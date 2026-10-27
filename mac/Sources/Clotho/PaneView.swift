@@ -79,6 +79,12 @@ final class PaneTerminalView: TerminalView {
     /// a drag selects nothing. Holding a modifier still selects text here, as in other Mac terminals:
     /// Shift (SwiftTerm, as in Ghostty and kitty, unless the app captures Shift) or Option (as in iTerm2).
     override func mouseDown(with event: NSEvent) {
+        // A new press means the menu's tracking already took the last menu click's release.
+        swallowLeftClick = false
+        if isMenuClick(event) {
+            swallowLeftClick = true
+            return showPaneMenu(for: event)
+        }
         if event.modifierFlags.contains(.option), allowMouseReporting {
             optionSelecting = true
             allowMouseReporting = false
@@ -86,12 +92,70 @@ final class PaneTerminalView: TerminalView {
         super.mouseDown(with: event)
     }
 
+    override func mouseDragged(with event: NSEvent) {
+        if swallowLeftClick { return }
+        super.mouseDragged(with: event)
+    }
+
     override func mouseUp(with event: NSEvent) {
+        if swallowLeftClick {
+            swallowLeftClick = false
+            return
+        }
         super.mouseUp(with: event)
         if optionSelecting {
             optionSelecting = false
             allowMouseReporting = true
         }
+    }
+
+    // MARK: The pane menu
+
+    /// Set from a click that opened the pane menu until its release, so no part of it reaches the app.
+    private var swallowLeftClick = false
+    private var swallowRightClick = false
+
+    /// Right-click and Ctrl-click open the pane menu even when the app takes the mouse (Claude Code,
+    /// Codex); SwiftTerm would report them to the app instead. Option-right-click is the way through:
+    /// it goes to the app as before, or opens the menu when the app doesn't take the mouse.
+    private func isMenuClick(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        return modifiers == .control
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        swallowRightClick = false
+        if event.modifierFlags.contains(.option) { return super.rightMouseDown(with: event) }
+        swallowRightClick = true
+        showPaneMenu(for: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        if swallowRightClick { return }
+        super.rightMouseDragged(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        if swallowRightClick {
+            swallowRightClick = false
+            return
+        }
+        super.rightMouseUp(with: event)
+    }
+
+    /// Asks for the menu (the hook tests use) and shows it at the click.
+    private func showPaneMenu(for event: NSEvent) {
+        guard let menu = contextMenu?() else { return }
+        // Testing aid: LogPaneMenuClicks=YES logs the menu instead of showing it.
+        if UserDefaults.standard.bool(forKey: "LogPaneMenuClicks") {
+            return log("pane \(paneID): pane menu (\(menu.items.count) items, Copy \(hasSelection ? "on" : "off"))")
+        }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    /// Whether there is selected text for Copy.
+    var hasSelection: Bool {
+        validateUserInterfaceItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
     }
 
     func enableFileDrops() { registerForDraggedTypes([.fileURL]) }

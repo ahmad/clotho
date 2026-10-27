@@ -11,6 +11,8 @@ extension AppDelegate {
         // The menu acts on this pane, so it becomes the focused one first.
         window.makeFirstResponder(host.terminal)
         let menu = NSMenu()
+        // Items are enabled as set here (Copy only with a selection).
+        menu.autoenablesItems = false
         let add = { (title: String, key: String, modifiers: NSEvent.ModifierFlags, action: @escaping () -> Void) in
             let item = ClosureMenuItem(title: title, action: action)
             // Shown for reference; the main menu handles the shortcuts themselves.
@@ -36,6 +38,8 @@ extension AppDelegate {
         menu.addItem(.separator())
         let terminal = host.terminal
         add("Copy", "c", [.command]) { terminal.copy(terminal) }
+        // Copy with nothing selected would empty the clipboard.
+        menu.items.last?.isEnabled = terminal.hasSelection
         add("Paste", "v", [.command]) { terminal.paste(terminal) }
         add("Select All", "a", [.command]) { terminal.selectAll(nil) }
         add("Clear", "k", [.command]) { [weak self] in self?.backend.sendInput(key.pane, Data([0x0c])) }

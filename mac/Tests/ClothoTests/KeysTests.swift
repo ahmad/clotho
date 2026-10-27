@@ -222,3 +222,92 @@ final class MouseSelectionTests: XCTestCase {
         XCTAssertTrue(hasSelection(view))
     }
 }
+
+/// Right-click and Ctrl-click open the pane menu even while the app takes the mouse; nothing of
+/// that click reaches the app. Option-right-click still goes to the app.
+@MainActor
+final class PaneMenuClickTests: XCTestCase {
+    override func setUp() { _ = NSApplication.shared }
+
+    private func click(_ view: PaneTerminalView, _ down: NSEvent.EventType, _ up: NSEvent.EventType,
+                       _ modifiers: NSEvent.ModifierFlags = []) {
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: NSPoint(x: 40, y: 150), modifierFlags: modifiers, timestamp: 0,
+                               windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        switch down {
+        case .rightMouseDown: view.rightMouseDown(with: event(down))
+        default: view.mouseDown(with: event(down))
+        }
+        switch up {
+        case .rightMouseUp: view.rightMouseUp(with: event(up))
+        default: view.mouseUp(with: event(up))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+
+    /// A pane whose app turned on mouse reporting (or not), and a count of menu requests.
+    private func setUpView(reporting: Bool = true) -> (PaneTerminalView, Recorder, () -> Int) {
+        let view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let recorder = Recorder()
+        view.terminalDelegate = recorder
+        var menus = 0
+        view.contextMenu = { menus += 1; return nil }
+        if reporting { view.feedFromBackend(Data("\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1006h".utf8)) }
+        return (view, recorder, { menus })
+    }
+
+    private func sent(_ recorder: Recorder) -> String { String(decoding: recorder.sent, as: UTF8.self) }
+
+    func testRightClickOpensTheMenuAndSendsNothing() {
+        let (view, recorder, menus) = setUpView()
+        click(view, .rightMouseDown, .rightMouseUp)
+        XCTAssertEqual(menus(), 1)
+        XCTAssertEqual(recorder.sent, [])
+    }
+
+    func testControlClickOpensTheMenuAndSendsNothing() {
+        let (view, recorder, menus) = setUpView()
+        click(view, .leftMouseDown, .leftMouseUp, .control)
+        XCTAssertEqual(menus(), 1)
+        XCTAssertEqual(recorder.sent, [])
+        // The next plain click is reported whole, press and release.
+        click(view, .leftMouseDown, .leftMouseUp)
+        XCTAssertTrue(sent(recorder).hasPrefix("\u{1b}[<0;"), sent(recorder))
+        XCTAssertTrue(sent(recorder).hasSuffix("m"), "the release is reported too: \(sent(recorder))")
+        XCTAssertEqual(menus(), 1)
+    }
+
+    /// The menu's tracking can eat the release; a later click must still be reported whole.
+    func testAMenuClickWithoutItsReleaseDoesntEatTheNextOne() {
+        let (view, recorder, _) = setUpView()
+        view.mouseDown(with: NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 40, y: 150), modifierFlags: .control,
+                                                timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+        click(view, .leftMouseDown, .leftMouseUp)
+        XCTAssertTrue(sent(recorder).hasPrefix("\u{1b}[<0;") && sent(recorder).hasSuffix("m"), sent(recorder))
+    }
+
+    func testLeftClickIsStillReported() {
+        let (view, recorder, menus) = setUpView()
+        click(view, .leftMouseDown, .leftMouseUp)
+        XCTAssertTrue(sent(recorder).hasPrefix("\u{1b}[<0;"), sent(recorder))
+        XCTAssertEqual(menus(), 0)
+    }
+
+    func testOptionRightClickGoesToTheApp() {
+        let (view, recorder, menus) = setUpView()
+        click(view, .rightMouseDown, .rightMouseUp, .option)
+        XCTAssertEqual(menus(), 0)
+        // Reported with Alt (+8), press and release. A real right-click is button 2 (<10); a synthetic
+        // event has no button number, so SwiftTerm reports button 0 (<8).
+        XCTAssertNotNil(sent(recorder).range(of: #"^\x1b\[<(8|10);\d+;\d+M\x1b\[<(8|10);\d+;\d+m$"#, options: .regularExpression),
+                        sent(recorder))
+    }
+
+    func testRightClickWithoutReportingOpensTheMenu() {
+        let (view, recorder, menus) = setUpView(reporting: false)
+        click(view, .rightMouseDown, .rightMouseUp)
+        XCTAssertEqual(menus(), 1)
+        XCTAssertEqual(recorder.sent, [])
+    }
+}

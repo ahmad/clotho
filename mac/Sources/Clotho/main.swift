@@ -440,7 +440,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // window's key handling like a real press (modifiers shift, cmd, ctrl, alt; keys return, enter, tab,
     // esc, delete, left, right, a, c, v),
     // "type:new name" posts those characters as key events, for typing into whatever has focus, and
-    // "click:600,300" clicks at that point of the window (from its bottom-left corner).
+    // "click:600,300" clicks at that point of the window (from its bottom-left corner), "rclick:600,300"
+    // right-clicks, and either takes modifiers after the point, as in "click:600,300,ctrl" or
+    // "rclick:600,300,alt".
     func runTestScripts() {
         let decode = { (text: String) in text.replacingOccurrences(of: "\\r", with: "\r").replacingOccurrences(of: "\\e", with: "\u{1b}") }
         for (i, step) in (UserDefaults.standard.string(forKey: "TypeText")?.components(separatedBy: "|") ?? []).enumerated() {
@@ -450,6 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("key:") { return postTestKey(String(step.dropFirst(4))) }
                 if step.hasPrefix("type:") { return postTestText(String(step.dropFirst(5))) }
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
+                if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 backend.sendInput(pane, Data(decode(step).utf8))
             }
         }
@@ -550,12 +553,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// Posts a left click, for TypeText's "click:" steps.
-    func postTestClick(_ spec: String) {
-        let numbers = spec.split(separator: ",").compactMap { Double($0) }
-        guard numbers.count == 2 else { return log("TypeText: bad click \(spec)") }
+    func postTestClick(_ spec: String, right: Bool = false) {
+        let parts = spec.split(separator: ",").map(String.init)
+        let numbers = parts.prefix(2).compactMap { Double($0) }
+        let flags: [String: NSEvent.ModifierFlags] = ["shift": .shift, "cmd": .command, "ctrl": .control, "alt": .option]
+        guard numbers.count == 2, parts.dropFirst(2).allSatisfy({ flags[$0] != nil }) else { return log("TypeText: bad click \(spec)") }
+        let modifiers = parts.dropFirst(2).reduce(into: NSEvent.ModifierFlags()) { $0.formUnion(flags[$1]!) }
         window.makeKey()
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(with: type, location: NSPoint(x: numbers[0], y: numbers[1]), modifierFlags: [],
+        for type in right ? [NSEvent.EventType.rightMouseDown, .rightMouseUp] : [.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: NSPoint(x: numbers[0], y: numbers[1]), modifierFlags: modifiers,
                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                                  context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { continue }
             NSApp.postEvent(event, atStart: false)
