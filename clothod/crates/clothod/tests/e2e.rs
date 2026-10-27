@@ -74,6 +74,8 @@ impl Env {
         cmd.arg("serve").arg("--runtime-dir").arg(self.path()).env("CLOTHOD_STATE_DIR", self.state());
         // Keep test daemons (and `report` in their panes) away from the user's real ones.
         cmd.env("CLOTHOD_RUNTIME_DIR", self.path()).env("CLOTHOD_REGISTRY_DIR", self.dir.path().join("registry"));
+        // Never the user's ~/.config/clothod/config.toml.
+        cmd.env("CLOTHOD_CONFIG", self.dir.path().join("config.toml"));
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -1929,6 +1931,54 @@ async fn subscribing_with_a_full_queue_defers_the_snapshot() {
             _ => {}
         }
     }
+}
+
+/// History lines in a pane's snapshot (lines above the screen).
+async fn history_lines(c: &mut Client, pane: u64) -> usize {
+    let (_, mut s) = subscribe(c, pane, None).await;
+    sync(c, &mut s).await.unwrap();
+    s.vt.history_len()
+}
+
+#[tokio::test]
+async fn scrollback_comes_from_the_config_and_can_be_set_per_pane() {
+    let mut env = Env::empty();
+    std::fs::write(env.dir.path().join("config.toml"), "# test\nscrollback_lines = 50\n").unwrap();
+    env.start();
+    let mut c = env.client().await;
+    let print = |n: u32| {
+        let mut p = sh();
+        p["command"] = json!(["/bin/sh", "-c", format!("i=0; while [ $i -lt {n} ]; do echo row-$i; i=$((i+1)); done; echo printed; exec cat")]);
+        p["rows"] = json!(10);
+        p
+    };
+    let a = new_pane(&c, print(300)).await;
+    let mut own = print(300);
+    own["scrollback_lines"] = json!(120);
+    let b = new_pane(&c, own).await;
+    for p in [a, b] {
+        wait_for_text(&c, p, T, |l| has_line(l, "printed")).await.unwrap();
+    }
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let lines = |p: u64| s["panes"].as_array().unwrap().iter().find(|x| x["id"] == p).unwrap()["scrollback_lines"].clone();
+    assert_eq!((lines(a), lines(b)), (json!(50), json!(120)));
+    assert_eq!(history_lines(&mut c, a).await, 50);
+    assert_eq!(history_lines(&mut c, b).await, 120);
+
+    // A pane's own setting survives a restart of the logic process.
+    drop(c);
+    env.kill();
+    env.start();
+    let mut c = env.client().await;
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let lines = |p: u64| s["panes"].as_array().unwrap().iter().find(|x| x["id"] == p).unwrap()["scrollback_lines"].clone();
+    assert_eq!((lines(a), lines(b)), (json!(50), json!(120)));
+    assert_eq!(history_lines(&mut c, b).await, 120);
+
+    let mut bad = sh();
+    bad["scrollback_lines"] = json!(-1);
+    let e = c.request("workspace.create", bad).await.unwrap_err();
+    assert!(e.to_string().contains("bad_request"), "{e}");
 }
 
 // ---- push --------------------------------------------------------------------------------

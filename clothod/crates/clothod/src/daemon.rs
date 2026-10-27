@@ -190,7 +190,7 @@ struct Pane {
 }
 
 impl Pane {
-    fn new(info: &PaneInfo) -> Pane {
+    fn new(info: &PaneInfo, scrollback: usize) -> Pane {
         Pane {
             id: info.pane,
             agent: None,
@@ -198,7 +198,7 @@ impl Pane {
             command: info.command.clone(),
             cols: info.cols,
             rows: info.rows,
-            vt: Vt::new(info.cols, info.rows),
+            vt: Vt::with_scrollback(info.cols, info.rows, scrollback),
             vt_seq: info.seq_start,
             ring: {
                 // Only for replays to clients, which are capped at REPLAY_LIMIT (the holder
@@ -234,6 +234,7 @@ impl Pane {
             "cwd": cwd,
             "seq": self.ring.end(),
             "exited": self.exited,
+            "scrollback_lines": self.vt.scrollback(),
             "agent": self.agent.as_ref().map(Agent::json),
         })
     }
@@ -250,7 +251,12 @@ pub struct Daemon {
     model: Mutex<Model>,
     rev: AtomicU64,
     panes: Mutex<HashMap<u64, Arc<Mutex<Pane>>>>,
-    spawns: Mutex<HashMap<u64, oneshot::Sender<Result<PaneInfo, String>>>>,
+    /// Spawns waiting for the holder, with the scrollback their pane gets.
+    spawns: Mutex<HashMap<u64, (oneshot::Sender<Result<PaneInfo, String>>, usize)>>,
+    /// Lines of history a pane keeps unless its spawn asked otherwise (config `scrollback_lines`).
+    scrollback: usize,
+    /// Per-pane settings from the stored state, for rebuilding those panes during recovery.
+    recovered_scrollback: HashMap<u64, usize>,
     next_req: AtomicU64,
     clients: Mutex<HashMap<u64, Arc<Client>>>,
     next_client: AtomicU64,
@@ -288,6 +294,7 @@ struct SpawnOpts {
     env: Vec<(String, String)>,
     cols: u16,
     rows: u16,
+    scrollback: Option<usize>,
 }
 
 fn default_shell() -> Vec<String> {
@@ -323,6 +330,12 @@ impl SpawnOpts {
             env,
             cols: p.get("cols").and_then(Value::as_u64).map_or(80, |v| v.clamp(2, 1000) as u16),
             rows: p.get("rows").and_then(Value::as_u64).map_or(24, |v| v.clamp(1, 1000) as u16),
+            scrollback: match p.get("scrollback_lines") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(v.as_u64().filter(|n| *n as usize <= crate::config::MAX_SCROLLBACK).ok_or_else(|| {
+                    err("bad_request", format!("scrollback_lines must be 0..={}", crate::config::MAX_SCROLLBACK))
+                })? as usize),
+            },
         })
     }
 }
@@ -456,6 +469,17 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         rev: AtomicU64::new(1),
         panes: Mutex::new(HashMap::new()),
         spawns: Mutex::new(HashMap::new()),
+        scrollback: crate::config::scrollback_lines(),
+        recovered_scrollback: state
+            .as_ref()
+            .and_then(|s| s.get("meta"))
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(id, v)| Some((id.parse().ok()?, (v.get("scrollback_lines")?.as_u64()? as usize).min(crate::config::MAX_SCROLLBACK))))
+                    .collect()
+            })
+            .unwrap_or_default(),
         next_req: AtomicU64::new(1),
         clients: Mutex::new(HashMap::new()),
         next_client: AtomicU64::new(1),
@@ -692,7 +716,7 @@ impl Daemon {
             .iter()
             .map(|(id, p)| {
                 let p = p.lock().unwrap();
-                (id.to_string(), json!({"title": p.title, "cwd": p.cwd}))
+                (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback()}))
             })
             .collect();
         let state = json!({"model": model, "meta": meta});
@@ -711,6 +735,10 @@ impl Daemon {
                 }
                 if p.cwd.is_none() {
                     p.cwd = m.get("cwd").and_then(Value::as_str).map(String::from);
+                }
+                // Recovery built the VT with the default; a pane spawned with its own keeps it.
+                if let Some(n) = m.get("scrollback_lines").and_then(Value::as_u64) {
+                    p.vt.set_scrollback((n as usize).min(crate::config::MAX_SCROLLBACK));
                 }
             }
         }
@@ -756,7 +784,7 @@ impl Daemon {
                 if let Some(p) = self.pane(pane) {
                     let mut p = p.lock().unwrap();
                     if seq >= p.ring.start() && seq <= p.ring.start() + RING_CAPACITY as u64 {
-                        let mut vt = Vt::new(cols, rows);
+                        let mut vt = Vt::with_scrollback(cols, rows, p.vt.scrollback());
                         vt.feed(&data);
                         p.vt = vt;
                         p.vt_seq = seq;
@@ -781,25 +809,27 @@ impl Daemon {
             FromHolder::Pane(info) => {
                 // Recovery: the VT starts blank at the buffer start, at the size the buffer's
                 // oldest bytes were written at; a stored snapshot (next frame) replaces it.
-                let mut p = Pane::new(&info);
+                let scrollback = self.recovered_scrollback.get(&info.pane).copied().unwrap_or(self.scrollback);
+                let mut p = Pane::new(&info, scrollback);
                 let start = info.seq_start;
                 let initial = info.resizes.iter().filter(|r| r.0 <= start).last().copied();
                 if let Some((_, c, r)) = initial {
-                    p.vt = Vt::new(c, r);
+                    p.vt = Vt::with_scrollback(c, r, scrollback);
                 }
                 p.replay_resizes = info.resizes.iter().filter(|r| r.0 > start).copied().collect();
                 p.snap_seq = start;
                 self.panes.lock().unwrap().insert(info.pane, Arc::new(Mutex::new(p)));
             }
             FromHolder::Spawned { id, pane } => {
-                let p = Pane::new(&pane);
+                let waiter = self.spawns.lock().unwrap().remove(&id);
+                let p = Pane::new(&pane, waiter.as_ref().map_or(self.scrollback, |w| w.1));
                 self.panes.lock().unwrap().insert(pane.pane, Arc::new(Mutex::new(p)));
-                if let Some(tx) = self.spawns.lock().unwrap().remove(&id) {
+                if let Some((tx, _)) = waiter {
                     let _ = tx.send(Ok(pane));
                 }
             }
             FromHolder::Error { id, message } => {
-                if let Some(tx) = self.spawns.lock().unwrap().remove(&id) {
+                if let Some((tx, _)) = self.spawns.lock().unwrap().remove(&id) {
                     let _ = tx.send(Err(message));
                 }
             }
@@ -1602,7 +1632,7 @@ impl Daemon {
     async fn spawn_pane(&self, opts: SpawnOpts) -> std::result::Result<u64, RpcError> {
         let id = self.next_req.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.spawns.lock().unwrap().insert(id, tx);
+        self.spawns.lock().unwrap().insert(id, (tx, opts.scrollback.unwrap_or(self.scrollback)));
         self.to_holder(&ToHolder::Spawn {
             id,
             command: opts.command,

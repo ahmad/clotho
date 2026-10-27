@@ -21,3 +21,7 @@ clotho-vt = { path = "crates/vt" }
 clotho-holder = { path = "crates/holder" }
 clothod = { path = "crates/clothod" }
 clotho = { path = "crates/cli" }
+
+# A one-line memory patch to alacritty_terminal (vendor/alacritty_terminal/VENDORED.md).
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }

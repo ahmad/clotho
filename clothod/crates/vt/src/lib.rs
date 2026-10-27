@@ -222,6 +222,14 @@ impl Vt {
         }
     }
 
+    /// Change how many lines of history this pane keeps (dropping the oldest if it shrinks).
+    pub fn set_scrollback(&mut self, scrollback: usize) {
+        if scrollback != self.scrollback {
+            self.scrollback = scrollback;
+            self.term.set_options(Config { scrolling_history: scrollback, ..Config::default() });
+        }
+    }
+
     pub fn cols(&self) -> u16 {
         self.term.columns() as u16
     }
@@ -591,6 +599,11 @@ impl Vt {
 
     pub fn scrollback(&self) -> usize {
         self.scrollback
+    }
+
+    /// Lines of history currently above the screen.
+    pub fn history_len(&self) -> usize {
+        self.term.grid().history_size()
     }
 }
 

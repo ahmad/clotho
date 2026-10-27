@@ -180,7 +180,8 @@ the life of the object and never reused within an `instance`.
   ],
   "panes": [
     {"id": 3, "cols": 120, "rows": 40, "pid": 9811, "command": ["/bin/zsh", "-l"],
-     "title": "vim notes.md", "cwd": "/Users/ahmad/notes", "seq": 183230, "exited": null}
+     "title": "vim notes.md", "cwd": "/Users/ahmad/notes", "seq": 183230, "exited": null,
+     "scrollback_lines": 2000}
   ]
 }
 ```
@@ -196,6 +197,7 @@ the life of the object and never reused within an `instance`.
   - `cwd` comes from OSC 7, with a fallback to the process's cwd (`/proc` on Linux, `proc_pidinfo`
     on macOS); it is `null` if unknown.
   - `exited` is `null` while the pane runs, then `{"code": 0}` or `{"signal": 9}`.
+  - `scrollback_lines` is the history the daemon keeps for the pane (spawn options).
 - When a tab's active pane closes or exits, the new `active_pane` is the first pane of the
   sibling subtree that takes its place (as in tmux).
 - A pane is removed from the layout when its process exits. A tab with no panes closes, but a
@@ -212,11 +214,15 @@ the life of the object and never reused within an `instance`.
 method that creates a pane:
 
 ```json
-{"command": ["/bin/zsh", "-l"], "cwd": "/path", "env": {"K": "V"}, "cols": 80, "rows": 24}
+{"command": ["/bin/zsh", "-l"], "cwd": "/path", "env": {"K": "V"}, "cols": 80, "rows": 24,
+ "scrollback_lines": 2000}
 ```
 
 All spawn options are optional. The defaults are the user's `$SHELL` as a login shell, `cwd` in
-`$HOME`, and a size of 80×24. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
+`$HOME`, and a size of 80×24. `scrollback_lines` (0 to 100,000) is how much history the daemon
+keeps for this pane, which is what a reattaching or newly started client can get back; the default
+is the machine's `scrollback_lines` in `~/.config/clothod/config.toml` (2000 if unset; see
+clothod/README.md, Limits). A pane keeps its value across daemon restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 `TERM_PROGRAM=clotho`, `CLOTHO_PANE=<id>` and `CLOTHOD_SOCKET=<daemon socket>` (see
 [Agents](#agents)).
 
@@ -396,7 +402,8 @@ The daemon picks one of three modes, and the reply always comes before the pane'
 
 `seq` in the reply is where the stream continues from, and `cols`/`rows` is the pane's current
 size. The default `scrollback` is 1000 lines of history in a snapshot (0 means none, and the cap is
-the 2,000 lines the daemon keeps; clients keep deeper history themselves). A connection whose
+the pane's `scrollback_lines`, 2000 by default; clients keep deeper history themselves while
+connected). A connection whose
 queue is already full when it subscribes (a reconnect resubscribing many panes) gets the reply
 with mode `snapshot` at once, and the snapshot after `pane.resync` once its queue has drained.
 

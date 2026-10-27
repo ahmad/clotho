@@ -312,8 +312,21 @@ async fn soak() {
     println!("SOAK SUMMARY {}", serde_json::to_string_pretty(&summary).unwrap());
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target").join(format!("soak-{}.json", chrono_free_stamp()));
     let _ = std::fs::write(out, serde_json::to_vec_pretty(&summary).unwrap());
+
+    // Memory ceilings (clothod/README.md, Limits), so a regression fails the soak. Override
+    // with CLOTHOD_SOAK_MAX_SERVE_MB / CLOTHOD_SOAK_MAX_HOLDER_MB.
+    let ceiling = |var: &str, default: u64| std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    let (serve_max, holder_max) = (ceiling("CLOTHOD_SOAK_MAX_SERVE_MB", SERVE_CEILING_MB), ceiling("CLOTHOD_SOAK_MAX_HOLDER_MB", HOLDER_CEILING_MB));
+    assert!(max_rss_serve / 1024 <= serve_max, "serve peaked at {} MB, over its {serve_max} MB ceiling", max_rss_serve / 1024);
+    assert!(max_rss_holder / 1024 <= holder_max, "holder peaked at {} MB, over its {holder_max} MB ceiling", max_rss_holder / 1024);
     let _: Value = summary;
 }
+
+/// Peak RSS this load may reach: 20 panes of 120 columns at full history (2,000 lines of grid at
+/// 24 bytes a cell, ~6 MB, plus 1 MiB of replay buffer in serve; 4 MiB in the holder), plus
+/// resume bursts and allocator overhead. Measured: serve 340 MB on Linux (musl), 159 MB on macOS.
+const SERVE_CEILING_MB: u64 = 600;
+const HOLDER_CEILING_MB: u64 = 150;
 
 fn chrono_free_stamp() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
