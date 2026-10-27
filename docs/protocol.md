@@ -360,7 +360,7 @@ and otherwise:
 | `source` | `"hook"` (the agent reports through `clothod report`) or `"detected"` (inferred from the pane's processes and output) |
 | `message` | what the agent says, or `null` |
 | `since` | when `state` last changed, in **unix seconds as a float** |
-| `attention` | the agent needs the user. It is raised only by exact signals: a hook-reported transition into `waiting`, `done` or `error`, or a terminal bell (BEL) from a detected agent. Detection's own guesses (quiet output read as `waiting`) never raise it. Cleared when any client sends input to the pane (INPUT frame or `pane.input`) or calls `agent.ack`. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions** |
+| `attention` | the agent needs the user. It is raised only by exact signals: a hook-reported transition into `waiting`, `done` or `error` (including a hook report that takes over from detection in the same state, e.g. detection guessed `waiting` and then the hook reports `waiting`; that also sends an `agent` event whose `from` equals the state), or a terminal bell (BEL) from a detected agent. Detection's own guesses (quiet output read as `waiting`) never raise it. Cleared when any client sends input to the pane (INPUT frame or `pane.input`) or calls `agent.ack`. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions** |
 | `session` | the agent's own session id, if it reports one |
 
 Changes reach clients in two ways. Every change to the field comes as a `pane` event, because

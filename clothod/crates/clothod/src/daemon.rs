@@ -1152,14 +1152,21 @@ impl Daemon {
         let old = p.agent.clone();
         let from = old.as_ref().map(|a| a.state.clone());
         if let Some(a) = new.as_mut() {
-            if old.as_ref().map(|o| &o.state) != Some(&a.state) {
-                a.since = unix_now();
+            let changed = old.as_ref().map(|o| &o.state) != Some(&a.state);
+            // A hook taking over from detection is news even in the same state: detection often
+            // reads a quiet agent as waiting before its hook says it waits for permission.
+            let hook_took_over = a.source == "hook" && old.as_ref().is_some_and(|o| o.source != "hook");
+            if changed || hook_took_over {
                 // Only exact signals ask for the user: a hook's report, or a BEL (handled by the
                 // caller). Detection's "quiet, so waiting" is a guess; it must not notify.
-                a.attention = a.source == "hook" && matches!(a.state.as_str(), "waiting" | "done" | "error");
-            } else if let Some(o) = &old {
-                a.since = o.since;
+                let exact = a.source == "hook" && matches!(a.state.as_str(), "waiting" | "done" | "error");
+                // A BEL may already have raised it; a takeover never lowers it.
+                a.attention = exact || (!changed && old.as_ref().is_some_and(|o| o.attention));
             }
+            a.since = match &old {
+                Some(o) if !changed => o.since,
+                _ => unix_now(),
+            };
         }
         if new == old {
             return;
@@ -1170,7 +1177,8 @@ impl Daemon {
             let alert = p.agent.as_ref().map(|a| crate::push::Alert { kind: a.kind.clone(), state: a.state.clone(), message: a.message.clone(), since: a.since });
             self.push.attention(p.id, attention(&p.agent), alert);
         }
-        let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str());
+        // A state change, or attention newly raised in the same state (a hook taking over).
+        let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str()) || (!attention(&old) && attention(&p.agent));
         self.pane_event(p);
         if transition {
             self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": from}));

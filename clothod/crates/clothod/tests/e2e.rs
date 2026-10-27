@@ -911,6 +911,29 @@ async fn detects_an_agent_without_hooks() {
     wait_agent(&c, p, "cleared when it exits", |a| a.is_null()).await;
 }
 
+#[tokio::test]
+async fn a_hook_report_raises_attention_after_detection_guessed_the_same_state() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let p = new_pane(&c, sh()).await;
+    // A quiet `claude` that detection reads as waiting; then its hook says it waits for
+    // permission.
+    let fake = env.dir.path().join("claude");
+    let b = test_bin();
+    std::fs::write(&fake, format!("#!/bin/sh\nsleep 4; \"{b}\" report waiting --agent claude --message \"Allow ls?\"; sleep \"$@\"\n")).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    c.request("events.subscribe", json!({})).await.unwrap();
+    c.input(p, format!("{} 60\r", fake.display()).as_bytes());
+    let a = wait_agent(&c, p, "detected waiting", |a| a["state"] == "waiting").await;
+    assert_eq!((a["source"].clone(), a["attention"].clone()), (json!("detected"), json!(false)), "{a}");
+    let a = wait_agent(&c, p, "the hook's report", |a| a["source"] == "hook").await;
+    assert_eq!((a["state"].clone(), a["attention"].clone(), a["message"].clone()), (json!("waiting"), json!(true), json!("Allow ls?")), "{a}");
+    let ev = agent_events(&mut c);
+    assert!(ev.iter().any(|e| e["from"] == "waiting" && e["agent"]["attention"] == true), "an agent event says so: {ev:?}");
+    c.input(p, b"\x03");
+    wait_agent(&c, p, "cleared when it exits", |a| a.is_null()).await;
+}
+
 #[test]
 fn hooks_install_is_idempotent_and_uninstall_restores() {
     let env = Env::empty();
