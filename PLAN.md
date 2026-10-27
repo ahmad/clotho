@@ -185,3 +185,14 @@ is verified; this is a standing go for this round.
   isn't one it rings for), so detected agents would never reach the top. The user chose agent hooks
   ("Set Up Agent Status…") on each machine (2026-10-27). Opening an agent no longer acks it; only
   the checkmark, typing, or a quick reply do.
+
+## clothod 0.1.8 (user decision, 2026-10-27)
+
+- The user asked to "ship 0.1.8 whenever you can": release it and upgrade in place on macbook, devbox
+  and imac, then reinstall the Mac app with 0.1.8 bundled. It carries the upgrade-race fix (68497ac):
+  `upgrade` moves `current` first and holds `upgrade.lock`, so a client's restart can't revive the old
+  build.
+- Agent hooks (Claude Code and Codex) were installed on all three machines at the user's request
+  (2026-10-27). The backups are `*.bak-2026-10-27-clotho-hooks` next to ~/.claude/settings.json and
+  ~/.codex/config.toml.
+- TestFlight build 202610271418 (bundling clothod 0.1.7) was uploaded by the user.
