@@ -18,10 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
+use alacritty_terminal::term::ClipboardType;
 use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte;
 use alacritty_terminal::vte::ansi::{
     Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler,
@@ -42,6 +43,11 @@ pub enum VtEvent {
     /// Working directory reported through OSC 7.
     Cwd(String),
     Bell,
+    /// The application set the clipboard with OSC 52 (`ESC ] 52 ; c ; <base64> BEL|ST`): the
+    /// decoded text, unbounded here (the daemon caps it). `selection` is true for the `p`/`s`
+    /// targets (primary selection) and false for `c` (or none given). OSC 52 reads (`?`) never
+    /// produce anything: the terminal is copy-only, so an application can't read the clipboard.
+    Clipboard { selection: bool, text: String },
 }
 
 #[derive(Clone, Default)]
@@ -191,6 +197,12 @@ fn cwd_from_osc7(url: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Copy-only OSC 52, stated rather than left to alacritty's default: a pane may set the
+/// clipboard but must never read it (a load would reply with the user's clipboard contents).
+fn term_config(scrollback: usize) -> Config {
+    Config { scrolling_history: scrollback, osc52: Osc52::OnlyCopy, ..Config::default() }
+}
+
 pub struct Vt {
     term: Term<Listener>,
     processor: Processor<StdSyncHandler>,
@@ -209,8 +221,7 @@ impl Vt {
     pub fn with_scrollback(cols: u16, rows: u16, scrollback: usize) -> Self {
         let (cols, rows) = (cols.max(2) as usize, rows.max(1) as usize);
         let listener = Listener::default();
-        let config = Config { scrolling_history: scrollback, ..Config::default() };
-        let term = Term::new(config, &Size { cols, rows }, listener.clone());
+        let term = Term::new(term_config(scrollback), &Size { cols, rows }, listener.clone());
         Vt {
             term,
             processor: Processor::new(),
@@ -226,7 +237,7 @@ impl Vt {
     pub fn set_scrollback(&mut self, scrollback: usize) {
         if scrollback != self.scrollback {
             self.scrollback = scrollback;
-            self.term.set_options(Config { scrolling_history: scrollback, ..Config::default() });
+            self.term.set_options(term_config(scrollback));
         }
     }
 
@@ -325,6 +336,9 @@ impl Vt {
                     out.push(VtEvent::Title(None));
                 }
                 Event::Bell => out.push(VtEvent::Bell),
+                Event::ClipboardStore(ty, text) => {
+                    out.push(VtEvent::Clipboard { selection: ty == ClipboardType::Selection, text })
+                }
                 _ => {}
             }
         }

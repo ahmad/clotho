@@ -268,3 +268,34 @@ fn tracks_kitty_flags_per_screen_and_through_snapshots() {
     let m = vt.input_modes();
     assert!(m.app_cursor && m.bracketed_paste);
 }
+
+#[test]
+fn osc52_store_becomes_a_clipboard_event() {
+    let mut vt = Vt::new(80, 24);
+    // "héllo\n" in base64, BEL- and ST-terminated, and split across feeds.
+    let ev = vt.feed(b"\x1b]52;c;aMOpbGxvCg==\x07");
+    assert_eq!(ev, vec![VtEvent::Clipboard { selection: false, text: "héllo\n".into() }]);
+    assert!(vt.feed(b"\x1b]52;c;aMOp").is_empty());
+    let ev = vt.feed(b"bGxvCg==\x1b\\");
+    assert_eq!(ev, vec![VtEvent::Clipboard { selection: false, text: "héllo\n".into() }]);
+    // An empty target means the clipboard; `p` and `s` are the selection.
+    assert_eq!(vt.feed(b"\x1b]52;;eA==\x07"), vec![VtEvent::Clipboard { selection: false, text: "x".into() }]);
+    assert_eq!(vt.feed(b"\x1b]52;p;eA==\x07"), vec![VtEvent::Clipboard { selection: true, text: "x".into() }]);
+    // Not base64, or not UTF-8: nothing.
+    assert!(vt.feed(b"\x1b]52;c;!!!\x07").is_empty());
+    assert!(vt.feed(b"\x1b]52;c;/w==\x07").is_empty());
+    // Nothing reaches the screen.
+    assert!(vt.screen_text().iter().all(|l| l.trim().is_empty()));
+}
+
+#[test]
+fn osc52_reads_are_never_answered() {
+    for scrollback in [DEFAULT_SCROLLBACK, 10] {
+        let mut vt = Vt::with_scrollback(80, 24, scrollback);
+        vt.set_scrollback(scrollback + 1); // rebuilds the term config
+        vt.take_events(); // set_options re-announces the title
+        let ev = vt.feed(b"\x1b]52;c;?\x07");
+        assert!(ev.is_empty(), "{ev:?}");
+        assert!(vt.feed(b"\x1b]52;p;?\x1b\\").is_empty());
+    }
+}

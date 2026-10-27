@@ -1905,8 +1905,18 @@ async fn subscribing_with_a_full_queue_defers_the_snapshot() {
     let Some(Frame::Json(v)) = read_frame(&mut s).await.unwrap() else { panic!() };
     assert!(v["result"].is_object(), "{v}");
     write_frame(&mut s, &Frame::Json(json!({"id": 2, "method": "pane.subscribe", "params": {"pane": a}}))).await.unwrap();
-    // Don't read: the firehose fills this connection's queue.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Don't read: the firehose fills this connection's queue. Wait until the daemon says so
+    // (a fixed wait was too short under a loaded parallel run).
+    let full_by = Instant::now() + Duration::from_secs(60);
+    loop {
+        let stats = c.request("debug.stats", json!({})).await.unwrap();
+        let lagging = stats["panes"].as_array().unwrap().iter().any(|p| p["id"] == a && p["lagging"].as_u64() > Some(0));
+        if lagging {
+            break;
+        }
+        assert!(Instant::now() < full_by, "the queue never filled: {stats}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     write_frame(&mut s, &Frame::Json(json!({"id": 3, "method": "pane.subscribe", "params": {"pane": b, "have_seq": 0}}))).await.unwrap();
 
     let (mut replied, mut resync) = (false, false);
@@ -2182,4 +2192,81 @@ async fn relay_errors_retry_block_or_remove_the_registration() {
     c.request("push.test", json!({"device": "phone"})).await.unwrap_err();
     relay.next();
     assert!(push_devices(&c).await.is_empty());
+}
+
+/// `pane.clipboard` events for `pane` that arrive within `wait`.
+async fn clipboard_events(c: &mut Client, pane: u64, wait: Duration) -> Vec<Value> {
+    let mut out = Vec::new();
+    let deadline = Instant::now() + wait;
+    while let Ok(Some(f)) = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), c.recv()).await {
+        if let Frame::Json(v) = f {
+            if v["event"] == "pane.clipboard" && v["data"]["pane"] == pane {
+                out.push(v["data"].clone());
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn osc52_copies_reach_the_panes_clients_and_reads_are_not_answered() {
+    let mut env = Env::new();
+    let mut c = env.client().await;
+    let hello = c.request("hello", json!({"protocol": 1, "client": "test"})).await.unwrap();
+    assert!(hello["features"].as_array().unwrap().contains(&json!("pane.clipboard")));
+    let rec = env.path().join("received");
+    // Waits for one key, then: a BEL-terminated copy, an ST-terminated one to the selection, a
+    // clipboard read, one copy of exactly the size limit and one a byte over it. Whatever the app
+    // reads afterwards goes to `rec`.
+    let big = |n: usize| format!("head -c {n} /dev/zero | tr '\\0' a | base64 | tr -d '\\n'");
+    let script = format!(
+        r#"stty raw -echo; head -c1 >/dev/null
+printf '\033]52;c;aMOpbGxvCg==\007\033]52;p;d29ybGQ=\033\\\033]52;c;?\007'
+printf '\033]52;c;%s\007' "$({})"
+printf '\033]52;c;%s\007' "$({})"
+printf done; exec cat > {}"#,
+        big(1 << 20),
+        big((1 << 20) + 1),
+        rec.display()
+    );
+    let mut params = sh();
+    params["command"] = json!(["/bin/sh", "-c", script]);
+    let p = new_pane(&c, params).await;
+
+    // A second connection that only watches events, not the pane, gets nothing.
+    let mut watcher = env.client().await;
+    watcher.request("events.subscribe", json!({})).await.unwrap();
+    let (_, mut screen) = subscribe(&mut c, p, None).await;
+    c.input(p, b"x");
+    wait_for_text(&c, p, T, |l| l.iter().any(|l| l.contains("done"))).await.unwrap();
+
+    let got = clipboard_events(&mut c, p, Duration::from_secs(2)).await;
+    assert_eq!(got.len(), 3, "BEL copy, ST copy, the one at the limit: {:?}", got.iter().map(|e| e["text"].as_str().map(str::len)).collect::<Vec<_>>());
+    assert_eq!(got[0], json!({"pane": p, "target": "clipboard", "text": "héllo\n"}));
+    assert_eq!(got[1], json!({"pane": p, "target": "selection", "text": "world"}));
+    assert_eq!(got[2]["text"].as_str().unwrap().len(), 1 << 20);
+    assert!(env.log().contains("dropped a 1048577 byte OSC 52 copy"), "{}", env.log());
+    assert!(clipboard_events(&mut watcher, p, Duration::from_millis(200)).await.is_empty());
+
+    // The read got no answer: the app received nothing.
+    c.input(p, b"z");
+    let deadline = Instant::now() + T;
+    while std::fs::read(&rec).unwrap_or_default().is_empty() {
+        assert!(Instant::now() < deadline, "input never arrived");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read(&rec).unwrap(), b"z", "the clipboard read was answered");
+
+    // Replaying the output (resubscribing from 0) and restarting the daemon copy nothing again.
+    let _ = subscribe(&mut c, p, Some(0)).await;
+    sync(&mut c, &mut screen).await.ok();
+    assert!(clipboard_events(&mut c, p, Duration::from_millis(500)).await.is_empty(), "replay re-sent copies");
+    drop(c);
+    drop(watcher);
+    env.kill();
+    env.start();
+    let mut c = env.client().await;
+    let _ = subscribe(&mut c, p, Some(0)).await;
+    assert!(clipboard_events(&mut c, p, Duration::from_secs(1)).await.is_empty(), "restart re-sent copies");
 }

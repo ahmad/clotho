@@ -64,6 +64,10 @@ pub(crate) struct Client {
     file_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// Bytes of pane output queued but not yet written to the socket.
     queued: AtomicUsize,
+    /// The queue went over CLIENT_HIGH and hasn't drained below CLIENT_LOW since. A pane that
+    /// stops sending to a lagging client lets the queue dip under CLIENT_HIGH while the socket
+    /// takes some of it, so `queued` alone would let a subscribe in that window replay.
+    full: AtomicBool,
     /// Bytes of replies and events queued (not limited; for `debug.stats`).
     control_queued: AtomicUsize,
     events: AtomicBool,
@@ -659,6 +663,26 @@ fn spawn_holder(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Largest OSC 52 copy passed on to clients, in bytes of UTF-8 text. Bigger ones are dropped
+/// (and logged), not truncated: a partial copy would paste wrong without anyone noticing.
+const MAX_CLIPBOARD: usize = 1 << 20;
+
+/// A pane's application set the clipboard (OSC 52): tell every client attached to the pane.
+fn send_clipboard(p: &Pane, selection: bool, text: &str) {
+    if text.is_empty() || p.subs.is_empty() {
+        return;
+    }
+    if text.len() > MAX_CLIPBOARD {
+        eprintln!("clothod: pane {}: dropped a {} byte OSC 52 copy (limit {MAX_CLIPBOARD})", p.id, text.len());
+        return;
+    }
+    let target = if selection { "selection" } else { "clipboard" };
+    let frame = Frame::Json(json!({"event": "pane.clipboard", "data": {"pane": p.id, "target": target, "text": text}})).encode();
+    for s in p.subs.values() {
+        s.client.control(frame.clone());
+    }
+}
+
 impl Daemon {
     fn to_holder(&self, msg: &ToHolder) {
         let v = serde_json::to_value(msg).expect("holder messages serialize");
@@ -910,6 +934,7 @@ impl Daemon {
                     continue;
                 }
                 if s.client.queued.load(Ordering::Relaxed) > CLIENT_HIGH {
+                    s.client.full.store(true, Ordering::Relaxed);
                     s.lagging = true;
                     lagged.push(*cid);
                     continue;
@@ -968,6 +993,12 @@ impl Daemon {
                         self.broadcast("bell", json!({"pane": p.id}));
                     }
                 }
+                // Replayed output after a restart copied long ago: never again.
+                VtEvent::Clipboard { selection, text } => {
+                    if live {
+                        send_clipboard(p, selection, &text);
+                    }
+                }
             }
         }
         if changed && live {
@@ -1022,19 +1053,28 @@ impl Daemon {
             }
             let mut p = p.lock().unwrap();
             let p = &mut *p;
+            let mut clips = Vec::new();
             if let Some(s) = p.subs.get_mut(&client) {
                 if s.lagging {
                     s.lagging = false;
                     s.client.json(json!({"event": "pane.resync", "data": {"pane": p.id}}));
                     let data = p.vt.snapshot(Some(DEFAULT_SCROLLBACK));
                     for ev in p.vt.take_events() {
-                        if let VtEvent::Reply(bytes) = ev {
-                            let _ = holder.send(Frame::Input { pane: p.id, data: bytes }.encode());
+                        match ev {
+                            VtEvent::Reply(bytes) => {
+                                let _ = holder.send(Frame::Input { pane: p.id, data: bytes }.encode());
+                            }
+                            // From a held synchronized update the snapshot just applied: live.
+                            VtEvent::Clipboard { selection, text } => clips.push((selection, text)),
+                            _ => {}
                         }
                     }
                     let frame = Frame::Snapshot { pane: p.id, seq: p.vt_seq, cols: p.vt.cols(), rows: p.vt.rows(), data };
                     s.client.output(frame.encode());
                 }
+            }
+            for (selection, text) in clips {
+                send_clipboard(p, selection, &text);
             }
         });
     }
@@ -1235,6 +1275,7 @@ impl Daemon {
             tx,
             file_tx,
             queued: AtomicUsize::new(0),
+            full: AtomicBool::new(false),
             control_queued: AtomicUsize::new(0),
             events: AtomicBool::new(false),
             real: AtomicBool::new(false),
@@ -1260,7 +1301,10 @@ impl Daemon {
                         break;
                     }
                     if let Some(counter) = out {
-                        counter.fetch_sub(buf.len(), Ordering::Relaxed);
+                        let left = counter.fetch_sub(buf.len(), Ordering::Relaxed) - buf.len();
+                        if std::ptr::eq(counter, &client.queued) && left <= CLIENT_LOW {
+                            client.full.store(false, Ordering::Relaxed);
+                        }
                     }
                 }
             })
@@ -1369,7 +1413,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1627,7 +1671,10 @@ impl Daemon {
         // once) gets this pane's snapshot only once it has drained, like a lagging client: the
         // bytes queued per connection stay bounded instead of every pane's replay or snapshot
         // piling up at the same moment.
-        let defer = client.queued.load(Ordering::Relaxed) > CLIENT_HIGH;
+        let defer = client.queued.load(Ordering::Relaxed) > CLIENT_HIGH || client.full.load(Ordering::Relaxed);
+        if defer {
+            client.full.store(true, Ordering::Relaxed);
+        }
         pp.subs.insert(client.id, Sub { client: client.clone(), lagging: defer, viewport });
 
         let end = pp.vt_seq;

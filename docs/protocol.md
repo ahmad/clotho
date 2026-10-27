@@ -86,7 +86,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
 → {"id": 1, "method": "hello", "params": {"protocol": 1, "client": "clotho-mac/0.1"}}
 ← {"id": 1, "result": {
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
-     "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push"],
+     "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
+                  "pane.clipboard"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -101,8 +102,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
 ```
 
 - `features` lists what this build supports, as strings: currently `pane.keys`, `agents`,
-  `agent.report.pid`, `ping`, `split.set_ratio`, `fs` (Files, below) and `push` (`push.*`
-  requests, docs/push.md). Builds share version numbers, so check
+  `agent.report.pid`, `ping`, `split.set_ratio`, `fs` (Files, below), `push` (`push.*`
+  requests, docs/push.md) and `pane.clipboard` (OSC 52 copies, see
+  [Clipboard](#clipboard-osc-52)). Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
   protocol_max]`, which a successful `hello` reports. If the
@@ -284,9 +286,10 @@ File access (`fs.*`) is described in [Files](#files).
 | `agent` | `{"pane", "agent": <agent or null>, "from": <previous state or null>}` | an agent appeared, changed `state`, or went away (`agent: null`); see [Agents](#agents) |
 | `pane.resized` | `{"pane", "cols", "rows", "seq"}` | the pane's PTY size changed; see [Resize](#resize) |
 | `pane.resync` | `{"pane"}` | the client fell behind on this pane, and a SNAPSHOT follows; see [Output](#output) |
+| `pane.clipboard` | `{"pane", "target", "text"}` | the pane's application copied text with OSC 52; see [Clipboard](#clipboard-osc-52) |
 
-`state`, `pane`, `bell` and `agent` go only to connections that called `events.subscribe`. `pane.resized`
-and `pane.resync` are part of a pane's data stream: they go to every subscriber of that pane,
+`state`, `pane`, `bell` and `agent` go only to connections that called `events.subscribe`. `pane.resized`,
+`pane.resync` and `pane.clipboard` are part of a pane's data stream: they go to every subscriber of that pane,
 whether or not it subscribed to events, in order with that pane's OUTPUT and SNAPSHOT frames.
 
 Focus changes, whether they come from this client or another one, arrive as a `state` event with
@@ -458,6 +461,38 @@ no client or several clients are attached. **Clients must not forward their emul
 auto-generated responses as input.** Send only user input such as keys, paste, and mouse and focus
 reports. (With SwiftTerm, that means filtering what the terminal delegate's `send` emits for
 query responses.)
+
+### Clipboard (OSC 52)
+
+Feature flag: `pane.clipboard` in `hello.features`. Terminal apps such as Claude Code, Codex,
+vim and tmux copy by writing `ESC ] 52 ; <target> ; <base64> BEL` (or `ESC \` instead of BEL).
+The daemon's terminal decodes that and sends every subscriber of the pane:
+
+```json
+← {"event": "pane.clipboard", "data": {"pane": 3, "target": "clipboard", "text": "héllo\n"}}
+```
+
+- `text` is the decoded text (UTF-8, as a JSON string). Payloads that aren't valid base64 or
+  don't decode to UTF-8 are ignored, and so are empty copies.
+- `target` is `"clipboard"` for target `c` or an empty target, and `"selection"` for `p` or `s`
+  (X11 primary selection). A client without a primary selection can ignore `"selection"`, or treat
+  it as the clipboard. Claude Code and Codex use `c`.
+- Only live output copies. A replayed stream (`pane.subscribe` in `replay` mode, or a SNAPSHOT)
+  never repeats a copy, and neither does a daemon restart replaying buffered output.
+- The event comes just before the OUTPUT frame that carried the sequence. It goes out even while
+  the client is lagging behind on the pane's output.
+- **Size cap: 1 MiB (1048576 bytes) of decoded text.** A bigger copy is dropped whole, not
+  truncated, and the daemon logs it. That's about 1.4 MB of base64 in the sequence.
+- **Clipboard reads are never answered.** The query form (`ESC ] 52 ; c ; ? BEL`) gets no reply
+  from the daemon, because a pane must never be able to read the user's clipboard. Clients must not
+  answer it either.
+- OUTPUT still carries the raw OSC 52 bytes, because the stream is exact. **A client must not act
+  on OSC 52 that its own emulator sees in OUTPUT or a SNAPSHOT** (with SwiftTerm, make the
+  `clipboardCopy` delegate a no-op). The emulator would otherwise copy twice, and copy again when
+  it replays a stream. Use only `pane.clipboard`. Against a daemon without the feature, a client
+  can fall back to its emulator's handling.
+- Which client copies is the client's call. Every attached client gets the event: for example,
+  the Mac app sets the pasteboard, and the iOS app does so only while it is in the foreground.
 
 ## Files
 
