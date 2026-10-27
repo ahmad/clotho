@@ -31,7 +31,7 @@ with no clients and no panes, or when its last client disconnects (exit).
   upgrade    install this binary, then switch the running daemon to it (stop + start, shells
              are kept), retrying if something else restarts an older one; verifies the result
   install    copy this binary to the versioned install dir (unless there) and print its path
-             --print-path: only print the path    --prune: also delete versions nothing runs
+             --print-path: only print the path    --prune: also delete versions no daemon runs
   bridge     start the daemon if needed, then relay stdin/stdout to its socket (for
              `ssh host clothod bridge`). Exit codes as for `start`.
   report <state> [--agent K] [--message M] [--session S] | --claude-hook | --codex-notify JSON
@@ -369,16 +369,36 @@ fn place_self(base: &std::path::Path) -> Result<(String, PathBuf)> {
 /// Delete every version dir except `keep_id` and any build a live clothod process of this user
 /// runs (which only a full restart can retire).
 fn remove_other_versions(base: &std::path::Path, keep_id: &str) {
-    let live: Vec<PathBuf> = clothod_processes().into_iter().filter_map(|p| p.exe).collect();
-    for v in installed_versions(base) {
-        if v == keep_id {
-            continue;
+    // Only a serve or holder keeps a version: it may exec its binary again. Anything else (an
+    // app's `bridge` that reconnected from the old build mid-upgrade, a `report` from a hook)
+    // runs fine from a deleted file, and keeping its version would leave two installed.
+    let daemons = || -> Vec<PathBuf> {
+        clothod_processes()
+            .into_iter()
+            .filter(|p| p.args.get(1).is_some_and(|a| a == "serve" || a == "holder"))
+            .filter_map(|p| p.exe)
+            .collect()
+    };
+    // A daemon that just switched can still show its old executable for a moment.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let live = daemons();
+        let mut kept = false;
+        for v in installed_versions(base) {
+            if v == keep_id {
+                continue;
+            }
+            let bin = base.join(&v).join("clothod");
+            if live.iter().any(|l| same_file(l, &bin)) {
+                kept = true;
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(base.join(&v));
         }
-        let bin = base.join(&v).join("clothod");
-        if live.iter().any(|l| same_file(l, &bin)) {
-            continue;
+        if !kept || std::time::Instant::now() >= deadline {
+            return;
         }
-        let _ = std::fs::remove_dir_all(base.join(&v));
+        std::thread::sleep(Duration::from_millis(200));
     }
 }
 

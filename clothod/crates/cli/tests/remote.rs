@@ -172,18 +172,30 @@ async fn install_from_scratch_upgrade_and_incompatible_holder() {
     c.input(p, b"V=kept-$((40+2))\r");
     ran(&c, p, "$ V=").await;
     let before = daemon_text(&c, p).await;
-    drop(c);
 
-    // Upgrade to a new build: all or nothing, the holder moves in place, one version remains.
+    // Upgrade to a new build: all or nothing, the holder moves in place, one version remains,
+    // even with the app's session (a `clothod bridge` of the old build) still attached.
+    let old_session = c;
     let holder_pid = h.r.probe().await.unwrap().get("holder_pid").to_string();
     let dist2 = upgraded_dist(&h.r, &probe.platform());
     let mut r2 = h.r.clone();
     r2.dist = dist2.path().to_path_buf();
     let b2 = r2.build_for(&r2.probe().await.unwrap()).unwrap();
+    // Like an app: whenever its connection drops (the upgrade stops the old serve), it
+    // reconnects right away with the old build's bridge, which can still be running when
+    // the upgrade removes old versions.
+    let reconnector = {
+        let (r, v1) = (h.r.clone(), v1.clone());
+        let lp = format!("version >/dev/null; end=$(( $(date +%s) + 12 )); while [ $(date +%s) -lt $end ]; do sleep 2 | {} bridge >/dev/null 2>&1; sleep 0.05; done", sq(&v1));
+        tokio::spawn(async move { r.clothod(&v1, &lp).await })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let v2 = r2.upgrade().await.unwrap();
+    reconnector.await.unwrap().unwrap();
     assert_ne!(v1, v2);
     let probe = r2.probe().await.unwrap();
     assert_eq!(probe.installed(), vec![b2.id.as_str()], "exactly one version on the host");
+    drop(old_session);
     assert_eq!(probe.get("current"), b2.id);
     assert_eq!(probe.get("holder_pid"), holder_pid, "same holder process");
     let Session { client: c, .. } = r2.connect().await.unwrap();
