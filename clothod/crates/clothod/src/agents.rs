@@ -247,6 +247,45 @@ fn claude_installed(settings: &Value) -> bool {
     })
 }
 
+/// Our hook commands in `settings`, by event (and matcher): what install would put there now
+/// is `claude_ours(&claude_snippet())`.
+fn claude_ours(settings: &Value) -> std::collections::BTreeMap<String, Vec<(Option<String>, String)>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (event, groups) in settings["hooks"].as_object().into_iter().flatten() {
+        for g in groups.as_array().into_iter().flatten() {
+            for h in g["hooks"].as_array().into_iter().flatten().filter(|h| is_ours(h)) {
+                out.entry(event.clone()).or_insert_with(Vec::new).push((g["matcher"].as_str().map(String::from), h["command"].as_str().unwrap_or("").to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// "installed", "outdated" (ours, but not what this build would install: an older command)
+/// or "not installed".
+fn claude_status(settings: &Value) -> &'static str {
+    if !claude_installed(settings) {
+        "not installed"
+    } else if claude_ours(settings) == claude_ours(&claude_snippet()) {
+        "installed"
+    } else {
+        "outdated"
+    }
+}
+
+fn codex_status(notify: Option<&[String]>) -> &'static str {
+    match notify {
+        Some(n) if codex_is_ours(n) => {
+            if n[..4] == ["/bin/sh".to_string(), "-c".into(), codex_script(), CODEX_ARG0.into()] {
+                "installed"
+            } else {
+                "outdated"
+            }
+        }
+        _ => "not installed",
+    }
+}
+
 fn install_claude() -> Result<String> {
     let path = claude_settings()?;
     let mut settings = read_json(&path)?;
@@ -374,10 +413,11 @@ pub fn hooks(args: &[String], install_self: impl Fn() -> Result<()>) -> Result<(
         ("uninstall", Some("claude")) => println!("{}", uninstall_claude()?),
         ("uninstall", Some("codex")) => println!("{}", uninstall_codex()?),
         ("status", _) => {
-            let claude = read_json(&claude_settings()?).map(|s| claude_installed(&s)).unwrap_or(false);
-            let codex = read_toml(&codex_config()?).ok().and_then(|d| codex_notify(&d)).is_some_and(|n| codex_is_ours(&n));
-            println!("claude: {}", if claude { "installed" } else { "not installed" });
-            println!("codex: {}", if codex { "installed" } else { "not installed" });
+            // `outdated`: installed by an older clothod; `hooks install` brings it up to date.
+            let claude = read_json(&claude_settings()?).map(|s| claude_status(&s)).unwrap_or("not installed");
+            let codex = codex_status(read_toml(&codex_config()?).ok().and_then(|d| codex_notify(&d)).as_deref());
+            println!("claude: {claude}");
+            println!("codex: {codex}");
         }
         _ => bail!("usage: clothod hooks <print|install|uninstall> <claude|codex>, or clothod hooks status"),
     }

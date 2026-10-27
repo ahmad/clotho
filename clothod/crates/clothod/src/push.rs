@@ -125,20 +125,39 @@ pub fn open(private_b64: &str, ciphertext_b64: &str, aad: &[u8]) -> Option<Vec<u
 
 /// The record a phone decrypts: `{"v":1, "m", "p", "k", "s", "msg", "t"}`.
 fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
-    let msg = a.message.as_deref().map(|m| {
-        let mut end = m.len().min(MAX_MSG);
+    let cut = |m: &str, max: usize| {
+        let mut end = m.len().min(max);
         while !m.is_char_boundary(end) {
             end -= 1;
         }
-        &m[..end]
-    });
-    let mut v = json!({"v": 1, "m": label, "p": pane, "k": a.kind, "s": a.state, "msg": msg, "t": a.since});
+        m[..end].to_string()
+    };
+    let (mut label, mut msg) = (label.to_string(), a.message.as_deref().map(|m| cut(m, MAX_MSG)));
+    let record = |label: &str, msg: &Option<String>| json!({"v": 1, "m": label, "p": pane, "k": a.kind, "s": a.state, "msg": msg, "t": a.since});
+    let pad_key = r#","pad":"""#.len();
+    // At most MAX_RECORD padded (the relay refuses bigger ciphertexts): a message (or label) that
+    // escapes to more than that in JSON is cut until it fits.
+    loop {
+        let len = serde_json::to_vec(&record(&label, &msg)).unwrap().len() + pad_key;
+        if len <= MAX_RECORD {
+            break;
+        }
+        match &msg {
+            Some(m) if !m.is_empty() => msg = Some(cut(m, m.len() / 2)),
+            _ => label = cut(&label, label.len() / 2),
+        }
+    }
+    let mut v = record(&label, &msg);
     // Padded to a multiple of PAD_TO bytes with a `pad` of spaces, so the ciphertext's length
     // (which the relay and APNs see) doesn't tell how long the message is.
-    let len = serde_json::to_vec(&v).unwrap().len() + r#","pad":"""#.len();
+    let len = serde_json::to_vec(&v).unwrap().len() + pad_key;
     v["pad"] = json!(" ".repeat(len.div_ceil(PAD_TO) * PAD_TO - len));
     serde_json::to_vec(&v).unwrap()
 }
+
+/// Largest record sealed: 2048 bytes is about 2,800 base64 characters of ciphertext, under the
+/// relay's 3,000 (ios/relay, MAX_CIPHERTEXT).
+pub const MAX_RECORD: usize = 2 * PAD_TO;
 
 /// Push records are padded to a multiple of this many bytes: every record is 1024 bytes unless
 /// its label (machine name) and an escape-heavy message are unusually long.
@@ -448,6 +467,13 @@ mod tests {
         let len = |m: Option<&str>| plaintext(LABEL, 3, &Alert { message: m.map(String::from), ..alert() }).len();
         let sizes = [len(None), len(Some("y")), len(Some(&"a".repeat(MAX_MSG))), len(Some(&"\"".repeat(MAX_MSG)))];
         assert_eq!(sizes, [PAD_TO; 4], "every message length looks the same");
+        // Escapes six-fold (control characters) in the message and the label: still at most
+        // MAX_RECORD, and the relay takes the ciphertext.
+        let worst = plaintext(&"\u{1}".repeat(500), 3, &Alert { message: Some("\u{1}".repeat(MAX_MSG)), ..alert() });
+        assert_eq!(worst.len(), MAX_RECORD);
+        let ct = seal(PK, &worst, b"x").unwrap();
+        assert!(ct.len() <= 3000, "{} base64 chars", ct.len());
+        assert!(serde_json::from_slice::<Value>(&worst).is_ok());
     }
 
     /// TLS works in this build (static musl builds bundle their own roots). Needs the network,

@@ -1411,7 +1411,8 @@ impl Daemon {
         if !AGENT_STATES.contains(&state) {
             return Err(err("bad_request", format!("unknown agent state `{state}`")));
         }
-        let kind = p.get("kind").and_then(Value::as_str).map(String::from);
+        // Bounded: these go into every agent event, the history and push records.
+        let kind = p.get("kind").and_then(Value::as_str).map(|k| clotho_vt::printable(k, 64));
         let prev = pp.agent.clone().filter(|a| a.source == "hook");
         // The agent is whatever owns the terminal while it reports.
         let pid = platform::foreground(pp.pid).map(|f| f.pgrp).filter(|g| *g != pp.pid).or(prev.as_ref().and_then(|a| a.pid));
@@ -1422,7 +1423,7 @@ impl Daemon {
             message: p.get("message").and_then(Value::as_str).filter(|m| !m.is_empty()).map(|m| m.chars().take(500).collect()),
             since: 0.0,
             attention: prev.as_ref().map(|a| a.attention).unwrap_or(false),
-            session: p.get("session").and_then(Value::as_str).map(String::from).or(prev.and_then(|a| a.session)),
+            session: p.get("session").and_then(Value::as_str).map(|s| s.chars().take(200).collect()).or(prev.and_then(|a| a.session)),
             pid,
             guess: false,
             muted: false,

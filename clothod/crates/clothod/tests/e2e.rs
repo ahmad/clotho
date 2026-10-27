@@ -3247,3 +3247,67 @@ async fn agent_history_logs_transitions_and_survives_a_restart() {
     let e = c.request("agent.history", json!({"pane": 999})).await.unwrap_err();
     assert!(e.to_string().contains("not_found"), "{e}");
 }
+
+/// Hooks installed by 0.1.10 (the install path spliced in double quotes, docs/security.md
+/// finding 6) show as `outdated`, and `hooks install` replaces them in place, keeping the
+/// user's own hooks and Codex's chained notify program.
+#[test]
+fn hooks_from_an_older_build_are_outdated_and_reinstall_replaces_them() {
+    let env = Env::empty();
+    let home = env.dir.path().join("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let bin_dir = env.dir.path().join("bin");
+    let old_bin = bin_dir.join("current").join("clothod");
+    let marker = "# clotho-agent-status";
+    let old_cmd = format!(r#"c="${{CLOTHOD_REPORT:-{}}}"; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report --claude-hook; true {marker}"#, old_bin.display());
+    let ours = |matcher: Option<&str>| {
+        let mut g = json!({"hooks": [{"type": "command", "command": old_cmd}]});
+        if let Some(m) = matcher {
+            g["matcher"] = json!(m);
+        }
+        g
+    };
+    let settings = home.join(".claude/settings.json");
+    let old = json!({"model": "opus", "hooks": {
+        "SessionStart": [ours(None)], "UserPromptSubmit": [ours(None)], "PreToolUse": [ours(Some("*"))],
+        "Notification": [ours(None)], "SessionEnd": [ours(None)],
+        "Stop": [{"hooks": [{"type": "command", "command": "echo mine"}]}, ours(None)],
+    }});
+    std::fs::write(&settings, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+    let old_script = format!(r#"for a; do j=$a; done; c="${{CLOTHOD_REPORT:-{}}}"; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report --codex-notify "$j"; [ $# -gt 1 ] && exec "$@"; exit 0"#, old_bin.display());
+    let config = home.join(".codex/config.toml");
+    let mut doc = toml_edit::DocumentMut::new();
+    let mut arr = toml_edit::Array::new();
+    for s in ["/bin/sh", "-c", old_script.as_str(), "clotho-notify", "echo", "user-notify"] {
+        arr.push(s);
+    }
+    doc["notify"] = toml_edit::value(arr);
+    std::fs::write(&config, doc.to_string()).unwrap();
+
+    let run = |args: &[&str]| {
+        let out = Command::new(test_bin()).args(args).env("HOME", &home).env("CLOTHOD_INSTALL_DIR", &bin_dir).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let st = run(&["hooks", "status"]);
+    assert!(st.contains("claude: outdated") && st.contains("codex: outdated"), "{st}");
+    assert!(run(&["hooks", "install", "claude"]).contains(": installed"));
+    assert!(run(&["hooks", "install", "codex"]).contains(": installed"));
+    let st = run(&["hooks", "status"]);
+    assert!(st.contains("claude: installed") && st.contains("codex: installed"), "{st}");
+    assert!(run(&["hooks", "install", "claude"]).contains("already installed"));
+    assert!(run(&["hooks", "install", "codex"]).contains("already installed"));
+
+    let s: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(s["model"], "opus");
+    let all: Vec<&str> = s["hooks"].as_object().unwrap().values().flat_map(|g| g.as_array().unwrap()).flat_map(|g| g["hooks"].as_array().unwrap()).map(|h| h["command"].as_str().unwrap()).collect();
+    assert!(all.contains(&"echo mine"), "user hook kept");
+    assert!(!all.iter().any(|c| c.contains(r#"c="${CLOTHOD_REPORT"#)), "no old command left: {all:?}");
+    assert_eq!(all.iter().filter(|c| c.contains(marker)).count(), 6, "one of ours per event");
+    let doc: toml_edit::DocumentMut = std::fs::read_to_string(&config).unwrap().parse().unwrap();
+    let notify: Vec<String> = doc["notify"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    assert_eq!(notify.len(), 6, "{notify:?}");
+    assert_eq!(&notify[3..], ["clotho-notify", "echo", "user-notify"], "still chains the user's program once");
+    assert!(!notify[2].contains(r#"c="${CLOTHOD_REPORT"#));
+}
