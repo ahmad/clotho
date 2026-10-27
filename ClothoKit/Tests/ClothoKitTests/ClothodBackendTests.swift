@@ -170,6 +170,41 @@ final class ClothodBackendTests: XCTestCase {
         XCTAssertEqual(again.scrollbackLines, target)
     }
 
+    /// service.status on a test instance: it reports, but this test never installs (on macOS that loads a
+    /// launchd agent into the GUI session). A test instance without its own label is refused outright.
+    func testServiceStatus() async throws {
+        let backend = makeBackend()
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        let hello = { collector.all.compactMap { e -> Hello? in if case .connected(let h) = e { return h }; return nil }.first }
+        try await waitFor("hello") { hello() != nil }
+        try XCTSkipUnless(hello()?.features.contains(.service) == true, "this clothod predates service")
+        do {
+            _ = try await backend.serviceStatus()
+            XCTFail("a test instance without its own label must be refused")
+        } catch let error as BackendError {
+            XCTAssertEqual(error.code, "bad_request", error.message)
+        }
+    }
+
+    func testDecodesService() throws {
+        let json: [String: Any] = [
+            "supported": true, "manager": "systemd", "label": "nyc.amin.clotho.clothod", "file": "/home/a/.config/systemd/user/x.service",
+            "installed": false, "loaded": false, "up_to_date": false, "command": ["/x/clothod", "start"], "linger": false,
+            "needs": ["linger"], "message": "Run sudo loginctl enable-linger a",
+        ]
+        let service = try ClothodBackend.decode(DaemonService.self, from: json)
+        XCTAssertEqual(service.linger, false)
+        XCTAssertEqual(service.needs, ["linger"])
+        XCTAssertFalse(service.installed)
+        let mac = try ClothodBackend.decode(DaemonService.self, from: ["supported": true, "installed": true, "loaded": true,
+                                                                      "up_to_date": true, "linger": NSNull(), "needs": [String]()])
+        XCTAssertNil(mac.linger)
+        XCTAssertTrue(mac.upToDate)
+    }
+
     /// The process transport, with a stand-in "ssh" that pipes stdio to the local daemon's socket (what
     /// `clothod bridge` will do on a remote machine), through a full session and a logic-process restart.
     func testProcessTransport() async throws {

@@ -382,6 +382,18 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         try Self.decode(DaemonSettings.self, from: try await request("settings.get", nil))
     }
 
+    public func serviceStatus() async throws -> DaemonService {
+        try Self.decode(DaemonService.self, from: try await request("service.status", nil))
+    }
+
+    public func installService() async throws -> DaemonService {
+        try Self.decode(DaemonService.self, from: try await request("service.install", nil))
+    }
+
+    public func uninstallService() async throws -> DaemonService {
+        try Self.decode(DaemonService.self, from: try await request("service.uninstall", nil))
+    }
+
     public func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings {
         try Self.decode(DaemonSettings.self, from: try await request("settings.set", change.params))
     }
@@ -517,6 +529,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             event = pane.map { .bell($0) }
         case "settings":
             event = (try? Self.decode(DaemonSettings.self, from: data)).map { .settings($0) }
+        case "service":
+            event = (try? Self.decode(DaemonService.self, from: data)).map { .service($0) }
         case "pane.clipboard":
             guard let pane, let text = data["text"] as? String else { return }
             event = .clipboard(pane, text: text, selection: data["target"] as? String == "selection")

@@ -48,6 +48,9 @@ public final class ModelStore: ObservableObject {
     @Published public private(set) var settings: DaemonSettings?
     /// The machine's settings changed, from any client.
     public var onSettings: ((DaemonSettings) -> Void)?
+    /// The machine's login service as last fetched or announced (`loadService()`, `service` events).
+    @Published public private(set) var service: DaemonService?
+    public var onService: ((DaemonService) -> Void)?
     /// An agent changed state: the pane, its previous info and its new one.
     public var onAgentChange: ((PaneID, AgentInfo?, AgentInfo?) -> Void)?
 
@@ -85,6 +88,22 @@ public final class ModelStore: ObservableObject {
         let changed = try await backend.setSettings(change)
         settings = changed
         return changed
+    }
+
+    /// Fetches the login service's status into `service`.
+    @discardableResult
+    public func loadService() async throws -> DaemonService {
+        let loaded = try await backend.serviceStatus()
+        service = loaded
+        return loaded
+    }
+
+    /// Turns start at login on or off, and keeps `service` in step with the reply.
+    @discardableResult
+    public func setStartsAtLogin(_ on: Bool) async throws -> DaemonService {
+        let result = try await (on ? backend.installService() : backend.uninstallService())
+        service = result
+        return result
     }
 
     public func stop() {
@@ -130,6 +149,9 @@ public final class ModelStore: ObservableObject {
         case .settings(let new):
             settings = new
             onSettings?(new)
+        case .service(let new):
+            service = new
+            onService?(new)
         case .clipboard(let pane, let text, let selection):
             sinks[pane]?.sink?.paneClipboard(text: text, selection: selection)
         case .subscribed(let pane, let subscription):

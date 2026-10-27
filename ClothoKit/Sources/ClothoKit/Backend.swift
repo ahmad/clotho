@@ -77,6 +77,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case paneClipboard = "pane.clipboard"
         /// `settings.get` / `settings.set` and `settings` events (clothod 0.1.7).
         case settings
+        /// `service.status` / `install` / `uninstall` and `service` events: start clothod at login (0.1.7).
+        case service
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -204,6 +206,8 @@ public enum SessionEvent: Sendable {
     case clipboard(PaneID, text: String, selection: Bool)
     /// The machine's daemon settings changed (by any client).
     case settings(DaemonSettings)
+    /// A client installed or removed the machine's login service.
+    case service(DaemonService)
 
     // A pane's data stream (only for subscribed panes), in order.
     /// The `pane.subscribe` reply, delivered in stream order ahead of the pane's first frame.
@@ -286,6 +290,12 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Changes them (`settings.set`); only the fields given change. The reply is the new settings.
     func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings
 
+    /// Start at login (`service.*`), when hello's `features` contains `.service`. Each returns the service
+    /// as it is afterwards. Install is idempotent; uninstall never stops the daemon.
+    func serviceStatus() async throws -> DaemonService
+    func installService() async throws -> DaemonService
+    func uninstallService() async throws -> DaemonService
+
     // Push alerts (docs/push.md), when hello's `features` contains `.push`.
     func pushRegister(_ registration: PushRegistration) async throws
     func pushUnregister(device: String) async throws
@@ -307,6 +317,12 @@ public extension SessionBackend {
     func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings {
         throw BackendError(code: "unknown_method", message: "this backend has no settings")
     }
+
+    func serviceStatus() async throws -> DaemonService { throw Self.noService }
+    func installService() async throws -> DaemonService { throw Self.noService }
+    func uninstallService() async throws -> DaemonService { throw Self.noService }
+
+    private static var noService: BackendError { BackendError(code: "unknown_method", message: "this backend can't start at login") }
 
     func sendKeys(_ pane: PaneID, text: String?, keys: [String]) async throws {
         throw BackendError(code: "unknown_method", message: "this backend can't send keys")
@@ -422,5 +438,65 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case scrollbackLines = "scrollback_lines", limits, config, appliedPanes = "applied_panes"
+    }
+}
+
+/// The machine's login service for clothod (protocol.md, "Start at login"): a launchd agent on macOS, a
+/// systemd user unit on Linux. Only the user turns it on.
+public struct DaemonService: Codable, Equatable, Sendable {
+    /// False when the machine has no service manager to use; `message` says why.
+    public var supported: Bool
+    /// "launchd" or "systemd".
+    public var manager: String?
+    public var label: String?
+    /// The unit file.
+    public var file: String?
+    /// Whether it's set to start at login: the toggle's state.
+    public var installed: Bool
+    /// Whether the service manager has it right now.
+    public var loaded: Bool
+    /// False while installed means installing again refreshes it.
+    public var upToDate: Bool
+    public var command: [String]?
+    /// Linux: whether the user's services run without a login session (nil elsewhere).
+    public var linger: Bool?
+    /// What's missing before it can be installed, such as "linger".
+    public var needs: [String]
+    /// A message for the user (for example how to enable lingering), when there's something to say.
+    public var message: String?
+
+    public init(supported: Bool, manager: String? = nil, label: String? = nil, file: String? = nil, installed: Bool,
+                loaded: Bool = false, upToDate: Bool = false, command: [String]? = nil, linger: Bool? = nil,
+                needs: [String] = [], message: String? = nil) {
+        self.supported = supported
+        self.manager = manager
+        self.label = label
+        self.file = file
+        self.installed = installed
+        self.loaded = loaded
+        self.upToDate = upToDate
+        self.command = command
+        self.linger = linger
+        self.needs = needs
+        self.message = message
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        supported = try c.decodeIfPresent(Bool.self, forKey: .supported) ?? false
+        manager = try c.decodeIfPresent(String.self, forKey: .manager)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        file = try c.decodeIfPresent(String.self, forKey: .file)
+        installed = try c.decodeIfPresent(Bool.self, forKey: .installed) ?? false
+        loaded = try c.decodeIfPresent(Bool.self, forKey: .loaded) ?? false
+        upToDate = try c.decodeIfPresent(Bool.self, forKey: .upToDate) ?? false
+        command = try c.decodeIfPresent([String].self, forKey: .command)
+        linger = try c.decodeIfPresent(Bool.self, forKey: .linger)
+        needs = try c.decodeIfPresent([String].self, forKey: .needs) ?? []
+        message = try c.decodeIfPresent(String.self, forKey: .message)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case supported, manager, label, file, installed, loaded, upToDate = "up_to_date", command, linger, needs, message
     }
 }
