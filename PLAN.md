@@ -213,3 +213,9 @@ is verified; this is a standing go for this round.
   (running or starting from a hook, or Claude's title spinner) or when the user resolves it
   (agent.ack). Viewing, input, focus and mouse reports, and detection's output guesses never clear
   it. Quick replies, Deny included, don't ack.
+- Resolve vs Silence (user request, 2026-10-27):
+  - Resolve (agent.ack) hides an agent until its next attention, as now.
+  - Silence (agent.silence, daemon-owned and synced) keeps it in Quiet with no attention, no
+    notifications and no pushes, until the user unsilences it or the agent session ends.
+  - Both actions appear on hover on the Mac and as swipe or menu actions on iOS. It ships with the
+    next clothod release (0.1.10), which needs the user's go.
