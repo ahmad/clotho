@@ -1512,3 +1512,317 @@ async fn ephemeral_instances_clean_up_after_themselves() {
     drop(c);
     gone("idle mode").await;
 }
+
+// ---- files (fs.*) -----------------------------------------------------------------------
+
+fn fs_err(e: anyhow::Error) -> String {
+    e.to_string()
+}
+
+/// A scratch directory for fs tests (under the test's temp dir).
+fn fs_root(env: &Env) -> PathBuf {
+    let d = env.dir.path().join("files");
+    std::fs::create_dir_all(&d).unwrap();
+    d.canonicalize().unwrap()
+}
+
+#[tokio::test]
+async fn fs_metadata_listing_and_errors() {
+    let env = Env::new();
+    let c = env.client().await;
+    assert!(c.hello["features"].as_array().unwrap().iter().any(|f| f == "fs"));
+    assert!(c.hello["machine"]["home"].as_str().is_some_and(|h| !h.is_empty()));
+    let root = fs_root(&env);
+    let r = root.to_str().unwrap();
+
+    let d = c.request("fs.mkdir", json!({"path": format!("{r}/a/b"), "parents": true})).await.unwrap();
+    assert_eq!(d["type"], "dir");
+    std::fs::write(root.join("a/b/notes.txt"), "hello\n").unwrap();
+    std::fs::write(root.join("a/bin.dat"), [0u8, 1, 2]).unwrap();
+    std::os::unix::fs::symlink(root.join("a/b"), root.join("a/link-to-b")).unwrap();
+    std::os::unix::fs::symlink(root.join("nowhere"), root.join("a/dangling")).unwrap();
+    std::fs::write(root.join("a/.hidden"), "").unwrap();
+
+    let st = c.request("fs.stat", json!({"path": format!("{r}/a/b/notes.txt")})).await.unwrap();
+    assert_eq!((st["type"].clone(), st["size"].clone(), st["text"].clone()), (json!("file"), json!(6), json!(true)));
+    assert!(st["mtime_ns"].as_str().unwrap().parse::<i128>().is_ok());
+    let st = c.request("fs.stat", json!({"path": format!("{r}/a/bin.dat")})).await.unwrap();
+    assert_eq!(st["text"], false);
+
+    let l = c.request("fs.list", json!({"path": format!("{r}/a")})).await.unwrap();
+    let names: Vec<&str> = l["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(names, [".hidden", "b", "bin.dat", "dangling", "link-to-b"]);
+    let get = |n: &str| l["entries"].as_array().unwrap().iter().find(|e| e["name"] == n).unwrap().clone();
+    assert_eq!((get("link-to-b")["type"].clone(), get("link-to-b")["link"].clone()), (json!("dir"), json!(true)), "a link to a dir is a dir");
+    assert_eq!((get("dangling")["type"].clone(), get("dangling")["link"].clone()), (json!("other"), json!(true)));
+    assert_eq!(l["dir"]["type"], "dir");
+    let l = c.request("fs.list", json!({"path": format!("{r}/a"), "hidden": false})).await.unwrap();
+    assert_eq!(l["entries"].as_array().unwrap().len(), 4);
+
+    // Paging: stable, complete, no repeats.
+    for i in 0..25 {
+        std::fs::write(root.join(format!("a/b/f{i:02}")), "").unwrap();
+    }
+    let (mut all, mut cursor) = (Vec::new(), Value::Null);
+    loop {
+        let mut p = json!({"path": format!("{r}/a/b"), "limit": 10});
+        if !cursor.is_null() {
+            p["cursor"] = cursor.clone();
+        }
+        let page = c.request("fs.list", p).await.unwrap();
+        all.extend(page["entries"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()));
+        cursor = page["next"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(all.len(), 26);
+    let mut sorted = all.clone();
+    sorted.sort();
+    assert_eq!(all, sorted);
+
+    // setattr, rename, remove, statfs.
+    let e = c.request("fs.setattr", json!({"path": format!("{r}/a/bin.dat"), "mtime_ns": "1700000000123456789", "mode": 0o600})).await.unwrap();
+    assert_eq!((e["mtime_ns"].clone(), e["mode"].clone()), (json!("1700000000123456789"), json!(0o600)));
+    let e = fs_err(c.request("fs.rename", json!({"from": format!("{r}/a/bin.dat"), "to": format!("{r}/a/b/notes.txt")})).await.unwrap_err());
+    assert!(e.contains("exists"), "{e}");
+    c.request("fs.rename", json!({"from": format!("{r}/a/bin.dat"), "to": format!("{r}/a/moved.dat")})).await.unwrap();
+    let e = fs_err(c.request("fs.remove", json!({"path": format!("{r}/a/b")})).await.unwrap_err());
+    assert!(e.contains("not_empty"), "{e}");
+    c.request("fs.remove", json!({"path": format!("{r}/a/link-to-b")})).await.unwrap();
+    assert!(root.join("a/b/notes.txt").exists(), "removing a link doesn't follow it");
+    c.request("fs.remove", json!({"path": format!("{r}/a/b"), "recursive": true})).await.unwrap();
+    assert!(!root.join("a/b").exists());
+    let sf = c.request("fs.statfs", json!({"path": r})).await.unwrap();
+    assert!(sf["total"].as_u64().unwrap() > 0 && sf["available"].as_u64().unwrap() <= sf["total"].as_u64().unwrap());
+
+    // Path rules and error codes.
+    for bad in ["~root/x", "relative/x"] {
+        let e = fs_err(c.request("fs.stat", json!({"path": bad})).await.unwrap_err());
+        assert!(e.contains("bad_request"), "{bad}: {e}");
+    }
+    let home = c.request("fs.stat", json!({"path": "~"})).await.unwrap();
+    assert_eq!(home["type"], "dir");
+    let e = fs_err(c.request("fs.stat", json!({"path": format!("{r}/missing")})).await.unwrap_err());
+    assert!(e.contains("not_found"), "{e}");
+
+    // Raw (non-UTF-8) names, where the filesystem allows them (not APFS).
+    use std::os::unix::ffi::OsStrExt;
+    let odd = root.join(std::ffi::OsStr::from_bytes(b"odd-\xff-name"));
+    if std::fs::write(&odd, "x").is_ok() {
+        let l = c.request("fs.list", json!({"path": r})).await.unwrap();
+        let e = l["entries"].as_array().unwrap().iter().find(|e| e.get("path_raw").is_some()).expect("raw entry").clone();
+        let st = c.request("fs.stat", json!({"path_raw": e["path_raw"]})).await.unwrap();
+        assert_eq!(st["size"], 1);
+    }
+}
+
+/// Read a stream into memory, acking as it goes (fire-and-forget acks every quarter window).
+async fn read_stream(c: &mut Client, stream: u64, start: u64, window: u64) -> Result<Vec<u8>, String> {
+    let mut data = Vec::new();
+    let mut pos = start;
+    let mut acked = start;
+    loop {
+        let f = tokio::time::timeout(T, c.recv()).await.map_err(|_| "timeout".to_string())?.ok_or("closed")?;
+        match f {
+            Frame::FileData { stream: s, offset, flags, data: d } if s == stream => {
+                assert_eq!(offset, pos, "contiguous");
+                pos += d.len() as u64;
+                data.extend_from_slice(&d);
+                if flags & clotho_proto::frame::FILE_FIN != 0 {
+                    return Ok(data);
+                }
+                if pos - acked >= window / 4 {
+                    c.send(Frame::Json(json!({"method": "fs.ack", "params": {"stream": stream, "offset": pos}})));
+                    acked = pos;
+                }
+            }
+            Frame::Json(v) if v["event"] == "fs.error" && v["data"]["stream"] == stream => return Err(v["data"]["code"].as_str().unwrap().into()),
+            _ => {}
+        }
+    }
+}
+
+fn pattern(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i * 7 % 251) as u8).collect()
+}
+
+#[tokio::test]
+async fn fs_read_streams_with_flow_control_and_guards() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let root = fs_root(&env);
+    let content = pattern(3 << 20);
+    std::fs::write(root.join("big.bin"), &content).unwrap();
+    let path = root.join("big.bin").to_string_lossy().into_owned();
+
+    let r = c.request("fs.read", json!({"path": path, "chunk": 65536, "window": 1 << 20})).await.unwrap();
+    assert_eq!(r["size"], content.len());
+    let got = read_stream(&mut c, r["stream"].as_u64().unwrap(), 0, 1 << 20).await.unwrap();
+    assert_eq!(got, content);
+
+    // Without acks the daemon stops at the window.
+    let r = c.request("fs.read", json!({"path": path, "chunk": 65536, "window": 262144})).await.unwrap();
+    let id = r["stream"].as_u64().unwrap();
+    let mut seen = 0usize;
+    while let Ok(Some(f)) = tokio::time::timeout(Duration::from_millis(500), c.recv()).await {
+        if let Frame::FileData { stream, data, .. } = f {
+            if stream == id {
+                seen += data.len();
+            }
+        }
+    }
+    assert_eq!(seen, 262144, "exactly one window without acks");
+    c.request("fs.cancel", json!({"stream": id})).await.unwrap();
+
+    // Ranges, and resume guards.
+    let r = c.request("fs.read", json!({"path": path, "offset": 1000, "length": 5000})).await.unwrap();
+    let got = read_stream(&mut c, r["stream"].as_u64().unwrap(), 1000, DEFAULT_WINDOW_TEST).await.unwrap();
+    assert_eq!(got, content[1000..6000]);
+    let mtime = r_mtime(&c, &path).await;
+    let ok = c.request("fs.read", json!({"path": path, "offset": 5, "length": 1, "expect_size": content.len(), "expect_mtime_ns": mtime})).await;
+    assert!(ok.is_ok());
+    let e = fs_err(c.request("fs.read", json!({"path": path, "offset": 5, "expect_size": 12})).await.unwrap_err());
+    assert!(e.contains("changed"), "{e}");
+}
+
+const DEFAULT_WINDOW_TEST: u64 = 4 << 20;
+
+async fn r_mtime(c: &Client, path: &str) -> Value {
+    c.request("fs.stat", json!({"path": path})).await.unwrap()["mtime_ns"].clone()
+}
+
+/// Send `data` as a write stream from `from`, returning the fs.done (or fs.error) event data.
+async fn write_stream(c: &mut Client, stream: u64, from: u64, data: &[u8], chunk: usize, fin: bool) -> Value {
+    let mut pos = from as usize;
+    while pos < data.len() {
+        let end = (pos + chunk).min(data.len());
+        c.send(Frame::FileData { stream, offset: pos as u64, flags: 0, data: data[pos..end].to_vec() });
+        pos = end;
+    }
+    if !fin {
+        return Value::Null;
+    }
+    c.send(Frame::FileData { stream, offset: pos as u64, flags: clotho_proto::frame::FILE_FIN, data: Vec::new() });
+    loop {
+        let f = tokio::time::timeout(T, c.recv()).await.expect("fs.done").expect("open");
+        if let Frame::Json(v) = f {
+            if (v["event"] == "fs.done" || v["event"] == "fs.error") && v["data"]["stream"] == stream {
+                return v;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn fs_atomic_writes_conflicts_and_resume() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let root = fs_root(&env);
+    let target = root.join("up.bin");
+    let path = target.to_string_lossy().into_owned();
+    let content = pattern(2 << 20);
+
+    // Upload with mode and mtime kept; the target appears only after FIN.
+    let r = c
+        .request("fs.write", json!({"path": path, "size": content.len(), "mode": 0o755, "mtime_ns": "1600000000000000000", "chunk": 65536}))
+        .await
+        .unwrap();
+    let id = r["stream"].as_u64().unwrap();
+    write_stream(&mut c, id, 0, &content[..1 << 20], 65536, false).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!target.exists(), "no partial target");
+    let done = write_stream(&mut c, id, 1 << 20, &content, 65536, true).await;
+    assert_eq!(done["event"], "fs.done", "{done}");
+    assert_eq!(std::fs::read(&target).unwrap(), content);
+    let e = &done["data"]["entry"];
+    assert_eq!((e["mode"].clone(), e["mtime_ns"].clone()), (json!(0o755), json!("1600000000000000000")));
+    assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("clotho-part")), "no part file left");
+
+    // Existing target: exists without overwrite; conflict if it changed since read.
+    let err1 = fs_err(c.request("fs.write", json!({"path": path})).await.unwrap_err());
+    assert!(err1.contains("exists"), "{err1}");
+    let err2 = fs_err(c.request("fs.write", json!({"path": path, "overwrite": true, "expect_mtime_ns": "1"})).await.unwrap_err());
+    assert!(err2.contains("conflict"), "{err2}");
+
+    // Resume: half an upload, the connection drops, a new one continues from the part file.
+    let big = pattern(3 << 20);
+    let params = json!({"path": root.join("resume.bin"), "size": big.len(), "upload_id": "abc123", "source": "v1", "chunk": 65536});
+    let r = c.request("fs.write", params.clone()).await.unwrap();
+    assert_eq!(r["offset"], 0);
+    write_stream(&mut c, r["stream"].as_u64().unwrap(), 0, &big[..1 << 20], 65536, false).await;
+    // Let the daemon write it before the connection goes.
+    let deadline = Instant::now() + T;
+    loop {
+        if let Some(Frame::Json(v)) = c.try_recv() {
+            if v["event"] == "fs.ack" && v["data"]["offset"].as_u64() == Some(1 << 20) {
+                break;
+            }
+        }
+        assert!(Instant::now() < deadline, "no ack");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    drop(c);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut c = env.client().await;
+    let r = c.request("fs.write", params.clone()).await.unwrap();
+    assert_eq!(r["offset"], 1 << 20, "resumes where it left off");
+    let done = write_stream(&mut c, r["stream"].as_u64().unwrap(), 1 << 20, &big, 65536, true).await;
+    assert_eq!(done["event"], "fs.done", "{done}");
+    assert_eq!(std::fs::read(root.join("resume.bin")).unwrap(), big);
+
+    // A different source restarts at 0.
+    let mut p2 = params.clone();
+    p2["path"] = json!(root.join("resume2.bin"));
+    let r = c.request("fs.write", p2.clone()).await.unwrap();
+    write_stream(&mut c, r["stream"].as_u64().unwrap(), 0, &big[..65536], 65536, false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    c.request("fs.cancel", json!({"stream": r["stream"]})).await.unwrap();
+    p2["source"] = json!("v2");
+    let r = c.request("fs.write", p2).await.unwrap();
+    assert_eq!(r["offset"], 0, "the local data changed: start over");
+    c.request("fs.cancel", json!({"stream": r["stream"]})).await.unwrap();
+
+    // Cancelling a write without upload_id leaves nothing behind.
+    let r = c.request("fs.write", json!({"path": root.join("gone.bin")})).await.unwrap();
+    write_stream(&mut c, r["stream"].as_u64().unwrap(), 0, b"partial", 7, false).await;
+    c.request("fs.cancel", json!({"stream": r["stream"]})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("gone.bin")));
+
+    // Writing through a symlink replaces the target's contents, not the link.
+    std::fs::write(root.join("real.txt"), "old").unwrap();
+    std::os::unix::fs::symlink(root.join("real.txt"), root.join("alias.txt")).unwrap();
+    let r = c.request("fs.write", json!({"path": root.join("alias.txt"), "overwrite": true})).await.unwrap();
+    let done = write_stream(&mut c, r["stream"].as_u64().unwrap(), 0, b"new", 3, true).await;
+    assert_eq!(done["event"], "fs.done", "{done}");
+    assert!(std::fs::symlink_metadata(root.join("alias.txt")).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(root.join("real.txt")).unwrap(), "new");
+}
+
+/// Terminal output must not wait behind a big transfer.
+#[tokio::test]
+async fn fs_transfers_do_not_stall_terminals() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let root = fs_root(&env);
+    std::fs::write(root.join("huge.bin"), pattern(48 << 20)).unwrap();
+    let p = new_pane(&c, sh()).await;
+    let (_, mut s) = subscribe(&mut c, p, None).await;
+    sync(&mut c, &mut s).await.unwrap();
+    // A big window queues a lot of file data at once.
+    let _r = c.request("fs.read", json!({"path": root.join("huge.bin"), "window": 48 << 20, "chunk": 1 << 20})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let t0 = Instant::now();
+    c.input(p, b"echo prio-$((2+2))\r");
+    loop {
+        let f = tokio::time::timeout(T, c.recv()).await.unwrap().unwrap();
+        if let Frame::Output { data, .. } = &f {
+            if String::from_utf8_lossy(data).contains("prio-4") {
+                break;
+            }
+        }
+    }
+    let waited = t0.elapsed();
+    assert!(waited < Duration::from_millis(1500), "pane output waited {waited:?} behind file data");
+}

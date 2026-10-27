@@ -451,8 +451,8 @@ query responses.)
 
 ## Files
 
-Status: **draft 2** (2026-10-26). It folds in the reviews from mac-d8, ios-c2 and clotho-f5 and
-isn't implemented yet. Feature flag: `fs` in `hello.features`.
+Status: **implemented** in clothod 0.1.3 (2026-10-27), from draft 2, which folded in the reviews
+from mac-d8, ios-c2 and clotho-f5. Feature flag: `fs` in `hello.features`.
 
 File access on the daemon's machine, for file browsers and transfers. It replaces running
 scripts and rsync over SSH, and it works the same locally, through `clothod bridge` and from
@@ -526,7 +526,14 @@ FILE_DATA:  u64 stream | u64 offset | u8 flags | bytes...      flags: 1 = FIN (l
 - **Flow control** is credit based, so nobody buffers without bound. The receiver grants a
   `window` (default 4 MiB; the client sets it for both directions), and the sender may send up to
   `acked + window`. The receiver slides the window with `fs.ack {stream, offset}` (consumed up
-  to `offset`).
+  to `offset`). A client sends `fs.ack` **without an `id`**, so it is fire and forget, with no
+  reply. Acking about every quarter window keeps the stream moving.
+- **How streams end:**
+  - A read ends with its FIN frame (empty, at the end offset), or with `fs.error`, or with
+    `fs.done {cancelled: true}` after `fs.cancel`. A read never gets an `fs.done` otherwise.
+  - A write ends only with `fs.done` (success, with the entry, or cancelled) or `fs.error`. The
+    daemon never sends FIN.
+  - A read's FILE_DATA never arrives before the `fs.read` reply.
 - A connection may have 16 streams open; more is `too_many_streams`. Frames fit easily within
   the 16 MiB frame limit.
 
@@ -567,7 +574,8 @@ FILE_DATA:  u64 stream | u64 offset | u8 flags | bytes...      flags: 1 = FIN (l
   is renamed over the target. Readers never see a partial file.
 - **Symlinks:** writing to a path that is a symlink writes to the file it points to (the temp file
   goes next to the link's target), so links survive edits. A dangling link is `not_found`.
-- **Conflicts:** with `overwrite: false`, an existing target is `exists`. With `expect_mtime_ns`,
+- **Conflicts:** `overwrite` defaults to false, so an existing target is `exists` unless
+  `overwrite: true` is given. With `expect_mtime_ns`,
   the target must still have that mtime when the write completes (else `conflict`), for safe
   edit-and-save.
 - **Mode:** `mode` sets the new file's permission bits (keep an upload's executable bit). By

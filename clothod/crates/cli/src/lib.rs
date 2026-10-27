@@ -130,6 +130,11 @@ impl Client {
         Ok(reply.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    /// Send any frame (FILE_DATA for fs.write streams, notifications without an id).
+    pub fn send(&self, frame: Frame) {
+        let _ = self.out.send(frame.encode());
+    }
+
     pub fn input(&self, pane: u64, data: &[u8]) {
         let _ = self.out.send(Frame::Input { pane, data: data.to_vec() }.encode());
     }

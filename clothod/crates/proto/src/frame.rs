@@ -10,6 +10,10 @@ pub const T_JSON: u8 = 1;
 pub const T_OUTPUT: u8 = 2;
 pub const T_INPUT: u8 = 3;
 pub const T_SNAPSHOT: u8 = 4;
+pub const T_FILE_DATA: u8 = 5;
+
+/// FILE_DATA flag: last frame of the stream.
+pub const FILE_FIN: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
@@ -20,6 +24,8 @@ pub enum Frame {
     Input { pane: u64, data: Vec<u8> },
     /// Terminal state after `seq` bytes, as a VT stream for a `cols`x`rows` terminal.
     Snapshot { pane: u64, seq: u64, cols: u16, rows: u16, data: Vec<u8> },
+    /// Bytes of an fs.* transfer stream at `offset` of the file (docs/protocol.md, Files).
+    FileData { stream: u64, offset: u64, flags: u8, data: Vec<u8> },
     /// A frame type this build does not know; receivers ignore it.
     Unknown(u8),
 }
@@ -55,6 +61,13 @@ impl Frame {
                 out.extend_from_slice(&rows.to_be_bytes());
                 out.extend_from_slice(data);
             }
+            Frame::FileData { stream, offset, flags, data } => {
+                out.push(T_FILE_DATA);
+                out.extend_from_slice(&stream.to_be_bytes());
+                out.extend_from_slice(&offset.to_be_bytes());
+                out.push(*flags);
+                out.extend_from_slice(data);
+            }
             Frame::Unknown(t) => out.push(*t),
         }
         let len = (out.len() - 4) as u32;
@@ -86,6 +99,11 @@ impl Frame {
                 let (pane, seq) = (u64_at(&body, 0)?, u64_at(&body, 8)?);
                 let (cols, rows) = (u16_at(&body, 16)?, u16_at(&body, 18)?);
                 Frame::Snapshot { pane, seq, cols, rows, data: body[20..].to_vec() }
+            }
+            T_FILE_DATA => {
+                let (stream, offset) = (u64_at(&body, 0)?, u64_at(&body, 8)?);
+                let flags = *body.get(16).ok_or_else(short)?;
+                Frame::FileData { stream, offset, flags, data: body[17..].to_vec() }
             }
             other => Frame::Unknown(other),
         })
@@ -146,6 +164,7 @@ mod tests {
             Frame::Input { pane: 3, data: vec![0, 1, 2] },
             Frame::Snapshot { pane: 9, seq: 5, cols: 80, rows: 24, data: b"\x1bc".to_vec() },
             Frame::Output { pane: 1, seq: 0, data: vec![] },
+            Frame::FileData { stream: 3, offset: 1 << 33, flags: FILE_FIN, data: b"tail".to_vec() },
         ];
         let mut buf = Vec::new();
         for f in &frames {

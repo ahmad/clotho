@@ -56,12 +56,17 @@ enum Msg {
     Output(Vec<u8>),
 }
 
-struct Client {
+pub(crate) struct Client {
     id: u64,
     tx: mpsc::UnboundedSender<Msg>,
+    /// File transfer frames: written only when nothing else is queued, so terminals stay
+    /// responsive during transfers (docs/protocol.md, Files).
+    file_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// Bytes of pane output queued but not yet written to the socket.
     queued: AtomicUsize,
     events: AtomicBool,
+    /// This connection's fs.* transfer streams.
+    pub(crate) fs: crate::fs::Streams,
 }
 
 impl Client {
@@ -69,8 +74,18 @@ impl Client {
         let _ = self.tx.send(Msg::Control(frame));
     }
 
-    fn json(&self, v: Value) {
+    pub(crate) fn json(&self, v: Value) {
         self.control(Frame::Json(v).encode());
+    }
+
+    /// Queue a FILE_DATA frame (lowest priority).
+    pub(crate) fn file(&self, frame: Vec<u8>) {
+        let _ = self.file_tx.send(frame);
+    }
+
+    /// An event only this connection gets (fs.ack, fs.done, fs.error).
+    pub(crate) fn event(&self, event: &str, data: Value) {
+        self.json(json!({"event": event, "data": data}));
     }
 
     fn output(&self, frame: Vec<u8>) {
@@ -1134,16 +1149,30 @@ impl Daemon {
         let id = self.next_client.fetch_add(1, Ordering::Relaxed);
         let (mut rd, mut wr) = stream.into_split();
         let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
-        let client = Arc::new(Client { id, tx, queued: AtomicUsize::new(0), events: AtomicBool::new(false) });
+        let (file_tx, mut file_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let client = Arc::new(Client {
+            id,
+            tx,
+            file_tx,
+            queued: AtomicUsize::new(0),
+            events: AtomicBool::new(false),
+            fs: Default::default(),
+        });
         self.clients.lock().unwrap().insert(id, client.clone());
 
         let writer = {
             let client = client.clone();
             tokio::spawn(async move {
-                while let Some(msg) = rx.recv().await {
-                    let (buf, out) = match msg {
-                        Msg::Control(b) => (b, false),
-                        Msg::Output(b) => (b, true),
+                loop {
+                    // Biased: replies, events and pane output always go before file data.
+                    let (buf, out) = tokio::select! {
+                        biased;
+                        msg = rx.recv() => match msg {
+                            Some(Msg::Control(b)) => (b, false),
+                            Some(Msg::Output(b)) => (b, true),
+                            None => break,
+                        },
+                        Some(b) = file_rx.recv() => (b, false),
                     };
                     if wr.write_all(&buf).await.is_err() {
                         break;
@@ -1170,6 +1199,11 @@ impl Daemon {
                     let req_id = v.get("id").cloned().unwrap_or(Value::Null);
                     let method = v.get("method").and_then(Value::as_str).unwrap_or("").to_string();
                     let params = v.get("params").cloned().unwrap_or(json!({}));
+                    // Credit for a read stream; without an id it is fire and forget.
+                    if method == "fs.ack" && req_id.is_null() && hello {
+                        crate::fs::ack(&client, &params);
+                        continue;
+                    }
                     let result = if !hello && method != "hello" {
                         Err(err("handshake_required", "send hello first"))
                     } else if method == "pane.subscribe" {
@@ -1185,11 +1219,19 @@ impl Daemon {
                         }
                         r
                     };
+                    let started = match (&result, method.as_str()) {
+                        (Ok(v), "fs.read") => Some(v.clone()),
+                        _ => None,
+                    };
                     let reply = match result {
                         Ok(v) => json!({"id": req_id, "result": v}),
                         Err(e) => json!({"id": req_id, "error": {"code": e.code, "message": e.message}}),
                     };
                     client.json(reply);
+                    // A read's data may only follow its reply.
+                    if let Some(v) = started {
+                        crate::fs::replied(&client, &v);
+                    }
                     if method == "daemon.stop" || method == "daemon.shutdown" {
                         // Let the reply go out first.
                         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1197,10 +1239,13 @@ impl Daemon {
                     }
                 }
                 Frame::Input { pane, data } if hello => self.input(id, pane, data),
+                Frame::FileData { stream, offset, flags, data } if hello => crate::fs::data(&client, stream, offset, flags, data),
                 _ => {}
             }
         }
 
+        // Transfers end with the connection (part files of resumable writes are kept).
+        crate::fs::close_all(&client);
         let none_left = {
             let mut clients = self.clients.lock().unwrap();
             clients.remove(&id);
@@ -1236,12 +1281,13 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
                     "pid": std::process::id(),
-                    "machine": {"hostname": platform::hostname(), "os": platform::OS_NAME, "arch": std::env::consts::ARCH},
+                    "machine": {"hostname": platform::hostname(), "os": platform::OS_NAME, "arch": std::env::consts::ARCH,
+                        "home": std::env::var("HOME").unwrap_or_default()},
                     "exe": std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
                     "holder": self.holder_info,
                     "holder_outdated": self.holder_info["outdated"],
@@ -1249,6 +1295,7 @@ impl Daemon {
                 }))
             }
             "ping" => Ok(json!({})),
+            m if m.starts_with("fs.") => crate::fs::request(&self.fs_ctx(), client, m, p).await.map_err(|e| err(e.code, e.message)),
             "agent.report" => self.agent_report(p),
             "agent.ack" => {
                 let pane = param_u64(p, "pane")?;
@@ -1551,6 +1598,10 @@ impl Daemon {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    fn fs_ctx(&self) -> crate::fs::Ctx {
+        crate::fs::Ctx { state_dir: platform::log_dir(&self.dir) }
     }
 }
 
