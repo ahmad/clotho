@@ -30,8 +30,7 @@ use tokio::sync::mpsc;
 /// clothod's snapshot policy), so a restart always finds its snapshot's seq still buffered.
 pub const RING_CAPACITY: usize = 4 << 20;
 
-/// Frames queued for the logic connection before the holder gives up on it. The logic process
-/// reconnects and recovers from snapshot + buffer, so dropping it loses nothing.
+/// Live output frames queued for the logic connection before pane readers wait (backpressure).
 const LOGIC_QUEUE: usize = 1024;
 
 pub const SOCKET_NAME: &str = "holder.sock";
@@ -84,7 +83,22 @@ impl Ring {
     }
 }
 
-type Sink = mpsc::Sender<Vec<u8>>;
+/// The logic connection's two queues. Control messages (welcome, recovery, replies) go first
+/// and never block. Live output goes through a bounded queue whose sends wait: when the logic
+/// process falls behind, pane readers stop reading their PTYs and the programs block on write,
+/// like on any slow terminal, instead of the holder dropping output or the connection.
+///
+/// Fairness: each pane may have only a few frames in that queue at once (a permit travels with
+/// each frame and is released once it is written), so one pane printing flat out can't keep the
+/// queue full and delay every other pane's output behind it.
+#[derive(Clone)]
+struct Sink {
+    live: mpsc::Sender<(Vec<u8>, Option<tokio::sync::OwnedSemaphorePermit>)>,
+    ctrl: mpsc::UnboundedSender<Vec<u8>>,
+}
+
+/// Frames one pane may have queued for the logic process at a time.
+const PANE_IN_FLIGHT: usize = 4;
 
 struct Snapshot {
     seq: u64,
@@ -127,24 +141,18 @@ impl Pane {
         }
     }
 
-    /// Queue a frame for the logic connection. A full queue means the logic process is stuck;
-    /// drop the connection rather than block the PTY.
-    fn send(&mut self, frame: Vec<u8>, holder: &Holder) {
-        if let Some((conn, sink)) = &self.sink {
-            if sink.try_send(frame).is_err() {
-                let conn = *conn;
-                self.sink = None;
-                holder.drop_conn(conn);
-            }
-        }
-    }
-
-    fn maybe_finish(&mut self, holder: &Holder) {
+    /// Once the output is all read and the process reaped: tell the logic process, behind the
+    /// pane's last output (same queue, queued after the reader's last send completed).
+    fn maybe_finish(&mut self) {
         if self.eof && !self.exited_sent {
             if let Some(status) = self.status {
                 self.exited_sent = true;
-                let msg = FromHolder::Exited { pane: self.id, status };
-                self.send(json_frame(&msg), holder);
+                if let Some((_, sink)) = self.sink.clone() {
+                    let msg = json_frame(&FromHolder::Exited { pane: self.id, status });
+                    tokio::spawn(async move {
+                        let _ = sink.live.send((msg, None)).await;
+                    });
+                }
             }
         }
     }
@@ -181,15 +189,6 @@ fn random_instance() -> String {
 }
 
 impl Holder {
-    fn drop_conn(&self, conn: u64) {
-        let mut cur = self.conn.lock().unwrap();
-        if let Some((id, handle)) = cur.as_ref() {
-            if *id == conn {
-                handle.abort();
-                *cur = None;
-            }
-        }
-    }
 
     fn pane(&self, id: u64) -> Option<Arc<Mutex<Pane>>> {
         self.panes.lock().unwrap().get(&id).cloned()
@@ -325,12 +324,22 @@ fn start_conn(holder: &Arc<Holder>, stream: UnixStream) {
 
 async fn serve_conn(holder: &Arc<Holder>, conn: u64, abort: tokio::task::AbortHandle, stream: UnixStream) -> Result<()> {
     let (mut rd, mut wr) = stream.into_split();
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(LOGIC_QUEUE);
+    let (live, mut live_rx) = mpsc::channel(LOGIC_QUEUE);
+    let (ctrl, mut ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let tx = Sink { live, ctrl };
     let writer = tokio::spawn(async move {
-        while let Some(buf) = rx.recv().await {
+        loop {
+            // Control first: a pane's recovery frames are queued before its live output can be.
+            let (buf, permit) = tokio::select! {
+                biased;
+                Some(b) = ctrl_rx.recv() => (b, None),
+                Some((b, permit)) = live_rx.recv() => (b, permit),
+                else => break,
+            };
             if wr.write_all(&buf).await.is_err() {
                 break;
             }
+            drop(permit); // the pane may queue another frame
         }
     });
     struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -367,7 +376,7 @@ async fn serve_conn(holder: &Arc<Holder>, conn: u64, abort: tokio::task::AbortHa
         pid: std::process::id(),
         state: holder.state.lock().unwrap().clone(),
     };
-    tx.send(json_frame(&welcome)).await?;
+    tx.ctrl.send(json_frame(&welcome))?;
 
     // Recovery: each pane's info, stored snapshot and buffer, then switch it to live streaming
     // to this connection, all under the pane's lock so no output slips in between.
@@ -388,12 +397,11 @@ async fn serve_conn(holder: &Arc<Holder>, conn: u64, abort: tokio::task::AbortHa
             let seq = start + (i << 20) as u64;
             frames.extend(Frame::Output { pane: id, seq, data: chunk.to_vec() }.encode());
         }
-        // Blocking send under a std mutex would stall; the queue is fresh, so make room by
-        // sending in one message. A full queue here means a broken peer.
-        tx.try_send(frames).map_err(|_| anyhow::anyhow!("logic queue full during recovery"))?;
+        // Queued (never blocking) under the pane's lock, before the pane streams live to us.
+        tx.ctrl.send(frames)?;
         p.sink = Some((conn, tx.clone()));
     }
-    tx.send(json_frame(&FromHolder::Ready)).await?;
+    tx.ctrl.send(json_frame(&FromHolder::Ready))?;
 
     while let Some(frame) = read_frame(&mut rd).await? {
         match frame {
@@ -432,7 +440,7 @@ async fn handle(holder: &Arc<Holder>, conn: u64, tx: &Sink, msg: ToHolder) {
         ToHolder::Spawn { id, command, cwd, env, cols, rows } => {
             // On success `spawn` queues the reply itself, before any output can be.
             if let Err(e) = spawn(holder, conn, tx, id, command, cwd, env, cols, rows) {
-                let _ = tx.send(json_frame(&FromHolder::Error { id, message: format!("{e:#}") })).await;
+                let _ = tx.ctrl.send(json_frame(&FromHolder::Error { id, message: format!("{e:#}") }));
             }
         }
         ToHolder::Resize { pane, cols, rows, seq } => {
@@ -481,7 +489,7 @@ async fn handle(holder: &Arc<Holder>, conn: u64, tx: &Sink, msg: ToHolder) {
             if holder.upgrades.send((exe, reply)).is_ok() {
                 // On success this process image is gone and the answer never comes.
                 let message = answer.await.unwrap_or_else(|_| "holder is shutting down".into());
-                let _ = tx.send(json_frame(&FromHolder::Error { id, message })).await;
+                let _ = tx.ctrl.send(json_frame(&FromHolder::Error { id, message }));
             }
         }
     }
@@ -617,8 +625,7 @@ fn spawn(
     let info = pane.info();
     // The logic process must learn about the pane before its first output, so the reply goes
     // into the queue before the reader starts.
-    tx.try_send(json_frame(&FromHolder::Spawned { id: req, pane: info.clone() }))
-        .map_err(|_| anyhow::anyhow!("logic queue full"))?;
+    tx.ctrl.send(json_frame(&FromHolder::Spawned { id: req, pane: info.clone() })).map_err(|_| anyhow::anyhow!("logic connection gone"))?;
     let pane = Arc::new(Mutex::new(pane));
     holder.panes.lock().unwrap().insert(id, pane.clone());
     tokio::spawn(read_pty(holder.clone(), pane.clone(), master.clone()));
@@ -628,6 +635,7 @@ fn spawn(
 
 async fn read_pty(holder: Arc<Holder>, pane: Arc<Mutex<Pane>>, master: Arc<AsyncFd<OwnedFd>>) {
     let mut buf = vec![0u8; 64 * 1024];
+    let in_flight = Arc::new(tokio::sync::Semaphore::new(PANE_IN_FLIGHT));
     loop {
         let mut guard = match master.readable().await {
             Ok(g) => g,
@@ -646,17 +654,26 @@ async fn read_pty(holder: Arc<Holder>, pane: Arc<Mutex<Pane>>, master: Arc<Async
             // EOF, or EIO once the last slave fd is closed (Linux and macOS).
             Ok(Ok(0)) | Ok(Err(_)) => break,
             Ok(Ok(n)) => {
-                let mut p = pane.lock().unwrap();
-                let seq = p.ring.end();
-                p.ring.push(&buf[..n]);
-                let frame = Frame::Output { pane: p.id, seq, data: buf[..n].to_vec() }.encode();
-                p.send(frame, &holder);
+                // Buffer and pick the destination under the lock (recovery switches it there),
+                // then wait for room outside it: this is the backpressure.
+                let (frame, sink) = {
+                    let mut p = pane.lock().unwrap();
+                    let seq = p.ring.end();
+                    p.ring.push(&buf[..n]);
+                    (Frame::Output { pane: p.id, seq, data: buf[..n].to_vec() }.encode(), p.sink.clone())
+                };
+                if let Some((_, sink)) = sink {
+                    if let Ok(permit) = in_flight.clone().acquire_owned().await {
+                        let _ = sink.live.send((frame, Some(permit))).await;
+                    }
+                }
             }
         }
     }
+    let _ = &holder;
     let mut p = pane.lock().unwrap();
     p.eof = true;
-    p.maybe_finish(&holder);
+    p.maybe_finish();
 }
 
 async fn write_pty(master: Arc<AsyncFd<OwnedFd>>, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
@@ -714,7 +731,7 @@ async fn reap_children(holder: Arc<Holder>) {
             if let Some(pane) = holder.pane(id) {
                 let mut p = pane.lock().unwrap();
                 p.status = Some(exit);
-                p.maybe_finish(&holder);
+                p.maybe_finish();
             }
         }
         // Also every second: a pane whose child exited before its pid was recorded has had

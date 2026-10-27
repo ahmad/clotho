@@ -1849,3 +1849,24 @@ async fn detected_claude_state_follows_its_title_glyph() {
     assert_eq!(t, "✳ Fixing tests", "the raw title is kept");
     c.input(p, b"\x03");
 }
+
+/// Programs printing as fast as they can (`yes`, `cat` of a huge file) must slow down, not
+/// break the daemon: the holder stops reading their PTYs while the daemon is behind.
+#[tokio::test]
+async fn firehose_output_applies_backpressure_instead_of_failing() {
+    let env = Env::new();
+    let c = env.client().await;
+    for _ in 0..3 {
+        let mut p = sh();
+        p["command"] = json!(["/bin/sh", "-c", "yes firehose-0123456789-abcdefghijklmnopqrstuvwxyz"]);
+        new_pane(&c, p).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Still responsive: new panes, input, output.
+    let p = new_pane(&c, sh()).await;
+    c.input(p, b"echo alive-$((3*4))\r");
+    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "alive-12")).await.unwrap();
+    assert!(!env.log().contains("holder closed the connection"), "{}", env.log());
+    let s = c.request("state.get", json!({})).await.unwrap();
+    assert!(s["panes"][0]["seq"].as_u64().unwrap() > 1 << 20, "the firehose did run");
+}
