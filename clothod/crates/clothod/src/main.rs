@@ -7,11 +7,10 @@ use clotho_proto::{platform, read_frame, write_frame, Frame};
 use serde_json::json;
 use tokio::net::UnixStream;
 
-// musl's malloc holds on to memory freed after bursts (snapshots, replays); static Linux builds
-// use mimalloc instead (scripts/dist.sh).
-#[cfg(feature = "mimalloc")]
+// mimalloc on Linux, the system allocator on macOS (clothod::alloc), counting live bytes for
+// `debug.stats`.
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: clothod::alloc::Counting = clothod::alloc::Counting(clothod::alloc::INNER);
 
 const USAGE: &str = "usage: clothod <command> [--runtime-dir DIR]
 
@@ -47,6 +46,7 @@ with no clients and no panes, or when its last client disconnects (exit).
 The runtime dir (sockets, locks) defaults to $CLOTHOD_RUNTIME_DIR or the OS default.";
 
 fn main() {
+    clothod::alloc::tune();
     match run() {
         Ok(()) => {}
         Err(e) => {

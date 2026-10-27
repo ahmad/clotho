@@ -279,7 +279,26 @@ async fn soak() {
             max_rss_serve = max_rss_serve.max(s);
             max_rss_holder = max_rss_holder.max(h);
             rss_samples.push((start.elapsed().as_secs(), s, h));
-            eprintln!("soak: {:>5}s rss serve {s} KiB holder {h} KiB, {reconnects} reconnects, {} probes", start.elapsed().as_secs(), latencies.len());
+            // Where serve's memory sits: queues and buffers (debug.stats).
+            let st = ctl.request("debug.stats", json!({"maps": true})).await.unwrap_or_default();
+            if std::env::var_os("CLOTHOD_SOAK_MAPS").is_some() {
+                eprintln!("soak: maps {}", st["maps"]);
+            }
+            let sum = |k: &str| st["clients"].as_array().map_or(0, |a| a.iter().map(|c| c[k].as_u64().unwrap_or(0)).sum::<u64>());
+            let lagging: u64 = st["panes"].as_array().map_or(0, |a| a.iter().map(|p| p["lagging"].as_u64().unwrap_or(0)).sum());
+            eprintln!(
+                "soak: {:>5}s rss serve {s} KiB holder {h} KiB, {reconnects} reconnects, {} probes | heap {} KiB (peak {} KiB) lazyfree {} KiB anon {} KiB, clients {} queued {} KiB control {} KiB, holder queue {} KiB, lagging subs {lagging}",
+                start.elapsed().as_secs(),
+                latencies.len(),
+                st["heap"].as_u64().unwrap_or(0) / 1024,
+                st["heap_peak"].as_u64().unwrap_or(0) / 1024,
+                st["smaps_kib"]["LazyFree"].as_u64().unwrap_or(0),
+                st["smaps_kib"]["Anonymous"].as_u64().unwrap_or(0),
+                st["clients"].as_array().map_or(0, |a| a.len()),
+                sum("queued") / 1024,
+                sum("control_queued") / 1024,
+                st["holder_queued"].as_u64().unwrap_or(0) / 1024,
+            );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -324,9 +343,10 @@ async fn soak() {
 
 /// Peak RSS this load may reach: 20 panes of 120 columns at full history (2,000 lines of grid at
 /// 24 bytes a cell, ~6 MB, plus 1 MiB of replay buffer in serve; 4 MiB in the holder), plus
-/// resume bursts and allocator overhead. Measured: serve 340 MB on Linux (musl), 159 MB on macOS.
-const SERVE_CEILING_MB: u64 = 600;
-const HOLDER_CEILING_MB: u64 = 150;
+/// resume bursts and allocator overhead. Measured: serve ~150 MB on Linux (mimalloc) and ~180 MB
+/// on macOS; the holder ~40 MB, briefly ~160 MB while an in-place upgrade reloads its state.
+const SERVE_CEILING_MB: u64 = 400;
+const HOLDER_CEILING_MB: u64 = 200;
 
 fn chrono_free_stamp() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()

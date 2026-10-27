@@ -18,11 +18,13 @@ base64 = "0.22"
 hpke = { version = "0.15", default-features = false, features = ["alloc", "x25519", "chacha", "getrandom"] }
 ureq = "2"
 sha2 = "0.10"
-mimalloc = { version = "0.1", default-features = false, optional = true }
 
 [dev-dependencies]
 clotho.workspace = true
 tempfile.workspace = true
 
-[features]
-mimalloc = ["dep:mimalloc"]
+
+# Linux: musl's malloc keeps gigabytes mapped under churn (docs: README.md, Limits).
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["extended"] }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }

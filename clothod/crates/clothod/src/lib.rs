@@ -2,6 +2,7 @@
 //! (crate `clotho-holder`) and `clothod serve` is the logic daemon (this crate).
 
 pub mod agents;
+pub mod alloc;
 pub mod config;
 pub mod daemon;
 pub(crate) mod fs;

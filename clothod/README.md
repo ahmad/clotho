@@ -20,9 +20,12 @@ There is one binary, `clothod`, and it runs as two processes:
 
 ```sh
 cargo build --release                    # macOS (or Linux) native
-cargo build --release --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
-                                         # static Linux binaries (linked with rust-lld, see .cargo/config.toml)
+cargo zigbuild --release --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+                                         # static Linux binaries; ring (TLS for push) has C code, so
+                                         # cross builds use zig (brew install zig; cargo install cargo-zigbuild)
 cargo test                               # unit, snapshot round-trip and end-to-end tests
+scripts/test-all.sh                      # all of that on macOS, Linux (devbox) and remotes, plus cleanliness
+CLOTHOD_SOAK_SECS=3600 cargo test --release -p clothod --test soak -- --nocapture   # soak (Limits)
 ```
 
 ## Run
@@ -119,7 +122,43 @@ detection covers agents without hooks (spec: `../docs/protocol.md`, "Agents").
 `clothod hooks print|install|uninstall claude|codex` manages the hooks. `install` edits the
 user's agent configuration, so apps run it only after the user confirms.
 
+## Configuration
+
+`~/.config/clothod/config.toml` (or `$XDG_CONFIG_HOME/clothod/config.toml`, or `$CLOTHOD_CONFIG`),
+read when the daemon starts:
+
+```toml
+# Lines of history each pane keeps in the daemon: what a reattaching or newly started app gets
+# back (apps keep their own deeper history while connected). Applies to new panes; a pane can also
+# set its own with the `scrollback_lines` spawn option.
+scrollback_lines = 2000
+```
+
+## Limits
+
+Memory, per pane (measured on Linux, 120 columns):
+
+| | serve | holder |
+|---|---|---|
+| fixed | ~0.5 MB (VT, screen) | ~0.1 MB |
+| history | 2.9 MB per 1000 lines in use (cols × 24 bytes a line), allocated 100 lines at a time | none |
+| output buffer | up to 1 MiB (replays to reconnecting clients) | up to 4 MiB (recovery) |
+
+Measured with 40 panes: about 0.6 MB a pane in serve and 0.07 MB in the holder with 100 lines of
+history; 5 MB and 0.27 MB with 1500 lines (200 MB for all 40). A pane at full 2000-line history is
+about 7 MB at 120 columns and 11 MB at 200 in serve, and ~1 MB in the holder.
+Per client connection, at most 8 MiB of output is queued (past that its panes resync with a
+snapshot once it drains, so a slow or reconnecting client can't grow the daemon).
+
+Allocator: mimalloc on Linux, tuned to return freed memory at once (`src/alloc.rs`); the system
+allocator on macOS. musl's own malloc, under a busy daemon's churn, kept gigabytes mapped while the
+live heap stayed ~165 MB (24 GB RSS in an hour-long soak). `debug.stats` reports the live heap,
+queues and buffers (and on Linux the kernel's view, from `/proc/self/smaps_rollup`).
+
+SOAK_RESULTS
+
 ## Not built yet
 
-- File APIs (`fs.*`)
 - launchd and systemd login units (see `crates/proto/src/platform/mod.rs`)
+- Never run: the linux-aarch64 and macos-x86_64 builds (no such test machine yet); they build
+  and are static, but no test suite has run on them.

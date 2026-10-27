@@ -64,6 +64,8 @@ pub(crate) struct Client {
     file_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// Bytes of pane output queued but not yet written to the socket.
     queued: AtomicUsize,
+    /// Bytes of replies and events queued (not limited; for `debug.stats`).
+    control_queued: AtomicUsize,
     events: AtomicBool,
     /// Said hello as an app or other real client, not one of clothod's own probes
     /// (`clothod-*`: upgrade, status, ps, report). Only these keep an exit-mode instance alive.
@@ -74,6 +76,7 @@ pub(crate) struct Client {
 
 impl Client {
     fn control(&self, frame: Vec<u8>) {
+        self.control_queued.fetch_add(frame.len(), Ordering::Relaxed);
         let _ = self.tx.send(Msg::Control(frame));
     }
 
@@ -94,6 +97,20 @@ impl Client {
     fn output(&self, frame: Vec<u8>) {
         self.queued.fetch_add(frame.len(), Ordering::Relaxed);
         let _ = self.tx.send(Msg::Output(frame));
+    }
+}
+
+/// Frames for the holder, with the bytes queued but not yet written (`debug.stats`).
+#[derive(Clone)]
+struct HolderTx {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl HolderTx {
+    fn send(&self, buf: Vec<u8>) -> std::result::Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.queued.fetch_add(buf.len(), Ordering::Relaxed);
+        self.tx.send(buf)
     }
 }
 
@@ -247,7 +264,7 @@ pub struct Daemon {
     build: String,
     /// The holder's welcome: pid, version, protocol, exe (reported in `hello`).
     holder_info: Value,
-    holder: mpsc::UnboundedSender<Vec<u8>>,
+    holder: HolderTx,
     model: Mutex<Model>,
     rev: AtomicU64,
     panes: Mutex<HashMap<u64, Arc<Mutex<Pane>>>>,
@@ -420,12 +437,15 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         break (rd, wr, f);
     };
     let (htx, mut hrx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let htx = HolderTx { tx: htx, queued: Arc::new(AtomicUsize::new(0)) };
+    let holder_queued = htx.queued.clone();
     let holder_writer = tokio::spawn(async move {
         while let Some(buf) = hrx.recv().await {
             // An empty buffer is the "flush and close" marker sent on exit.
             if buf.is_empty() || hwr.write_all(&buf).await.is_err() {
                 break;
             }
+            holder_queued.fetch_sub(buf.len(), Ordering::Relaxed);
         }
         let _ = hwr.shutdown().await;
     });
@@ -1215,6 +1235,7 @@ impl Daemon {
             tx,
             file_tx,
             queued: AtomicUsize::new(0),
+            control_queued: AtomicUsize::new(0),
             events: AtomicBool::new(false),
             real: AtomicBool::new(false),
             fs: Default::default(),
@@ -1229,17 +1250,17 @@ impl Daemon {
                     let (buf, out) = tokio::select! {
                         biased;
                         msg = rx.recv() => match msg {
-                            Some(Msg::Control(b)) => (b, false),
-                            Some(Msg::Output(b)) => (b, true),
+                            Some(Msg::Control(b)) => (b, Some(&client.control_queued)),
+                            Some(Msg::Output(b)) => (b, Some(&client.queued)),
                             None => break,
                         },
-                        Some(b) = file_rx.recv() => (b, false),
+                        Some(b) = file_rx.recv() => (b, None),
                     };
                     if wr.write_all(&buf).await.is_err() {
                         break;
                     }
-                    if out {
-                        client.queued.fetch_sub(buf.len(), Ordering::Relaxed);
+                    if let Some(counter) = out {
+                        counter.fetch_sub(buf.len(), Ordering::Relaxed);
                     }
                 }
             })
@@ -1362,6 +1383,13 @@ impl Daemon {
                 }))
             }
             "ping" => Ok(json!({})),
+            "debug.stats" => {
+                let mut v = self.stats();
+                if p.get("maps").and_then(Value::as_bool).unwrap_or(false) {
+                    v["maps"] = big_mappings();
+                }
+                Ok(v)
+            }
             m if m.starts_with("fs.") => crate::fs::request(&self.fs_ctx(), client, m, p).await.map_err(|e| err(e.code, e.message)),
             m if m.starts_with("push.") => self.push.request(m, p).await.map_err(|e| err(e.code, e.message)),
             "agent.report" => self.agent_report(p),
@@ -1675,9 +1703,85 @@ impl Daemon {
         &self.dir
     }
 
+    /// Queue and buffer sizes, for finding where memory goes (the soak logs these).
+    fn stats(&self) -> Value {
+        let clients: Vec<Value> = self
+            .clients
+            .lock()
+            .unwrap()
+            .values()
+            .map(|c| json!({"id": c.id, "queued": c.queued.load(Ordering::Relaxed), "control_queued": c.control_queued.load(Ordering::Relaxed)}))
+            .collect();
+        let panes: Vec<Value> = self
+            .panes
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| {
+                let p = p.lock().unwrap();
+                json!({"id": p.id, "ring": p.ring.end() - p.ring.start(), "history": p.vt.history_len(), "subs": p.subs.len(),
+                    "lagging": p.subs.values().filter(|s| s.lagging).count(), "replay_resizes": p.replay_resizes.len()})
+            })
+            .collect();
+        let (heap, heap_peak) = crate::alloc::heap();
+        // Linux: how the kernel counts this process's memory (LazyFree: freed by the allocator
+        // with MADV_FREE, still in RSS until the kernel needs it). Not readable from outside
+        // when the process isn't dumpable.
+        let smaps: serde_json::Map<String, Value> = std::fs::read_to_string("/proc/self/smaps_rollup")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                let kib: u64 = v.trim().strip_suffix(" kB")?.trim().parse().ok()?;
+                Some((k.to_string(), json!(kib)))
+            })
+            .collect();
+        json!({"heap": heap, "heap_peak": heap_peak, "smaps_kib": smaps, "holder_queued": self.holder.queued.load(Ordering::Relaxed), "clients": clients, "panes": panes})
+    }
+
     fn fs_ctx(&self) -> crate::fs::Ctx {
         crate::fs::Ctx { state_dir: platform::log_dir(&self.dir) }
     }
+}
+
+/// Linux: this process's mappings with the most RSS (from /proc/self/smaps), and a count of
+/// mappings by size, for finding memory outside the Rust heap.
+fn big_mappings() -> Value {
+    let text = std::fs::read_to_string("/proc/self/smaps").unwrap_or_default();
+    let mut maps: Vec<(u64, u64, String)> = Vec::new(); // (rss KiB, size KiB, header)
+    let mut cur: Option<(u64, u64, String)> = None;
+    for line in text.lines() {
+        let first = line.split_whitespace().next().unwrap_or("");
+        if first.contains('-') && !first.ends_with(':') {
+            if let Some(m) = cur.take() {
+                maps.push(m);
+            }
+            cur = Some((0, 0, line.to_string()));
+        } else if let Some(m) = cur.as_mut() {
+            let kib = |l: &str| l.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            if line.starts_with("Rss:") {
+                m.0 = kib(line);
+            } else if line.starts_with("Size:") {
+                m.1 = kib(line);
+            }
+        }
+    }
+    maps.extend(cur);
+    let count = maps.len();
+    let mut by_size: std::collections::BTreeMap<u64, (u64, u64)> = Default::default();
+    for m in &maps {
+        let e = by_size.entry(m.1).or_default();
+        e.0 += 1;
+        e.1 += m.0;
+    }
+    let mut sizes: Vec<_> = by_size.into_iter().collect();
+    sizes.sort_by_key(|(_, (_, rss))| std::cmp::Reverse(*rss));
+    maps.sort_by_key(|m| std::cmp::Reverse(m.0));
+    json!({
+        "count": count,
+        "top": maps.iter().take(8).map(|m| json!({"rss_kib": m.0, "size_kib": m.1, "map": m.2})).collect::<Vec<_>>(),
+        "by_size": sizes.iter().take(8).map(|(size, (n, rss))| json!({"size_kib": size, "count": n, "rss_kib": rss})).collect::<Vec<_>>(),
+    })
 }
 
 async fn ticker(d: Arc<Daemon>) {
