@@ -216,6 +216,51 @@ final class SSHIntegrationTests: XCTestCase {
         try await backend.closeWorkspace(shown.workspace)
         try await backend.closeWorkspace(hidden.workspace)
     }
+
+    /// Mute over the wire (agent.mute, clothod 0.1.10): a hook-reported waiting agent needs the user until it's
+    /// muted; while muted, another report raises nothing; unmuting doesn't bring attention back by itself.
+    @MainActor
+    func testMuteOverTheWire() async throws {
+        let backend = ClothodBackend(configuration: .init(transport: SSHTransport(machine: machine), clientName: "clotho-ios-test"))
+        let store = ModelStore(backend: backend)
+        try await store.start()
+        defer { store.stop() }
+        func waitUntil(_ what: String, _ seconds: Double = 15, _ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition() {
+                guard Date() < deadline else { return XCTFail("timed out: \(what)") }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        try await waitUntil("hello") { store.hello != nil }
+        guard store.hello?.features.contains(.agentMute) == true else {
+            throw XCTSkip("clothod \(store.hello?.version ?? "?") has no agent.mute")
+        }
+        let created = try await backend.createWorkspace(name: "ios-mute")
+        let pane = created.pane
+        var agent: AgentInfo? { store.state.pane(pane)?.agent }
+        // A long-lived process in the pane reports as an agent's hooks would (each report a child of it, as with
+        // Claude Code): waiting, then 4 s later done, then it keeps running. The test install has one build.
+        let script = #"b=$(ls "$HOME"/.local/share/clotho-ios-dev/bin/*/clothod | head -1); r() { "$b" report "$1" --agent claude --session ios-mute-test --message mute-test; }; r waiting; sleep 4; r done; sleep 60"#
+        backend.sendInput(pane, Data("sh -c '\(script)'\r".utf8))
+
+        try await waitUntil("the reported agent needs the user") { agent?.needsAttention == true }
+        XCTAssertEqual(agent?.isMuted, false)
+
+        try await backend.muteAgent(pane, muted: true)
+        try await waitUntil("muted, attention cleared") { agent?.isMuted == true && agent?.attention != true }
+
+        try await waitUntil("the done report arrives") { agent?.state == .done }
+        XCTAssertNotEqual(agent?.attention, true, "a muted agent's report raised attention")
+        XCTAssertTrue(agent?.isMuted == true, "the agent lost its mute")
+
+        try await backend.muteAgent(pane, muted: false)
+        try await waitUntil("unmuted") { agent?.isMuted == false }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertNotEqual(agent?.attention, true, "unmuting raised attention by itself")
+
+        try await backend.closeWorkspace(created.workspace)
+    }
 }
 
 private actor OutputCollector {

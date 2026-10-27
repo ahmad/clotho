@@ -13,6 +13,9 @@ export CLOTHOD_DIST=${CLOTHOD_DIST:-$PWD/../clothod/dist}
 # The packed clothod builds land here at build time; xcodegen needs the folder to exist (it is gitignored).
 mkdir -p build-resources/dist
 PUSH=YES xcodegen generate --quiet
+# Pack before xcodebuild, not only in its pre-build phase: Xcode plans the resource copy before that phase
+# runs, so the first build after a new clothod release would otherwise bundle the previous one.
+python3 scripts/pack-dist.py "$CLOTHOD_DIST" build-resources/dist || exit 1
 if [ "$action" = test ]; then
   trap 'scripts/cleanup-dev.sh' EXIT
   mkdir -p /tmp/cki-ios-bin && rm -f /tmp/cki-ios-bin/clothod && cp "$CLOTHOD_DIST/macos-aarch64/clothod" /tmp/cki-ios-bin/clothod

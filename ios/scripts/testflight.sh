@@ -12,6 +12,8 @@ mkdir -p build-resources/dist
 # TestFlight always bundles the released clothod, never a dev dist (build.sh's CLOTHOD_DIST).
 unset CLOTHOD_DIST
 PUSH=YES xcodegen generate -q
+# Packed before xcodebuild plans its resource copy (see build.sh), so the archive has the current release.
+python3 scripts/pack-dist.py ../clothod/dist build-resources/dist
 rm -rf "$ARCHIVE" build/export
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
