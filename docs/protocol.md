@@ -136,6 +136,10 @@ instance (the default runtime dir).
 1. **First run:** `<bundle>/clothod install` installs the bundled build if nothing is installed
    yet (or this exact build is) and prints the path. If a *different* version is installed it
    refuses (exit 1) and leaves things alone. Nothing gets a second version by installing.
+   `install` sets `current` only when nothing else is installed: while another version is
+   there (such as in the middle of an upgrade) only `upgrade` moves it. Clients should still
+   run `install` only when there is no `current/clothod` yet, since builds before 0.1.9 did
+   move it.
 2. **Start:** `<base>/current/clothod start` (exit 0: up; exit 3: incompatible holder, see
    below; any other code is a failure, with the reason on stderr). Starting through `current`
    means any client's restart revives the installed build, never an old one.

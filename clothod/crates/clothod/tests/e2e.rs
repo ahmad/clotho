@@ -708,6 +708,14 @@ fn install_puts_the_binary_in_a_versioned_dir() {
     run(&["install", "--prune", "--runtime-dir", env.path().to_str().unwrap()]);
     assert!(!base.join("0.0.1-aaaaaaaaaaaa").exists());
     assert!(std::path::Path::new(&path).exists());
+    // Mid-upgrade: another version is installed and `current` points at it. Installing this
+    // (already present) build must not move `current` back: only `upgrade` moves it.
+    std::fs::create_dir_all(base.join("9.9.9-bbbbbbbbbbbb")).unwrap();
+    std::fs::write(base.join("9.9.9-bbbbbbbbbbbb/clothod"), b"newer").unwrap();
+    std::fs::remove_file(base.join("current")).unwrap();
+    std::os::unix::fs::symlink("9.9.9-bbbbbbbbbbbb", base.join("current")).unwrap();
+    assert_eq!(run(&["install"]), path);
+    assert_eq!(std::fs::read_link(base.join("current")).unwrap().to_string_lossy(), "9.9.9-bbbbbbbbbbbb");
 }
 
 /// Temp cleaners may delete the runtime dir under a running daemon. The next client must reach
@@ -1348,10 +1356,13 @@ async fn upgrade_is_not_undone_by_a_client_restarting_current() {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let client = {
-        let (stop, starts, dir, state, current, base) = (stop.clone(), starts.clone(), env.path(), env.state(), current.clone(), base.clone());
+        let (stop, starts, dir, state, current, base, bundled) = (stop.clone(), starts.clone(), env.path(), env.state(), current.clone(), base.clone(), v1.clone());
         std::thread::spawn(move || {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 if std::os::unix::net::UnixStream::connect(dir.join("clothod.sock")).is_err() {
+                    // As the Mac app does before each start: install its bundled build (the
+                    // one being upgraded from), which must leave `current` alone.
+                    let _ = Command::new(&bundled).arg("install").env("CLOTHOD_INSTALL_DIR", &base).output();
                     let o = Command::new(&current)
                         .arg("start")
                         .arg("--runtime-dir")

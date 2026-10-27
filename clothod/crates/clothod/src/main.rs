@@ -454,7 +454,14 @@ fn install_path(_dir: &std::path::Path, print_only: bool, prune: bool) -> Result
         );
     }
     place_self(&base)?;
-    point_current_at(&base, &id)?;
+    // `current` is the installed build's, and only `upgrade` moves it once another version is
+    // there: in the middle of an upgrade the old and the new dir both exist, and an app
+    // installing its bundled (old) build before each start would point `current` back at the
+    // build being replaced. A first install (or one from before `current` existed) sets it.
+    let have_current = base.join("current").join("clothod").is_file();
+    if others.is_empty() || !have_current {
+        point_current_at(&base, &id)?;
+    }
     if prune {
         remove_other_versions(&base, &id);
     }
