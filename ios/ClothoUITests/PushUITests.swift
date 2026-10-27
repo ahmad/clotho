@@ -41,4 +41,31 @@ final class PushUITests: XCTestCase {
         XCTAssertTrue(title.waitForExistence(timeout: 30), "no decrypted alert:\n\(springboard.debugDescription)")
         XCTAssertTrue(springboard.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Allow push self test?")).firstMatch.exists)
     }
+
+    /// The whole path, run on request with a driver outside the simulator (see README, "Push alerts"):
+    /// the app registers with the dev clothod (0.1.4+, `push`) and goes to the background; the driver then
+    /// starts an agent that reports `waiting`, and clothod's alert must arrive through the deployed relay and
+    /// APNs, decrypted by the extension.
+    func testAgentAlertFromClothod() throws {
+        let marker = "/tmp/clotho-ios-push-e2e/ready"
+        guard FileManager.default.fileExists(atPath: "/tmp/clotho-ios-push-e2e/agent") else {
+            throw XCTSkip("agent push test not requested (mkdir -p /tmp/clotho-ios-push-e2e && touch /tmp/clotho-ios-push-e2e/agent)")
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let app = XCUIApplication()
+        app.launchArguments = ["-UITesting"]
+        app.launch()
+        let allow = springboard.buttons["Allow"]
+        if allow.waitForExistence(timeout: 5) { allow.tap() }
+        app.staticTexts["Local Mac (dev)"].firstMatch.tap()
+        let newWorkspace = app.buttons["New Workspace"]
+        XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
+        sleep(3) // push.register after hello
+        XCUIDevice.shared.press(.home)
+        FileManager.default.createFile(atPath: marker, contents: nil)
+        let title = springboard.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Claude is waiting on Local Mac (dev)")).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 60), "no alert from clothod:\n\(springboard.debugDescription)")
+        XCTAssertTrue(springboard.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Allow cargo test --release?")).firstMatch.exists)
+    }
 }

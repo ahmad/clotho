@@ -116,3 +116,10 @@ Agent alerts while the app is closed; the design is docs/push.md.
   TestFlight builds don't touch the developer account's identifiers until push is set up there.
 - The relay URL: `PushRegistrar.deployedRelay`, or `-PushRelay <url>`; Debug simulator builds default to
   the dev relay. Each machine has an "Agent alerts" switch, and "Send test alert" on its screen.
+- End to end, on request (needs the network and Apple): `touch /tmp/clotho-ios-push-e2e` runs
+  `PushUITests.testRealSandboxPushIsDecrypted` (the app sends itself an alert through the deployed relay).
+  For an alert from clothod itself: start the dev daemon with `CLOTHOD_TEST_PUSH_FAST=1`, create
+  `/tmp/clotho-ios-push-e2e/agent`, run `PushUITests/testAgentAlertFromClothod`, and once it writes
+  `/tmp/clotho-ios-push-e2e/ready` (the app is registered and in the background), run
+  `scripts/fake-agent.py`. Then `scripts/cleanup-dev.sh` and remove `/tmp/clotho-ios-push-e2e`.
+
