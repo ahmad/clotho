@@ -418,7 +418,9 @@ final class AgentRow: ChromeItem {
     private let icon = NSImageView()
     private let detail = NSTextField(labelWithString: "")
     private let elapsed = NSTextField(labelWithString: "")
-    private var resolve: ClosureButton?
+    /// The Resolve checkmark: always in place (so nothing moves), shown only while the row is hovered.
+    private(set) var resolve: ClosureButton?
+    static let fade: TimeInterval = 0.12
 
     /// With `onResolve`, the row has a checkmark that resolves the agent (agents needing attention).
     init(_ entry: AgentEntry, onResolve: (() -> Void)? = nil) {
@@ -490,6 +492,8 @@ final class AgentRow: ChromeItem {
                 button.heightAnchor.constraint(equalToConstant: 20),
             ])
             resolve = button
+            button.alphaValue = 0
+            onHoverChanged = { [weak self] on in self?.showResolve(on, animated: true) }
             trailing = button.leadingAnchor
             inset = -4
         }
@@ -511,6 +515,18 @@ final class AgentRow: ChromeItem {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Fades the checkmark in or out. Hidden only by alpha: it keeps its place and stays clickable and
+    /// reachable to accessibility (and the row's menu has Resolve too).
+    func showResolve(_ visible: Bool, animated: Bool) {
+        guard let resolve else { return }
+        let alpha: CGFloat = visible ? 1 : 0
+        guard animated, window != nil else { return resolve.alphaValue = alpha }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.fade
+            resolve.animator().alphaValue = alpha
+        }
+    }
 
     /// "now", "45s", "12m", "3h", "2d".
     static func elapsed(since date: Date) -> String {

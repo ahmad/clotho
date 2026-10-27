@@ -11,7 +11,15 @@ class ChromeItem: NSView {
     var onClose: (() -> Void)?
     var contextMenu: (() -> NSMenu?)?
     var isSelected = false { didSet { updateColors() } }
-    private var hovering = false { didSet { updateColors() } }
+    private(set) var hovering = false {
+        didSet {
+            guard hovering != oldValue else { return }
+            updateColors()
+            onHoverChanged?(hovering)
+        }
+    }
+    /// The pointer came over the item, or left it.
+    var onHoverChanged: ((Bool) -> Void)?
     /// Rows with an attributed title keep its colors on hover and selection.
     var colorsOwnTitle = false
     var selectedColor = Theme.background
@@ -76,10 +84,25 @@ class ChromeItem: NSView {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+        // An item that appears or scrolls under a pointer that isn't moving gets no mouseEntered (or
+        // mouseExited), so where the pointer is now decides. AppKit calls this when the view enters a
+        // window and when its visible rect changes.
+        hovering = pointerIsOver()
+    }
+
+    /// Whether the pointer is over the visible part of this item, in its window, with no other window on top.
+    func pointerIsOver() -> Bool {
+        guard let window, window.isVisible, !isHiddenOrHasHiddenAncestor else { return false }
+        let screenPoint = NSEvent.mouseLocation
+        guard NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0) == window.windowNumber else { return false }
+        return visibleRect.contains(convert(window.convertPoint(fromScreen: screenPoint), from: nil))
     }
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
+
+    /// For tests: hover as if the pointer came over the item or left it.
+    func setHovering(_ on: Bool) { hovering = on }
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 { onDoubleClick?() } else { onClick?() }

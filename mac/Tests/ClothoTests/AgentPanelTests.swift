@@ -42,3 +42,51 @@ final class AgentPanelTests: XCTestCase {
         XCTAssertTrue(attention.isEmpty && others.isEmpty)
     }
 }
+
+/// The Resolve checkmark shows only while its row is hovered, and never moves anything.
+@MainActor
+final class ResolveHoverTests: XCTestCase {
+    override func setUp() { _ = NSApplication.shared }
+
+    private func row(resolvable: Bool) -> AgentRow {
+        let entry = AgentEntry(machine: "local", machineName: "Mac", pane: 1, workspace: nil, tab: nil, paneTitle: nil,
+                               tabTitle: "A long tab title that will be cut off",
+                               info: AgentInfo(kind: "claude", state: .done, since: 1, attention: true), canReply: false)
+        let row = AgentRow(entry, onResolve: resolvable ? {} : nil)
+        row.frame = NSRect(x: 0, y: 0, width: 260, height: 40)
+        row.layoutSubtreeIfNeeded()
+        return row
+    }
+
+    func testHiddenUntilHovered() throws {
+        let row = row(resolvable: true)
+        let button = try XCTUnwrap(row.resolve)
+        XCTAssertEqual(button.alphaValue, 0, "hidden by default")
+        XCTAssertFalse(button.isHidden, "only transparent, so it keeps its place and stays clickable")
+        row.setHovering(true)
+        XCTAssertEqual(button.alphaValue, 1)
+        row.setHovering(false)
+        XCTAssertEqual(button.alphaValue, 0)
+    }
+
+    func testHoverMovesNothing() throws {
+        let row = row(resolvable: true)
+        let button = try XCTUnwrap(row.resolve)
+        let before = (button.frame, row.label.frame)
+        row.setHovering(true)
+        row.layoutSubtreeIfNeeded()
+        XCTAssertEqual(button.frame, before.0)
+        XCTAssertEqual(row.label.frame, before.1)
+    }
+
+    func testRowsWithoutResolveHaveNoCheckmark() {
+        let row = row(resolvable: false)
+        XCTAssertNil(row.resolve)
+        row.setHovering(true)
+        XCTAssertNil(row.resolve)
+    }
+
+    func testNoPointerOutsideAWindow() {
+        XCTAssertFalse(row(resolvable: true).pointerIsOver())
+    }
+}
