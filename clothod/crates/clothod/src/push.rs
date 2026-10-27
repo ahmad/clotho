@@ -132,8 +132,17 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
         }
         &m[..end]
     });
-    serde_json::to_vec(&json!({"v": 1, "m": label, "p": pane, "k": a.kind, "s": a.state, "msg": msg, "t": a.since})).unwrap()
+    let mut v = json!({"v": 1, "m": label, "p": pane, "k": a.kind, "s": a.state, "msg": msg, "t": a.since});
+    // Padded to a multiple of PAD_TO bytes with a `pad` of spaces, so the ciphertext's length
+    // (which the relay and APNs see) doesn't tell how long the message is.
+    let len = serde_json::to_vec(&v).unwrap().len() + r#","pad":"""#.len();
+    v["pad"] = json!(" ".repeat(len.div_ceil(PAD_TO) * PAD_TO - len));
+    serde_json::to_vec(&v).unwrap()
 }
+
+/// Push records are padded to a multiple of this many bytes: every record is 1024 bytes unless
+/// its label (machine name) and an escape-heavy message are unusually long.
+pub const PAD_TO: usize = 1024;
 
 /// https anywhere; plain http only to this machine (a dev relay).
 fn check_relay(url: &str) -> Result<(), Error> {
@@ -400,6 +409,10 @@ mod tests {
     const PK: &str = "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=";
     const LABEL: &str = "00000000-0000-0000-0000-00000000C10D devbox";
     const CT: &str = "jmHxxNQXj2wm3geR2KiLzXdhyo1/9E1jusxEmNVobigz4a+nHrN7MWYh8vvydxOmkSaESvX70WVLehRpiZb+pr9SJQPvKyhGm4Ym2ZXUGzUh5CrZVaVjnxOAIeuxPWOn8cGaelb1KkT8UR18z+Q4otc5PJLweY7a6nZmQ8ih8y9x35WLjHMHBQvaRUSZTr1K2uWBauhUmNsmQX6G2HcBf3XFG+sNQEyXVfJUlMJw0/+rp4gtYszv3tIXRNHrKpk=";
+    /// PLAIN as clothod sends it since 0.1.11: padded to 1024 bytes.
+    const PADDED: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Allow cargo test --release?","t":1761512345.5,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        "}"#;
+    /// PADDED sealed to PK (by clothod), for iOS to open with SK.
+    const CT_PADDED: &str = "waIuQwmR41aqP/FeDl6qcxO3VMlzn9JWMLLSVBBno3RoZ6H0WMBF+pB381kmx09JSwR0LKdoo1tQiL82E1SUpXiSbNRqF/I2TLdju9z5NN3Tcjo28n1MRYN8N54znoR81MryHYIWWw/enTmy3dld+zdiULd8YS8ZWuh/Yzv82zWvJRRoOMF2gHElBCt9BxNEXA3vxxlgM8dxksJx8uKZGql7nXKBsBVjnkUjSm/5JnzaHW89fhAbpaKXUXLP5TwGJ8N6d1k0yO/ikMJgQOJ3cMSkygWVIOLJFtuQ/hPDEj7vJSzVcud/zb+wZlbVJxjl1eSr+t4x9ESxBWnwy13o3zdDhwiHkbXlVYpCbaNtFjTmvSRf27nGoPEPCEIMskcnciNhc1aRrE1oEg9gHO2AbWuTD3qBOazA3YMGXPkgljx3JMSdjPA0mKoascgEZzt6x1aITqdnu4dNhTaDtgN8qpyZi+bDaSvXRpY5vRm14T9izWayls3wHDa2VWBVXSiKTbge3gYoKIBtTMnNEPYQ/hM3ibv0u8eIXRpdvTNljP9+WOPSb2y0dMcK7ZgnCMZ7CqJbM+Bk0rXye+WiuM+vQGe4E1grJMo7Ot7NtW+oWSadm8s+QeGELUhwk9Ol1zkbswNWON1mSCcFh3XnAyZzegzd1lqMCIBL57bnxm/trSrpPOQNICHjvQhd91H0A20XSXMQWOfVP6m8O0AMa9fwLM3GzWJhlZJhysvmRlZjHtV/gsq1/rqnMOGGj6GlWYDZ1ye59wBkwOPfJmOrTjQVgnrIi4GG7WhlKd2o4Ushvh3Bml7+S1uJq2b+DymcOydvSsqYRmG7N7vSvd+VsgeSbdn7DQ2nwY100B99kosRiOeID6wmQml+OIP6YJsSSrLgBtF+zwvWD4NMGg+DLCFeCusFQZE9JVbEPDATWHe4FGVXfKrR2uzK6Hhj3QSUOJzAOUdPKYIs+aDYgrqC3FRZtZdwFUFORxp9kfG4uhF3fVqXFCxM4PQMQv5PtuGzkrYvIxASp1+ZmIBWUB03C5R3HJ7IU/HE0IViOzJmSv3XpSmbf2S+fF+yZv1Jv8OJbtzF7n+0mKzM5tbXNVOlEI1ie7nC1zExWoVjE/XYOzaMToo10qzrW0PRf5VBRMX0i2rOZTHyJE9KTCHDoy/0DqfewdGX/HbB16P+yzY9r50J9fcR3YyPOPba/qtMEVs/Ovskng9U+br7THXQ17gr3x86oQRcDwzfv0ws/g+VgmNANpL72ra6TewLGmYWOiyam7jHJrfcY5V17E7Tdm4pqpLadui7ua6GShgm6c4iR/ppy80CJOYYnFfxqeZczor6O5Rear0J9C/ul1NCYeONaGOzZtq8xf4t3QrMmxhO5/4rPvwOBwUsqqf1apYuBAN3NNF1I36qfakZ6JlKqOg2O587HA==";
     const PLAIN: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Allow cargo test --release?","t":1761512345.5}"#;
 
     fn alert() -> Alert {
@@ -409,7 +422,11 @@ mod tests {
     #[test]
     fn matches_the_ios_vector() {
         assert_eq!(collapse_id(LABEL, 7), "c1b5d6191cb70ab41a81baa4c6158682");
-        assert_eq!(String::from_utf8(plaintext(LABEL, 7, &alert())).unwrap(), PLAIN);
+        // Ours is PLAIN padded; the iOS ciphertext (unpadded, as iOS produced it) still opens.
+        let ours = String::from_utf8(plaintext(LABEL, 7, &alert())).unwrap();
+        assert_eq!(ours, PADDED);
+        assert_eq!(ours.len(), PAD_TO);
+        assert_eq!(open(SK, CT_PADDED, collapse_id(LABEL, 7).as_bytes()).unwrap(), PADDED.as_bytes(), "the padded vector for iOS");
         let opened = open(SK, CT, collapse_id(LABEL, 7).as_bytes()).expect("opens the iOS ciphertext");
         assert_eq!(String::from_utf8(opened).unwrap(), PLAIN);
         let ours = seal(PK, PLAIN.as_bytes(), collapse_id(LABEL, 7).as_bytes()).unwrap();
@@ -423,6 +440,14 @@ mod tests {
         let v: Value = serde_json::from_slice(&plaintext(LABEL, 1, &a)).unwrap();
         let msg = v["msg"].as_str().unwrap();
         assert!(msg.len() <= MAX_MSG && msg.len() >= MAX_MSG - 1, "{}", msg.len());
+    }
+
+    #[test]
+    #[test]
+    fn records_are_padded_to_a_fixed_size() {
+        let len = |m: Option<&str>| plaintext(LABEL, 3, &Alert { message: m.map(String::from), ..alert() }).len();
+        let sizes = [len(None), len(Some("y")), len(Some(&"a".repeat(MAX_MSG))), len(Some(&"\"".repeat(MAX_MSG)))];
+        assert_eq!(sizes, [PAD_TO; 4], "every message length looks the same");
     }
 
     /// TLS works in this build (static musl builds bundle their own roots). Needs the network,

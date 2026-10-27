@@ -56,7 +56,7 @@ Severity is for a single-user Mac or Linux box, with clothod's default setup.
 | 7 | Low | Titles kept control characters (C1 included) and had no length limit | yes, 0.1.11 |
 | 8 | Low | A write stream ignored its window: a client could queue unlimited data in serve | yes, 0.1.11 |
 | 9 | Low | `clotho --host` passed a host starting with `-` to ssh as an option | yes, 0.1.11 |
-| 10 | Low | Push ciphertext length reveals the alert message's length | no (needs iOS) |
+| 10 | Low | Push ciphertext length revealed the alert message's length | yes, 0.1.11 |
 | 11 | Info | serve read its whole executable at startup (110 MB transient for a debug build) | yes, 0.1.11 |
 
 ### 1. Endless OSC (Medium, fixed)
@@ -172,14 +172,17 @@ starting with `-`, or containing whitespace or control characters, is refused. T
 apps build their own ssh command lines and should check the same (told mac and ios). Test:
 `a_host_can_not_be_an_ssh_option`.
 
-### 10. Push length (Low, not fixed)
+### 10. Push length (Low, fixed)
 
 Push alerts are HPKE-sealed to the phone's key (X25519, ChaCha20-Poly1305), with the collapse id
 as AAD. The relay and APNs see the device handle, a per-pane collapse id (stable per pane, so
-alerts from one pane can be linked), the time, and the ciphertext's length. The length reveals
-the message's length, which is at most 400 bytes. Padding the plaintext to a fixed size would
-hide it, but iOS's decoder and the shared test vector have to agree first. Proposed to ios; not
-changed.
+alerts from one pane can be linked), the time, and the ciphertext's length. The length revealed
+the message's length (up to 400 bytes). Fix: the sealed record carries a `pad` of spaces making
+it a multiple of 1024 bytes, which in practice means every record is 1024 bytes. iOS decodes
+with Codable, which ignores the extra key, so older apps read padded records unchanged. Tests:
+`records_are_padded_to_a_fixed_size`, and `matches_the_ios_vector`, which has a padded vector
+for iOS (`PADDED`, `CT_PADDED`). The collapse id and timing still link alerts of one pane; that
+is what lets the phone replace them.
 
 ### 11. Startup read (Info, fixed)
 

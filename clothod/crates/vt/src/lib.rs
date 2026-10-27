@@ -295,6 +295,49 @@ impl OscGuard {
     }
 }
 
+/// A place on the terminal: `line` 0 is the top row of the screen, negative lines are scrollback
+/// (-1 the newest), as in a snapshot taken at the same seq. `col` counts cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pos {
+    pub line: i32,
+    pub col: usize,
+}
+
+/// One match of [`Vt::search`]: `start..=end` (both inclusive cells; a match may run over a
+/// soft wrap onto the next row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub start: Pos,
+    pub end: Pos,
+    /// The matched text (at most 256 chars).
+    pub text: String,
+    /// The whole logical line the match starts on, soft wraps joined (at most 512 chars).
+    pub line_text: String,
+}
+
+/// What [`Vt::search`] found, newest first.
+pub struct SearchResult {
+    pub matches: Vec<SearchMatch>,
+    /// Where to continue (pass it as `before`) when the limit or the time budget stopped the
+    /// search; `None` when everything up to the oldest scrollback line was searched.
+    pub next: Option<Pos>,
+}
+
+/// Longest search pattern accepted.
+pub const MAX_PATTERN: usize = 1000;
+
+/// `s` as a regex matching it literally.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// `s` without control characters (C0, DEL, C1), cut to `max` chars: what a title shows.
 pub fn printable(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
@@ -360,6 +403,97 @@ impl Vt {
 
     pub fn cwd(&self) -> Option<&str> {
         self.tracker.cwd.as_deref()
+    }
+
+    /// Search the scrollback and screen, from the bottom up: `query` literally, or as a regex
+    /// (Rust regex syntax), case-insensitively unless `case_sensitive`. A match lies within one
+    /// logical line (soft wraps joined, trailing blanks dropped, so `^` and `$` are its ends).
+    /// Only matches starting before `before` count (all without it), at most `limit`, and the
+    /// search stops early, with a `next` to continue from, after `budget`.
+    pub fn search(
+        &self,
+        query: &str,
+        regex: bool,
+        case_sensitive: bool,
+        before: Option<Pos>,
+        limit: usize,
+        budget: std::time::Duration,
+    ) -> Result<SearchResult, String> {
+        use regex_automata::meta::Regex;
+        use regex_automata::util::syntax;
+        if query.is_empty() {
+            return Err("empty query".into());
+        }
+        if query.chars().count() > MAX_PATTERN {
+            return Err(format!("query longer than {MAX_PATTERN} characters"));
+        }
+        let pattern = if regex { query.to_string() } else { regex_escape(query) };
+        let re = Regex::builder()
+            .syntax(syntax::Config::new().case_insensitive(!case_sensitive))
+            .configure(Regex::config().nfa_size_limit(Some(4 << 20)))
+            .build(&pattern)
+            .map_err(|e| format!("bad regex: {e}"))?;
+        let grid = self.term.grid();
+        let (top, cols) = (-(grid.history_size() as i32), grid.columns());
+        let wraps = |line: i32| grid[Line(line)][Column(cols - 1)].flags.contains(Flags::WRAPLINE);
+        let t0 = Instant::now();
+        let mut matches: Vec<SearchMatch> = Vec::new();
+        let mut text = String::new();
+        // Byte offset in `text` of each char, and its cell.
+        let mut map: Vec<(usize, Pos)> = Vec::new();
+        let bottom = grid.screen_lines() as i32 - 1;
+        let mut last = bottom;
+        if let Some(b) = before {
+            // From the end of the logical line `before` is on, so the line is searched whole.
+            last = last.min(b.line.max(top));
+            while last < bottom && wraps(last) {
+                last += 1;
+            }
+        }
+        while last >= top {
+            if matches.len() >= limit || t0.elapsed() > budget {
+                let next = matches.last().map(|m| m.start).unwrap_or(Pos { line: last + 1, col: 0 });
+                return Ok(SearchResult { matches, next: Some(next) });
+            }
+            // The logical line ending on row `last`.
+            let mut first = last;
+            while first > top && wraps(first - 1) {
+                first -= 1;
+            }
+            text.clear();
+            map.clear();
+            for line in first..=last {
+                let row = &grid[Line(line)];
+                for col in 0..cols {
+                    let cell = &row[Column(col)];
+                    if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+                    map.push((text.len(), Pos { line, col }));
+                    text.push(cell.c);
+                    for z in cell.zerowidth().unwrap_or(&[]) {
+                        text.push(*z);
+                    }
+                }
+            }
+            let trimmed = text.trim_end_matches([' ', '\0']).len();
+            let cell_at = |byte: usize| map[map.partition_point(|(b, _)| *b <= byte) - 1].1;
+            let mut found: Vec<(usize, usize)> = re.find_iter(&text[..trimmed]).filter(|m| !m.is_empty()).map(|m| (m.start(), m.end())).collect();
+            found.reverse();
+            for (a, b) in found {
+                let start = cell_at(a);
+                if before.is_some_and(|bf| (start.line, start.col) >= (bf.line, bf.col)) {
+                    continue;
+                }
+                if matches.len() == limit {
+                    break;
+                }
+                let line_text: String = text[..trimmed].chars().take(512).collect();
+                matches.push(SearchMatch { start, end: cell_at(b - 1), text: text[a..b].chars().take(256).collect(), line_text });
+            }
+            last = first - 1;
+        }
+        Ok(SearchResult { matches, next: None })
     }
 
     /// Feed PTY output. Returns replies for the application and other notable events.

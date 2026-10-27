@@ -3107,27 +3107,143 @@ async fn an_endless_osc_does_not_grow_serve() {
     sync(&mut c, &mut s).await.unwrap();
     let before = c.request("debug.stats", json!({})).await.unwrap()["heap_peak"].as_u64().unwrap();
     c.input(p, b"printf '\\033]0;'; head -c 100000000 /dev/zero | tr '\\0' A; printf '\\007'; echo osc-$((6*7))\r");
+    // Drain what comes (the output itself may be split anywhere, or arrive as a snapshot) and
+    // watch the daemon's screen for the end.
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut peak = 0;
     loop {
-        let f = tokio::time::timeout(Duration::from_secs(60), c.recv()).await.unwrap().unwrap();
-        // A client that fell behind gets a snapshot instead of the output.
-        if let Frame::Output { data, .. } | Frame::Snapshot { data, .. } = &f {
-            if String::from_utf8_lossy(data).contains("osc-42") {
-                break;
+        while let Some(f) = c.try_recv() {
+            if let Frame::Json(v) = &f {
+                assert!(v["event"] != "pane" || v["data"]["title"].is_null(), "no title from the dropped OSC");
             }
         }
-        if let Frame::Json(v) = &f {
-            assert_ne!(v["event"], "pane", "no title from the dropped OSC: {}", &v.to_string()[..200.min(v.to_string().len())]);
+        let st = c.request("debug.stats", json!({})).await.unwrap();
+        peak = peak.max(st["heap_peak"].as_u64().unwrap());
+        let t = c.request("pane.text", json!({"pane": p})).await.unwrap();
+        if t["lines"].as_array().unwrap().iter().any(|l| l == "osc-42") {
+            break;
         }
-        assert!(Instant::now() < deadline);
-        if c.try_recv().is_none() {
-            let st = c.request("debug.stats", json!({})).await.unwrap();
-            peak = peak.max(st["heap_peak"].as_u64().unwrap());
-        }
+        assert!(Instant::now() < deadline, "the pane never finished: {t}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let st = c.request("debug.stats", json!({})).await.unwrap();
     let grew = st["heap_peak"].as_u64().unwrap().max(peak).saturating_sub(before);
     eprintln!("endless OSC of 100 MB: heap peak {before} -> {} (+{} KiB)", before + grew, grew >> 10);
     assert!(grew < 48 << 20, "serve grew {} MiB on a 100 MB OSC", grew >> 20);
+}
+
+/// `pane.search` over scrollback and screen, newest first, positions in snapshot coordinates
+/// (0 = top screen row, negative = scrollback), paged with `before`.
+#[tokio::test]
+async fn pane_search_finds_scrollback_matches_in_snapshot_coordinates() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let mut params = sh();
+    params["rows"] = json!(10);
+    let p = new_pane(&c, params).await;
+    let (_, mut s) = subscribe(&mut c, p, None).await;
+    c.input(p, b"for i in $(seq 1 60); do echo row-$i; done; echo Done-Marker\r");
+    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "Done-Marker")).await.unwrap();
+    sync(&mut c, &mut s).await.unwrap();
+
+    let r = c.request("pane.search", json!({"pane": p, "query": "row-1"})).await.unwrap();
+    // row-1, row-10..19: newest first.
+    let texts: Vec<&str> = r["matches"].as_array().unwrap().iter().map(|m| m["line_text"].as_str().unwrap()).collect();
+    assert_eq!(texts.first(), Some(&"row-19"), "{r}");
+    assert_eq!(texts.last(), Some(&"row-1"), "{r}");
+    assert!(texts.iter().all(|t| *t == "row-1" || t.starts_with("row-1")), "{texts:?}");
+    assert_eq!(texts.len(), 11);
+    assert!(r["next"].is_null());
+
+    // Same coordinates as a snapshot at that seq: the screen line `line` (>= 0) is that text.
+    let marker = c.request("pane.search", json!({"pane": p, "query": "done-marker"})).await.unwrap();
+    let m = &marker["matches"][0];
+    let line = m["start"]["line"].as_i64().unwrap();
+    assert!(line >= 0, "{marker}");
+    let screen = c.request("pane.text", json!({"pane": p})).await.unwrap();
+    assert_eq!(screen["lines"][line as usize], "Done-Marker");
+    assert_eq!(marker["seq"], screen["seq"]);
+    // A scrollback match: -k is the k-th line above the screen.
+    let r40 = c.request("pane.search", json!({"pane": p, "query": "row-40", "case_sensitive": true})).await.unwrap();
+    let l40 = r40["matches"][0]["start"]["line"].as_i64().unwrap();
+    let l41 = c.request("pane.search", json!({"pane": p, "query": "row-41"})).await.unwrap()["matches"][0]["start"]["line"].as_i64().unwrap();
+    assert_eq!(l41, l40 + 1);
+    assert!(c.request("pane.search", json!({"pane": p, "query": "DONE-MARKER", "case_sensitive": true})).await.unwrap()["matches"].as_array().unwrap().is_empty());
+
+    // Regex, paging.
+    let mut all = 0;
+    let mut before = Value::Null;
+    loop {
+        let r = c.request("pane.search", json!({"pane": p, "query": "^row-[0-9]+$", "regex": true, "limit": 7, "before": before})).await.unwrap();
+        all += r["matches"].as_array().unwrap().len();
+        if r["next"].is_null() {
+            break;
+        }
+        before = r["next"].clone();
+    }
+    assert_eq!(all, 60, "every row once");
+    let e = fs_err(c.request("pane.search", json!({"pane": p, "query": "(", "regex": true})).await.unwrap_err());
+    assert!(e.contains("bad_request"), "{e}");
+}
+
+async fn history(c: &Client, params: Value) -> Vec<Value> {
+    c.request("agent.history", params).await.unwrap()["entries"].as_array().unwrap().clone()
+}
+
+/// `agent.history`: a bounded log of what a pane's agents did (transitions, messages,
+/// attention, mute, ack, departure), kept across serve restarts.
+#[tokio::test]
+async fn agent_history_logs_transitions_and_survives_a_restart() {
+    let mut env = Env::new();
+    let c = env.client().await;
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("agent.history")), "{}", c.hello);
+    let p = new_pane(&c, sh()).await;
+    assert!(history(&c, json!({"pane": p})).await.is_empty());
+    let b = test_bin();
+    let script = format!(
+        r#"sh -c '"{b}" report running --agent claude --session s1; "{b}" report waiting --agent claude --session s1 --message "Allow rm?"; read a; "{b}" report running --agent claude --session s1; "{b}" report done --agent claude --session s1; read b; "{b}" report clear --agent claude --session s1; sleep 60'"#
+    );
+    c.input(p, format!("{script}\r").as_bytes());
+    wait_agent(&c, p, "waiting", |a| a["state"] == "waiting").await;
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    c.request("agent.mute", json!({"pane": p, "muted": true})).await.unwrap();
+    let h = history(&c, json!({"pane": p})).await;
+    let brief: Vec<(String, Value, Value, Value)> =
+        h.iter().map(|e| (e["event"].as_str().unwrap().to_string(), e["state"].clone(), e["attention"].clone(), e["muted"].clone())).collect();
+    assert_eq!(
+        brief,
+        vec![
+            ("state".into(), json!("running"), json!(false), json!(false)),
+            ("state".into(), json!("waiting"), json!(true), json!(false)),
+            ("attention".into(), json!("waiting"), json!(false), json!(false)),
+            ("mute".into(), json!("waiting"), json!(false), json!(true)),
+        ],
+        "{h:#?}"
+    );
+    assert_eq!(h[1]["message"], "Allow rm?");
+    assert_eq!(h[1]["from"], "running");
+    assert!(h.iter().all(|e| e["session"] == "s1" && e["kind"] == "claude" && e["source"] == "hook"));
+    let t1 = h[1]["at"].as_f64().unwrap();
+    assert!(h.windows(2).all(|w| w[0]["at"].as_f64() <= w[1]["at"].as_f64()));
+
+    // Across a restart of the logic process.
+    drop(c);
+    env.kill();
+    env.start();
+    let c = env.client().await;
+    assert_eq!(history(&c, json!({"pane": p})).await.len(), 4);
+    c.input(p, b"a\r");
+    wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    c.input(p, b"b\r");
+    wait_agent(&c, p, "gone", |a| a.is_null()).await;
+    let h = history(&c, json!({"pane": p})).await;
+    let states: Vec<Value> = h.iter().map(|e| e["state"].clone()).collect();
+    assert_eq!(&states[4..], &[json!("running"), json!("done"), Value::Null], "{h:#?}");
+    assert_eq!(h.last().unwrap()["event"], "gone");
+    // Filters: since, limit, session.
+    assert_eq!(history(&c, json!({"pane": p, "since": t1})).await.len(), h.len() - 2);
+    assert_eq!(history(&c, json!({"pane": p, "limit": 2})).await, h[h.len() - 2..].to_vec());
+    assert!(history(&c, json!({"pane": p, "session": "other"})).await.is_empty());
+    let e = c.request("agent.history", json!({"pane": 999})).await.unwrap_err();
+    assert!(e.to_string().contains("not_found"), "{e}");
 }

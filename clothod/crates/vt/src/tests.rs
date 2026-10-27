@@ -349,3 +349,89 @@ fn titles_and_cwds_are_printable_and_bounded() {
     let snap = vt.snapshot(None);
     assert!(!String::from_utf8_lossy(&snap).contains('\u{9c}'));
 }
+
+fn found(vt: &Vt, q: &str, regex: bool, case: bool) -> Vec<(i32, usize, i32, usize, String)> {
+    let r = vt.search(q, regex, case, None, 100, std::time::Duration::from_secs(5)).unwrap();
+    r.matches.into_iter().map(|m| (m.start.line, m.start.col, m.end.line, m.end.col, m.text)).collect()
+}
+
+#[test]
+fn search_finds_matches_in_scrollback_and_screen_newest_first() {
+    let mut vt = Vt::with_scrollback(20, 3, 100);
+    vt.feed(b"alpha Error one\r\nbeta\r\nerror two\r\ngamma\r\nERROR three");
+    // 5 lines on a 3-row screen: rows 0..2 are "error two", "gamma", "ERROR three".
+    assert_eq!(
+        found(&vt, "error", false, false),
+        vec![(2, 0, 2, 4, "ERROR".into()), (0, 0, 0, 4, "error".into()), (-2, 6, -2, 10, "Error".into())]
+    );
+    assert_eq!(found(&vt, "error", false, true), vec![(0, 0, 0, 4, "error".into())]);
+    // Literal: regex metacharacters match themselves.
+    vt.feed(b"\r\na.b (x) a+b");
+    assert_eq!(found(&vt, "(x)", false, false).len(), 1);
+    assert_eq!(found(&vt, "a.b", false, false).len(), 1);
+    assert_eq!(found(&vt, "a.b", true, false).len(), 2, "regex: . matches +");
+    assert_eq!(found(&vt, "t[a-z]o", true, false), vec![(-1, 6, -1, 8, "two".into())]);
+    assert!(vt.search("(", true, false, None, 10, std::time::Duration::from_secs(1)).is_err());
+}
+
+#[test]
+fn search_joins_soft_wraps_and_pages_with_before() {
+    let mut vt = Vt::with_scrollback(10, 4, 1000);
+    // "needle" wrapped over the row boundary: cols 7..9 then 0..2 of the next row.
+    vt.feed(b"1234567nee\x1b[2;1Hdle rest");
+    let m = vt.search("needle", false, false, None, 10, std::time::Duration::from_secs(1)).unwrap();
+    // Not a soft wrap (cursor moved), so no match; a real wrap matches.
+    assert!(m.matches.is_empty());
+    let mut vt = Vt::with_scrollback(10, 4, 1000);
+    vt.feed(b"1234567needle rest");
+    let m = vt.search("needle", false, false, None, 10, std::time::Duration::from_secs(1)).unwrap();
+    assert_eq!((m.matches[0].start, m.matches[0].end), (Pos { line: 0, col: 7 }, Pos { line: 1, col: 2 }));
+    assert_eq!(m.matches[0].line_text, "1234567needle rest");
+
+    let mut vt = Vt::with_scrollback(30, 5, 1000);
+    for i in 0..50 {
+        vt.feed(format!("line {i} hit\r\n").as_bytes());
+    }
+    let mut all = Vec::new();
+    let mut before = None;
+    loop {
+        let r = vt.search("hit", false, false, before, 7, std::time::Duration::from_secs(1)).unwrap();
+        all.extend(r.matches.iter().map(|m| m.line_text.clone()));
+        match r.next {
+            Some(n) => before = Some(n),
+            None => break,
+        }
+    }
+    let want: Vec<String> = (0..50).rev().map(|i| format!("line {i} hit")).collect();
+    assert_eq!(all, want, "pages cover every match once, newest first");
+}
+
+#[test]
+fn search_anchors_are_the_ends_of_the_text_on_a_line() {
+    let mut vt = Vt::with_scrollback(20, 3, 100);
+    vt.feed(b"row-1\r\nxrow-2\r\nrow-3  \r\n");
+    let n = |q: &str| vt.search(q, true, false, None, 100, std::time::Duration::from_secs(1)).unwrap().matches.len();
+    assert_eq!((n("^row-[0-9]+"), n("row-[0-9]+$"), n("^row-[0-9]+$")), (2, 3, 2));
+    // Patterns that could match inside each other count once.
+    assert_eq!(n("o*"), 3);
+}
+
+/// How long a search of a full scrollback takes (cargo test --release -- --ignored --nocapture).
+#[test]
+#[ignore]
+fn search_latency_probe() {
+    let mut vt = Vt::with_scrollback(120, 40, 50_000);
+    let line: String = (0..118).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    for i in 0..50_100 {
+        vt.feed(format!("{i:06} {line}\r\n").as_bytes());
+    }
+    let small = Vt::new(20, 3);
+    let t = Instant::now();
+    small.search("x", false, false, None, 1, std::time::Duration::from_secs(1)).unwrap();
+    eprintln!("empty terminal: {:?}", t.elapsed());
+    for (q, regex) in [("no-such-text", false), ("004242", false), ("[0-9]{6} abc", true)] {
+        let t = Instant::now();
+        let r = vt.search(q, regex, false, None, 100, std::time::Duration::from_secs(10)).unwrap();
+        eprintln!("{q:?} over {} lines: {} matches in {:?}", vt.history_len() + 40, r.matches.len(), t.elapsed());
+    }
+}

@@ -5,7 +5,7 @@
 //! Lock order: model -> panes map -> pane -> clients map. Nothing that holds a pane lock takes
 //! the model lock.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -261,6 +261,41 @@ struct Pane {
     snap_seq: u64,
     snap_at: Instant,
     last_output: Instant,
+    /// What its agents did, oldest first (`agent.history`), at most HISTORY_MAX entries; kept
+    /// across serve restarts in the pane meta.
+    history: VecDeque<Value>,
+}
+
+/// Entries kept per pane by `agent.history`.
+const HISTORY_MAX: usize = 200;
+/// Longest agent message kept in history (chars).
+const HISTORY_MESSAGE: usize = 300;
+
+/// The fields that make two history entries the same (`at` and `event` aside).
+fn history_key(e: &Value) -> [&Value; 8] {
+    ["kind", "state", "message", "session", "source", "guess", "attention", "muted"].map(|k| e.get(k).unwrap_or(&Value::Null))
+}
+
+impl Pane {
+    /// Log the pane's agent as it is now, unless nothing that matters changed.
+    fn record(&mut self, event: &str, from: Option<&str>, gone: Option<&Agent>) {
+        let a = self.agent.as_ref().or(gone);
+        let Some(a) = a else { return };
+        let message = a.message.as_ref().filter(|_| gone.is_none()).map(|m| m.chars().take(HISTORY_MESSAGE).collect::<String>());
+        let e = json!({
+            "at": unix_now(), "event": event, "kind": a.kind,
+            "state": if gone.is_some() { Value::Null } else { json!(a.state) },
+            "from": from, "message": message, "session": a.session, "pid": a.pid,
+            "source": a.source, "guess": a.guess, "attention": gone.is_none() && a.attention, "muted": a.muted,
+        });
+        if self.history.back().is_some_and(|last| history_key(last) == history_key(&e)) {
+            return;
+        }
+        if self.history.len() == HISTORY_MAX {
+            self.history.pop_front();
+        }
+        self.history.push_back(e);
+    }
 }
 
 impl Pane {
@@ -292,6 +327,7 @@ impl Pane {
             snap_seq: 0,
             snap_at: Instant::now(),
             last_output: Instant::now(),
+            history: VecDeque::new(),
         }
     }
 
@@ -827,7 +863,7 @@ impl Daemon {
                 let muted = p.agent.as_ref().filter(|a| a.muted).map(|a| json!({"kind": a.kind, "pid": a.pid, "session": a.session}))
                     .or_else(|| p.muted_agent.as_ref().map(|(k, pid, s)| json!({"kind": k, "pid": pid, "session": s})));
                 (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback,
-                    "agent_muted": muted}))
+                    "agent_muted": muted, "agent_history": p.history}))
             })
             .collect();
         let state = json!({"model": model, "meta": meta});
@@ -855,6 +891,16 @@ impl Daemon {
                             p.muted_agent = Some((kind.into(), pid, a.get("session").and_then(Value::as_str).map(String::from)));
                         }
                     }
+                }
+                if let Some(Value::Array(h)) = m.get("agent_history") {
+                    let skip = h.len().saturating_sub(HISTORY_MAX);
+                    let mut restored: VecDeque<Value> = h.iter().skip(skip).filter(|e| e.is_object()).cloned().collect();
+                    // Anything logged since this serve started comes after.
+                    restored.extend(p.history.drain(..));
+                    while restored.len() > HISTORY_MAX {
+                        restored.pop_front();
+                    }
+                    p.history = restored;
                 }
                 // Recovery built the VT with the default; a pane spawned with its own keeps it.
                 if let Some(n) = m.get("scrollback_lines").and_then(Value::as_u64) {
@@ -1247,6 +1293,23 @@ impl Daemon {
             return;
         }
         p.agent = new;
+        match (&old, &p.agent) {
+            (Some(o), None) => p.record("gone", Some(&o.state), Some(o)),
+            // Detection's output-only guesses flip with every redraw: an agent's arrival is
+            // logged, its guessed states are not.
+            (Some(o), Some(a)) if a.guess && o.guess && o.kind == a.kind => {}
+            (_, Some(a)) => {
+                let event = if from.as_deref() != Some(a.state.as_str()) {
+                    "state"
+                } else if old.as_ref().is_some_and(|o| o.attention != a.attention) {
+                    "attention"
+                } else {
+                    "update"
+                };
+                p.record(event, from.as_deref(), None);
+            }
+            (None, None) => {}
+        }
         let attention = |a: &Option<Agent>| a.as_ref().is_some_and(|a| a.attention);
         if attention(&old) != attention(&p.agent) {
             let alert = p.agent.as_ref().map(|a| crate::push::Alert { kind: a.kind.clone(), state: a.state.clone(), message: a.message.clone(), since: a.since });
@@ -1272,6 +1335,7 @@ impl Daemon {
             a.attention = false;
         }
         p.agent = Some(a);
+        p.record(if on { "mute" } else { "unmute" }, Some(&old.state), None);
         if old.attention && on {
             self.push.attention(p.id, false, None);
         }
@@ -1548,7 +1612,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1782,6 +1846,45 @@ impl Daemon {
                     self.input(client.id, pane, bytes);
                 }
                 Ok(json!({}))
+            }
+            "agent.history" => {
+                let pane = param_u64(p, "pane")?;
+                let limit = p["limit"].as_u64().unwrap_or(HISTORY_MAX as u64).clamp(1, HISTORY_MAX as u64) as usize;
+                let since = p["since"].as_f64();
+                let session = p["session"].as_str();
+                let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+                let pp = pp.lock().unwrap();
+                let picked: Vec<&Value> = pp
+                    .history
+                    .iter()
+                    .filter(|e| since.is_none_or(|t| e["at"].as_f64().is_some_and(|at| at > t)))
+                    .filter(|e| session.is_none_or(|s| e["session"].as_str() == Some(s)))
+                    .collect();
+                let entries: Vec<&Value> = picked[picked.len().saturating_sub(limit)..].to_vec();
+                Ok(json!({"pane": pane, "entries": entries, "max": HISTORY_MAX}))
+            }
+            "pane.search" => {
+                let pane = param_u64(p, "pane")?;
+                let query = p["query"].as_str().ok_or_else(|| err("bad_request", "missing query"))?;
+                let limit = p["limit"].as_u64().unwrap_or(100).clamp(1, 1000) as usize;
+                let before = match p.get("before") {
+                    None | Some(Value::Null) => None,
+                    Some(b) => match (b["line"].as_i64(), b["col"].as_u64()) {
+                        (Some(line), Some(col)) => Some(clotho_vt::Pos { line: line as i32, col: col as usize }),
+                        _ => return Err(err("bad_request", "before must be {line, col}")),
+                    },
+                };
+                let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+                let pp = pp.lock().unwrap();
+                // The pane's output waits while this runs: bounded, with `next` to go on.
+                let r = pp
+                    .vt
+                    .search(query, p["regex"].as_bool().unwrap_or(false), p["case_sensitive"].as_bool().unwrap_or(false), before, limit, Duration::from_millis(200))
+                    .map_err(|e| err("bad_request", e))?;
+                let pos = |q: clotho_vt::Pos| json!({"line": q.line, "col": q.col});
+                let matches: Vec<Value> =
+                    r.matches.iter().map(|m| json!({"start": pos(m.start), "end": pos(m.end), "text": m.text, "line_text": m.line_text})).collect();
+                Ok(json!({"seq": pp.vt_seq, "cols": pp.cols, "rows": pp.rows, "history": pp.vt.history_len(), "matches": matches, "next": r.next.map(pos)}))
             }
             "pane.text" => {
                 let pane = param_u64(p, "pane")?;

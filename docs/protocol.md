@@ -93,7 +93,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
 ← {"id": 1, "result": {
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
-                  "pane.clipboard", "settings", "service", "agent.mute"],
+                  "pane.clipboard", "settings", "service", "agent.mute",
+                  "pane.search", "agent.history"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -112,7 +113,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   requests, docs/push.md), `pane.clipboard` (OSC 52 copies, see
   [Clipboard](#clipboard-osc-52)), `settings` (`settings.get` and `settings.set`, see
   [Settings](#settings)), `service` (`service.*`, see [Start at login](#start-at-login)) and
-  `agent.mute` (the agent's `muted` field and the `agent.mute` request, see [Agents](#agents)).
+  `agent.mute` (the agent's `muted` field and the `agent.mute` request, see [Agents](#agents)),
+  `pane.search` ([Searching scrollback](#searching-scrollback), since 0.1.11) and
+  `agent.history` ([Agent history](#agent-history), since 0.1.11).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -277,6 +280,7 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `pane.resize` | `pane`, `cols`, `rows` | `{}`: sets the size now, whatever the viewports say |
 | `pane.input` | `pane`, `data` (UTF-8 string) | `{}`: same as an INPUT frame, for clients without binary framing |
 | `pane.keys` | `pane`, `text?`, `keys?` (list of key names) | `{}`: input encoded for the pane's current modes (see below). Counts as input like an INPUT frame |
+| `pane.search` | `pane`, `query`; optional `regex`, `case_sensitive` (both default false), `limit` (1–1000, default 100), `before` (`{line, col}`) | matches in the scrollback and screen, newest first; see [Searching scrollback](#searching-scrollback) |
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
 | `settings.get` | – | the settings object; see [Settings](#settings) |
 | `settings.set` | any settings to change, e.g. `scrollback_lines` | the settings object, plus `applied_panes`; see [Settings](#settings) |
@@ -304,6 +308,7 @@ frame.
 
 | `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?` | `{}`; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
 | `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it) |
+| `agent.history` | `pane`; optional `limit` (1–200, default 200), `since` (unix seconds: entries after it), `session` | `{"pane", "entries": [..], "max": 200}`, oldest first; see [Agent history](#agent-history) |
 | `agent.mute` | `pane`, `muted` (bool) | `{"agent": <agent>}`: mutes or unmutes the pane's agent; see [Agents](#agents). `not_found` if the pane has no agent |
 
 File access (`fs.*`) is described in [Files](#files).
@@ -514,6 +519,38 @@ the user's existing hooks. It backs the file up to
 `<file>.clotho-backup-<unix time>` before changing it. For Codex, which allows only one `notify`
 program, an existing one is kept and called after clotho's. `uninstall` puts it back.
 
+### Agent history
+
+`agent.history {pane}` returns what the pane's agents did, oldest first: at most the last 200
+entries per pane (`max`), kept across serve restarts and upgrades like the agent's mute (in the
+holder's pane state), and gone with the pane.
+
+```json
+{"pane": 7, "max": 200, "entries": [
+  {"at": 1761512345.5, "event": "state", "kind": "claude", "state": "waiting", "from": "running",
+   "message": "Allow rm -rf build?", "session": "6c1f…", "pid": 4242, "source": "hook",
+   "guess": false, "attention": true, "muted": false},
+  {"at": 1761512351.0, "event": "attention", "kind": "claude", "state": "waiting", "from": "waiting",
+   "message": "Allow rm -rf build?", "session": "6c1f…", "pid": 4242, "source": "hook",
+   "guess": false, "attention": false, "muted": false},
+  {"at": 1761512360.2, "event": "gone", "kind": "claude", "state": null, "from": "done", …}
+]}
+```
+
+- Each entry is the agent as it was after the change, with the agent fields as in the `agent`
+  object, plus `at` (unix seconds), `from` (the state before), `pid` and `event`. `event` is one
+  of `state` (a new state, including an agent's arrival), `attention` (raised or cleared in the
+  same state, e.g. `agent.ack`), `update` (another field changed: message, session, source),
+  `mute`, `unmute`, and `gone` (the agent left; `state` is null).
+- An entry is only added when something other than `at` and `event` differs from the last one.
+  Detection's output-only guesses (`guess`, see above) are logged when a detected agent appears,
+  not each time they flip.
+- `message` is cut to 300 characters.
+- Filters: `since` (only entries with `at` greater than it, to fetch what's new), `session` (one
+  agent's entries), `limit` (the newest that many).
+- Live updates come from the `agent` events, as before; history is for what happened while a
+  client wasn't watching. Feature flag: `agent.history`.
+
 ## Pane data
 
 ### seq
@@ -582,6 +619,44 @@ Known issue (TODO): randomized testing found one rare case where a wide characte
 insert-character (ICH) pushed toward the right margin does not round-trip. Its row can come back
 misaligned. About 1 in 100k random sequences hits it, and no real application has been seen to.
 It is tracked in `clothod/crates/vt` (`randomized_roundtrips`, seed 7).
+
+### Searching scrollback
+
+`pane.search {pane, query}` searches the daemon's copy of the pane, scrollback and screen, from
+the newest line up.
+
+```json
+→ {"id": 9, "method": "pane.search", "params": {"pane": 7, "query": "error", "limit": 2}}
+← {"id": 9, "result": {"seq": 183230, "cols": 120, "rows": 40, "history": 2000, "matches": [
+    {"start": {"line": 31, "col": 4}, "end": {"line": 31, "col": 8}, "text": "Error",
+     "line_text": "npm Error: missing script"},
+    {"start": {"line": -12, "col": 0}, "end": {"line": -12, "col": 4}, "text": "error",
+     "line_text": "error[E0308]: mismatched types"}],
+   "next": {"line": -12, "col": 0}}}
+```
+
+- **Positions** are the coordinates of a snapshot taken at `seq`. `line` 0 is the screen's top
+  row, `rows - 1` its bottom, and negative lines are scrollback (-1 the newest, `-history` the
+  oldest the daemon keeps). `col` counts cells, so a wide character takes two. `start` and `end`
+  are both inclusive. A client that has applied output up to `seq` at the same `cols` has the same
+  layout, and its own deeper history continues upward from `-history`. Once more output arrives
+  the lines move up, so search again after a new `seq` rather than reusing old positions.
+- **Lines:** a match lies within one logical line: soft-wrapped rows joined, trailing blanks
+  dropped. So `^` and `$` are the ends of the text on that line, and a match may start on one
+  row and end on the next (`end.line` = `start.line + 1`). `line_text` is the whole logical line
+  (at most 512 characters) and `text` the match (at most 256).
+- **Matching:** literal by default, case-insensitive unless `case_sensitive: true`. With `regex:
+  true`, `query` is a Rust regex (the `regex` crate's syntax), e.g. `^error\[E[0-9]+\]`. An
+  invalid regex, an empty query or one over 1000 characters is `bad_request`. Empty matches are
+  skipped.
+- **Paging:** at most `limit` matches (default 100, at most 1000). If there may be more, `next`
+  is set: pass it as `before` to continue (only matches starting before it are returned), while
+  `seq` hasn't changed. `next` is null when the search reached the oldest line. A search also
+  stops after 200 ms with a `next`, since the pane's output waits while it runs. Measured: a
+  full scan of 50,000 scrollback rows at 120 columns takes 56 ms (release build, devbox), and a
+  page of 100 matches near the bottom 0.6 ms.
+- It searches what the daemon keeps (`history` lines: the pane's `scrollback_lines`). Clients
+  with deeper local history search the rest themselves. Feature flag: `pane.search`.
 
 ### Output
 
