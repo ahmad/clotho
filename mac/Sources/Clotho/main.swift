@@ -397,7 +397,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Testing aid: TestCopy="machine|source path|destination folder" copies through the transfer pipeline.
         if let spec = UserDefaults.standard.string(forKey: "TestCopy")?.components(separatedBy: "|"), spec.count == 3,
            let machine = Machine.all().first(where: { $0.label == spec[0] }) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            Task { @MainActor in
+                // Once the machine's connection can share files (or after a minute, to show why not).
+                for _ in 0 ..< 60 where (try? self.fileBackend(for: machine)) == nil {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
                 let fromRemote = spec[1].hasPrefix("remote:")
                 let source = Location(machine: fromRemote ? machine : .local, path: fromRemote ? String(spec[1].dropFirst(7)) : spec[1])
                 let dest = Location(machine: fromRemote ? .local : machine, path: spec[2])

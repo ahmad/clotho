@@ -4,9 +4,8 @@ import UniformTypeIdentifiers
 
 // MARK: Machines
 
-// Local, or a saved SSH host that the file browser reaches over ssh and rsync. Terminals run on the
-// session daemon's machine (this Mac, for now). The saved hosts live in the "Machines" default as
-// [{id, label, target}], imported once from herdr's saved machines.
+// Local, or a saved SSH host whose clothod the app reaches with `clothod bridge` over ssh. The saved
+// hosts live in the "Machines" default as [{id, label, target}].
 struct Machine: Equatable {
     let id: String?
     let label: String
@@ -16,7 +15,6 @@ struct Machine: Equatable {
     static let local = Machine(id: nil, label: "Local", target: nil)
 
     static func all() -> [Machine] {
-        importHerdrMachines()
         let saved = UserDefaults.standard.array(forKey: "Machines") as? [[String: String]] ?? []
         return [.local] + saved.compactMap { entry in
             guard let id = entry["id"], let target = entry["target"] else { return nil }
@@ -47,29 +45,13 @@ struct Machine: Equatable {
     static let didChange = Notification.Name("ClothoMachinesDidChange")
 
     private static func saved() -> [[String: String]] {
-        importHerdrMachines()
-        return UserDefaults.standard.array(forKey: "Machines") as? [[String: String]] ?? []
+        UserDefaults.standard.array(forKey: "Machines") as? [[String: String]] ?? []
     }
 
     private static func save(_ machines: [[String: String]]) {
         UserDefaults.standard.set(machines, forKey: "Machines")
         NotificationCenter.default.post(name: didChange, object: nil)
     }
-
-    // herdr kept its SSH profiles in ~/.local/state/herdr/client/endpoints.json; bring them over the first time.
-    private static func importHerdrMachines() {
-        let defaults = UserDefaults.standard
-        guard defaults.object(forKey: "Machines") == nil else { return }
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/state/herdr/client/endpoints.json")
-        let profiles = (try? Data(contentsOf: url))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["ssh"] as? [[String: Any]] ?? []
-        let saved = profiles.compactMap { p -> [String: String]? in
-            guard p["enabled"] as? Bool != false, let id = p["id"] as? String, let target = p["target"] as? String else { return nil }
-            return ["id": id, "label": p["label"] as? String ?? target, "target": target]
-        }
-        defaults.set(saved, forKey: "Machines")
-    }
-
 
     /// The last folder the file browser showed on this machine.
     var lastFolder: String? {
@@ -80,20 +62,19 @@ struct Machine: Equatable {
 
 struct FileError: LocalizedError {
     let message: String
+    /// The machine is still connecting, so trying again shortly may work.
+    var isTransient = false
     var errorDescription: String? { message }
 }
 
 // MARK: SSH
 
-// Every remote call shares one multiplexed connection per machine, so listings feel instant.
+// Connection checks (`ssh <target> true`) share one multiplexed connection per machine.
 enum SSH {
     static var options: [String] {
         ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15",
          "-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/cm-clothoapp-%C", "-o", "ControlPersist=600"]
     }
-
-    // The ssh command rsync runs (-e).
-    static var rsyncShell: String { (["ssh"] + options).joined(separator: " ") }
 
     static func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
@@ -125,79 +106,6 @@ enum SSH {
     }
 }
 
-// MARK: Listing and lookups
-
-struct FileEntry {
-    let name: String
-    let isDir: Bool
-    let size: Int64
-    let modified: Date
-}
-
-enum FileSource {
-    static let listScript = """
-    import json, os, sys
-    p = os.path.abspath(os.path.expanduser(sys.argv[1]))
-    out = {"path": p, "entries": []}
-    try:
-        with os.scandir(p) as it:
-            for e in it:
-                try:
-                    st = e.stat(follow_symlinks=True); d = e.is_dir(follow_symlinks=True)
-                except OSError:
-                    st = e.stat(follow_symlinks=False); d = False
-                out["entries"].append([e.name, d, st.st_size, int(st.st_mtime)])
-    except OSError as err:
-        out["error"] = err.strerror or str(err)
-    print(json.dumps(out))
-    """
-
-    static func expand(_ path: String) -> String { (path as NSString).expandingTildeInPath }
-
-    // Returns the resolved folder and its contents.
-    static func list(_ machine: Machine, _ path: String) throws -> (String, [FileEntry]) {
-        if machine.isLocal {
-            let dir = URL(fileURLWithPath: expand(path)).standardizedFileURL
-            let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]
-            let urls: [URL]
-            do {
-                urls = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys)
-            } catch {
-                throw FileError(message: (error as NSError).localizedDescription)
-            }
-            let entries = urls.map { url -> FileEntry in
-                let values = try? url.resourceValues(forKeys: Set(keys))
-                let isDir = (try? url.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                return FileEntry(name: url.lastPathComponent, isDir: isDir,
-                                 size: Int64(values?.fileSize ?? 0), modified: values?.contentModificationDate ?? .distantPast)
-            }
-            return (dir.path, entries)
-        }
-        let data = try SSH.run(machine, "python3 - " + SSH.quote(path), input: Data(listScript.utf8))
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let resolved = json["path"] as? String
-        else { throw FileError(message: "Couldn't read the folder listing from \(machine.label)") }
-        if let error = json["error"] as? String { throw FileError(message: error) }
-        let entries = (json["entries"] as? [[Any]] ?? []).compactMap { e -> FileEntry? in
-            guard e.count >= 4, let name = e[0] as? String else { return nil }
-            return FileEntry(name: name, isDir: e[1] as? Bool ?? false, size: (e[2] as? NSNumber)?.int64Value ?? 0,
-                             modified: Date(timeIntervalSince1970: (e[3] as? NSNumber)?.doubleValue ?? 0))
-        }
-        return (resolved, entries)
-    }
-
-    // Which of these names already exist in a folder.
-    static func existing(_ names: [String], in dir: String, on machine: Machine) -> [String] {
-        if machine.isLocal {
-            return names.filter { FileManager.default.fileExists(atPath: (expand(dir) as NSString).appendingPathComponent($0)) }
-        }
-        let script = "import os,sys\nd=os.path.expanduser(sys.argv[1])\nfor n in sys.argv[2:]:\n    if os.path.lexists(os.path.join(d,n)): print(n)"
-        let command = (["python3", "-c", SSH.quote(script), SSH.quote(dir)] + names.map(SSH.quote)).joined(separator: " ")
-        guard let data = try? SSH.run(machine, command), let text = String(data: data, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").map(String.init)
-    }
-}
-
 // MARK: Transfers
 
 // A file or folder on some machine.
@@ -206,12 +114,6 @@ struct Location {
     let path: String
 
     var name: String { (path as NSString).lastPathComponent }
-
-    // How rsync addresses it; remote paths are quoted for the remote shell.
-    var rsyncArg: String {
-        guard let target = machine.target else { return FileSource.expand(path) }
-        return target + ":" + SSH.quote(path)
-    }
 }
 
 final class Transfer {
@@ -224,8 +126,10 @@ final class Transfer {
     var state = State.running
     var progress: Double = 0
     var detail = "Starting…"
-    var process: Process?
+    var task: Task<Void, Never>?
     var onFinish: ((Bool) -> Void)?
+    /// When the toast last showed this transfer's progress, to redraw it a few times a second at most.
+    var shown = Date.distantPast
 
     init(title: String, sources: [Location], destination: Location) {
         self.title = title
@@ -236,18 +140,23 @@ final class Transfer {
     var isRunning: Bool { if case .running = state { return true } else { return false } }
 }
 
-// Runs rsync for each item in turn and reports progress to the toast.
+// Copies with ClothoKit's FileTransfer, between any two machines (through the app when neither is
+// this Mac), and reports progress to the toast.
+@MainActor
 final class TransferManager {
     private(set) var transfers: [Transfer] = []
     var onChange: (() -> Void)?
+    /// The file access for a machine, or why there's none.
+    var files: ((Machine) throws -> FileBackend)?
 
     @discardableResult
-    func start(title: String, sources: [Location], to destination: Location, onFinish: ((Bool) -> Void)? = nil) -> Transfer {
+    func start(title: String, sources: [Location], to destination: Location, conflict: FileTransfer.Conflict = .replace,
+               onFinish: ((Bool) -> Void)? = nil) -> Transfer {
         let transfer = Transfer(title: title, sources: sources, destination: destination)
         transfer.onFinish = onFinish
         transfers.append(transfer)
         log("transfer: \(title) → \(destination.machine.label):\(destination.path)")
-        run(transfer, index: 0)
+        run(transfer, conflict: conflict)
         onChange?()
         return transfer
     }
@@ -255,7 +164,7 @@ final class TransferManager {
     func cancel(_ transfer: Transfer) {
         guard transfer.isRunning else { return remove(transfer) }
         transfer.state = .cancelled
-        transfer.process?.terminate()
+        transfer.task?.cancel()
     }
 
     func remove(_ transfer: Transfer) {
@@ -263,71 +172,68 @@ final class TransferManager {
         onChange?()
     }
 
-    private func run(_ transfer: Transfer, index: Int) {
-        guard transfer.isRunning else { return finish(transfer) }
-        guard index < transfer.sources.count else {
+    private func run(_ transfer: Transfer, conflict: FileTransfer.Conflict) {
+        guard !transfer.sources.isEmpty else {
             transfer.state = .done
-            transfer.progress = 1
             return finish(transfer)
         }
-        let source = transfer.sources[index]
-        let count = transfer.sources.count
-        transfer.detail = count > 1 ? "\(source.name) (\(index + 1) of \(count))" : source.name
-
-        var args = ["-a", "--partial", "--progress"]
-        if !source.machine.isLocal || !transfer.destination.machine.isLocal {
-            args += ["-z", "-e", SSH.rsyncShell]
-        }
-        var dest = transfer.destination.rsyncArg
-        if transfer.destination.machine.isLocal {
-            dest = FileSource.expand(transfer.destination.path) + "/"
-        } else {
-            dest = transfer.destination.machine.target! + ":" + SSH.quote(transfer.destination.path + "/")
-        }
-        args += [source.rsyncArg, dest]
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/rsync")
-        process.arguments = args
-        let out = Pipe(), err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
-        var errText = ""
-        out.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let chunk = String(data: handle.availableData, encoding: .utf8),
-                  let match = chunk.range(of: #"(\d+)%"#, options: [.regularExpression, .backwards]),
-                  let pct = Double(chunk[match].dropLast())
-            else { return }
-            DispatchQueue.main.async {
-                transfer.progress = (Double(index) + pct / 100) / Double(count)
-                self?.onChange?()
-            }
-        }
-        err.fileHandleForReading.readabilityHandler = { handle in
-            if let text = String(data: handle.availableData, encoding: .utf8) {
-                DispatchQueue.main.async { errText += text }
-            }
-        }
-        process.terminationHandler = { [weak self] p in
-            out.fileHandleForReading.readabilityHandler = nil
-            err.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if p.terminationStatus != 0, transfer.isRunning {
-                    let lines = errText.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
-                    transfer.state = .failed(lines.last ?? "rsync exited with status \(p.terminationStatus)")
-                    log("transfer failed: \(errText)")
-                }
-                self.run(transfer, index: index + 1)
-            }
-        }
-        transfer.process = process
+        let to: FileBackend
+        var copies: [(FileTransfer, [String])] = []
         do {
-            try process.run()
+            to = try backend(transfer.destination.machine)
+            // Sources are grouped by machine; in practice they all come from one side of the browser.
+            var order: [MachineKey] = []
+            var groups: [MachineKey: [Location]] = [:]
+            for source in transfer.sources {
+                if groups[source.machine.key] == nil { order.append(source.machine.key) }
+                groups[source.machine.key, default: []].append(source)
+            }
+            for key in order {
+                let items = groups[key]!
+                copies.append((FileTransfer(from: try backend(items[0].machine), to: to), items.map(\.path)))
+            }
         } catch {
             transfer.state = .failed(error.localizedDescription)
-            finish(transfer)
+            return finish(transfer)
         }
+        let folder = transfer.destination.path
+        transfer.task = Task { [weak self] in
+            do {
+                for (index, (copy, paths)) in copies.enumerated() {
+                    try await copy.copy(paths, into: folder, conflict: conflict) { progress in
+                        Task { @MainActor in self?.update(transfer, progress, part: index, of: copies.count) }
+                    }
+                }
+                if transfer.isRunning {
+                    transfer.state = .done
+                    transfer.progress = 1
+                }
+            } catch {
+                if transfer.isRunning {
+                    transfer.state = error is CancellationError ? .cancelled : .failed(error.localizedDescription)
+                    log("transfer failed: \(error)")
+                }
+            }
+            self?.finish(transfer)
+        }
+    }
+
+    private func backend(_ machine: Machine) throws -> FileBackend {
+        guard let files else { throw FileError(message: "File access isn't set up") }
+        return try files(machine)
+    }
+
+    private func update(_ transfer: Transfer, _ progress: FileTransfer.Progress, part: Int, of parts: Int) {
+        guard transfer.isRunning else { return }
+        transfer.progress = (Double(part) + progress.fraction) / Double(parts)
+        let size = { (bytes: UInt64) in ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
+        var detail = progress.current ?? "Preparing…"
+        if progress.totalFiles > 1 { detail += " (\(min(progress.doneFiles + 1, progress.totalFiles)) of \(progress.totalFiles))" }
+        if progress.totalBytes > 0 { detail += " · \(size(progress.doneBytes)) of \(size(progress.totalBytes))" }
+        transfer.detail = detail
+        // Fast local copies report thousands of times a second; the toast redraws a few times.
+        guard Date().timeIntervalSince(transfer.shown) > 0.2 else { return }
+        transfer.shown = Date()
         onChange?()
     }
 
@@ -447,7 +353,30 @@ extension AppDelegate {
         transferToast.autoresizingMask = [.minXMargin, .maxYMargin]
         container.addSubview(transferToast)
         transfers.onChange = { [weak self] in self?.transferToast.refresh() }
+        transfers.files = { [weak self] machine in
+            guard let self else { throw FileError(message: "Clotho is closing") }
+            return try fileBackend(for: machine)
+        }
     }
+
+    /// File access on a machine: this Mac's own files, or the machine's clothod (`fs.*`) through
+    /// its connection. Throws a message for the browser when the machine can't share files yet.
+    func fileBackend(for machine: Machine) throws -> FileBackend {
+        if machine.isLocal { return Self.localFiles }
+        guard let session = sessions[machine.key] else {
+            throw FileError(message: "Connect to \(machine.label) to browse its files.")
+        }
+        guard let files = session.store.backend as? FileBackend, let hello = session.store.hello else {
+            throw FileError(message: "Waiting for \(machine.label)…", isTransient: true)
+        }
+        guard files.supportsFiles else {
+            throw FileError(message: "\(machine.label) runs clothod \(hello.version), which can't share files. "
+                + "Update it to 0.1.3 or later from the machine's menu in the sidebar.")
+        }
+        return files
+    }
+
+    static let localFiles = LocalFileBackend()
 
     // Keeps the toast above any overlay that was added after it.
     func raiseTransferToast() {
@@ -522,35 +451,39 @@ extension AppDelegate {
     func copy(_ sources: [Location], to destination: Location, then done: ((Bool) -> Void)?) {
         guard !sources.isEmpty else { return }
         let names = sources.map(\.name)
-        DispatchQueue.global(qos: .userInitiated).async {
-            let clashes = FileSource.existing(names, in: destination.path, on: destination.machine)
-            DispatchQueue.main.async { [self] in
-                let begin = { (items: [Location]) in
-                    guard !items.isEmpty else { return }
-                    let verb = destination.machine.isLocal
-                        ? (items.allSatisfy { $0.machine.isLocal } ? "Copying" : "Downloading")
-                        : "Uploading"
-                    let what = items.count == 1 ? items[0].name : "\(items.count) items"
-                    let place = "\(destination.machine.label):\((destination.path as NSString).abbreviatingWithTildeInPath)"
-                    self.transfers.start(title: "\(verb) \(what) → \(place)", sources: items, to: destination, onFinish: done)
-                }
-                guard !clashes.isEmpty else { return begin(sources) }
-                let alert = NSAlert()
-                alert.messageText = clashes.count == 1
-                    ? "“\(clashes[0])” already exists in \(destination.name)."
-                    : "\(clashes.count) items already exist in \(destination.name)."
-                alert.informativeText = clashes.count == 1
-                    ? "Replace overwrites it (a folder is merged). Skip leaves it as it is."
-                    : "Replace overwrites them (folders are merged). Skip copies only the new items."
-                alert.addButton(withTitle: "Replace")
-                alert.addButton(withTitle: "Skip")
-                alert.addButton(withTitle: "Cancel")
-                alert.beginSheetModal(for: window) { response in
-                    switch response {
-                    case .alertFirstButtonReturn: begin(sources)
-                    case .alertSecondButtonReturn: begin(sources.filter { !clashes.contains($0.name) })
-                    default: break
-                    }
+        let files: FileBackend
+        do {
+            files = try fileBackend(for: destination.machine)
+        } catch {
+            let failed = Transfer(title: "Copy to \(destination.machine.label)", sources: [], destination: destination)
+            return showError(failed, error.localizedDescription)
+        }
+        Task { @MainActor [self] in
+            let clashes = await FileTransfer.existing(names, in: destination.path, on: files)
+            let begin = { (items: [Location]) in
+                guard !items.isEmpty else { return }
+                let verb = items.allSatisfy({ $0.machine == destination.machine }) ? "Copying"
+                    : destination.machine.isLocal ? "Downloading" : "Uploading"
+                let what = items.count == 1 ? items[0].name : "\(items.count) items"
+                let place = "\(destination.machine.label):\((destination.path as NSString).abbreviatingWithTildeInPath)"
+                self.transfers.start(title: "\(verb) \(what) → \(place)", sources: items, to: destination, onFinish: done)
+            }
+            guard !clashes.isEmpty else { return begin(sources) }
+            let alert = NSAlert()
+            alert.messageText = clashes.count == 1
+                ? "“\(clashes[0])” already exists in \(destination.name)."
+                : "\(clashes.count) items already exist in \(destination.name)."
+            alert.informativeText = clashes.count == 1
+                ? "Replace overwrites it (a folder is merged). Skip leaves it as it is."
+                : "Replace overwrites them (folders are merged). Skip copies only the new items."
+            alert.addButton(withTitle: "Replace")
+            alert.addButton(withTitle: "Skip")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { response in
+                switch response {
+                case .alertFirstButtonReturn: begin(sources)
+                case .alertSecondButtonReturn: begin(sources.filter { !clashes.contains($0.name) })
+                default: break
                 }
             }
         }
@@ -847,6 +780,8 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     private var shown: [FileEntry] = []
     private var showHidden = false
     private var generation = 0
+    /// The machine's home folder, for breadcrumbs that start at "~".
+    private var home: String?
 
     let table = FileTable()
     let pathBar = BreadcrumbBar()
@@ -997,30 +932,46 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     func load(_ target: String) {
         generation += 1
         let token = generation
-        let machine = machine
         status.stringValue = "Loading…"
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try FileSource.list(machine, target) }
-            DispatchQueue.main.async { [weak self] in
-                guard let self, token == generation else { return }
-                switch result {
-                case .success(let (resolved, items)):
-                    path = resolved
-                    entries = items.sorted {
-                        $0.isDir != $1.isDir ? $0.isDir : $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                    }
-                    machine.lastFolder = resolved
-                    applyFilter()
-                case .failure(let error):
-                    status.stringValue = error.localizedDescription
+        let files: FileBackend
+        do {
+            guard let app else { return }
+            files = try app.fileBackend(for: machine)
+        } catch {
+            entries = []
+            applyFilter()
+            status.stringValue = error.localizedDescription
+            // A machine that's still connecting gets its listing once it's up.
+            if (error as? FileError)?.isTransient == true {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    guard let self, token == generation, window != nil else { return }
+                    load(target)
                 }
+            }
+            return
+        }
+        let machine = machine
+        Task { @MainActor [weak self] in
+            do {
+                let listing = try await files.listAll(target, hidden: true)
+                guard let self, token == generation else { return }
+                path = listing.dir.path
+                home = files.homeDirectory
+                entries = listing.entries.sorted {
+                    $0.isDirectory != $1.isDirectory ? $0.isDirectory : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                }
+                machine.lastFolder = path
+                applyFilter()
+            } catch {
+                guard let self, token == generation else { return }
+                status.stringValue = error.localizedDescription
             }
         }
     }
 
     private func applyFilter() {
-        shown = showHidden ? entries : entries.filter { !$0.name.hasPrefix(".") }
-        pathBar.show(path, home: machine.isLocal ? NSHomeDirectory() : nil)
+        shown = showHidden ? entries : entries.filter { !$0.hidden }
+        pathBar.show(path, home: home)
         table.reloadData()
         let hidden = entries.count - shown.count
         status.stringValue = "\(shown.count) item\(shown.count == 1 ? "" : "s")" + (hidden > 0 ? " · \(hidden) hidden" : "")
@@ -1062,7 +1013,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
         guard row >= 0, row < shown.count else { return }
         let entry = shown[row]
-        if entry.isDir {
+        if entry.isDirectory {
             load(fullPath(entry))
         } else if machine.isLocal {
             NSWorkspace.shared.open(URL(fileURLWithPath: fullPath(entry)))
@@ -1092,7 +1043,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
 
     func icon(for entry: FileEntry) -> NSImage {
         if machine.isLocal { return NSWorkspace.shared.icon(forFile: fullPath(entry)) }
-        if entry.isDir { return NSWorkspace.shared.icon(for: .folder) }
+        if entry.isDirectory { return NSWorkspace.shared.icon(for: .folder) }
         let ext = (entry.name as NSString).pathExtension
         return NSWorkspace.shared.icon(for: UTType(filenameExtension: ext) ?? .data)
     }
@@ -1107,7 +1058,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         text.textColor = id == "name" ? Theme.foreground : NSColor(hex: 0x9AA3AA)
         switch id {
         case "name": text.stringValue = entry.name
-        case "size": text.stringValue = entry.isDir ? "—" : ByteCountFormatter.string(fromByteCount: entry.size, countStyle: .file)
+        case "size": text.stringValue = entry.isDirectory ? "—" : ByteCountFormatter.string(fromByteCount: Int64(entry.size), countStyle: .file)
         default: text.stringValue = Self.format(entry.modified)
         }
         text.translatesAutoresizingMaskIntoConstraints = false
@@ -1142,7 +1093,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let entry = shown[row]
         if machine.isLocal { return NSURL(fileURLWithPath: fullPath(entry)) }
         let ext = (entry.name as NSString).pathExtension
-        let type = entry.isDir ? UTType.folder : (UTType(filenameExtension: ext) ?? .data)
+        let type = entry.isDirectory ? UTType.folder : (UTType(filenameExtension: ext) ?? .data)
         let promise = RemoteFilePromise(fileType: type.identifier, delegate: self)
         promise.location = Location(machine: machine, path: fullPath(entry))
         promise.userInfo = entry.name
@@ -1178,14 +1129,14 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
 
     private func destinationFolder(forRow row: Int, operation: NSTableView.DropOperation) -> String? {
         if operation == .on, row >= 0, row < shown.count {
-            return shown[row].isDir ? fullPath(shown[row]) : nil
+            return shown[row].isDirectory ? fullPath(shown[row]) : nil
         }
         return path
     }
 
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        if dropOperation == .on, row >= 0, row < shown.count, shown[row].isDir {
+        if dropOperation == .on, row >= 0, row < shown.count, shown[row].isDirectory {
             return .copy
         }
         tableView.setDropRow(-1, dropOperation: .on)
@@ -1207,13 +1158,8 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
                 sources.append(Location(machine: .local, path: url.path))
             }
         }
-        // Only copies across machines or into a different local folder; remote-to-same-remote moves aren't supported.
-        sources = sources.filter { source in
-            if source.machine == machine {
-                return machine.isLocal && (source.path as NSString).deletingLastPathComponent != folder
-            }
-            return source.machine.isLocal || machine.isLocal
-        }
+        // Copies between any two machines, or into another folder on the same one.
+        sources = sources.filter { $0.machine != machine || ($0.path as NSString).deletingLastPathComponent != folder }
         guard !sources.isEmpty else { return false }
         app?.copy(sources, to: Location(machine: machine, path: folder)) { [weak self] ok in
             if ok { self?.reload() }

@@ -213,3 +213,67 @@ final class Progress: @unchecked Sendable {
     func set(_ value: UInt64) { lock.withLock { stored = value } }
     func setFirst(_ value: UInt64) { lock.withLock { if stored == nil { stored = value } } }
 }
+
+extension ClothodBackendTests {
+    /// A tree up to clothod and back down again, keeping contents, modes and times, then a merge
+    /// that skips what's already there.
+    func testTreeTransferRoundTrip() async throws {
+        let backend = makeBackend()
+        defer { backend.stop() }
+        try await backend.start()
+        let local = LocalFileBackend()
+        let root = try makeFileRoot()
+        let tree = filePath(root, "tree")
+        try FileManager.default.createDirectory(atPath: filePath(tree, "sub/deeper"), withIntermediateDirectories: true)
+        let big = FileBackendChecks.randomData(1 << 20 + 7)
+        try big.write(to: URL(fileURLWithPath: filePath(tree, "sub/big.bin")))
+        try Data("a".utf8).write(to: URL(fileURLWithPath: filePath(tree, "a.txt")))
+        try Data().write(to: URL(fileURLWithPath: filePath(tree, "sub/deeper/empty")))
+        chmod(filePath(tree, "a.txt"), 0o755)
+        _ = try await local.setattr(filePath(tree, "sub"), mtimeNs: "1500000000000000000", mode: nil)
+        try FileManager.default.createSymbolicLink(atPath: filePath(tree, "loop"), withDestinationPath: tree)
+
+        // Up: this device → clothod (the daemon sees the same disk, in another folder).
+        try FileManager.default.createDirectory(atPath: filePath(root, "up"), withIntermediateDirectories: true)
+        let upload = FileTransfer(from: local, to: backend)
+        let last = ProgressBox()
+        try await upload.copy([tree], into: filePath(root, "up"), conflict: .replace) { last.set($0) }
+        XCTAssertEqual(last.value?.totalFiles, 3)
+        XCTAssertEqual(last.value?.doneFiles, 3)
+        XCTAssertEqual(last.value?.doneBytes, UInt64(big.count + 1))
+
+        // Down: clothod → this device.
+        try FileManager.default.createDirectory(atPath: filePath(root, "down"), withIntermediateDirectories: true)
+        try await FileTransfer(from: backend, to: local).copy([filePath(root, "up/tree")], into: filePath(root, "down"), conflict: .replace) { _ in }
+        let copy = filePath(root, "down/tree")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: filePath(copy, "sub/big.bin"))), big)
+        let mode = try await local.stat(filePath(copy, "a.txt")).mode
+        let sub = try await local.stat(filePath(copy, "sub")).mtimeNs
+        let copied = try await local.stat(filePath(copy, "sub/big.bin")).mtimeNs
+        let original = try await local.stat(filePath(tree, "sub/big.bin")).mtimeNs
+        let empty = try await local.stat(filePath(copy, "sub/deeper/empty")).size
+        XCTAssertEqual(mode, 0o755)
+        XCTAssertEqual(sub, "1500000000000000000")
+        XCTAssertEqual(copied, original)
+        XCTAssertEqual(empty, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: filePath(copy, "loop")), "a link to a folder inside the tree was followed")
+
+        // A merge that skips existing files copies only the new one.
+        try Data("changed".utf8).write(to: URL(fileURLWithPath: filePath(tree, "a.txt")))
+        try Data("new".utf8).write(to: URL(fileURLWithPath: filePath(tree, "new.txt")))
+        let merge = ProgressBox()
+        try await FileTransfer(from: local, to: backend).copy([tree], into: filePath(root, "up"), conflict: .skip) { merge.set($0) }
+        XCTAssertEqual(merge.value?.skippedFiles, 3)
+        XCTAssertEqual(try String(contentsOfFile: filePath(root, "up/tree/a.txt"), encoding: .utf8), "a")
+        XCTAssertEqual(try String(contentsOfFile: filePath(root, "up/tree/new.txt"), encoding: .utf8), "new")
+        let existing = await FileTransfer.existing(["tree", "nope"], in: filePath(root, "up"), on: backend)
+        XCTAssertEqual(existing, ["tree"])
+    }
+}
+
+final class ProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: FileTransfer.Progress?
+    var value: FileTransfer.Progress? { lock.withLock { stored } }
+    func set(_ value: FileTransfer.Progress) { lock.withLock { stored = value } }
+}

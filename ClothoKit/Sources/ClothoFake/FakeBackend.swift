@@ -40,7 +40,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        hello.featureNames = ["pane.keys", "agents"]
+        hello.featureNames = ["pane.keys", "agents", "fs"]
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -650,5 +650,32 @@ private extension Layout {
         if let newA = a.settingRatio(of: split, to: ratio) { return .split(id: id, axis: axis, ratio: old, a: newA, b: b) }
         if let newB = b.settingRatio(of: split, to: ratio) { return .split(id: id, axis: axis, ratio: old, a: a, b: newB) }
         return nil
+    }
+}
+
+// Files are this device's own, so the fake machine has a real file browser.
+extension FakeBackend: FileBackend {
+    private static let files = LocalFileBackend()
+
+    public var supportsFiles: Bool { true }
+    public var homeDirectory: String? { NSHomeDirectory() }
+
+    public func stat(_ path: String) async throws -> FileEntry { try await Self.files.stat(path) }
+    public func list(_ path: String, hidden: Bool, limit: Int?, cursor: String?) async throws -> FileListing {
+        try await Self.files.list(path, hidden: hidden, limit: limit, cursor: cursor)
+    }
+    public func mkdir(_ path: String, parents: Bool) async throws -> FileEntry { try await Self.files.mkdir(path, parents: parents) }
+    public func setattr(_ path: String, mtimeNs: String?, mode: Int?) async throws -> FileEntry {
+        try await Self.files.setattr(path, mtimeNs: mtimeNs, mode: mode)
+    }
+    public func rename(_ from: String, to: String, overwrite: Bool) async throws -> FileEntry {
+        try await Self.files.rename(from, to: to, overwrite: overwrite)
+    }
+    public func remove(_ path: String, recursive: Bool) async throws { try await Self.files.remove(path, recursive: recursive) }
+    public func statfs(_ path: String) async throws -> FileSpace { try await Self.files.statfs(path) }
+    public func read(_ path: String, options: FileReadOptions) async throws -> FileReadStream { try await Self.files.read(path, options: options) }
+    public func write(_ path: String, options: FileWriteOptions, source: FileDataSource,
+                      progress: @escaping @Sendable (UInt64) -> Void) async throws -> FileEntry {
+        try await Self.files.write(path, options: options, source: source, progress: progress)
     }
 }

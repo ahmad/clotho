@@ -74,7 +74,7 @@ extension AppDelegate {
         let alert = NSAlert()
         alert.messageText = existing == nil ? "Add Machine" : "Edit \(existing!.label)"
         alert.informativeText = "Clotho connects with ssh using your ~/.ssh/config and keys, without prompts, "
-            + "so the host must accept your key or agent. The machine needs python3 and rsync for files."
+            + "so the host must accept your key or agent."
         alert.addButton(withTitle: existing == nil ? "Add" : "Save")
         alert.addButton(withTitle: "Cancel")
         let name = NSTextField(frame: NSRect(x: 0, y: 32, width: 300, height: 24))

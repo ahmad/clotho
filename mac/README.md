@@ -21,8 +21,8 @@ The terminals live in [clothod](../clothod/README.md), Clotho's session daemon, 
 | macOS 13 or later | Running the app |
 | Swift 6.2 or later and the macOS developer tools | Building the app |
 | Rust (`cargo`, `rustup`) | Building clothod for every platform, which the build script bundles |
-| `/usr/bin/ssh` and `/usr/bin/rsync` | The file browser's remote listings and transfers |
-| SSH access, Python 3 and rsync on remote machines | Browsing and copying files on them |
+| `/usr/bin/ssh` | Connecting to remote machines (`clothod bridge`) |
+| clothod 0.1.3 or later on remote machines | Browsing and copying files on them (clothod's `fs.*`) |
 
 ## Build and install
 

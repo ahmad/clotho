@@ -128,7 +128,7 @@ Copies go local to local, local to remote, and remote to local. Direct remote-to
 
 When names already exist at the destination, Clotho offers **Replace**, **Skip** and **Cancel**. Replace overwrites matching files and merges folders; it never deletes other files there. Downloads dragged to Finder follow Finder's own handling.
 
-A toast in the corner shows each transfer's progress and result. Its cancel button stops a transfer, which can leave partial data behind because rsync runs with `--partial`. Transfers copy, so the source always stays in place.
+A toast in the corner shows each transfer's progress and result. Its cancel button stops a transfer. Files that finished stay; a file cut short never appears half-written, and copying it again resumes where it stopped. Transfers copy, so the source always stays in place. Copies keep file modes and modification times, and can go between any two machines (through the app when neither is this Mac).
 
 ## Remote machines
 
@@ -142,9 +142,9 @@ First check that SSH works without prompts from this Mac, replacing `user@imac` 
 ssh -o BatchMode=yes user@imac true
 ```
 
-If that fails, set up a key or an SSH agent. Clotho runs ssh without prompts and can't ask for a password or passphrase. The machine needs a POSIX shell for sessions, plus `python3` and `rsync` for the file browser.
+If that fails, set up a key or an SSH agent. Clotho runs ssh without prompts and can't ask for a password or passphrase. The machine needs a POSIX shell. The file browser uses the machine's clothod, so it needs clothod 0.1.3 or later; an older one shows an update notice in the browser.
 
-Then click **+ Add Machine** at the bottom of the sidebar (or choose **File → Add Machine…**), and give it a name and the SSH target. On first launch, Clotho also imports the machines saved in herdr (`~/.local/state/herdr/client/endpoints.json`).
+Then click **+ Add Machine** at the bottom of the sidebar (or choose **File → Add Machine…**), and give it a name and the SSH target.
 
 With Tailscale, connect both machines to the tailnet and use the remote machine's MagicDNS name or Tailscale IP as the host. See [Tailscale's connection guide](https://tailscale.com/docs/how-to/connect-to-devices).
 
@@ -207,8 +207,8 @@ For scripted testing, `-RunShortcuts "Split Right,New Tab"` fires menu items by 
 | "Has no clothod build" for a machine | Clotho carries builds for Linux and macOS on x86_64 and ARM only. |
 | A pane shows a smaller terminal in its top-left corner | Another client sized that pane. It takes this window's size again once you type in it. |
 | Remote browser can't connect | Test `ssh -o BatchMode=yes user@host true` from this Mac, and check keys, the SSH agent, host-key trust and the network. |
-| Remote folder listing fails | Check that `python3` is on the remote machine's noninteractive SSH path and that the folder is readable. |
-| A file transfer fails | Check that `/usr/bin/rsync` exists here, `rsync` is on the remote SSH path, and the destination is writable. The transfer toast shows the error. |
+| Remote folder listing fails | Connect to the machine first. If it says the machine's clothod can't share files, accept the update offer for that machine. Otherwise check the folder is readable. |
+| A file transfer fails | The transfer toast shows the machine's error (for example a full disk or no permission). Copying again resumes files that were cut short. |
 | An upload can't find the pane's folder | The daemon hasn't learned the folder yet. Wait a moment after `cd`, or use the file browser. |
 | Desktop, Documents or Downloads is inaccessible | Review Clotho under System Settings → Privacy & Security → Files and Folders. |
 

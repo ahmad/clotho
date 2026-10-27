@@ -141,29 +141,12 @@ public final class LocalFileBackend: FileBackend, @unchecked Sendable {
         if let mtime = options.expectMtimeNs, mtime != found.mtimeNs { throw Self.error(.changed, "\(path) changed") }
         guard let handle = FileHandle(forReadingAtPath: resolved) else { throw Self.posixError(resolved) }
         let end = options.length.map { min(found.size, options.offset + $0) } ?? found.size
-        let chunk = max(4096, options.chunk)
-        let cancelled = Flag()
-        let data = AsyncThrowingStream<Data, Error> { continuation in
-            let thread = Thread {
-                defer { try? handle.close() }
-                do {
-                    try handle.seek(toOffset: options.offset)
-                    var position = options.offset
-                    while position < end, !cancelled.isSet {
-                        let piece = try handle.read(upToCount: Int(min(UInt64(chunk), end - position))) ?? Data()
-                        if piece.isEmpty { break }
-                        position += UInt64(piece.count)
-                        continuation.yield(piece)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: Self.translate(error, path))
-                }
-            }
-            thread.start()
-            continuation.onTermination = { _ in cancelled.set() }
-        }
-        return FileReadStream(size: found.size, mtimeNs: found.mtimeNs, offset: options.offset, data: data, cancel: { cancelled.set() })
+        try handle.seek(toOffset: options.offset)
+        let reader = ChunkReader(handle: handle, position: options.offset, end: end, chunk: max(4096, options.chunk))
+        let data = AsyncThrowingStream<Data, Error>(unfolding: {
+            do { return try reader.next() } catch { throw Self.translate(error, path) }
+        })
+        return FileReadStream(size: found.size, mtimeNs: found.mtimeNs, offset: options.offset, data: data, cancel: { reader.close() })
     }
 
     public func write(_ path: String, options: FileWriteOptions, source: FileDataSource,
@@ -294,23 +277,8 @@ public struct LocalFileSource: FileDataSource {
     public func open(at offset: UInt64) async throws -> AsyncThrowingStream<Data, Error> {
         guard let handle = FileHandle(forReadingAtPath: path) else { throw LocalFileBackend.posixError(path) }
         try handle.seek(toOffset: offset)
-        let chunk = chunk
-        return AsyncThrowingStream { continuation in
-            let thread = Thread {
-                defer { try? handle.close() }
-                do {
-                    while true {
-                        let piece = try handle.read(upToCount: chunk) ?? Data()
-                        if piece.isEmpty { break }
-                        continuation.yield(piece)
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            thread.start()
-        }
+        let reader = ChunkReader(handle: handle, position: offset, end: nil, chunk: chunk)
+        return AsyncThrowingStream(unfolding: { try reader.next() })
     }
 }
 
@@ -318,10 +286,48 @@ public struct LocalFileSource: FileDataSource {
 private func posixStat(_ path: String, _ info: UnsafeMutablePointer<Darwin.stat>) -> Int32 { stat(path, info) }
 private func posixStatfs(_ path: String, _ info: UnsafeMutablePointer<Darwin.statfs>) -> Int32 { statfs(path, info) }
 
-/// A thread-safe one-way switch.
-final class Flag: @unchecked Sendable {
+/// Reads a file a chunk at a time, only when the consumer asks, so nothing piles up in memory
+/// while a slow destination catches up.
+final class ChunkReader: @unchecked Sendable {
     private let lock = NSLock()
-    private var value = false
-    var isSet: Bool { lock.withLock { value } }
-    func set() { lock.withLock { value = true } }
+    private var handle: FileHandle?
+    private var position: UInt64
+    private let end: UInt64?
+    private let chunk: Int
+    private var cancelled = false
+
+    init(handle: FileHandle, position: UInt64, end: UInt64?, chunk: Int) {
+        self.handle = handle
+        self.position = position
+        self.end = end
+        self.chunk = chunk
+    }
+
+    /// The next chunk, or nil at the end. After `close()` it throws CancellationError, as a cancelled
+    /// clothod read does.
+    func next() throws -> Data? {
+        try lock.withLock {
+            if cancelled { throw CancellationError() }
+            guard let handle else { return nil }
+            let count = end.map { Int(min(UInt64(chunk), $0 - min($0, position))) } ?? chunk
+            let piece = count > 0 ? try handle.read(upToCount: count) ?? Data() : Data()
+            if piece.isEmpty {
+                try? handle.close()
+                self.handle = nil
+                return nil
+            }
+            position += UInt64(piece.count)
+            return piece
+        }
+    }
+
+    func close() {
+        lock.withLock {
+            cancelled = handle != nil
+            try? handle?.close()
+            handle = nil
+        }
+    }
+
+    deinit { try? handle?.close() }
 }
