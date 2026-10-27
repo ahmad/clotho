@@ -138,6 +138,10 @@ struct Agent {
     session: Option<String>,
     /// The agent's process (group), watched to clear the agent when it exits.
     pid: Option<u32>,
+    /// `state` is detection's guess from output alone (busy = running, quiet = waiting), not
+    /// a hook's report or Claude's title. A guess never raises or clears `attention`: opening
+    /// a pane resizes it, and the app's redraw would read as "running".
+    guess: bool,
 }
 
 const AGENT_STATES: [&str; 5] = ["starting", "running", "waiting", "done", "error"];
@@ -1002,6 +1006,7 @@ impl Daemon {
                         if a.state != "waiting" {
                             a.state = "waiting".into();
                             a.message = None;
+                            a.guess = false;
                             self.set_agent(p, Some(a.clone()));
                         }
                         a.attention = true;
@@ -1132,11 +1137,8 @@ impl Daemon {
     fn input(&self, client: u64, pane: u64, data: Vec<u8>) {
         let Some(p) = self.pane(pane) else { return };
         let mut p = p.lock().unwrap();
-        if p.agent.as_ref().is_some_and(|a| a.attention) {
-            let mut a = p.agent.clone().unwrap();
-            a.attention = false;
-            self.set_agent(&mut p, Some(a));
-        }
+        // Input never clears an agent's attention: opening a pane alone sends focus reports and
+        // mouse motion. A reply makes the agent work again, and that clears it (set_agent).
         if p.last_input_client != Some(client) {
             p.last_input_client = Some(client);
             self.apply_viewport_policy(&mut p, client);
@@ -1156,12 +1158,16 @@ impl Daemon {
             // A hook taking over from detection is news even in the same state: detection often
             // reads a quiet agent as waiting before its hook says it waits for permission.
             let hook_took_over = a.source == "hook" && old.as_ref().is_some_and(|o| o.source != "hook");
+            let had = old.as_ref().is_some_and(|o| o.attention);
             if changed || hook_took_over {
-                // Only exact signals ask for the user: a hook's report, or a BEL (handled by the
-                // caller). Detection's "quiet, so waiting" is a guess; it must not notify.
-                let exact = a.source == "hook" && matches!(a.state.as_str(), "waiting" | "done" | "error");
-                // A BEL may already have raised it; a takeover never lowers it.
-                a.attention = exact || (!changed && old.as_ref().is_some_and(|o| o.attention));
+                // Raised only by exact signals: a hook's report of waiting/done/error, or a BEL
+                // (handled by the caller). Cleared only by the agent working again, told by a
+                // hook or by Claude's title, never by a guess from output (or by input: the
+                // user looking at a pane sends focus and mouse reports; see `input`). Also
+                // cleared by agent.ack and when the agent goes away.
+                let raise = a.source == "hook" && matches!(a.state.as_str(), "waiting" | "done" | "error");
+                let working = !a.guess && matches!(a.state.as_str(), "running" | "starting");
+                a.attention = raise || (had && !working);
             }
             a.since = match &old {
                 Some(o) if !changed => o.since,
@@ -1213,19 +1219,21 @@ impl Daemon {
                     attention: false,
                     session: None,
                     pid: fg.as_ref().map(|f| f.pgrp),
+                    guess: false,
                 });
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
                     // Claude Code's title says it best: a spinner glyph while it works, ✳ when
                     // idle. Otherwise quiet after activity reads as waiting (a BEL also sets it).
-                    let state = match (kind, title_activity(p.title.as_deref())) {
-                        ("claude", Some(working)) => if working { "running" } else { "waiting" },
-                        _ => if busy { "running" } else { "waiting" },
+                    let (state, guess) = match (kind, title_activity(p.title.as_deref())) {
+                        ("claude", Some(working)) => (if working { "running" } else { "waiting" }, false),
+                        _ => (if busy { "running" } else { "waiting" }, true),
                     };
                     if a.state != state {
                         a.state = state.into();
                         a.message = None;
                     }
+                    a.guess = guess;
                 }
                 self.set_agent(p, Some(a));
             }
@@ -1263,6 +1271,7 @@ impl Daemon {
             attention: prev.as_ref().map(|a| a.attention).unwrap_or(false),
             session: p.get("session").and_then(Value::as_str).map(String::from).or(prev.and_then(|a| a.session)),
             pid,
+            guess: false,
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))

@@ -823,7 +823,7 @@ async fn agent_hook_reports_attention_and_clearing() {
     // A stand-in agent: reports like hooks would, from inside its own process group.
     let b = test_bin();
     let script = format!(
-        r#"sh -c '"{b}" report running --agent claude --session s1; sleep 0.3; "{b}" report waiting --message "May I run ls?"; read x; "{b}" report done; sleep 60'"#
+        r#"sh -c '"{b}" report running --agent claude --session s1; sleep 0.3; "{b}" report waiting --message "May I run ls?"; read x; "{b}" report running; sleep 0.3; "{b}" report done; sleep 60'"#
     );
     c.input(p, format!("{script}\r").as_bytes());
 
@@ -842,17 +842,28 @@ async fn agent_hook_reports_attention_and_clearing() {
     assert!(states.contains(&(Value::Null, json!("running"))), "{ev:?}");
     assert!(states.contains(&(json!("running"), json!("waiting"))), "{ev:?}");
 
-    // Acknowledging clears attention (state unchanged).
-    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    // Looking at the pane is not resolving it: what an app sends when the pane is opened
+    // (focus-in, SGR mouse motion) and other input, by frame or by pane.input, leave it set.
+    c.input(p, b"\x1b[I");
+    c.input(p, b"\x1b[<35;10;5M\x1b[<35;11;5M");
+    c.request("pane.input", json!({"pane": p, "data": "\x1b[O"})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
     let a = pane_agent(&c, p).await;
-    assert_eq!((a["state"].clone(), a["attention"].clone()), (json!("waiting"), json!(false)));
+    assert_eq!((a["state"].clone(), a["attention"].clone()), (json!("waiting"), json!(true)), "input must not clear attention");
 
-    // Answering (input) moves it on; `done` sets attention again; input clears it.
+    // Answering makes the agent work again (its hook reports running), and that clears it.
     c.input(p, b"y\r");
+    let a = wait_agent(&c, p, "running again", |a| a["state"] == "running").await;
+    assert_eq!(a["attention"], false, "working again clears attention");
+    // `done` raises it again; input leaves it; acknowledging clears it (state unchanged).
     let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
     assert_eq!(a["attention"], true);
-    c.input(p, b"\r");
-    wait_agent(&c, p, "attention cleared by input", |a| a["attention"] == false).await;
+    c.input(p, b"\x1b[I");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(pane_agent(&c, p).await["attention"], true);
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["state"].clone(), a["attention"].clone()), (json!("done"), json!(false)));
 
     // The agent exits: the field clears and an `agent` event says so.
     agent_events(&mut c);
@@ -947,6 +958,31 @@ async fn detects_an_agent_without_hooks() {
     assert_eq!(a["attention"], false, "quiet output alone raises no attention");
     // A terminal bell from the agent does.
     wait_agent(&c, p, "attention after BEL", |a| a["attention"] == true && a["state"] == "waiting").await;
+    c.input(p, b"\x03");
+    wait_agent(&c, p, "cleared when it exits", |a| a.is_null()).await;
+}
+
+/// Detection without hooks guesses from output: busy is running, quiet is waiting. Opening a
+/// pane resizes it and the app redraws, which reads as "running". A guess must never clear the
+/// attention a BEL raised; only acknowledging it (or the agent leaving) does.
+#[tokio::test]
+async fn a_detected_agents_output_guess_never_clears_attention() {
+    let env = Env::new();
+    let c = env.client().await;
+    let p = new_pane(&c, sh()).await;
+    let fake = env.dir.path().join("codex");
+    std::fs::write(&fake, "#!/bin/sh\nsleep 3; printf '\\007'; read x; i=0; while [ $i -lt 40 ]; do echo redraw-$i; i=$((i+1)); done; sleep \"$@\"\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    c.input(p, format!("{} 60\r", fake.display()).as_bytes());
+    wait_agent(&c, p, "attention after BEL", |a| a["kind"] == "codex" && a["attention"] == true).await;
+    // The redraw: a burst of output, guessed as running, then quiet again.
+    c.input(p, b"\r");
+    let a = wait_agent(&c, p, "guessed running", |a| a["state"] == "running").await;
+    assert_eq!(a["attention"], true, "a guess doesn't clear attention: {a}");
+    let a = wait_agent(&c, p, "guessed waiting", |a| a["state"] == "waiting").await;
+    assert_eq!(a["attention"], true, "{a}");
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    assert_eq!(pane_agent(&c, p).await["attention"], false);
     c.input(p, b"\x03");
     wait_agent(&c, p, "cleared when it exits", |a| a.is_null()).await;
 }
