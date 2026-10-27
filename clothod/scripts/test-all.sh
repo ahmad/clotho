@@ -56,11 +56,12 @@ done
 
 step "cleanliness"
 checked=""
-# Ours: clothod processes serving /tmp/clt* dirs, the dirs themselves, and login units of the
+# Ours: clothod processes serving /tmp/clt* dirs, the dirs themselves ("/tmp/": on macOS /tmp is
+# a symlink, which find does not follow without it), and login units of the
 # e2e tests (launchd labels / systemd runtime units named clt-test-*).
 # A check that couldn't run is UNCHECKED, a failure: never read silence as clean.
 if ps_out=$(target/debug/clothod ps); then
-    left=$(echo "$ps_out" | grep "/tmp/clt" ; find /tmp -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test)
+    left=$(echo "$ps_out" | grep "/tmp/clt" ; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test)
     [ -n "$left" ] && { echo "$left"; fail "leftovers on this Mac"; } || echo "this Mac: clean"
 else
     echo "this Mac: UNCHECKED"; fail "cleanliness unchecked on this Mac (clothod ps failed)"
@@ -69,7 +70,7 @@ for h in $LINUX_HOST $REMOTE_HOSTS; do
     case " $checked " in *" $h "*) continue ;; esac
     checked="$checked $h"
     # The marker proves the remote commands ran; ssh failing leaves it out.
-    out=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; find /tmp -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test; ls /run/user/$(id -u)/systemd/user 2>/dev/null | grep clt-test; echo CLOTHO-CHECKED')
+    out=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test; ls /run/user/$(id -u)/systemd/user 2>/dev/null | grep clt-test; echo CLOTHO-CHECKED')
     case "$out" in
     *CLOTHO-CHECKED*) ;;
     *) echo "$h: UNCHECKED"; fail "cleanliness unchecked on $h (ssh failed)"; continue ;;

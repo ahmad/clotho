@@ -118,6 +118,36 @@ impl Drop for Env {
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
         }
+        // Every process of this instance must be gone before the temp dir is: a daemon this
+        // test didn't start itself (after an upgrade, or a login unit's) would otherwise heal
+        // its socket by recreating the dir, and leave an empty /tmp/clt* behind when it ends.
+        let dir = self.path().to_string_lossy().into_owned();
+        let ours = || -> Vec<u32> {
+            clotho_proto::platform::own_processes()
+                .into_iter()
+                .filter(|p| p.pid != std::process::id() && p.args.windows(2).any(|w| w[0] == "--runtime-dir" && w[1] == dir))
+                .map(|p| p.pid)
+                .collect()
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut signal = libc::SIGTERM;
+        loop {
+            let left = ours();
+            if left.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                signal = libc::SIGKILL;
+            }
+            for pid in &left {
+                unsafe { libc::kill(*pid as i32, signal) };
+            }
+            if signal == libc::SIGKILL {
+                std::thread::sleep(Duration::from_millis(100));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
