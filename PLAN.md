@@ -231,3 +231,7 @@ is verified; this is a standing go for this round.
 - Sidebar (user request): a subtle outline "Create Workspace" button at the bottom of each machine's
   workspace list replaces the header "+". A "Manage Machines…" footer pinned to the bottom of the
   sidebar opens a panel to add, edit and remove machines. Removing only forgets the machine.
+- Website (user decision, 2026-10-27): a landing page at clotho.app is built by a separate session
+  in ~/Projects/clotho.app. Its CTA is "Join the waitlist"; the tagline is still open. It must
+  never name machines, the repo, the relay URL, bundle or team ids, or "Session" (use
+  Workspace/Tab/Pane).
