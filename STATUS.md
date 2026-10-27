@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-27)
+# Status and handoff (2026-10-27, updated after clothod 0.1.6)
 
 Development moved from this Mac's sessions to devbox. Everything from the old agents (clothod-80, mac-d8,
 ios-c2 and the orchestrator) is committed. CLAUDE.md has the rules. This file has where things stand and
@@ -6,18 +6,30 @@ what the old agents learned. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.5** runs on all three machines: this Mac (`macbook`), devbox and imac.
-  - Each machine has one version dir, only the user's instance and the app's bridges, and no
+- **clothod 0.1.6** runs on all three machines: this Mac (`macbook`), devbox and imac. It was
+  released and upgraded in place on 2026-10-27 at the user's request; the holders kept their pids.
+  - Each machine has one version dir (0.1.6), only the user's instance and the app's bridges, and no
     /tmp/clt* dirs.
-  - The holders kept their pids through the in-place upgrade.
-- **The Mac app** in `~/Applications/Clotho.app` bundles clothod 0.1.5.
-- **TestFlight:** build 202610262314 is processed and in the Personal group. It was built from
-  10e9f4d and bundles clothod **0.1.4**, so a new upload is needed to bundle 0.1.5, and that needs the
-  user's go. 202610261658 is expired.
+  - New in 0.1.6: the `pane.clipboard` event forwards OSC 52 copies to clients. Panes can never read
+    the clipboard.
+- **The Mac app** in `~/Applications/Clotho.app` bundles clothod 0.1.6 and has the following:
+  - Shift+Return sends ESC CR (a newline in Claude Code and Codex).
+  - Cmd+Left, Cmd+Right and Cmd+Delete send ^A, ^E and ^U.
+  - Rename commits without flicker.
+  - Option-drag and Shift-drag select while mouse reporting is on.
+  - OSC 52 copies reach the clipboard.
+  The user hasn't yet tested these by hand.
+- **TestFlight:** a build with 0.1.6 and iOS clipboard support is ready to upload. The user runs
+  `~/Builds/clotho-clothod/ios/scripts/testflight.sh` at the Mac. 202610262314 (0.1.4) is the
+  latest uploaded build.
 - **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets, APNS_KEY and
   HANDLE_KEYS, exist in Cloudflare only.
 - **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes, and only when the
   user asks.
+- **The Mac can't SSH to imac under clotho-mac.** imac only authorizes the Mac's
+  id_ed25519_clotho key, which the Mac's ssh config uses only for GitHub. Run the imac suite from
+  devbox. test-all.sh now reports such hosts as UNCHECKED and fails the run. Fixing the keys is the
+  user's call.
 
 ## Waiting on the user
 
