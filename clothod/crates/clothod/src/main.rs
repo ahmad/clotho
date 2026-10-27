@@ -185,6 +185,24 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
         }
         return Ok(());
     }
+    // An upgrade is switching this instance to another build: its own `start` comes through
+    // (CLOTHOD_UPGRADING), anything else (a client reconnecting, a login unit) waits for the
+    // daemon it brings up instead of starting the build being replaced.
+    if std::env::var_os(UPGRADING_ENV).is_none() && upgrade_running(&dir) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && upgrade_running(&dir) {
+            if connect(&dir).await.is_ok() {
+                if !quiet {
+                    println!("clothod already running, just upgraded ({})", clothod::daemon::socket_path(&dir).display());
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if connect(&dir).await.is_ok() {
+            return Ok(());
+        }
+    }
     // Running, but its socket was deleted (temp cleaner): have it rebind instead of starting a
     // second daemon.
     if let Some(pid) = clotho_proto::listen::live_instance(&platform::log_dir(&dir).join("clothod.live")) {
@@ -531,6 +549,21 @@ async fn running_builds(dir: &std::path::Path) -> Option<(PathBuf, String, Strin
     ))
 }
 
+/// Set for the `start` an upgrade runs itself, which must not wait for its own upgrade.
+const UPGRADING_ENV: &str = "CLOTHOD_UPGRADING";
+
+fn upgrade_lock_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("upgrade.lock")
+}
+
+/// Whether an upgrade of this instance is in progress: it holds `upgrade.lock` (released when it
+/// exits, also if it crashes).
+fn upgrade_running(dir: &std::path::Path) -> bool {
+    std::fs::File::open(upgrade_lock_path(dir))
+        .map(|f| nix::fcntl::Flock::lock(f, nix::fcntl::FlockArg::LockSharedNonblock).is_err())
+        .unwrap_or(false)
+}
+
 /// Make `exe` the running logic process (its start upgrades a capable holder to it), retrying
 /// if something else revives another build. Returns whether the holder runs `exe` too.
 async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool> {
@@ -541,7 +574,10 @@ async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool>
     let mut attempt = 0;
     while attempt < 5 && std::time::Instant::now() < deadline {
         match running_builds(dir).await {
-            Some((cur, _, holder, _)) if same_file(&cur, exe) => {
+            // By build, not path: a serve started through `current` reports that symlink as its
+            // executable on macOS, and `current` may already point at `exe` while the old build
+            // still runs.
+            Some((_, serve, holder, _)) if serve == want => {
                 // Started by us (or already right): the holder followed unless it can't.
                 return Ok(holder == want);
             }
@@ -553,7 +589,13 @@ async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool>
             None => {}
         }
         // Start the new build right away to keep the window for a racing old `start` small.
-        let status = std::process::Command::new(exe).arg("start").arg("--runtime-dir").arg(dir).stdout(std::process::Stdio::null()).status()?;
+        let status = std::process::Command::new(exe)
+            .arg("start")
+            .arg("--runtime-dir")
+            .arg(dir)
+            .env(UPGRADING_ENV, std::process::id().to_string())
+            .stdout(std::process::Stdio::null())
+            .status()?;
         if status.code() == Some(clothod::daemon::EXIT_INCOMPATIBLE) {
             std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
         }
@@ -571,7 +613,16 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
     let had = installed_versions(&base);
     let old_current = std::fs::read_link(base.join("current")).ok();
     let (id, target) = place_self(&base)?;
-    let before = running_builds(&dir).await;
+    // The old serve's executable, resolved now: it may be `current`, which moves below.
+    let before = running_builds(&dir).await.map(|(exe, ..)| exe.canonicalize().unwrap_or(exe));
+    // Held until this process exits: `start` from anyone else waits for the new daemon rather
+    // than bring back the old one while serve is switching. A second upgrade waits its turn.
+    platform::ensure_private_dir(&dir)?;
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(upgrade_lock_path(&dir))?;
+    let _upgrade_lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusive).map_err(|(_, e)| e)?;
+    // `current` first: a client or login unit that restarts the daemon through it (and doesn't
+    // know the lock: older builds) gets the new build. The rollback below restores it.
+    point_current_at(&base, &id)?;
 
     let result: Result<bool> = async {
         let holder_followed = switch_to(&dir, &target).await?;
@@ -583,14 +634,14 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let after = loop {
             let after = running_builds(&dir).await;
-            let settled = after.as_ref().is_some_and(|a| !same_file(&a.0, &target) || !a.3 || a.2 == id);
+            let settled = after.as_ref().is_some_and(|a| a.1 != id || !a.3 || a.2 == id);
             if settled || std::time::Instant::now() >= deadline {
                 break after;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         };
         let after = after.context("daemon not reachable after the switch")?;
-        anyhow::ensure!(same_file(&after.0, &target), "serve runs {}, not {}", after.0.display(), target.display());
+        anyhow::ensure!(after.1 == id, "serve runs {} ({}), not {id}", after.1, after.0.display());
         if after.3 {
             anyhow::ensure!(after.2 == id, "holder runs {}, not {id}", after.2);
         }
@@ -616,7 +667,7 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
         Err(e) => {
             // Roll back: the old serve again (its start moves a capable holder back), old
             // `current`, and the new build gone unless it was there before.
-            if let Some((old_exe, ..)) = &before {
+            if let Some(old_exe) = &before {
                 if old_exe.exists() && !same_file(old_exe, &target) {
                     let _ = switch_to(&dir, old_exe).await;
                 }

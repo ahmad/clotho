@@ -143,10 +143,16 @@ instance (the default runtime dir).
    version can't be ordered): `<bundle>/clothod upgrade`. All or nothing:
    - It installs the new build next to the old one and switches the logic process. The new
      serve upgrades the holder in place, so shells, screens and the same pids are kept.
-   - It verifies both run the new build, then makes it the only installed version and points
-     `current` at it. It prints `running <path>`.
-   - On any failure it goes back to the old build (serve, and holder in place), removes the new
-     one and exits non-zero with `upgrade ... failed, rolled back: <reason>`.
+   - It points `current` at the new build *before* it stops the old serve, so a client that
+     restarts the daemon through `current` while it switches gets the new build.
+   - While it runs it holds `upgrade.lock` in the runtime dir. A `start` (and so a `bridge`)
+     from anyone else during that time waits up to 60 s for the daemon the upgrade brings up,
+     and exits 0 once it answers, instead of starting a daemon of its own. Clients therefore
+     need nothing special: reconnecting with `current/clothod start` right away is fine.
+   - It verifies both run the new build, then makes it the only installed version. It prints
+     `running <path>`.
+   - On any failure it goes back to the old build (serve, and holder in place, and `current`),
+     removes the new one and exits non-zero with `upgrade ... failed, rolled back: <reason>`.
    - A legacy holder stays as it is (`holder_outdated`), and stderr says so.
    - Exit 3 means the holder is incompatible (only `shutdown` + `start` fixes that).
 4. **Check:** `<base>/current/clothod status --print-builds` prints `serve=<build>`,

@@ -1285,7 +1285,8 @@ async fn upgrade_switches_builds_despite_an_old_restarter() {
         })
     };
 
-    let v2 = upgraded_copy(&env);
+    // Another build (other bytes, so another id): upgrades are judged by build, not path.
+    let (v2, id2) = other_build(&env, "v2");
     let base = env.dir.path().join("bin");
     let out = Command::new(&v2)
         .arg("upgrade")
@@ -1306,9 +1307,84 @@ async fn upgrade_switches_builds_despite_an_old_restarter() {
     let c = env.client().await;
     let exe = std::path::Path::new(c.hello["exe"].as_str().unwrap()).canonicalize().unwrap();
     assert_eq!(exe, std::path::Path::new(&installed).canonicalize().unwrap(), "the upgraded build runs");
+    assert_eq!((c.hello["build"].clone(), c.hello["holder"]["build"].clone()), (json!(id2), json!(id2)));
     assert_eq!(c.hello["instance"], instance, "same holder");
     c.input(p, b"echo $U\r");
     wait_for_text(&c, p, T, |l| has_line(l, "kept-9")).await.unwrap();
+}
+
+/// What the Mac app does when its connection drops: `<install dir>/current/clothod start`, about
+/// a second later. On macbook this restarted the old build in the middle of both the 0.1.6 and
+/// the 0.1.7 upgrade, which then needed a second attempt. An upgrade must win the first time.
+#[tokio::test]
+async fn upgrade_is_not_undone_by_a_client_restarting_current() {
+    let mut env = Env::empty();
+    let base = env.dir.path().join("bin");
+    // The machine's install: the old build, and `current` pointing at it.
+    let (v1, id1) = other_build(&env, "v1");
+    let out = clothod_cmd(&env, &v1, &["install"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let current = base.join("current/clothod");
+    env.start_with(&current.to_string_lossy(), &[("CLOTHOD_INSTALL_DIR", &base.to_string_lossy())]);
+    let c = env.client().await;
+    assert_eq!(c.hello["build"], id1);
+    let (p, shell) = live_shell(&c).await;
+    let holder = holder_pid(&env);
+    drop(c);
+    env.daemon.take();
+
+    // The client: whenever the daemon is unreachable, start it through `current`, at once.
+    // Stopped by its guard even when an assert fails: left running, it would recreate the test's
+    // dir after it is gone.
+    struct Racer(std::sync::Arc<std::sync::atomic::AtomicBool>, Option<std::thread::JoinHandle<()>>);
+    impl Drop for Racer {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(t) = self.1.take() {
+                let _ = t.join();
+            }
+        }
+    }
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let client = {
+        let (stop, starts, dir, state, current, base) = (stop.clone(), starts.clone(), env.path(), env.state(), current.clone(), base.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if std::os::unix::net::UnixStream::connect(dir.join("clothod.sock")).is_err() {
+                    let o = Command::new(&current)
+                        .arg("start")
+                        .arg("--runtime-dir")
+                        .arg(&dir)
+                        .env("CLOTHOD_STATE_DIR", &state)
+                        .env("CLOTHOD_INSTALL_DIR", &base)
+                        .output()
+                        .unwrap();
+                    starts.lock().unwrap().push(format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let racer = Racer(stop.clone(), Some(client));
+
+    // Several upgrades in a row: the race is a matter of timing, and each round is a chance.
+    let mut last = String::new();
+    for round in 2..8 {
+        let (v, id) = other_build(&env, &format!("v{round}"));
+        let out = clothod_cmd(&env, &v, &["upgrade"]);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "round {round}: {stderr}");
+        assert!(!stderr.contains("attempt 2"), "round {round}: the client restarted the old build mid-upgrade: {stderr}");
+        let c = env.client().await;
+        assert_eq!((c.hello["build"].clone(), c.hello["holder"]["build"].clone()), (json!(id), json!(id)), "round {round}");
+        assert_eq!(holder_pid(&env), holder);
+        assert_shell_alive(&c, p, &shell).await;
+        assert_eq!(versions(&env), vec![id.clone(), "current".to_string()]);
+        last = id;
+    }
+    drop(racer);
+    assert!(!last.is_empty() && last != id1);
 }
 
 /// Leftovers of earlier runs killed before Drop could clean up: clothod processes of ours
@@ -2377,7 +2453,12 @@ async fn login_unit_adopts_the_daemon_never_fights_upgrades_and_uninstall_keeps_
     drop(c);
     let out = unit.cmd(&env, &test_bin(), &["stop"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(serve_pids(&env).is_empty());
+    // `stop` returns once the socket is gone; the process exits a moment later.
+    let deadline = Instant::now() + T;
+    while !serve_pids(&env).is_empty() {
+        assert!(Instant::now() < deadline, "serve still running after stop: {:?}", serve_pids(&env));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     unit.trigger();
     let c = wait_serve(&env, "the unit to start the daemon", |h| h["build"] == json!(id2)).await;
     assert_eq!(holder_pid(&env), holder);
