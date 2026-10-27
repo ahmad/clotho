@@ -87,7 +87,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
 ← {"id": 1, "result": {
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
-                  "pane.clipboard", "settings", "service"],
+                  "pane.clipboard", "settings", "service", "agent.mute"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -105,7 +105,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `agent.report.pid`, `ping`, `split.set_ratio`, `fs` (Files, below), `push` (`push.*`
   requests, docs/push.md), `pane.clipboard` (OSC 52 copies, see
   [Clipboard](#clipboard-osc-52)), `settings` (`settings.get` and `settings.set`, see
-  [Settings](#settings)) and `service` (`service.*`, see [Start at login](#start-at-login)).
+  [Settings](#settings)), `service` (`service.*`, see [Start at login](#start-at-login)) and
+  `agent.mute` (the agent's `muted` field and the `agent.mute` request, see [Agents](#agents)).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -291,6 +292,7 @@ frame.
 
 | `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?` | `{}`; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
 | `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it) |
+| `agent.mute` | `pane`, `muted` (bool) | `{"agent": <agent>}`: mutes or unmutes the pane's agent; see [Agents](#agents). `not_found` if the pane has no agent |
 
 File access (`fs.*`) is described in [Files](#files).
 
@@ -432,7 +434,7 @@ and otherwise:
 
 ```json
 {"kind": "claude", "state": "waiting", "source": "hook", "message": "Claude needs your permission to use Bash",
- "since": 1761512345.123, "attention": true, "session": "3f1c..."}
+ "since": 1761512345.123, "attention": true, "muted": false, "session": "3f1c..."}
 ```
 
 | field | |
@@ -443,6 +445,7 @@ and otherwise:
 | `message` | what the agent says, or `null` |
 | `since` | when `state` last changed, in **unix seconds as a float** |
 | `attention` | the agent needs the user. **Raised** only by exact signals: a hook-reported transition into `waiting`, `done` or `error` (including a hook report that takes over from detection in the same state, e.g. detection guessed `waiting` and then the hook reports `waiting`; that also sends an `agent` event whose `from` equals the state), or a terminal bell (BEL) from a detected agent. **Cleared** only when the agent works again (a transition into `running` or `starting` reported by a hook, or shown by Claude Code's title spinner), by `agent.ack` (the user resolved it), or when the agent goes away. Input never clears it: opening a pane makes a client send focus and mouse reports, and looking is not resolving. A typed reply clears it through the agent going back to work. Detection's guesses from output alone (busy read as `running`, quiet as `waiting`) neither raise nor clear it, since an app's redraw after a resize would read as work. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions** |
+| `muted` | the user muted this agent (`agent.mute`). While muted, nothing raises its `attention` (hook `waiting`/`done`/`error`, BEL), so it never notifies or pushes; its `state` still updates as usual. Muting clears `attention`. It lasts for this agent: through restarts and upgrades of the daemon while the agent's process lives, and until `agent.mute` with `muted: false`. It is gone when the agent goes away (session end, exit), and a new agent in the pane starts unmuted. Owned by the daemon, like `attention`: muting on one device mutes it everywhere. Absent (older daemons) means false. Feature flag: `agent.mute` |
 | `session` | the agent's own session id, if it reports one |
 
 Changes reach clients in two ways. Every change to the field comes as a `pane` event, because

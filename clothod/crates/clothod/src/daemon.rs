@@ -142,6 +142,26 @@ struct Agent {
     /// a hook's report or Claude's title. A guess never raises or clears `attention`: opening
     /// a pane resizes it, and the app's redraw would read as "running".
     guess: bool,
+    /// The user muted this agent (`agent.mute`): nothing raises its attention (or pushes)
+    /// until they unmute it. Lasts for this agent; a new agent in the pane starts unmuted.
+    muted: bool,
+}
+
+impl Agent {
+    /// Whether `other` is the same agent (session) as this one, so that what the user set on
+    /// it carries over: same kind, and the same process or the same hook session.
+    /// What both know decides: the process if both have one, else the hook session, else
+    /// (nothing to tell them apart) the kind alone.
+    fn same_as(&self, kind: &str, pid: Option<u32>, session: Option<&str>) -> bool {
+        if self.kind != kind {
+            return false;
+        }
+        match ((self.pid, pid), (self.session.as_deref(), session)) {
+            ((Some(a), Some(b)), _) => a == b,
+            (_, (Some(a), Some(b))) => a == b,
+            _ => true,
+        }
+    }
 }
 
 const AGENT_STATES: [&str; 5] = ["starting", "running", "waiting", "done", "error"];
@@ -186,6 +206,7 @@ impl Agent {
             "message": self.message,
             "since": self.since,
             "attention": self.attention,
+            "muted": self.muted,
             "session": self.session,
         })
     }
@@ -199,6 +220,9 @@ struct Pane {
     cols: u16,
     rows: u16,
     vt: Vt,
+    /// After a restart: the muted agent this pane had (kind, pid, session), applied when that
+    /// same agent shows up again.
+    muted_agent: Option<(String, Option<u32>, Option<String>)>,
     /// Its scrollback was asked for at spawn (`scrollback_lines`); otherwise it follows the
     /// daemon's setting, also when that changes.
     own_scrollback: bool,
@@ -227,6 +251,7 @@ impl Pane {
             cols: info.cols,
             rows: info.rows,
             vt: Vt::with_scrollback(info.cols, info.rows, scrollback),
+            muted_agent: None,
             own_scrollback,
             vt_seq: info.seq_start,
             ring: {
@@ -777,7 +802,10 @@ impl Daemon {
             .iter()
             .map(|(id, p)| {
                 let p = p.lock().unwrap();
-                (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback}))
+                let muted = p.agent.as_ref().filter(|a| a.muted).map(|a| json!({"kind": a.kind, "pid": a.pid, "session": a.session}))
+                    .or_else(|| p.muted_agent.as_ref().map(|(k, pid, s)| json!({"kind": k, "pid": pid, "session": s})));
+                (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback,
+                    "agent_muted": muted}))
             })
             .collect();
         let state = json!({"model": model, "meta": meta});
@@ -796,6 +824,15 @@ impl Daemon {
                 }
                 if p.cwd.is_none() {
                     p.cwd = m.get("cwd").and_then(Value::as_str).map(String::from);
+                }
+                if let Some(a) = m.get("agent_muted").filter(|a| a.is_object()) {
+                    if let Some(kind) = a.get("kind").and_then(Value::as_str) {
+                        let pid = a.get("pid").and_then(Value::as_u64).map(|v| v as u32);
+                        // Only while that process lives: otherwise it's gone, and so is the mute.
+                        if pid.is_none_or(platform::process_alive) {
+                            p.muted_agent = Some((kind.into(), pid, a.get("session").and_then(Value::as_str).map(String::from)));
+                        }
+                    }
                 }
                 // Recovery built the VT with the default; a pane spawned with its own keeps it.
                 if let Some(n) = m.get("scrollback_lines").and_then(Value::as_u64) {
@@ -1154,6 +1191,12 @@ impl Daemon {
         let old = p.agent.clone();
         let from = old.as_ref().map(|a| a.state.clone());
         if let Some(a) = new.as_mut() {
+            // Muting belongs to this agent: kept while it's the same one, restored after a
+            // restart when it shows up again, gone with a new one.
+            let restored = p.muted_agent.take().is_some_and(|(kind, pid, session)| {
+                Agent { kind, pid, session, ..a.clone() }.same_as(&a.kind, a.pid, a.session.as_deref())
+            });
+            a.muted = restored || old.as_ref().is_some_and(|o| o.muted && o.same_as(&a.kind, a.pid, a.session.as_deref()));
             let changed = old.as_ref().map(|o| &o.state) != Some(&a.state);
             // A hook taking over from detection is news even in the same state: detection often
             // reads a quiet agent as waiting before its hook says it waits for permission.
@@ -1168,6 +1211,10 @@ impl Daemon {
                 let raise = a.source == "hook" && matches!(a.state.as_str(), "waiting" | "done" | "error");
                 let working = !a.guess && matches!(a.state.as_str(), "running" | "starting");
                 a.attention = raise || (had && !working);
+            }
+            if a.muted {
+                // Nothing raises a muted agent's attention (hooks, BEL), so it never pushes.
+                a.attention = false;
             }
             a.since = match &old {
                 Some(o) if !changed => o.since,
@@ -1189,6 +1236,25 @@ impl Daemon {
         if transition {
             self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": from}));
         }
+    }
+
+    /// `agent.mute`: set or clear the pane's agent's `muted`. Muting clears attention.
+    fn mute(&self, p: &mut Pane, on: bool) {
+        let Some(old) = p.agent.clone() else { return };
+        if old.muted == on {
+            return;
+        }
+        let mut a = old.clone();
+        a.muted = on;
+        if on {
+            a.attention = false;
+        }
+        p.agent = Some(a);
+        if old.attention && on {
+            self.push.attention(p.id, false, None);
+        }
+        self.pane_event(p);
+        self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": old.state}));
     }
 
     /// Detection (no hooks): who is in the foreground of the pane's terminal, and is it busy.
@@ -1220,6 +1286,7 @@ impl Daemon {
                     session: None,
                     pid: fg.as_ref().map(|f| f.pgrp),
                     guess: false,
+                    muted: false,
                 });
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
@@ -1272,6 +1339,7 @@ impl Daemon {
             session: p.get("session").and_then(Value::as_str).map(String::from).or(prev.and_then(|a| a.session)),
             pid,
             guess: false,
+            muted: false,
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))
@@ -1451,7 +1519,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1484,6 +1552,22 @@ impl Daemon {
                     self.set_agent(&mut pp, Some(a));
                 }
                 Ok(json!({}))
+            }
+            "agent.mute" => {
+                let pane = param_u64(p, "pane")?;
+                let on = p.get("muted").and_then(Value::as_bool).ok_or_else(|| err("bad_request", "muted must be true or false"))?;
+                let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+                let mut pp = pp.lock().unwrap();
+                if pp.agent.is_none() {
+                    return Err(err("not_found", format!("no agent in pane {pane}")));
+                }
+                self.mute(&mut pp, on);
+                let agent = pp.agent.as_ref().map(Agent::json);
+                drop(pp);
+                // Stored with the pane at once (persist locks every pane, so not while holding
+                // this one), so a restart, an upgrade or a crash keeps it.
+                self.persist();
+                Ok(json!({"agent": agent}))
             }
             "state.get" => Ok(self.state_json()),
             "events.subscribe" => {

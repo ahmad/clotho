@@ -962,6 +962,93 @@ async fn detects_an_agent_without_hooks() {
     wait_agent(&c, p, "cleared when it exits", |a| a.is_null()).await;
 }
 
+/// Mute: the user keeps an agent from ever asking for attention again, until they unmute it.
+/// It lasts for that agent, through a restart of the logic process, and not for the next one.
+#[tokio::test]
+async fn a_muted_agent_never_asks_for_attention_until_unmuted_or_replaced() {
+    let mut env = Env::new();
+    let mut c = env.client().await;
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("agent.mute")), "{}", c.hello);
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    let b = test_bin();
+    let script = format!(
+        r#"sh -c '"{b}" report running --agent claude --session m1; "{b}" report waiting --agent claude --message Q1; read a; "{b}" report done --agent claude; read b; "{b}" report waiting --agent claude --message Q2; read c; "{b}" report done --agent claude; sleep 60'"#
+    );
+    c.input(p, format!("{script}\r").as_bytes());
+    let a = wait_agent(&c, p, "waiting", |a| a["state"] == "waiting").await;
+    assert_eq!((a["attention"].clone(), a["muted"].clone()), (json!(true), json!(false)));
+
+    // Muting clears attention, and says so in an `agent` event.
+    agent_events(&mut c);
+    c.request("agent.mute", json!({"pane": p, "muted": true})).await.unwrap();
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["attention"].clone(), a["muted"].clone()), (json!(false), json!(true)), "{a}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(agent_events(&mut c).iter().any(|e| e["agent"]["muted"] == true), "an agent event");
+    // `done` while muted: the state moves on, attention stays down.
+    c.input(p, b"a\r");
+    let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    assert_eq!((a["attention"].clone(), a["muted"].clone()), (json!(false), json!(true)), "{a}");
+
+    // A restart of the logic process (as in an upgrade) keeps it for this agent (hooks always
+    // say which agent they are, as `report --claude-hook` does).
+    drop(c);
+    env.kill();
+    env.start();
+    let c = env.client().await;
+    c.input(p, b"b\r");
+    let a = wait_agent(&c, p, "Q2", |a| a["message"] == "Q2").await;
+    assert_eq!((a["state"].clone(), a["attention"].clone(), a["muted"].clone()), (json!("waiting"), json!(false), json!(true)), "{a}");
+
+    // Unmuted: the next `done` asks for attention again.
+    c.request("agent.mute", json!({"pane": p, "muted": false})).await.unwrap();
+    assert_eq!(pane_agent(&c, p).await["muted"], false);
+    c.input(p, b"c\r");
+    let a = wait_agent(&c, p, "done again", |a| a["state"] == "done").await;
+    assert_eq!(a["attention"], true, "{a}");
+
+    // Mute it, then it exits: the next agent in the pane starts unmuted.
+    c.request("agent.mute", json!({"pane": p, "muted": true})).await.unwrap();
+    c.input(p, b"\x03");
+    wait_agent(&c, p, "gone", |a| a.is_null()).await;
+    c.input(p, format!(r#"sh -c '"{b}" report waiting --agent claude --message new; sleep 60'"#).as_bytes());
+    c.input(p, b"\r");
+    let a = wait_agent(&c, p, "a new agent", |a| a["message"] == "new").await;
+    assert_eq!((a["attention"].clone(), a["muted"].clone()), (json!(true), json!(false)), "{a}");
+
+    // Errors.
+    let q = new_pane(&c, sh()).await;
+    let e = c.request("agent.mute", json!({"pane": q, "muted": true})).await.unwrap_err();
+    assert!(e.to_string().contains("not_found"), "{e}");
+    let e = c.request("agent.mute", json!({"pane": p})).await.unwrap_err();
+    assert!(e.to_string().contains("bad_request"), "{e}");
+}
+
+#[tokio::test]
+async fn a_muted_agent_sends_no_push() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let report = |state: &str| c.request("agent.report", json!({"pane": p, "state": state, "kind": "claude"}));
+    report("running").await.unwrap();
+    report("waiting").await.unwrap();
+    relay.next();
+    c.request("agent.mute", json!({"pane": p, "muted": true})).await.unwrap();
+    report("running").await.unwrap();
+    report("done").await.unwrap();
+    report("running").await.unwrap();
+    report("error").await.unwrap();
+    relay.none_for(Duration::from_millis(1500));
+    // Unmuted, it pushes again.
+    c.request("agent.mute", json!({"pane": p, "muted": false})).await.unwrap();
+    report("running").await.unwrap();
+    report("done").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["s"], "done");
+}
+
 /// Detection without hooks guesses from output: busy is running, quiet is waiting. Opening a
 /// pane resizes it and the app redraws, which reads as "running". A guess must never clear the
 /// attention a BEL raised; only acknowledging it (or the agent leaving) does.
