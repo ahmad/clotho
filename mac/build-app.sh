@@ -8,17 +8,27 @@
 # ./build-app.sh --release signs with Developer ID, notarizes and staples (scripts/notarize.sh) before
 # installing. It needs the Developer ID certificate, notarytool credentials and a clothod dist built with
 # CLOTHOD_SIGN_IDENTITY (README, "Notarized builds"). Without --release the app is signed ad hoc.
+#
+# ./build-app.sh --package builds build/Clotho.app the way --release does (or signed ad hoc, when there's
+# no Developer ID yet) but doesn't install it: scripts/release.sh turns it into a Sparkle update.
+#
+# The version is VERSION (CFBundleShortVersionString); the build number, which Sparkle compares, is the
+# UTC time (CFBundleVersion, YYYYMMDDHHMM). CLOTHO_VERSION and CLOTHO_BUILD override them.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DEV=false
 RELEASE=false
+PACKAGE=false
 case "${1:-}" in
   --dev) DEV=true ;;
   --release) RELEASE=true ;;
+  --package) PACKAGE=true ;;
   "") ;;
-  *) echo "usage: $0 [--dev | --release]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--dev | --release | --package]" >&2; exit 2 ;;
 esac
+VERSION=${CLOTHO_VERSION:-$(cat VERSION)}
+BUILD=${CLOTHO_BUILD:-$(date -u +%Y%m%d%H%M)}
 if $DEV; then
   NAME="Clotho Dev"
   BUNDLE_ID="app.clotho.desktop.dev"
@@ -27,7 +37,9 @@ else
   BUNDLE_ID="app.clotho.desktop"
 fi
 
-swift build -c release
+# --disable-keychain: SwiftPM otherwise asks the keychain for github.com credentials when it fetches
+# Sparkle's binary, which fails over SSH, where the keychain is locked. Nothing it fetches needs any.
+swift build -c release --disable-keychain
 APP="build/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -69,6 +81,28 @@ fi
 echo "Bundled clothod $(sed -n 's/.*"version": "\(.*\)".*/\1/p' "$DIST/manifest.json" | head -1) for $(ls "$DIST" | grep -v manifest | tr '\n' ' ')"
 cp -R Resources/Fonts "$APP/Contents/Resources/Fonts"
 
+# Sparkle, for in-app updates. Clotho isn't sandboxed, so Sparkle's XPC services aren't needed; they're
+# left out, and what remains is signed again (ad hoc here, Developer ID in scripts/notarize.sh).
+SPARKLE=$(find -L .build/release -maxdepth 1 -name Sparkle.framework | head -1)
+[[ -n "$SPARKLE" ]] || { echo "error: no Sparkle.framework in .build/release" >&2; exit 1; }
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
+rm -rf "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices" "$APP/Contents/Frameworks/Sparkle.framework/XPCServices"
+for nested in Versions/B/Autoupdate Versions/B/Updater.app ""; do
+  codesign --force --sign - "$APP/Contents/Frameworks/Sparkle.framework/$nested"
+done
+
+# Updates: the feed and the public half of the EdDSA key (Resources/SparklePublicKey, made by Sparkle's
+# generate_keys at the release Mac). Without the key the app has updates turned off. The dev build never
+# updates.
+UPDATE_KEYS=""
+if ! $DEV && [[ -s Resources/SparklePublicKey ]]; then
+  UPDATE_KEYS="<key>SUFeedURL</key><string>https://clotho.app/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>$(tr -d '[:space:]' < Resources/SparklePublicKey)</string>
+  <key>SUEnableAutomaticChecks</key><true/>
+  <key>SUScheduledCheckInterval</key><integer>86400</integer>"
+fi
+
 # App icon ("Panes", Resources/AppIcon): every size drawn from the vector at its exact pixel size, the
 # 16 and 32 px ones from the hand-tuned small variant. Resources/icon-1024.png is the 1024 rendering.
 ICONSET="build/Clotho.iconset"
@@ -95,8 +129,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>Clotho</string>
   <key>CFBundleIconFile</key><string>Clotho</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD</string>
+  $UPDATE_KEYS
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
@@ -111,6 +146,16 @@ PLIST
 codesign --force --sign - "$APP"
 if $RELEASE; then
   scripts/notarize.sh "$APP"
+fi
+if $PACKAGE; then
+  # Developer ID and notarized when the certificate exists; ad hoc otherwise.
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application: .*(TEAMID0000)"; then
+    scripts/notarize.sh "$APP"
+  else
+    echo "warning: no Developer ID identity, so $APP is signed ad hoc and not notarized" >&2
+  fi
+  echo "Packaged $APP ($VERSION, build $BUILD)"
+  exit 0
 fi
 if $DEV; then
   echo "Built $APP (not installed). Run it with: open -g -n \"$PWD/$APP\" --args -LaunchInBackground YES"

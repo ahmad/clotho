@@ -114,6 +114,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             })
         }
 
+        section("Appearance")
+        let modes = NSPopUpButton()
+        modes.addItems(withTitles: Theme.Mode.allCases.map(\.title))
+        modes.selectItem(at: Theme.Mode.allCases.firstIndex(of: Theme.Mode.current) ?? 0)
+        let modeTarget = ClosureTarget { [weak app] sender in
+            guard let index = (sender as? NSPopUpButton)?.indexOfSelectedItem else { return }
+            app?.setAppearance(Theme.Mode.allCases[index])
+        }
+        targets.append(modeTarget)
+        modes.target = modeTarget
+        modes.action = #selector(ClosureTarget.fire(_:))
+        add(modes)
+        note("Light or dark for the whole window, terminals included. Match System follows macOS.")
+
+        section("Updates")
+        if let reason = app.updates.unavailableReason {
+            note(reason)
+        } else {
+            add(checkbox("Check for updates automatically", on: app.updates.automaticallyChecks) { [weak app] on in
+                app?.updates.automaticallyChecks = on
+            })
+            let check = ClosureButton(title: "Check Now") { [weak app] in app?.checkForUpdates(nil) }
+            check.bezelStyle = .rounded
+            check.controlSize = .small
+            add(check, indent: 20)
+            note("Clotho checks once a day and asks before installing anything. Updates are signed, and one that isn't signed with Clotho's key is refused.")
+        }
+
         section("Machines")
         var machines = [Machine.local] + app.remoteMachines
         machines.sort { $0.isLocal != $1.isLocal ? $0.isLocal : $0.label < $1.label }

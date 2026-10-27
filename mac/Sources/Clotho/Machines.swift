@@ -1,4 +1,5 @@
 import AppKit
+import ClothoKit
 
 // Saved SSH machines: adding, editing and removing them, a connection check for machines that aren't
 // connected, and the sidebar's machine menu. Connected machines' workspaces are in MachineConnections.swift.
@@ -11,8 +12,8 @@ enum MachineStatus: Equatable {
         switch self {
         case .unknown: return nil
         case .checking: return Theme.dimText
-        case .reachable: return NSColor(hex: 0x57C78A)
-        case .unreachable: return NSColor(hex: 0xC76156)
+        case .reachable: return Theme.success
+        case .unreachable: return Theme.danger
         }
     }
 
@@ -96,6 +97,16 @@ extension AppDelegate {
             let sshTarget = target.stringValue.trimmingCharacters(in: .whitespaces)
             let label = name.stringValue.trimmingCharacters(in: .whitespaces)
             guard let self, response == .alertFirstButtonReturn, !sshTarget.isEmpty else { return done(nil) }
+            if let problem = SSHTarget.problem(sshTarget) {
+                // Nothing is saved; the sheet is gone, so the reason gets its own.
+                DispatchQueue.main.async {
+                    let refusal = NSAlert()
+                    refusal.messageText = "Can't use \"\(sshTarget)\""
+                    refusal.informativeText = problem
+                    refusal.beginSheetModal(for: host)
+                }
+                return done(nil)
+            }
             let machine = existing?.id.map { Machine.update($0, label: label, target: sshTarget) }
                 ?? Machine.add(label: label, target: sshTarget)
             if let id = machine.id { machineStatus[id] = .unknown }
@@ -149,8 +160,9 @@ extension AppDelegate {
         monitor.state = monitorsAgents(key) ? .on : .off
         menu.addItem(monitor)
         // Until an agent there reports through hooks, offer to set them up (never automatically).
-        if (connected || machine.isLocal), !hasHookSourcedAgents(key) {
-            add("Set Up Agent Status…") { [weak self] in self?.setUpAgentHooks(on: key) }
+        // Older hooks (from a previous clothod) are offered as an update even though they still report.
+        if (connected || machine.isLocal), !hasHookSourcedAgents(key) || hooksNeedUpdate(key) {
+            add(hooksNeedUpdate(key) ? "Update Agent Status…" : "Set Up Agent Status…") { [weak self] in self?.setUpAgentHooks(on: key) }
         }
         guard !machine.isLocal else { return menu }
         if connected {

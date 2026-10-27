@@ -79,12 +79,25 @@ extension AppDelegate {
         Task { @MainActor in
             guard let result = try? await runClothod(on: key, ["hooks", "status"]), result.status == 0 else { return }
             var status: [String: Bool] = [:]
+            var outdated: Set<String> = []
             for line in result.stdout.split(separator: "\n") {
                 let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-                if parts.count == 2, Self.hookedAgents.contains(parts[0]) { status[parts[0]] = parts[1] == "installed" }
+                // "outdated" (clothod 0.1.11+): an older clothod's hooks, which `hooks install` replaces in place.
+                if parts.count == 2, Self.hookedAgents.contains(parts[0]) {
+                    status[parts[0]] = parts[1] == "installed"
+                    if parts[1] == "outdated" { outdated.insert(parts[0]) }
+                }
             }
             hookStatus[key] = status
+            if outdated.isEmpty { outdatedHooks.removeValue(forKey: key) } else { outdatedHooks[key] = outdated }
+            onboarding?.refreshHooks()
         }
+    }
+
+    /// Whether every agent needing hooks on the machine has older ones, to update rather than set up.
+    func hooksNeedUpdate(_ key: MachineKey) -> Bool {
+        let needed = agentsNeedingHooks(key)
+        return !needed.isEmpty && needed.allSatisfy { outdatedHooks[key]?.contains($0) == true }
     }
 
     /// The agents that still need hooks on the machine (all of them if unknown).
@@ -94,28 +107,33 @@ extension AppDelegate {
     }
 
     /// Shows what installing the hooks changes on the machine, and installs them only if the user agrees.
-    func setUpAgentHooks(on key: MachineKey) {
+    func setUpAgentHooks(on key: MachineKey, in parent: NSWindow? = nil) {
+        let window: NSWindow = parent ?? self.window
         guard let session = connections[key], window.attachedSheet == nil else { return }
         let name = session.title
+        guard !agentsNeedingHooks(key).isEmpty else {
+            log("hooks: already set up on \(name)")
+            return showNotice("Agent status is already set up on \(name).", detail: nil, action: nil, then: nil)
+        }
         Task { @MainActor in
             var previews: [(agent: String, text: String)] = []
             for agent in agentsNeedingHooks(key) {
                 do {
                     let result = try await runClothod(on: key, ["hooks", "print", agent])
                     guard result.status == 0 else {
-                        return showHooksFailure(name, "clothod on \(name) can't set up agent status yet.", detail: result.stderr)
+                        return showHooksFailure(name, "clothod on \(name) can't set up agent status yet.", detail: result.stderr, in: window)
                     }
                     previews.append((agent, result.stdout))
                 } catch {
-                    return showHooksFailure(name, "Couldn't ask clothod on \(name) what would change.", detail: error.localizedDescription)
+                    return showHooksFailure(name, "Couldn't ask clothod on \(name) what would change.", detail: error.localizedDescription, in: window)
                 }
             }
             let kept = await existingAgentHooks(on: key)
-            confirmHooks(on: key, name: name, previews: previews, kept: kept)
+            confirmHooks(on: key, name: name, previews: previews, kept: kept, in: window)
         }
     }
 
-    private func confirmHooks(on key: MachineKey, name: String, previews: [(agent: String, text: String)], kept: [String]) {
+    private func confirmHooks(on key: MachineKey, name: String, previews: [(agent: String, text: String)], kept: [String], in window: NSWindow) {
         guard window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = "Set up agent status on \(name)?"
@@ -134,8 +152,9 @@ extension AppDelegate {
                 : "Codex: sets `notify` in ~/.codex/config.toml:"
             return "\(what)\n\n\(preview.text)"
         }.joined(separator: "\n\n"))
+        log("hooks: asking to set up \(previews.map(\.agent).joined(separator: ", ")) on \(name)")
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self, response == .alertFirstButtonReturn else { return }
+            guard let self, response == .alertFirstButtonReturn else { return log("hooks: set up cancelled on \(name)") }
             Task { @MainActor in
                 var report: [String] = []
                 var failed = false
@@ -152,7 +171,7 @@ extension AppDelegate {
                 log("hooks install on \(name): \(report.joined(separator: " | "))")
                 self.refreshHookStatus(key)
                 if failed {
-                    self.showHooksFailure(name, "Setting up agent status on \(name) didn't finish.", detail: report.joined(separator: "\n\n"))
+                    self.showHooksFailure(name, "Setting up agent status on \(name) didn't finish.", detail: report.joined(separator: "\n\n"), in: window)
                 } else {
                     self.hookSourcedMachines.insert(key)
                     self.showNotice("Agent status is set up on \(name). Agents started from now on report it.", detail: report.joined(separator: "\n"),
@@ -163,7 +182,7 @@ extension AppDelegate {
         }
     }
 
-    private func showHooksFailure(_ name: String, _ message: String, detail: String) {
+    private func showHooksFailure(_ name: String, _ message: String, detail: String, in window: NSWindow) {
         guard window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = message

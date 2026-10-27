@@ -32,6 +32,15 @@ else
 fi
 print "notarize: signing with $IDENTITY"
 
+# Sparkle's pieces are signed again with this identity, innermost first (Sparkle's own signature is
+# another team's, which the hardened runtime's library validation would refuse).
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE" ]]; then
+  for nested in Versions/B/Autoupdate Versions/B/Updater.app ""; do
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE/$nested"
+  done
+fi
+
 # Every Mach-O inside the app must already carry a Developer ID signature with hardened runtime,
 # except the app's own executable, which is signed below.
 is_macho() { file -b "$1" | grep -q Mach-O; }

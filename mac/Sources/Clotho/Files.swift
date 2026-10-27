@@ -136,9 +136,10 @@ enum SSH {
 
     static func run(_ machine: Machine, _ command: String, input: Data? = nil) throws -> Data {
         guard let target = machine.target else { throw FileError(message: "Not a remote machine") }
+        if let problem = SSHTarget.problem(target) { throw FileError(message: problem) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        process.arguments = options + [target, command]
+        process.arguments = options + ["--", target, command]
         let out = Pipe(), err = Pipe(), inp = Pipe()
         process.standardOutput = out
         process.standardError = err
@@ -248,7 +249,18 @@ final class TransferManager {
             }
             for key in order {
                 let items = groups[key]!
-                copies.append((FileTransfer(from: try backend(items[0].machine), to: to), items.map(\.path)))
+                let copy = FileTransfer(from: try backend(items[0].machine), to: to)
+                let names = (from: items[0].machine.label, to: transfer.destination.machine.label)
+                copy.onRetry = { [weak self] path, error, attempt in
+                    let reason = (error as? BackendError)?.message ?? error.localizedDescription
+                    log("transfer: retrying \(path) (attempt \(attempt)) after: \(reason)")
+                    Task { @MainActor in
+                        guard transfer.isRunning else { return }
+                        transfer.detail = "Lost the connection between \(names.from) and \(names.to); resuming…"
+                        self?.onChange?()
+                    }
+                }
+                copies.append((copy, items.map(\.path)))
             }
         } catch {
             transfer.state = .failed(error.localizedDescription)
@@ -319,16 +331,23 @@ final class TransferToast: NSView {
     let stack = NSStackView()
     static var width: CGFloat { s(340) }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance {
+            layer?.backgroundColor = Theme.raised.cgColor
+            layer?.borderColor = Theme.divider.cgColor
+        }
+    }
+
     init(manager: TransferManager) {
         self.manager = manager
         super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: s(10)))
         wantsLayer = true
-        layer?.backgroundColor = NSColor(hex: 0x23282C).cgColor
+        layer?.backgroundColor = Theme.raised.cgColor
         layer?.cornerRadius = s(10)
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
-        layer?.borderColor = NSColor(hex: 0x343A3F).cgColor
-        appearance = NSAppearance(named: .darkAqua)
+        layer?.borderColor = Theme.divider.cgColor
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = s(10)
@@ -359,9 +378,9 @@ final class TransferToast: NSView {
     func row(for transfer: Transfer) -> NSView {
         let title = ShortcutsOverlay.label(transfer.title, size: 12, weight: .semibold, color: Theme.foreground)
         title.lineBreakMode = .byTruncatingMiddle
-        var detailColor = NSColor(hex: 0x9AA3AA)
-        if case .failed = transfer.state { detailColor = NSColor(hex: 0xC76156) }
-        if case .done = transfer.state { detailColor = NSColor(hex: 0x57C78A) }
+        var detailColor = Theme.secondaryText
+        if case .failed = transfer.state { detailColor = Theme.danger }
+        if case .done = transfer.state { detailColor = Theme.success }
         let detail = ShortcutsOverlay.label(transfer.detail, size: 11, weight: .regular, color: detailColor)
         detail.lineBreakMode = .byTruncatingMiddle
         detail.maximumNumberOfLines = 2
@@ -380,7 +399,7 @@ final class TransferToast: NSView {
                                              accessibilityDescription: transfer.isRunning ? "Cancel" : "Dismiss")!,
                               target: self, action: #selector(cancelTapped(_:)))
         button.isBordered = false
-        button.contentTintColor = NSColor(hex: 0x7F888F)
+        button.contentTintColor = Theme.dimText
         button.identifier = NSUserInterfaceItemIdentifier(transfer.id.uuidString)
 
         let top = NSStackView(views: [title, NSView(), button])
@@ -586,12 +605,20 @@ final class FileBrowserOverlay: NSView {
     var left: FilePane!
     var right: FilePane!
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance {
+            layer?.backgroundColor = Theme.backdrop.cgColor
+            card.layer?.backgroundColor = Theme.background.cgColor
+            card.layer?.borderColor = Theme.divider.cgColor
+        }
+    }
+
     init(app: AppDelegate, machine: Machine? = nil) {
         self.app = app
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
-        appearance = NSAppearance(named: .darkAqua)
+        layer?.backgroundColor = Theme.backdrop.cgColor
 
         // FilesMachine (a launch argument, for testing) overrides which machine the left side shows.
         // "label" or "label:/path".
@@ -606,14 +633,14 @@ final class FileBrowserOverlay: NSView {
 
         let title = ShortcutsOverlay.label("Files", size: 15, weight: .semibold, color: Theme.foreground)
         let hint = ShortcutsOverlay.label("Drag between sides or to Finder · ⇧⌘O or Esc to close",
-                                          size: 12, weight: .regular, color: NSColor(hex: 0x7F888F))
+                                          size: 12, weight: .regular, color: Theme.dimText)
         let top = NSStackView(views: [title, NSView(), hint])
         top.orientation = .horizontal
         top.edgeInsets = NSEdgeInsets(top: s(0), left: s(18), bottom: s(0), right: s(18))
 
         let divider = NSBox()
         divider.boxType = .custom
-        divider.fillColor = NSColor(hex: 0x343A3F)
+        divider.fillColor = Theme.divider
         divider.borderWidth = 0
         divider.widthAnchor.constraint(equalToConstant: s(1)).isActive = true
         let panes = NSStackView(views: [left, divider, right])
@@ -627,7 +654,7 @@ final class FileBrowserOverlay: NSView {
         card.layer?.cornerRadius = s(12)
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor(hex: 0x343A3F).cgColor
+        card.layer?.borderColor = Theme.divider.cgColor
         card.layer?.masksToBounds = true
 
         let stack = NSStackView(views: [top, panes])
@@ -692,10 +719,15 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
     private var path = "/"
     private var home: String?
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { layer?.backgroundColor = Theme.raised.cgColor }
+    }
+
     init() {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(hex: 0x23282C).cgColor
+        layer?.backgroundColor = Theme.raised.cgColor
         layer?.cornerRadius = s(5)
         layer?.masksToBounds = true
 
@@ -757,7 +789,7 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
             if i > 0 {
                 let separator = NSTextField(labelWithString: "›")
                 separator.font = NSFont.systemFont(ofSize: s(13))
-                separator.textColor = NSColor(hex: 0x5C656C)
+                separator.textColor = Theme.faintText
                 crumbs.addArrangedSubview(separator)
             }
             let isLast = i == segments.count - 1
@@ -767,7 +799,7 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
             button.controlSize = .small
             button.attributedTitle = NSAttributedString(string: segment.title, attributes: [
                 .font: NSFont.systemFont(ofSize: s(12), weight: isLast ? .semibold : .regular),
-                .foregroundColor: isLast ? Theme.foreground : NSColor(hex: 0x9AA3AA),
+                .foregroundColor: isLast ? Theme.foreground : Theme.secondaryText,
             ])
             button.toolTip = segment.path
             button.identifier = NSUserInterfaceItemIdentifier(segment.path)
@@ -851,7 +883,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
 
     let table = FileTable()
     let pathBar = BreadcrumbBar()
-    let status = ShortcutsOverlay.label("", size: 11, weight: .regular, color: NSColor(hex: 0x7F888F))
+    let status = ShortcutsOverlay.label("", size: 11, weight: .regular, color: Theme.dimText)
     let machineMenu = NSPopUpButton()
     let hiddenButton = NSButton()
     let promiseQueue: OperationQueue = {
@@ -878,7 +910,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let refresh = Self.iconButton("arrow.clockwise", "Refresh", self, #selector(reload))
         hiddenButton.image = NSImage(systemSymbolName: "eye.slash", accessibilityDescription: "Show Hidden Files")
         hiddenButton.isBordered = false
-        hiddenButton.contentTintColor = NSColor(hex: 0x9AA3AA)
+        hiddenButton.contentTintColor = Theme.secondaryText
         hiddenButton.target = self
         hiddenButton.action = #selector(toggleHidden)
         hiddenButton.toolTip = "Show hidden files"
@@ -923,7 +955,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     static func iconButton(_ symbol: String, _ label: String, _ target: AnyObject, _ action: Selector) -> NSButton {
         let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)!, target: target, action: action)
         button.isBordered = false
-        button.contentTintColor = NSColor(hex: 0x9AA3AA)
+        button.contentTintColor = Theme.secondaryText
         button.toolTip = label
         return button
     }
@@ -1053,7 +1085,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     @objc func toggleHidden() {
         showHidden.toggle()
         hiddenButton.image = NSImage(systemSymbolName: showHidden ? "eye" : "eye.slash", accessibilityDescription: "Show Hidden Files")
-        hiddenButton.contentTintColor = showHidden ? Theme.accent : NSColor(hex: 0x9AA3AA)
+        hiddenButton.contentTintColor = showHidden ? Theme.accent : Theme.secondaryText
         applyFilter()
     }
 
@@ -1121,7 +1153,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let text = NSTextField(labelWithString: "")
         text.lineBreakMode = .byTruncatingMiddle
         text.font = NSFont.systemFont(ofSize: s(12))
-        text.textColor = id == "name" ? Theme.foreground : NSColor(hex: 0x9AA3AA)
+        text.textColor = id == "name" ? Theme.foreground : Theme.secondaryText
         switch id {
         case "name": text.stringValue = entry.name
         case "size": text.stringValue = entry.isDirectory ? "—" : ByteCountFormatter.string(fromByteCount: Int64(entry.size), countStyle: .file)

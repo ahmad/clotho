@@ -65,11 +65,11 @@ struct AgentEntry {
 extension AgentInfo.State {
     var color: NSColor {
         switch self {
-        case .waiting: return NSColor(hex: 0xE5A01A)
+        case .waiting: return Theme.warning
         case .running: return Theme.accent
         case .starting, .unknown: return Theme.dimText
-        case .done: return NSColor(hex: 0x57C78A)
-        case .error: return NSColor(hex: 0xC76156)
+        case .done: return Theme.success
+        case .error: return Theme.danger
         }
     }
 
@@ -267,6 +267,9 @@ extension AppDelegate {
                 self?.muteAgent(machine: machine, pane: pane, muted: !muted)
             })
         }
+        if connections[machine]?.store.hello?.features.contains(.agentHistory) == true {
+            menu.addItem(ClosureMenuItem(title: "History…") { [weak self] in self?.showAgentHistory(machine: machine, pane: pane) })
+        }
         guard canReply else { return menu }
         menu.addItem(.separator())
         for reply in Self.quickReplies {
@@ -279,6 +282,7 @@ extension AppDelegate {
     // MARK: Transitions, notifications and the dock badge
 
     func agentChanged(machine: MachineKey, pane: PaneID, from before: AgentInfo?, to after: AgentInfo?) {
+        agentHistoryWindows[PaneKey(machine: machine, pane: pane)]?.refresh()
         log("agent \(machine)/\(pane): \(before?.state.rawValue ?? "none") → \(after.map { "\($0.kind) \($0.state.rawValue) (\($0.source ?? "?"))\($0.message.map { ": " + $0 } ?? "")" } ?? "none")")
         if after?.isHookSourced == true { hookSourcedMachines.insert(machine) }
         // Only when the daemon raises attention (a hook-reported waiting, done or error, or a bell): quiet
@@ -470,7 +474,7 @@ final class AgentRow: ChromeItem {
             .withSymbolConfiguration(.init(pointSize: s(11), weight: .semibold))
         icon.contentTintColor = shown.color
         // Where it is: machine · workspace (bold) › tab, as on iOS.
-        let strong = info.needsAttention ? Theme.foreground : NSColor(hex: 0xA9B0B6)
+        let strong = info.needsAttention ? Theme.foreground : Theme.secondaryText
         let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s(12)), .foregroundColor: Theme.dimText]
         let title = NSMutableAttributedString(string: entry.machineName + " · ", attributes: quiet)
         title.append(NSAttributedString(string: entry.workspace?.name ?? "Workspace", attributes: [

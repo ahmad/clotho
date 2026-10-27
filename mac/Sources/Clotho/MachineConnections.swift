@@ -149,7 +149,7 @@ extension AppDelegate {
                                         ephemeral: runtimeDir != nil ? "exit" : nil, log: { log("\(label): \($0)") })
         var transport = SSHProcessTransport(target: target, remoteCommand: { try installer.bridgeCommand() },
                                             prepare: { progress in try installer.prepare(progress: progress) })
-        transport.extraOptions = Self.sshMultiplexOptions
+        transport.extraOptions = Self.sshBridgeOptions
         let key = machine.key
         transport.onStderrLine = { [weak self] line in
             guard line.hasPrefix("clothod: warning:") else { return }
@@ -171,12 +171,19 @@ extension AppDelegate {
     /// separate connection.
     nonisolated static let sshMultiplexOptions: [String] = {
         var name = isDevBuild ? "cm-clothodev" : "cm-clothoapp"
-        var proxy: [String] = []
-        if isDevBuild, let command = UserDefaults.standard.string(forKey: "SSHProxyCommand"), !command.isEmpty {
-            name += "-proxied"
-            proxy = ["-o", "ProxyCommand=\(command)"]
-        }
-        return ["-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/\(name)-%C", "-o", "ControlPersist=600"] + proxy
+        if !sshProxyOptions.isEmpty { name += "-proxied" }
+        return ["-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/\(name)-%C", "-o", "ControlPersist=600"]
+            + sshProxyOptions
+    }()
+
+    /// The session's bridge gets an SSH connection of its own, outside the shared master. Its keepalives
+    /// then watch its own link, killing it ends it for sure, and a wedged master (a dead link it hasn't
+    /// noticed) can't hold the session, or the reconnect after it, hostage.
+    nonisolated static let sshBridgeOptions: [String] = ["-o", "ControlMaster=no", "-o", "ControlPath=none"] + sshProxyOptions
+
+    nonisolated static let sshProxyOptions: [String] = {
+        guard isDevBuild, let command = UserDefaults.standard.string(forKey: "SSHProxyCommand"), !command.isEmpty else { return [] }
+        return ["-o", "ProxyCommand=\(command)"]
     }()
 
     /// clothod's warnings (for example that workspaces won't survive logout), once per machine per run.
@@ -296,10 +303,10 @@ extension AppDelegate {
 
     private func connectionStatus(_ state: ConnectionState, isLocal: Bool) -> (NSColor?, String?) {
         switch state {
-        case .connected: return (isLocal ? nil : NSColor(hex: 0x57C78A), nil)
+        case .connected: return (isLocal ? nil : Theme.success, nil)
         case .idle: return (Theme.dimText, "Starting…")
-        case .connecting(let step): return (NSColor(hex: 0xC8A35A), step + "…")
-        case .reconnecting(let reason): return (NSColor(hex: 0xC76156), "Reconnecting: \(reason)")
+        case .connecting(let step): return (Theme.caution, step + "…")
+        case .reconnecting(let reason): return (Theme.danger, "Reconnecting: \(reason)")
         }
     }
 }

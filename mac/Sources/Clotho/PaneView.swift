@@ -193,7 +193,9 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
 
     let paneID: PaneID
     let terminal: PaneTerminalView
-    private let store: ModelStore
+    let store: ModelStore
+    /// The find bar and its highlights, while open (PaneSearch.swift).
+    var search: PaneSearchController?
     private var backend: SessionBackend { store.backend }
 
     /// The seq this view's terminal has applied up to; nil until the first snapshot.
@@ -229,10 +231,8 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         terminal.terminalDelegate = self
         terminal.font = font
         terminal.lineSpacing = 1.2
-        terminal.nativeBackgroundColor = Theme.background
-        terminal.nativeForegroundColor = Theme.foreground
-        terminal.caretColor = Theme.accent
-        terminal.installColors(Theme.terminalColors)
+        defaultSelection = terminal.selectedTextBackgroundColor
+        applyTheme()
         terminal.optionAsMetaKey = true
         terminal.enableFileDrops()
         terminal.withoutReplies { terminal.resize(cols: pane.cols, rows: pane.rows) }
@@ -315,6 +315,10 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         // The snapshot starts with a full reset, so earlier state doesn't matter.
         terminal.feedFromBackend(bytes)
         haveSeq = seq
+        if search != nil {
+            search?.outputArrived()
+            searchLayoutChanged()
+        }
     }
 
     func paneResized(cols: Int, rows: Int, seq: UInt64) {
@@ -351,6 +355,10 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         pending = Data()
         terminal.feedFromBackend(bytes)
         haveSeq = (haveSeq ?? 0) + UInt64(bytes.count)
+        if search != nil {
+            search?.outputArrived()
+            searchLayoutChanged()
+        }
     }
 
     // MARK: Size
@@ -400,6 +408,7 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         // Anchored top-left, so a pane sized by another client lines up like a normal terminal.
         let frame = NSRect(origin: CGPoint(x: Self.padding, y: Self.padding), size: size)
         if terminal.frame != frame { terminal.frame = frame }
+        searchLayoutChanged()
         if wantsSubscription, bounds.width > 0, bounds.height > 0 { subscribe() }
         sendViewportIfNeeded()
     }
@@ -415,7 +424,39 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     }
 
     private func updateBorder() {
-        layer?.borderColor = (isFocusedPane && showsFocusRing ? Theme.accent.withAlphaComponent(0.7) : NSColor.clear).cgColor
+        withAppearance {
+            layer?.borderColor = (isFocusedPane && showsFocusRing ? Theme.accent.withAlphaComponent(0.7) : NSColor.clear).cgColor
+        }
+    }
+
+    /// SwiftTerm's own selection colour, kept for the dark palette.
+    private var defaultSelection: NSColor?
+    /// The palette the terminal was last given, so an unchanged appearance doesn't redraw it.
+    private var appliedDark: Bool?
+
+    /// Gives the terminal the palette for this view's appearance: its colours are fixed values, not
+    /// dynamic ones, so they're set again whenever the appearance changes.
+    func applyTheme() {
+        let appearance = effectiveAppearance
+        guard appliedDark != appearance.isDark else { return }
+        appliedDark = appearance.isDark
+        let palette = Theme.palette(for: appearance)
+        terminal.nativeBackgroundColor = NSColor(hex: palette.background)
+        terminal.nativeForegroundColor = NSColor(hex: palette.foreground)
+        terminal.caretColor = NSColor(hex: palette.caret)
+        if let selection = palette.selection {
+            terminal.selectedTextBackgroundColor = NSColor(hex: selection)
+        } else if let defaultSelection {
+            terminal.selectedTextBackgroundColor = defaultSelection
+        }
+        terminal.installColors(Theme.terminalColors(for: appearance))
+        updateBorder()
+        terminal.needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTheme()
     }
 
     // Right-clicks in the padding get the terminal's menu.
@@ -453,7 +494,7 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     // Titles and folders come from the daemon's model.
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-    func scrolled(source: TerminalView, position: Double) {}
+    func scrolled(source: TerminalView, position: Double) { searchLayoutChanged() }
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     // The daemon reports bells as events.
     func bell(source: TerminalView) {}

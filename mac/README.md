@@ -66,6 +66,28 @@ mac/build-app.sh --release
 
 `CLOTHO_SIGN_IDENTITY` and `CLOTHO_NOTARY_PROFILE` override the identity and the profile name (`clotho-notary`).
 
+### Releases and in-app updates
+
+Clotho updates itself with [Sparkle 2](https://sparkle-project.org): **Clotho › Check for Updates…**, plus a daily automatic check (Settings › Updates turns it off). It reads the appcast at `https://clotho.app/appcast.xml` and installs an update only if its zip is signed with Clotho's EdDSA key. The public key is in [`Resources/SparklePublicKey`](Resources) and goes into Info.plist as `SUPublicEDKey`. The private key exists only in the release Mac's login keychain, never in the repo. A build without `Resources/SparklePublicKey` has updates turned off, and Clotho Dev never updates.
+
+One-time setup, at the Mac itself (the keychain is locked over SSH):
+
+1. Make the key pair. This stores the private key in the login keychain and prints the public key:
+   `"$(mac/scripts/sparkle-tools.sh)/generate_keys"`
+2. Save the public key for the build (it isn't secret), and commit it:
+   `"$(mac/scripts/sparkle-tools.sh)/generate_keys" -p > mac/Resources/SparklePublicKey`
+3. Back up the private key somewhere safe outside the repo, such as a password manager, then delete the file. Losing it means existing installs can never be updated again:
+   `"$(mac/scripts/sparkle-tools.sh)/generate_keys" -x ~/Desktop/clotho-sparkle-private-key` 
+
+Each release, at the Mac (Developer ID signing and notarizing happen when the certificate is there; see above):
+
+```sh
+echo 1.1.0 > mac/VERSION                     # the version people see; the build number is the UTC time
+mac/scripts/release.sh path/to/notes.html    # notes are optional HTML for the update window
+```
+
+It writes `build/release/Clotho-<version>-<build>.zip` and `build/release/appcast.xml`. Upload the zip to `https://clotho.app/downloads/`, then publish the appcast at `https://clotho.app/appcast.xml`, in that order, so the feed never points at a missing file. `CLOTHO_APPCAST_IN` starts from another appcast file than the live one, and `CLOTHO_DOWNLOADS` changes the download URL.
+
 ## Start using Clotho
 
 1. Open Clotho. The first launch starts the daemon and opens a workspace with one shell.
@@ -90,6 +112,8 @@ Read the [usage guide](docs/usage.md) for all shortcuts, file transfers, remote 
 | [`Sources/Clotho/LocalDaemon.swift`](Sources/Clotho/LocalDaemon.swift) | Installs and starts this Mac's clothod, and upgrades it |
 | [`Sources/Clotho/Machines.swift`](Sources/Clotho/Machines.swift) | Saved machines: add, edit, remove, connection checks and the machine menu |
 | [`Sources/Clotho/Files.swift`](Sources/Clotho/Files.swift) | The saved machine list, SSH, the file browser and transfers |
+| [`Sources/Clotho/Onboarding.swift`](Sources/Clotho/Onboarding.swift) | First-run welcome window (Help › Welcome to Clotho), and the SSH connection check that explains failures |
+| [`Sources/Clotho/Updates.swift`](Sources/Clotho/Updates.swift) | In-app updates with Sparkle: Check for Updates… and the automatic check |
 | [`../ClothoKit`](../ClothoKit) | Shared with the future iOS app: the model, the clothod protocol client, and a fake backend for UI work |
 | [`build-app.sh`](build-app.sh) | Build, bundle, sign and install (`--dev`, `--release`) |
 | [`scripts/notarize.sh`](scripts/notarize.sh) | Developer ID signing, notarization and stapling |

@@ -60,6 +60,7 @@ struct Shortcut {
 extension AppDelegate {
     static let shortcuts: [Shortcut] = {
         var list: [Shortcut] = [
+            Shortcut(menu: "Clotho", title: "Check for Updates…", key: "", action: #selector(checkForUpdates(_:)), listed: false),
             Shortcut(menu: "Clotho", title: "Settings…", key: ",", action: #selector(showSettings(_:))),
             Shortcut(menu: "Clotho", title: "Hide Clotho", key: "h", action: #selector(NSApplication.hide(_:))),
             Shortcut(menu: "Clotho", title: "Quit Clotho", key: "q", action: #selector(NSApplication.terminate(_:))),
@@ -72,13 +73,10 @@ extension AppDelegate {
             Shortcut(menu: "Edit", title: "Paste", key: "v", action: #selector(NSText.paste(_:))),
             Shortcut(menu: "Edit", title: "Select All", key: "a", action: #selector(NSText.selectAll(_:))),
             Shortcut(menu: "Edit", title: "Clear", key: "k", action: #selector(clearActivePane(_:))),
-            // SwiftTerm's own find bar; the tags are NSFindPanelAction values.
-            Shortcut(menu: "Edit", title: "Find…", key: "f", action: #selector(NSTextView.performFindPanelAction(_:)),
-                     tag: Int(NSFindPanelAction.showFindPanel.rawValue)),
-            Shortcut(menu: "Edit", title: "Find Next", key: "g", action: #selector(NSTextView.performFindPanelAction(_:)),
-                     tag: Int(NSFindPanelAction.next.rawValue)),
-            Shortcut(menu: "Edit", title: "Find Previous", key: "g", modifiers: [.command, .shift],
-                     action: #selector(NSTextView.performFindPanelAction(_:)), tag: Int(NSFindPanelAction.previous.rawValue)),
+            // The pane's find bar (PaneSearch.swift): Next goes up to older output, Previous back down.
+            Shortcut(menu: "Edit", title: "Find…", key: "f", action: #selector(findInPane(_:))),
+            Shortcut(menu: "Edit", title: "Find Next", key: "g", action: #selector(findNextInPane(_:))),
+            Shortcut(menu: "Edit", title: "Find Previous", key: "g", modifiers: [.command, .shift], action: #selector(findPreviousInPane(_:))),
 
             Shortcut(menu: "View", title: "Actual Size", key: "0", action: #selector(resetZoom(_:))),
             Shortcut(menu: "View", title: "Zoom In", key: "+", action: #selector(zoomIn(_:))),
@@ -131,8 +129,10 @@ extension AppDelegate {
             Shortcut(menu: "Window", title: "Minimize", key: "m", action: #selector(minimizeWindow(_:))),
             Shortcut(menu: "Window", title: "Zoom", key: "", action: #selector(zoomWindow(_:)), listed: false),
             Shortcut(menu: "Window", title: "Toggle Full Screen", key: "f", modifiers: [.command, .control], action: #selector(toggleFullScreen(_:))),
+            Shortcut(menu: "Window", title: "Quick Open…", key: "p", action: #selector(showQuickOpen(_:))),
             Shortcut(menu: "Window", title: "File Browser", key: "o", modifiers: [.command, .shift], action: #selector(showFileBrowser(_:))),
 
+            Shortcut(menu: "Help", title: "Welcome to Clotho", key: "", action: #selector(showOnboarding(_:)), listed: false),
             Shortcut(menu: "Help", title: "Keyboard Shortcuts", key: "/", action: #selector(showShortcuts(_:))),
         ]
         return list
@@ -153,7 +153,7 @@ extension AppDelegate {
                     menu.addItem(.separator())
                 }
                 lastGroup = group
-                if name == "Window", shortcut.title == "File Browser" { menu.addItem(.separator()) }
+                if name == "Window", shortcut.title == "Quick Open…" { menu.addItem(.separator()) }
                 let (key, mods) = shortcut.menuKey
                 let menuItem = menu.addItem(withTitle: shortcut.title, action: shortcut.action, keyEquivalent: key)
                 menuItem.keyEquivalentModifierMask = mods
@@ -379,10 +379,10 @@ final class ShortcutsOverlay: NSView {
     init(shortcuts: [Shortcut]) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        layer?.backgroundColor = Theme.backdrop.cgColor
 
         let heading = Self.label("Keyboard Shortcuts", size: 17, weight: .semibold, color: Theme.foreground)
-        let hint = Self.label("⌘/ or Esc to close", size: 12, weight: .regular, color: NSColor(hex: 0x7F888F))
+        let hint = Self.label("⌘/ or Esc to close", size: 12, weight: .regular, color: Theme.dimText)
         let top = NSStackView(views: [heading, NSView(), hint])
         top.orientation = .horizontal
         top.alignment = .firstBaseline
@@ -404,7 +404,7 @@ final class ShortcutsOverlay: NSView {
         card.layer?.cornerRadius = s(12)
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor(hex: 0x343A3F).cgColor
+        card.layer?.borderColor = Theme.divider.cgColor
         card.layer?.shadowColor = NSColor.black.cgColor
         card.layer?.shadowOpacity = 0.5
         card.layer?.shadowRadius = 24
@@ -471,7 +471,7 @@ final class ShortcutsOverlay: NSView {
         key.font = NSFont.monospacedSystemFont(ofSize: s(12), weight: .medium)
         let cap = NSView()
         cap.wantsLayer = true
-        cap.layer?.backgroundColor = NSColor(hex: 0x2A3035).cgColor
+        cap.layer?.backgroundColor = Theme.pill.cgColor
         cap.layer?.cornerRadius = s(5)
         cap.addSubview(key)
         key.translatesAutoresizingMaskIntoConstraints = false

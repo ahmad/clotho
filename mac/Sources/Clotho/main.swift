@@ -4,29 +4,96 @@ import ClothoKit
 import Network
 import SwiftTerm
 
-// Warp's Adeberry theme (from warpdotdev/warp app/src/themes/default_themes.rs), with the
-// foreground and both whites toned down so text and the active pane's outline are easier on the eyes.
+// Colours for both appearances (ClothoKit's ClothoPalette, shared with iOS). Each token is a dynamic
+// NSColor, so text and tints follow the window's appearance on their own. Colours handed to CALayers are
+// resolved once, so views that use them set them again in viewDidChangeEffectiveAppearance (see
+// `withAppearance`), and AppDelegate.appearanceChanged refreshes the rest.
 enum Theme {
-    static let background = NSColor(hex: 0x1D2022)
-    static let foreground = NSColor(hex: 0xC5CDD4)
-    static let accent = NSColor(hex: 0x6C96B4)
-    // The sidebar and tab bar share this, so the notch strip blends into both.
-    static let sidebar = NSColor(hex: 0x191C1E)
-    static let hover = NSColor(hex: 0x24282B)
-    static let divider = NSColor(hex: 0x343A3F)
-    static let dimText = NSColor(hex: 0x7F888F)
-    static let ansi: [UInt32] = [
-        0x121212, 0xC76156, 0x57C78A, 0xC8A35A, 0x5785C7, 0xC756A9, 0x57C7C3, 0xA9B0B6,
-        0x292929, 0xD22D1E, 0x1CA05A, 0xE5A01A, 0x1458B8, 0xA43787, 0x4D9989, 0xD6DCE1,
-    ]
+    static func color(dark: UInt32, light: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            NSColor(hex: appearance.isDark ? dark : light)
+        }
+    }
 
-    static var terminalColors: [SwiftTerm.Color] {
-        ansi.map { hex in
+    private static func token(_ value: KeyPath<ClothoPalette, UInt32>) -> NSColor {
+        color(dark: ClothoPalette.dark[keyPath: value], light: ClothoPalette.light[keyPath: value])
+    }
+
+    static let background = token(\.background)
+    static let foreground = token(\.foreground)
+    static let accent = token(\.accent)
+    static let caret = token(\.caret)
+    // The sidebar and tab bar share this, so the notch strip blends into both.
+    static let sidebar = token(\.chrome)
+    static let hover = token(\.hover)
+    static let divider = token(\.divider)
+    static let dimText = token(\.dimText)
+
+    /// Text a step down from foreground: file sizes, breadcrumbs, quiet agents' titles.
+    static let secondaryText = color(dark: 0x9AA3AA, light: 0x52595F)
+    /// The faintest text: separators, counts.
+    static let faintText = color(dark: 0x5F676D, light: 0x8C9297)
+    /// Panels raised over the chrome (the transfer toast, the file browser's path bar), and keycaps and pills.
+    static let raised = color(dark: 0x23282C, light: 0xFFFFFF)
+    static let pill = color(dark: 0x2B3034, light: 0xE1E3E1)
+    static let border = color(dark: 0x3A4046, light: 0xC6CAC8)
+    static let borderHover = color(dark: 0x58616A, light: 0x9AA0A5)
+    /// The notice bar under the tab bar.
+    static let noticeBackground = color(dark: 0x2A2F25, light: 0xF6EFD9)
+    /// The dimmed backdrop behind overlay cards.
+    static let backdrop = NSColor(name: nil) { $0.isDark ? NSColor.black.withAlphaComponent(0.45) : NSColor.black.withAlphaComponent(0.18) }
+
+    // States: agents, machines and transfers.
+    static let success = color(dark: 0x57C78A, light: 0x2E7D4F)
+    static let warning = color(dark: 0xE5A01A, light: 0x9A6A00)
+    static let caution = color(dark: 0xC8A35A, light: 0x8A6400)
+    static let danger = color(dark: 0xC76156, light: 0xB3392F)
+
+    /// Colours turned into CGColors outside drawing (layer backgrounds set while building views) resolve
+    /// against the thread's current appearance, which is the system's unless set. With Settings ›
+    /// Appearance overriding the system, it has to be the app's, or a light window gets dark layers.
+    @MainActor
+    static func followAppAppearance() {
+        let appearance = NSApp.effectiveAppearance
+        // Deprecated as a setter, but it's what `.cgColor` reads outside performAsCurrentDrawingAppearance.
+        NSAppearance.current = appearance
+    }
+
+    static func palette(for appearance: NSAppearance) -> ClothoPalette { appearance.isDark ? .dark : .light }
+
+    static func terminalColors(for appearance: NSAppearance) -> [SwiftTerm.Color] {
+        palette(for: appearance).ansi.map { hex in
             // SwiftTerm colors are 16 bits per channel.
             SwiftTerm.Color(red: UInt16((hex >> 16) & 0xff) * 257,
                             green: UInt16((hex >> 8) & 0xff) * 257,
                             blue: UInt16(hex & 0xff) * 257)
         }
+    }
+
+    /// Settings › Appearance: follow the system, or always light or dark.
+    enum Mode: String, CaseIterable {
+        case system, light, dark
+        static let defaultsKey = "Appearance"
+        static var current: Mode { Mode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .system }
+        var title: String { self == .system ? "Match System" : rawValue.capitalized }
+        var appearance: NSAppearance? {
+            switch self {
+            case .system: return nil
+            case .light: return NSAppearance(named: .aqua)
+            case .dark: return NSAppearance(named: .darkAqua)
+            }
+        }
+    }
+}
+
+extension NSAppearance {
+    var isDark: Bool { bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+}
+
+extension NSView {
+    /// Runs `body` with this view's appearance current, so dynamic colours resolve for it (`.cgColor`).
+    func withAppearance(_ body: () -> Void) {
+        effectiveAppearance.performAsCurrentDrawingAppearance(body)
     }
 }
 
@@ -152,10 +219,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var splitView: SplitLayoutView!
     var emptyLabel: NSTextField!
     var shortcutsOverlay: ShortcutsOverlay?
+    var quickOpen: QuickOpenOverlay?
     var fileBrowser: FileBrowserOverlay?
     var keyMonitor: Any?
     var settingsWindow: SettingsWindowController?
     var machineManager: MachineManagerController?
+    var onboarding: OnboardingController?
+    var agentHistoryWindows: [PaneKey: AgentHistoryWindowController] = [:]
+    lazy var updates = Updates()
     let transfers = TransferManager()
     var transferToast: TransferToast!
 
@@ -174,6 +245,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var hookSourcedMachines: Set<MachineKey> = []
     /// `hooks status` per machine: agent → installed.
     var hookStatus: [MachineKey: [String: Bool]] = [:]
+    /// Agents whose hooks on a machine came from an older clothod (`hooks status` says "outdated").
+    var outdatedHooks: [MachineKey: Set<String>] = [:]
     var lastAgentNotification: [String: (state: AgentInfo.State, date: Date)] = [:]
     /// Machines whose daemon runs an older build than the one installed, waiting for the user.
     var pendingDaemonUpdates: Set<MachineKey> = []
@@ -204,6 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     var windowedFrame: NSRect?
     var firstResponderObservation: NSKeyValueObservation?
+    var appearanceObservation: NSKeyValueObservation?
 
     // Carries settings over, once, from the "Clotho Next" builds that ran beside the herdr-based app
     // (bundle id app.clotho.desktop.next), without replacing anything already set here.
@@ -222,6 +296,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateLegacyPreferences()
+        NSApp.appearance = Theme.Mode.current.appearance
+        Theme.followAppAppearance()
+        // Before anything saves a window frame or a focused machine.
+        let firstRun = OnboardingController.isFirstRun()
         buildMenu()
         Self.registerBundledFonts()
 
@@ -389,6 +467,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         firstResponderObservation = window.observe(\.firstResponder) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.firstResponderChanged() }
         }
+        appearanceObservation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.appearanceChanged() } }
+        }
         let (backend, daemon) = Self.makeBackend()
         localDaemon = daemon
         addSession(MachineConnection(machine: .local, backend: backend))
@@ -407,6 +488,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         termSource = term
         runTestScripts()
         checkMachinesIfStale()
+        showOnboardingIfFirstRun(firstRun: firstRun)
+        _ = updates
 
         if UserDefaults.standard.bool(forKey: "ShowShortcuts") { showShortcuts(nil) }
         if UserDefaults.standard.bool(forKey: "ShowFiles") {
@@ -479,6 +562,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
+                // "quick:bb api" opens quick open with that query and logs the results; "quick:" + "open" picks the top one.
+                if step.hasPrefix("quick:") {
+                    if quickOpen == nil { showQuickOpen(nil) }
+                    let query = String(step.dropFirst(6))
+                    if query == "\r" || query == "open" { return quickOpen?.open() ?? () }
+                    quickOpen?.setQuery(query)
+                    return log("quick open \"\(query)\": " + (quickOpen?.results.map { "\($0.item.kind) \($0.item.title) [\($0.item.subtitle)]" }.joined(separator: " | ") ?? ""))
+                }
+                // "find:text" opens the focused pane's find bar and searches; "find:next" / "find:prev" step.
+                if step.hasPrefix("find:") {
+                    let what = String(step.dropFirst(5))
+                    guard let host = focusedPaneHost else { return log("TypeText: no pane to search") }
+                    if what == "close" { return host.hideFind() }
+                    if what == "next" || what == "prev" {
+                        host.search?.step(older: what == "next")
+                        return log("find: current \(host.search?.current.map(String.init) ?? "none") of \(host.search?.matches.count ?? 0)")
+                    }
+                    host.showFind()
+                    host.search?.bar.field.stringValue = what
+                    host.search?.search(now: true)
+                    return
+                }
+                if step.hasPrefix("history:") {
+                    let panes = store.state.panes.map(\.id)
+                    guard let index = Int(step.dropFirst(8)), index < panes.count else { return log("TypeText: no pane \(step)") }
+                    return showAgentHistory(machine: focusedMachine, pane: panes[index])
+                }
+                // "shot:/path.png" saves an image of the main window alone; "shot:panel:/path.png" the other
+                // visible window (Settings, a history panel).
+                if step.hasPrefix("shot:") {
+                    let rest = String(step.dropFirst(5))
+                    if rest.hasPrefix("panel:") {
+                        let other = NSApp.windows.first { $0 !== window && $0.isVisible && $0.contentView != nil }
+                        guard let view = other?.contentView else { return log("shot: no panel") }
+                        return saveSnapshot(of: view, to: String(rest.dropFirst(6)))
+                    }
+                    return saveSnapshot(of: container, to: rest)
+                }
+                // "paneshot:/path.png": the focused pane as it draws itself (terminal, highlights, find bar).
+                if step.hasPrefix("paneshot:"), let host = focusedPaneHost,
+                   let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: String(step.dropFirst(9))))
+                    return log("snapshot saved \(step.dropFirst(9))")
+                }
+                if step.hasPrefix("appearance:"), let mode = Theme.Mode(rawValue: String(step.dropFirst(11))) {
+                    return setAppearance(mode)
+                }
                 if step.hasPrefix("zoom:"), let factor = Double(step.dropFirst(5)) {
                     setUIScale(CGFloat(factor))
                     if UserDefaults.standard.bool(forKey: "LogSidebar") { logChromeFrames() }
@@ -938,6 +1069,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// Changes the app zoom: the chrome is rebuilt at the new size, then the terminal font follows.
+    /// Settings › Appearance.
+    func setAppearance(_ mode: Theme.Mode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: Theme.Mode.defaultsKey)
+        NSApp.appearance = mode.appearance
+        log("appearance: \(mode.rawValue)")
+    }
+
+    /// Light and dark: dynamic colours follow by themselves; what was resolved into layers is set again,
+    /// and the chrome is rebuilt. Overlays close (reopening them draws them in the new colours).
+    func appearanceChanged() {
+        guard let content = window.contentView else { return }
+        Theme.followAppAppearance()
+        content.withAppearance {
+            container.layer?.backgroundColor = Theme.background.cgColor
+            notchExtension.layer?.backgroundColor = Theme.sidebar.cgColor
+            shortcutsOverlay?.dismiss()
+            quickOpen?.dismiss()
+            sync()
+            transferToast.refresh()
+        }
+        settingsWindow?.reload()
+        log("appearance is now \(NSApp.effectiveAppearance.isDark ? "dark" : "light")")
+    }
+
     func setUIScale(_ factor: CGFloat) {
         let factor = UIScale.clamp(factor)
         guard factor != UIScale.factor else { return }

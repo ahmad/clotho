@@ -180,6 +180,11 @@ class ChromeItem: NSView {
         onEditingEnded?()
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { updateColors() }
+    }
+
     private func updateColors() {
         closeButton.isHidden = !(hovering || isSelected) || onClose == nil || editor != nil
         guard selectionStyle != .plain else {
@@ -309,6 +314,11 @@ final class TabBarView: NSView {
     private let addButton = NSButton()
     /// The bar's own constraints, with their sizes at 100%.
     private var scaled: [(NSLayoutConstraint, CGFloat)] = []
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { layer?.backgroundColor = Theme.sidebar.cgColor }
+    }
 
     /// Re-applies the app zoom to what's built once; the tabs themselves are rebuilt by update.
     func applyScale() {
@@ -559,6 +569,11 @@ final class SidebarView: NSView {
             handle.trailingAnchor.constraint(equalTo: trailingAnchor),
             handle.widthAnchor.constraint(equalToConstant: 5),
         ])
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { layer?.backgroundColor = Theme.sidebar.cgColor }
     }
 
     /// Re-applies the app zoom to the columns, which are built once; their rows are rebuilt by update.
@@ -1029,12 +1044,20 @@ final class WorkspaceRow: ChromeItem {
 /// A strip under the tab bar for things that need the user's attention but shouldn't block anything,
 /// such as an upgrade that needs clothod restarted.
 final class NoticeBar: NSView {
+    private var appearanceColors: (() -> Void)?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { appearanceColors?() }
+    }
+
     init(message: String, detail: String?, action: String?, onAction: (() -> Void)?, onDismiss: @escaping () -> Void) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor(hex: 0x2A2F25).cgColor
+        layer?.backgroundColor = Theme.noticeBackground.cgColor
+        appearanceColors = { [weak self] in self?.layer?.backgroundColor = Theme.noticeBackground.cgColor }
         let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.circle", accessibilityDescription: nil)!)
-        icon.contentTintColor = NSColor(hex: 0xC8A35A)
+        icon.contentTintColor = Theme.caution
         let label = NSTextField(wrappingLabelWithString: message)
         label.font = NSFont.systemFont(ofSize: s(12))
         label.textColor = Theme.foreground
@@ -1143,10 +1166,10 @@ final class DisclosureRow: ChromeItem {
         label.textColor = Theme.dimText
         badge.stringValue = "\(count)"
         badge.font = NSFont.monospacedDigitSystemFont(ofSize: s(10), weight: .medium)
-        badge.textColor = NSColor(hex: 0x5F676D)
+        badge.textColor = Theme.faintText
         badge.alignment = .center
         pill.wantsLayer = true
-        pill.layer?.backgroundColor = NSColor(hex: 0x2B3034).cgColor
+        pill.layer?.backgroundColor = Theme.pill.cgColor
         pill.layer?.cornerRadius = s(7)
         pill.isHidden = count == 0
         setAccessibilityLabel("\(title), \(count) agents")
@@ -1183,8 +1206,8 @@ final class OutlineButton: NSView {
     static var height: CGFloat { s(26) }
     /// The plus's distance from the button's leading edge.
     static var iconInset: CGFloat { s(9) }
-    static let border = NSColor(hex: 0x3A4046)
-    static let borderHover = NSColor(hex: 0x58616A)
+    static let border = Theme.border
+    static let borderHover = Theme.borderHover
     var onClick: (() -> Void)?
     let label: NSTextField
     private let icon = NSImageView()
@@ -1218,6 +1241,11 @@ final class OutlineButton: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { updateColors() }
+    }
 
     private func updateColors() {
         layer?.borderColor = (hovering ? Self.borderHover : Self.border).cgColor
@@ -1290,6 +1318,11 @@ final class SidebarFooter: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        withAppearance { separator.layer?.backgroundColor = Theme.divider.cgColor }
+    }
 
     /// Re-applies the app zoom (the footer is built once).
     func applyScale() {

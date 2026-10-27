@@ -43,10 +43,7 @@ extension AppDelegate {
         add("Paste", "v", [.command]) { terminal.paste(terminal) }
         add("Select All", "a", [.command]) { terminal.selectAll(nil) }
         add("Clear", "k", [.command]) { [weak self] in self?.backend.sendInput(key.pane, Data([0x0c])) }
-        let find = NSMenuItem(title: "Find…", action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
-        find.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
-        find.target = terminal
-        menu.addItem(find)
+        add("Find…", "f", [.command]) { [weak self] in self?.paneHosts[key]?.showFind() }
 
         menu.addItem(.separator())
         let machine = session.machine
