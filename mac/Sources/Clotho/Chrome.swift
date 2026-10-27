@@ -17,6 +17,17 @@ class ChromeItem: NSView {
     var selectedColor = Theme.background
     var hoverColor = Theme.hover
 
+    /// How selection shows. `.row` (workspaces): an accent tint, a bar on the leading edge and a semibold
+    /// title. `.tab`: an accent tint and an underline. Both turn grey while the window isn't key, as macOS
+    /// does. `.plain` keeps the old look (selectedColor).
+    enum SelectionStyle { case plain, row, tab }
+    var selectionStyle = SelectionStyle.plain {
+        didSet { installMarker(); updateColors() }
+    }
+    /// The selection bar (rows) or underline (tabs).
+    private let marker = NSView()
+    private var keyObservers: [NSObjectProtocol] = []
+
     let label = NSTextField(labelWithString: "")
     let closeButton = NSButton()
 
@@ -147,9 +158,68 @@ class ChromeItem: NSView {
     }
 
     private func updateColors() {
-        layer?.backgroundColor = (isSelected ? selectedColor : hovering ? hoverColor : .clear).cgColor
-        if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
         closeButton.isHidden = !(hovering || isSelected) || onClose == nil || editor != nil
+        guard selectionStyle != .plain else {
+            layer?.backgroundColor = (isSelected ? selectedColor : hovering ? hoverColor : .clear).cgColor
+            if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
+            return
+        }
+        // The accent while the window is key; grey (still visible) while it isn't.
+        let active = window?.isKeyWindow ?? true
+        let tint = active ? Theme.accent : Theme.dimText
+        layer?.backgroundColor = (isSelected ? tint.withAlphaComponent(active ? Self.tintAlpha : 0.16) : hovering ? hoverColor : .clear).cgColor
+        marker.isHidden = !isSelected
+        marker.layer?.backgroundColor = tint.cgColor
+        if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
+        if selectionStyle == .row, let size = label.font?.pointSize {
+            label.font = NSFont.systemFont(ofSize: size, weight: isSelected ? .semibold : .regular)
+        }
+    }
+
+    /// The selection tint's opacity over the sidebar and tab bar.
+    static let tintAlpha: CGFloat = 0.22
+
+    private func installMarker() {
+        guard selectionStyle != .plain, marker.superview == nil else { return }
+        marker.wantsLayer = true
+        marker.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(marker, positioned: .below, relativeTo: nil)
+        switch selectionStyle {
+        case .row:
+            // A 3 pt bar on the leading edge, inside the rounded highlight.
+            marker.layer?.cornerRadius = 1.5
+            NSLayoutConstraint.activate([
+                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+                marker.widthAnchor.constraint(equalToConstant: 3),
+                marker.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+                marker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            ])
+        case .tab:
+            // A 2 pt underline along the bottom edge.
+            marker.layer?.cornerRadius = 1
+            NSLayoutConstraint.activate([
+                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+                marker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                marker.heightAnchor.constraint(equalToConstant: 2),
+                marker.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        case .plain:
+            break
+        }
+    }
+
+    // Selection turns grey while the window isn't key, and back to the accent when it is.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+        keyObservers = []
+        guard let window, selectionStyle != .plain else { return }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateColors() }
+            })
+        }
+        updateColors()
     }
 }
 
@@ -260,6 +330,7 @@ final class TabBarView: NSView {
         for (index, var tab) in tabs.enumerated() {
             if let held = heldTitles.title(for: tab.id, model: tab.custom) { (tab.title, tab.custom) = (held, held) }
             let item = ChromeItem(closable: true)
+            item.selectionStyle = .tab
             items[tab.id] = (item, tab.title, tab.custom)
             item.label.stringValue = (tab.maximized ? "⤢ " : "") + tab.title
             item.label.alignment = .center
@@ -546,27 +617,27 @@ final class SidebarView: NSView {
         for (index, group) in groups.enumerated() {
             if index > 0, let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
             let key = group.key
-            let isCollapsed = collapsed.contains(key) && group.isConnected
+            // Every machine's group collapses, connected or not, so all names line up after the chevron.
+            let isCollapsed = collapsed.contains(key)
             let header = MachineHeader(title: group.title, status: group.status,
                                        newWorkspaceTooltip: group.isConnected ? (group.isLocal ? "New Workspace (⌘N)" : "New workspace on \(group.title)") : nil,
-                                       collapsed: group.isConnected ? isCollapsed : nil, count: group.workspaces.count)
+                                       collapsed: isCollapsed, count: group.isConnected ? group.workspaces.count : 0)
             header.onNewWorkspace = { [weak self] in self?.onNewWorkspace?(key) }
-            if group.isConnected {
-                header.onToggle = { [weak self, weak header] in
-                    header?.chevron?.setExpanded(isCollapsed, animated: true) { self?.toggleCollapsed(key) }
-                }
+            header.onToggle = { [weak self, weak header] in
+                header?.chevron?.setExpanded(isCollapsed, animated: true) { self?.toggleCollapsed(key) }
             }
             header.contextMenu = { [weak self] in self?.machineMenu?(key) }
             add(header)
             column.setCustomSpacing(4, after: header)
-            guard group.isConnected else {
-                add(actionButton("Connect", symbol: "arrow.right", tooltip: "Connect to \(group.title) and show its workspaces") { [weak self] in
-                    self?.onConnect?(key)
-                })
-                continue
-            }
             if isCollapsed {
                 if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title) collapsed (\(group.workspaces.count))") }
+                continue
+            }
+            guard group.isConnected else {
+                add(actionButton("Connect", symbol: "arrow.right", tooltip: "Connect to \(group.title) and show its workspaces",
+                                 inset: MachineHeader.nameInset - 2) { [weak self] in
+                    self?.onConnect?(key)
+                })
                 continue
             }
             for workspace in group.workspaces {
@@ -585,7 +656,8 @@ final class SidebarView: NSView {
                 add(row, height: Self.rowHeight)
             }
             if group.workspaces.isEmpty {
-                add(actionButton("New Workspace", symbol: "plus", tooltip: header.toolTip ?? "New Workspace") { [weak self] in
+                add(actionButton("New Workspace", symbol: "plus", tooltip: header.toolTip ?? "New Workspace",
+                                 inset: MachineHeader.nameInset - 2) { [weak self] in
                     self?.onNewWorkspace?(key)
                 })
             }
@@ -654,7 +726,9 @@ final class SidebarView: NSView {
     }
 
     /// A dim, single-line action, with its icon where row titles start.
-    private func actionButton(_ title: String, symbol: String, tooltip: String, action: @escaping () -> Void) -> NSView {
+    /// `inset`: where the icon starts (inside a machine's group, in line with the names).
+    private func actionButton(_ title: String, symbol: String, tooltip: String, inset: CGFloat = 8,
+                              action: @escaping () -> Void) -> NSView {
         let button = ClosureButton(title: title, action: action)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
@@ -667,7 +741,7 @@ final class SidebarView: NSView {
         button.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(button)
         NSLayoutConstraint.activate([
-            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: 8),
+            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: inset),
             button.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
             wrapper.heightAnchor.constraint(equalToConstant: Self.rowHeight),
         ])
@@ -691,6 +765,9 @@ final class MachineHeader: NSView {
     var onToggle: (() -> Void)?
     /// The group's disclosure chevron (machines that can collapse).
     private(set) var chevron: DisclosureChevron?
+    /// Where a machine's name starts: after its chevron (10 pt in, 14 pt wide) and 6 pt of space. Its
+    /// workspace rows and buttons line up with it.
+    static let nameInset: CGFloat = 30
 
     /// `collapsed` nil: no disclosure chevron (the Agents header). `count` shows after the title while
     /// collapsed, so a closed group still says how many workspaces it holds.
@@ -722,7 +799,8 @@ final class MachineHeader: NSView {
         add.toolTip = newWorkspaceTooltip
         add.isHidden = newWorkspaceTooltip == nil
         toolTip = newWorkspaceTooltip
-        // The chevron follows the title, so titles stay in line with the workspace rows below.
+        // A machine's chevron comes first, in the Quiet header's column; the name, its rows and their
+        // buttons all start at nameInset after it.
         let chevron = DisclosureChevron(expanded: collapsed == false)
         chevron.isHidden = collapsed == nil
         chevron.setAccessibilityLabel(collapsed == true ? "Show workspaces" : "Hide workspaces")
@@ -732,13 +810,13 @@ final class MachineHeader: NSView {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            chevron.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 3),
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             chevron.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             chevron.widthAnchor.constraint(equalToConstant: DisclosureChevron.size),
             chevron.heightAnchor.constraint(equalToConstant: DisclosureChevron.size),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: collapsed == nil ? 10 : Self.nameInset),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            dot.leadingAnchor.constraint(equalTo: collapsed == nil ? label.trailingAnchor : chevron.trailingAnchor, constant: collapsed == nil ? 6 : 3),
+            dot.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
             dot.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 6),
             dot.heightAnchor.constraint(equalToConstant: 6),
@@ -827,6 +905,7 @@ final class WorkspaceRow: ChromeItem {
     override init(closable: Bool = true) {
         super.init(closable: closable)
         label.font = NSFont.systemFont(ofSize: 13)
+        selectionStyle = .row
         detail.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         detail.textColor = Theme.dimText
         detail.setContentHuggingPriority(.required, for: .horizontal)
@@ -838,6 +917,8 @@ final class WorkspaceRow: ChromeItem {
         badge.isHidden = true
         badge.translatesAutoresizingMaskIntoConstraints = false
         addSubview(badge)
+        // The title lines up with the machine's name above it, after the header's chevron.
+        constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.constant = MachineHeader.nameInset }
         // The title gives way to the trailing count and badge.
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
         let end = closeButton.superview == nil ? trailingAnchor : closeButton.leadingAnchor
