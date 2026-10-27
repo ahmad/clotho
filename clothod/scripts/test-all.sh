@@ -27,12 +27,16 @@ step "Linux: e2e on $LINUX_HOST"
 T=x86_64-unknown-linux-musl
 # zigbuild: ring has C code (see .cargo/config.toml).
 if cargo zigbuild -q --target $T --bins && e2e=$(cargo zigbuild -q --target $T --tests --message-format=json 2>/dev/null | grep '"name":"e2e"' | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | head -1) && [ -n "$e2e" ]; then
-    rdir=$($SSH "$LINUX_HOST" 'mktemp -d /tmp/clt-ci.XXXXXX')
-    scp -q "target/$T/debug/clothod" "target/$T/debug/clotho" "$e2e" "$LINUX_HOST:$rdir/" &&
-        $SSH "$LINUX_HOST" "cd $rdir && CLOTHOD_BIN=\$PWD/clothod CLOTHO_BIN=\$PWD/clotho ./$(basename "$e2e") 2>&1" > target/test-all-linux.log
-    grep -E "^test result|panicked" target/test-all-linux.log
-    grep -q "^test result: ok" target/test-all-linux.log || fail "Linux e2e on $LINUX_HOST (target/test-all-linux.log)"
-    $SSH "$LINUX_HOST" "rm -rf $rdir"
+    : > target/test-all-linux.log
+    if rdir=$($SSH "$LINUX_HOST" 'mktemp -d /tmp/clt-ci.XXXXXX') && [ -n "$rdir" ]; then
+        scp -q "target/$T/debug/clothod" "target/$T/debug/clotho" "$e2e" "$LINUX_HOST:$rdir/" &&
+            $SSH "$LINUX_HOST" "cd $rdir && CLOTHOD_BIN=\$PWD/clothod CLOTHO_BIN=\$PWD/clotho ./$(basename "$e2e") 2>&1" > target/test-all-linux.log
+        grep -E "^test result|panicked" target/test-all-linux.log
+        grep -q "^test result: ok. [1-9]" target/test-all-linux.log || fail "Linux e2e on $LINUX_HOST (target/test-all-linux.log)"
+        $SSH "$LINUX_HOST" "rm -rf $rdir"
+    else
+        fail "Linux e2e: can't reach $LINUX_HOST over ssh"
+    fi
 else
     fail "Linux cross build"
 fi
@@ -42,6 +46,8 @@ DIST_DIR=target/dist-dev ./scripts/dist.sh --dev > target/test-all-dist.log 2>&1
 
 for h in $REMOTE_HOSTS; do
     step "remote: $h"
+    # Unreachable hosts must fail here, not depend on how the suite reports it.
+    $SSH "$h" true || { fail "remote suite: can't reach $h over ssh"; continue; }
     log="target/test-all-remote-$(echo "$h" | tr '@' '_').log"
     CLOTHO_DIST=$PWD/target/dist-dev CLOTHO_TEST_SSH_HOST=$h cargo test -p clotho --test remote > "$log" 2>&1
     grep -E "^test result|panicked" "$log"
@@ -51,12 +57,23 @@ done
 step "cleanliness"
 checked=""
 # Ours: clothod processes serving /tmp/clt* dirs, and the dirs themselves.
-left=$(target/debug/clothod ps | grep "/tmp/clt" ; find /tmp -maxdepth 1 -name "clt*" 2>/dev/null)
-[ -n "$left" ] && { echo "$left"; fail "leftovers on this Mac"; } || echo "this Mac: clean"
+# A check that couldn't run is UNCHECKED, a failure: never read silence as clean.
+if ps_out=$(target/debug/clothod ps); then
+    left=$(echo "$ps_out" | grep "/tmp/clt" ; find /tmp -maxdepth 1 -name "clt*" 2>/dev/null)
+    [ -n "$left" ] && { echo "$left"; fail "leftovers on this Mac"; } || echo "this Mac: clean"
+else
+    echo "this Mac: UNCHECKED"; fail "cleanliness unchecked on this Mac (clothod ps failed)"
+fi
 for h in $LINUX_HOST $REMOTE_HOSTS; do
     case " $checked " in *" $h "*) continue ;; esac
     checked="$checked $h"
-    left=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; find /tmp -maxdepth 1 -name "clt*" 2>/dev/null')
+    # The marker proves the remote commands ran; ssh failing leaves it out.
+    out=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; find /tmp -maxdepth 1 -name "clt*" 2>/dev/null; echo CLOTHO-CHECKED')
+    case "$out" in
+    *CLOTHO-CHECKED*) ;;
+    *) echo "$h: UNCHECKED"; fail "cleanliness unchecked on $h (ssh failed)"; continue ;;
+    esac
+    left=$(echo "$out" | grep -v '^CLOTHO-CHECKED$')
     [ -n "$left" ] && { echo "$left"; fail "leftovers on $h"; } || echo "$h: clean"
 done
 
