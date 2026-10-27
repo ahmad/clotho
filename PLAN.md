@@ -129,3 +129,12 @@ owns the PTY fds shapes spawn, resize, reconnect and the output buffer.
 3. Remote: SSH bridge, auto-install, file transfers moved onto the daemon.
 4. iOS app on ClothoKit.
 5. Agent status and notifications, then the push relay.
+
+## Clipboard from agent TUIs (user decision, 2026-10-27)
+
+- Copying inside Claude Code and Codex must reach the device clipboard. Panes may set the clipboard
+  through OSC 52, which clothod forwards to attached clients. Panes may never read it.
+- Modifier-drag (Option/Shift) forces a local selection while a pane has mouse reporting on.
+- The user approved releasing it everywhere: clothod 0.1.6, upgraded in place on macbook, devbox and
+  imac, the Mac app installed, and an iOS TestFlight build with the same support. This is together
+  with the Shift+Return, rename-flicker and Cmd-arrow/Cmd-Delete fixes.
