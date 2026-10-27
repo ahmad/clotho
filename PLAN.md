@@ -220,3 +220,14 @@ is verified; this is a standing go for this round.
     no notifications and no pushes, until the user unmutes it or the agent session ends.
   - Both actions appear on hover on the Mac and as swipe or menu actions on iOS. It ships with the
     next clothod release (0.1.10), which needs the user's go.
+
+## clothod 0.1.10 (user decision, 2026-10-27)
+
+- The user said "ship when everything is completed". When Mute (daemon, Mac and iOS) and the Mac
+  batch (pinned agent time, app-wide zoom, thicker tabs, Create Workspace buttons, Manage
+  Machines) are done and verified, release 0.1.10 and upgrade in place on macbook, devbox and
+  imac. Then reinstall the Mac app with 0.1.10, and prepare a TestFlight build, which the user
+  uploads at the Mac.
+- Sidebar (user request): a subtle outline "Create Workspace" button at the bottom of each machine's
+  workspace list replaces the header "+". A "Manage Machines…" footer pinned to the bottom of the
+  sidebar opens a panel to add, edit and remove machines. Removing only forgets the machine.
