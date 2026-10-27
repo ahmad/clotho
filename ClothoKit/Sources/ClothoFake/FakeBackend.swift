@@ -37,9 +37,10 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     // MARK: Lifecycle
 
     public func start() async throws {
-        let hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
+        var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
+        hello.featureNames = ["pane.keys", "agents"]
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -299,6 +300,23 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
             continuation.yield(.agent(pane, agent))
             publishPane(at: p)
         }
+    }
+
+    /// `pane.keys`, simply: text as is, then each key as the bytes a terminal sends in normal modes.
+    public func sendKeys(_ pane: PaneID, text: String?, keys: [String]) async throws {
+        var bytes = Data((text ?? "").utf8)
+        for key in keys {
+            switch key {
+            case "enter": bytes.append(0x0d)
+            case "escape", "esc": bytes.append(0x1b)
+            case "tab": bytes.append(0x09)
+            case "backspace": bytes.append(0x7f)
+            case let single where single.count == 1: bytes.append(contentsOf: single.utf8)
+            default: throw BackendError(code: "bad_request", message: "unknown key \(key)")
+            }
+        }
+        sendInput(pane, bytes)
+        try await ackAgent(pane)
     }
 
     public func sendInput(_ pane: PaneID, _ bytes: Data) {

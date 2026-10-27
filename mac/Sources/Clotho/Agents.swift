@@ -18,6 +18,12 @@ struct AgentEntry {
     /// The tab's name as the tab bar shows it.
     let tabTitle: String?
     let info: AgentInfo
+    /// The machine's daemon can type for us (`pane.keys`), so quick replies are offered.
+    let canReply: Bool
+
+    /// Quick replies make sense while the agent waits for the user, or has finished and not been seen
+    /// (it often ends by asking something).
+    var offersReplies: Bool { canReply && (info.state == .waiting || info.needsAttention) }
 
     /// Waiting first, then finished or failed ones nobody has looked at, then running, then the rest.
     var rank: Int {
@@ -110,7 +116,8 @@ extension AppDelegate {
                 let location = state.location(of: pane.id)
                 entries.append(AgentEntry(machine: key, machineName: session.title, pane: pane.id, workspace: location?.workspace,
                                           tab: location?.tab, paneTitle: pane.title,
-                                          tabTitle: location.map { session.store.displayTitle(of: $0.tab) }, info: info))
+                                          tabTitle: location.map { session.store.displayTitle(of: $0.tab) }, info: info,
+                                          canReply: session.store.hello?.features.contains(.paneKeys) == true))
             }
         }
         return entries.sorted {
@@ -152,6 +159,68 @@ extension AppDelegate {
         }
     }
 
+    // MARK: Quick replies
+
+    /// Answers an agent without switching to its pane: `text` (pasted) and then `keys`, encoded by the
+    /// machine's daemon for the agent's terminal modes (`pane.keys`). Answering also marks it seen.
+    func reply(machine: MachineKey, pane: PaneID, text: String? = nil, keys: [String]) {
+        guard let session = sessions[machine], session.store.hello?.features.contains(.paneKeys) == true else {
+            return log("reply to \(machine)/\(pane): this clothod can't send keys")
+        }
+        let backend = session.store.backend
+        log("reply to \(machine)/\(pane): \(text.map { "text (\($0.count) chars) + " } ?? "")\(keys)")
+        Task { @MainActor in
+            do {
+                try await backend.sendKeys(pane, text: text, keys: keys)
+                try await backend.ackAgent(pane)
+            } catch {
+                log("reply to \(machine)/\(pane) failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Asks for a line of text and sends it with Enter.
+    func promptReply(machine: MachineKey, pane: PaneID) {
+        guard window.attachedSheet == nil, let session = sessions[machine], let agent = session.store.state.pane(pane)?.agent else { return }
+        if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+        let alert = NSAlert()
+        alert.messageText = "Reply to \(agent.kindName) on \(session.title)"
+        alert.informativeText = agent.message ?? "Sends your text, then Enter."
+        alert.addButton(withTitle: "Send")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "Your reply"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            let text = field.stringValue
+            guard response == .alertFirstButtonReturn, !text.isEmpty else { return }
+            self?.reply(machine: machine, pane: pane, text: text, keys: ["enter"])
+        }
+    }
+
+    /// The quick replies, for an agent row's buttons and menu: (title, keys). "Reply…" asks for text.
+    static let quickReplies: [(title: String, help: String, keys: [String])] = [
+        ("1", "Press 1 (usually Yes)", ["1"]),
+        ("2", "Press 2", ["2"]),
+        ("3", "Press 3", ["3"]),
+        ("↩", "Press Return", ["enter"]),
+        ("Esc", "Press Esc (cancel or deny)", ["escape"]),
+    ]
+
+    /// The right-click menu on an agent row.
+    func agentMenu(machine: MachineKey, pane: PaneID, canReply: Bool) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "Open Pane") { [weak self] in self?.openAgent(machine: machine, pane: pane) })
+        guard canReply else { return menu }
+        menu.addItem(.separator())
+        for reply in Self.quickReplies {
+            menu.addItem(ClosureMenuItem(title: reply.help) { [weak self] in self?.reply(machine: machine, pane: pane, keys: reply.keys) })
+        }
+        menu.addItem(ClosureMenuItem(title: "Reply…") { [weak self] in self?.promptReply(machine: machine, pane: pane) })
+        return menu
+    }
+
     // MARK: Transitions, notifications and the dock badge
 
     func agentChanged(machine: MachineKey, pane: PaneID, from before: AgentInfo?, to after: AgentInfo?) {
@@ -172,8 +241,11 @@ extension AppDelegate {
         let title = "\(after.kindName) \(after.state == .waiting ? "is waiting" : after.state == .done ? "finished" : "hit an error")"
         let place = [session.title, location?.workspace.name, location.map { session.store.displayTitle(of: $0.tab) }]
             .compactMap { $0 }.joined(separator: " › ")
+        // Answerable from the notification when the daemon can type for us.
+        let canReply = session.store.hello?.features.contains(.paneKeys) == true
+        let category = canReply ? (after.state == .waiting ? Self.waitingCategory : Self.finishedCategory) : nil
         postNotification(title: title, body: [place, after.message].compactMap { $0 }.joined(separator: "\n"),
-                         machine: machine, pane: pane)
+                         machine: machine, pane: pane, category: category)
     }
 
     /// Mutable per state in the Agents menu; all on by default.
@@ -212,12 +284,27 @@ extension AppDelegate {
         main.insertItem(item, at: index)
     }
 
-    private func postNotification(title: String, body: String, machine: MachineKey, pane: PaneID) {
+    static let waitingCategory = "agent.waiting"
+    static let finishedCategory = "agent.finished"
+
+    /// Approve (1), Deny (Esc) and a typed Reply for a waiting agent; a typed Reply for a finished one.
+    static func notificationCategories() -> Set<UNNotificationCategory> {
+        let approve = UNNotificationAction(identifier: "approve", title: "Approve (1)")
+        let deny = UNNotificationAction(identifier: "deny", title: "Deny (Esc)", options: [.destructive])
+        let reply = UNTextInputNotificationAction(identifier: "reply", title: "Reply", textInputButtonTitle: "Send",
+                                                  textInputPlaceholder: "Your reply")
+        return [
+            UNNotificationCategory(identifier: waitingCategory, actions: [approve, deny, reply], intentIdentifiers: []),
+            UNNotificationCategory(identifier: finishedCategory, actions: [reply], intentIdentifiers: []),
+        ]
+    }
+
+    private func postNotification(title: String, body: String, machine: MachineKey, pane: PaneID, category: String? = nil) {
         // AgentNotifications=NO (for test runs) logs instead, so no permission prompt appears. bool(forKey:)
         // reads a launch argument's "NO" too.
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: "AgentNotifications") == nil || defaults.bool(forKey: "AgentNotifications") else {
-            return log("agent notification: \(title) — \(body.replacingOccurrences(of: "\n", with: " · "))")
+            return log("agent notification: \(title) — \(body.replacingOccurrences(of: "\n", with: " · "))\(category.map { " [\($0)]" } ?? "")")
         }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
@@ -226,6 +313,7 @@ extension AppDelegate {
             content.body = body
             content.sound = .default
             content.userInfo = ["machine": machine, "pane": NSNumber(value: pane)]
+            if let category { content.categoryIdentifier = category }
             // One notification per pane: a newer state replaces the older one.
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "agent.\(machine).\(pane)", content: content, trigger: nil))
         }
@@ -240,7 +328,16 @@ extension AppDelegate {
 
     func setUpAgentNotifications() {
         UNUserNotificationCenter.current().delegate = notificationDelegate
+        UNUserNotificationCenter.current().setNotificationCategories(Self.notificationCategories())
         notificationDelegate.onOpen = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
+        notificationDelegate.onAction = { [weak self] machine, pane, action, text in
+            switch action {
+            case "approve": self?.reply(machine: machine, pane: pane, keys: ["1"])
+            case "deny": self?.reply(machine: machine, pane: pane, keys: ["escape"])
+            case "reply" where !(text ?? "").isEmpty: self?.reply(machine: machine, pane: pane, text: text, keys: ["enter"])
+            default: break
+            }
+        }
         // Elapsed times in the Agents section stay current.
         agentClock = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sync() }
@@ -258,6 +355,8 @@ final class AgentsMenuDelegate: NSObject, NSMenuDelegate {
 /// in front too (unless it's the pane being looked at, which never gets one).
 final class AgentNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     var onOpen: ((MachineKey, PaneID) -> Void)?
+    /// A notification button: the action id ("approve", "deny", "reply") and any typed text.
+    var onAction: ((MachineKey, PaneID, String, String?) -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -268,7 +367,16 @@ final class AgentNotificationDelegate: NSObject, UNUserNotificationCenterDelegat
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
         if let machine = info["machine"] as? String, let pane = (info["pane"] as? NSNumber)?.uint64Value {
-            DispatchQueue.main.async { self.onOpen?(machine, pane) }
+            let action = response.actionIdentifier
+            let text = (response as? UNTextInputNotificationResponse)?.userText
+            DispatchQueue.main.async {
+                if action == UNNotificationDefaultActionIdentifier {
+                    self.onOpen?(machine, pane)
+                } else if action != UNNotificationDismissActionIdentifier {
+                    // Answered from the notification: the pane stays where it is.
+                    self.onAction?(machine, pane, action, text)
+                }
+            }
         }
         completionHandler()
     }
@@ -342,6 +450,33 @@ final class AgentRow: ChromeItem {
             detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
             detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 1),
             detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
+        ])
+    }
+
+    /// Reply buttons on a third line: the keys a prompt takes for a waiting agent, and a typed reply for
+    /// one that finished (which often ends with a question).
+    func addReplyButtons(keys: Bool, onReply: @escaping ([String]) -> Void, onText: @escaping () -> Void) {
+        var buttons: [NSView] = (keys ? AppDelegate.quickReplies : []).map { reply in
+            let button = ClosureButton(title: reply.title) { onReply(reply.keys) }
+            button.toolTip = reply.help
+            return button
+        }
+        let text = ClosureButton(title: "Reply…", action: onText)
+        text.toolTip = "Type a reply and send it with Return"
+        buttons.append(text)
+        for case let button as NSButton in buttons {
+            button.bezelStyle = .recessed
+            button.controlSize = .small
+            button.font = NSFont.systemFont(ofSize: 11)
+        }
+        let strip = NSStackView(views: buttons)
+        strip.spacing = 3
+        strip.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(strip)
+        NSLayoutConstraint.activate([
+            strip.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -2),
+            strip.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 4),
+            strip.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
         ])
     }
 

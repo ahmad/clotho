@@ -182,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Moves the panes down while a notice shows, so it never covers them.
     var splitTop: NSLayoutConstraint!
     var termSource: DispatchSourceSignal?
+    var lastRemoteReconnect = Date.distantPast
     var paneHosts: [PaneKey: PaneHostView] = [:]
     // Maximize is a per-window view state, not part of the daemon's model.
     var maximized: [TabKey: PaneID] = [:]
@@ -278,6 +279,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
+        sidebar.onAgentReply = { [weak self] machine, pane, keys in self?.reply(machine: machine, pane: pane, keys: keys) }
+        sidebar.onAgentTextReply = { [weak self] machine, pane in self?.promptReply(machine: machine, pane: pane) }
+        sidebar.agentRowMenu = { [weak self] machine, pane, canReply in
+            self?.agentMenu(machine: machine, pane: pane, canReply: canReply) ?? NSMenu()
+        }
         sidebar.agentsMenu = { [weak self] in self?.agentsNotificationMenu() ?? NSMenu() }
         sidebar.machineMenu = { [weak self] key in self?.menu(forMachine: key) ?? NSMenu() }
         NotificationCenter.default.addObserver(forName: Machine.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -476,6 +482,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 log("PaneMenu: " + menu.items.map { $0.isSeparatorItem ? "|" : $0.title }.joined(separator: ", "))
                 guard let item = menu.items.first(where: { $0.title == title }) else { return log("PaneMenu: no item \(title)") }
                 _ = item.target?.perform(item.action, with: item)
+            }
+        }
+        // QuickReply="30|1" (or "40|text:hello") answers the first waiting (or attention) agent then: keys
+        // separated by commas, or text followed by Enter.
+        for spec in (UserDefaults.standard.string(forKey: "QuickReply")?.components(separatedBy: ";") ?? []) {
+            let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2, let time = Double(parts[0]) else { continue }
+            DispatchQueue.main.asyncAfter(deadline: .now() + time) { [self] in
+                guard let entry = agentEntries().first(where: { $0.info.state == .waiting || $0.info.needsAttention }) else {
+                    return log("QuickReply: no agent to answer")
+                }
+                log("QuickReply: \(parts[1]) → \(entry.machine)/\(entry.pane), offersReplies \(entry.offersReplies)")
+                if parts[1].hasPrefix("text:") {
+                    reply(machine: entry.machine, pane: entry.pane, text: String(parts[1].dropFirst(5)), keys: ["enter"])
+                } else {
+                    reply(machine: entry.machine, pane: entry.pane, keys: parts[1].components(separatedBy: ","))
+                }
             }
         }
         // ConnectMachine="devbox" connects to that saved machine and starts a session there.

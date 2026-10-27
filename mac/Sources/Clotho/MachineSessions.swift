@@ -235,6 +235,9 @@ extension AppDelegate {
     }
 
     func reconnectRemoteMachines(reason: String) {
+        // Network changes come in bursts (an interface going down, a VPN, DHCP); one reconnect covers them.
+        guard Date().timeIntervalSince(lastRemoteReconnect) > 2 else { return }
+        lastRemoteReconnect = Date()
         for session in sessions.values where !session.machine.isLocal {
             log("\(session.machine.label): reconnecting after \(reason)")
             session.store.backend.reconnectNow()

@@ -57,11 +57,15 @@ public final class ByteStream: @unchecked Sendable {
                     break
                 }
             }
+            let closedHere = isClosed
             close()
             // Only the read loop closes the descriptors, so none is reused while a read is blocked on it.
             Darwin.close(readFD)
             if writeFD != readFD { Darwin.close(writeFD) }
-            onClose(closeReason() ?? reason ?? "the connection closed")
+            // closeReason runs either way (it reports how a remote command ended), but a stream this side
+            // closed (reconnectNow, stop) ended on purpose, whatever the process says about it.
+            let explained = closeReason()
+            onClose(closedHere ? "reconnecting" : explained ?? reason ?? "the connection closed")
         }
         thread.name = "clotho.clothod.read"
         thread.qualityOfService = .userInteractive
@@ -78,6 +82,12 @@ public final class ByteStream: @unchecked Sendable {
                 sent += n
             }
         }
+    }
+
+    private var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
     }
 
     /// Ends the stream, which ends the read loop.

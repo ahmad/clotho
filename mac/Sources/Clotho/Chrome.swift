@@ -292,6 +292,9 @@ final class SidebarView: NSView {
     static let groupSpacing: CGFloat = 18
 
     var onOpenAgent: ((MachineKey, PaneID) -> Void)?
+    var onAgentReply: ((MachineKey, PaneID, [String]) -> Void)?
+    var onAgentTextReply: ((MachineKey, PaneID) -> Void)?
+    var agentRowMenu: ((MachineKey, PaneID, Bool) -> NSMenu)?
     var agentsMenu: (() -> NSMenu)?
 
     func update(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) {
@@ -308,7 +311,12 @@ final class SidebarView: NSView {
         for entry in agents {
             let row = AgentRow(entry)
             row.onClick = { [weak self] in self?.onOpenAgent?(entry.machine, entry.pane) }
-            add(row, height: 40, to: agentsColumn)
+            row.contextMenu = { [weak self] in self?.agentRowMenu?(entry.machine, entry.pane, entry.canReply) }
+            if entry.offersReplies {
+                row.addReplyButtons(keys: entry.info.state == .waiting, onReply: { [weak self] keys in self?.onAgentReply?(entry.machine, entry.pane, keys) },
+                                    onText: { [weak self] in self?.onAgentTextReply?(entry.machine, entry.pane) })
+            }
+            add(row, height: entry.offersReplies ? 66 : 40, to: agentsColumn)
         }
         for machine in unreachable {
             add(note("\(machine.name) is unreachable, so its agents aren't shown", tooltip: machine.reason, color: AgentInfo.State.error.color),
