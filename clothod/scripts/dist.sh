@@ -8,6 +8,11 @@
 #
 # Linux builds are static musl binaries linked with rust-lld (no cross toolchain needed).
 # macOS x86_64 needs Xcode's SDK, which any Mac with the command line tools has.
+#
+# CLOTHOD_SIGN_IDENTITY="Developer ID Application: … (TEAMID)" signs the macOS builds with that
+# identity, hardened runtime and a secure timestamp (what notarization needs), before their
+# install ids are computed: the id hashes the whole file, so signing later would break the
+# manifest and every installed daemon's id. Unset, they keep the linker's ad-hoc signature.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -44,6 +49,11 @@ cargo zigbuild --release --bin clothod $linux
 host=target/release/clothod
 cargo build --release --bin clothod
 
+sign=${CLOTHOD_SIGN_IDENTITY:-}
+if [ -n "$sign" ]; then
+    command -v codesign >/dev/null || { echo "dist: CLOTHOD_SIGN_IDENTITY needs codesign (a Mac)" >&2; exit 1; }
+fi
+
 out=${DIST_DIR:-dist}
 rm -rf "$out"
 mkdir -p "$out"
@@ -55,6 +65,14 @@ mkdir -p "$out"
         t=${b#*:}
         mkdir -p "$out/$name"
         cp "target/$t/release/clothod" "$out/$name/clothod"
+        case $name in macos-*)
+            if [ -n "$sign" ]; then
+                codesign --force --options runtime --timestamp --sign "$sign" "$out/$name/clothod" >&2
+                codesign --verify --strict --verbose=1 "$out/$name/clothod" >&2
+                # It must still start under the hardened runtime (x86_64 through Rosetta).
+                "$out/$name/clothod" version >&2
+            fi
+        esac
         id=$("$host" build-id "$out/$name/clothod")
         size=$(wc -c < "$out/$name/clothod" | tr -d ' ')
         [ $first = 1 ] || printf ',\n'
