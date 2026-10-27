@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build clothod for every platform a client may need to install it on, into dist/:
 #
+# Output goes to $DIST_DIR (default dist/):
 #   dist/<os>-<arch>/clothod      os: macos | linux, arch: aarch64 | x86_64 (as `uname -m`
 #                                 normalizes, see docs/remote.md)
 #   dist/manifest.json            version, and per build: Rust target, install id, size
@@ -38,25 +39,26 @@ cargo build --release --bin clothod $args
 host=target/release/clothod
 cargo build --release --bin clothod
 
-rm -rf dist
-mkdir -p dist
+out=${DIST_DIR:-dist}
+rm -rf "$out"
+mkdir -p "$out"
 {
     printf '{\n  "version": "%s",\n  "builds": {\n' "$version"
     first=1
     for b in $builds; do
         name=${b%%:*}
         t=${b#*:}
-        mkdir -p "dist/$name"
-        cp "target/$t/release/clothod" "dist/$name/clothod"
-        id=$("$host" build-id "dist/$name/clothod")
-        size=$(wc -c < "dist/$name/clothod" | tr -d ' ')
+        mkdir -p "$out/$name"
+        cp "target/$t/release/clothod" "$out/$name/clothod"
+        id=$("$host" build-id "$out/$name/clothod")
+        size=$(wc -c < "$out/$name/clothod" | tr -d ' ')
         [ $first = 1 ] || printf ',\n'
         first=0
         printf '    "%s": {"target": "%s", "id": "%s", "size": %s, "file": "%s/clothod"}' "$name" "$t" "$id" "$size" "$name"
     done
     printf '\n  }\n}\n'
-} > dist/manifest.json
-cat dist/manifest.json
+} > "$out/manifest.json"
+cat "$out/manifest.json"
 if [ "$dev" = 0 ]; then
     echo "$version" > RELEASED
     echo "dist: released $version (recorded in RELEASED)"

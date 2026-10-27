@@ -255,10 +255,13 @@ async fn shells_survive_the_ssh_session_ending() {
     assert!(probe.daemon_running(), "{probe:?}");
     let pid = probe.get("daemon_pid").to_string();
     // Not tied to the ended session: on Linux the daemon is in its own session (setsid).
-    let (_, out, _) = h.r.clothod(&path, &format!("version >/dev/null; ps -o sid= -p {pid}; ps -o sid= -p $$")).await.unwrap();
-    let sids: Vec<&str> = out.split_whitespace().collect();
-    assert_eq!(sids.len(), 2, "{out}");
-    assert_ne!(sids[0], sids[1], "daemon shares the ssh session: {out}");
+    // Not tied to the ended session: the daemon was started with setsid, so it leads its own
+    // process group, unlike the ssh session's shell (portable: macOS ps has no `sid`).
+    let (_, out, _) = h.r.clothod(&path, &format!("version >/dev/null; ps -o pgid= -p {pid}; ps -o pgid= -p $$")).await.unwrap();
+    let pgids: Vec<&str> = out.split_whitespace().collect();
+    assert_eq!(pgids.len(), 2, "{out}");
+    assert_eq!(pgids[0], pid, "daemon leads its own session: {out}");
+    assert_ne!(pgids[0], pgids[1], "daemon shares the ssh session's group: {out}");
     let Session { client: c, .. } = h.r.bridge(&path).await.unwrap();
     wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "slept")).await.unwrap();
     c.input(p, b"echo $W\r");
