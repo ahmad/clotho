@@ -42,6 +42,7 @@ The maximum `length` is 16 MiB. A peer that receives a larger frame closes the c
 | 2    | OUTPUT   | `u64 pane`, `u64 seq`, then raw PTY bytes                            | daemon → client |
 | 3    | INPUT    | `u64 pane`, then raw bytes to write to the PTY                       | client → daemon |
 | 4    | SNAPSHOT | `u64 pane`, `u64 seq`, `u16 cols`, `u16 rows`, then VT bytes         | daemon → client |
+| 5    | FILE_DATA | `u64 stream`, `u64 offset`, `u8 flags`, then file bytes (see [Files](#files)) | both |
 
 All integers are big-endian. Receivers ignore frame types they don't know, which leaves room to
 add types later.
@@ -448,6 +449,130 @@ no client or several clients are attached. **Clients must not forward their emul
 auto-generated responses as input.** Send only user input such as keys, paste, and mouse and focus
 reports. (With SwiftTerm, that means filtering what the terminal delegate's `send` emits for
 query responses.)
+
+## Files
+
+Status: **draft** (2026-10-26, for review by the ClothoKit side; not implemented yet). Feature
+flag: `fs` in `hello.features`.
+
+File access on the daemon's machine, for file browsers and transfers. It replaces running
+scripts and rsync over SSH, and it works the same locally, through `clothod bridge`, and later
+on iOS. The daemon acts as the user it runs as, with the same rights an SSH login has.
+
+### Paths and entries
+
+Paths are absolute (`/home/me/x`) or start with `~` (`~`, `~/notes`), which expands to the
+user's home. Anything else is `bad_request`. Paths are not normalized beyond that, and symlinks
+are followed except where noted. A pane's `cwd` field is a good place to start browsing.
+
+An **entry**:
+
+```json
+{"name": "notes.md", "path": "/home/me/notes.md", "type": "file", "size": 1234,
+ "mtime": 1761512345.5, "mode": 420, "target": null, "hidden": false}
+```
+
+| field | |
+|---|---|
+| `type` | `"file"`, `"dir"`, `"symlink"` (only from `fs.list`/`fs.stat` with `follow: false`) or `"other"` (sockets, devices, FIFOs) |
+| `size` | bytes (for directories: what the OS reports) |
+| `mtime` | unix seconds, float |
+| `mode` | permission bits as an integer (`0o644` = 420) |
+| `target` | for symlinks, the link text; otherwise `null` |
+| `hidden` | the name starts with `.` |
+
+### Metadata methods
+
+| method | params | result |
+|---|---|---|
+| `fs.stat` | `path`, `follow?` (default true) | an entry |
+| `fs.list` | `path`, `hidden?` (default true), `limit?` (default 10000) | `{"path", "entries": [..], "truncated": bool}`, entries sorted by name; `path` is the resolved directory |
+| `fs.mkdir` | `path`, `parents?` (default false) | the new directory's entry |
+| `fs.rename` | `from`, `to`, `overwrite?` (default false) | the entry at `to`. Within one filesystem this is atomic; across filesystems it is `cross_device` (copy with read and write instead) |
+| `fs.remove` | `path`, `recursive?` (default false) | `{}`. A non-empty directory needs `recursive: true`. Symlinks are removed, not followed |
+
+### Transfers
+
+Contents move as **streams**: a `stream` id the daemon assigns, carried in FILE_DATA frames.
+
+```
+FILE_DATA:  u64 stream | u64 offset | u8 flags | bytes...      flags: 1 = FIN (last frame)
+```
+
+- `offset` is the position of the first byte in the file.
+- Chunks are at most 256 KiB.
+- An empty frame with FIN ends a stream.
+- Streams of one connection are independent and interleave with pane output, so a large
+  transfer doesn't stall terminals.
+- A connection may have 16 streams open; more is `too_many_streams`.
+
+**Flow control** is credit based, so neither side buffers without bound. The receiver of the data
+grants a window: the sender may send bytes up to `acked + window`. The receiver acknowledges
+consumed bytes with `fs.ack`, which slides the window. The default window is 4 MiB.
+
+**Reading:**
+
+```json
+→ {"id": 9, "method": "fs.read", "params": {"path": "~/big.iso", "offset": 0, "length": null, "window": 4194304}}
+← {"id": 9, "result": {"stream": 3, "size": 734003200, "mtime": 1761512345.5, "offset": 0}}
+← FILE_DATA stream=3 offset=0 ... (up to the window)
+→ {"id": 10, "method": "fs.ack", "params": {"stream": 3, "offset": 4194304}}
+← FILE_DATA ... ← FILE_DATA stream=3 offset=… flags=FIN
+```
+
+- `offset` and `length` (null means to the end) select a range, which also resumes an
+  interrupted download.
+- `size` and `mtime` are taken when the stream opens. If the file changes meanwhile, the stream
+  ends with an `fs.error` (`changed`) rather than delivering a mix.
+
+**Writing:**
+
+```json
+→ {"id": 11, "method": "fs.write", "params": {"path": "~/upload.bin", "size": 52428800,
+    "overwrite": true, "expect_mtime": null, "mode": null, "upload_id": "8f3c…"}}
+← {"id": 11, "result": {"stream": 4, "offset": 0, "window": 4194304}}
+→ FILE_DATA stream=4 offset=0 ... (up to the window)
+← {"event": "fs.ack", "data": {"stream": 4, "offset": 4194304}}
+→ ... → FILE_DATA stream=4 offset=… flags=FIN
+← {"event": "fs.done", "data": {"stream": 4, "entry": {...}}}
+```
+
+- **Atomic:** the bytes go to a hidden temp file next to the target (`.<name>.clotho-part-<id>`),
+  which is fsynced and renamed over the target only after FIN, and only if `size` (when given)
+  matches. Readers never see a partial file.
+- **Conflicts:** with `overwrite: false`, an existing target is `exists`. With `expect_mtime`, the
+  target must still have that mtime when the write completes (else `conflict`), for safe
+  edit-and-save.
+- **Resume:** a client-chosen `upload_id` names the temp file. If a write with the same
+  `upload_id` and path finds a part file from an interrupted attempt, the reply's `offset` says
+  how many bytes it already has, and the client continues from there. Part files nobody resumes
+  are deleted after 24 h. Without `upload_id`, every write starts at 0.
+- `mode` sets permission bits on the new file. By default a new file gets 0644 (less the umask)
+  and a replaced file keeps the old file's mode.
+
+**Ending a stream early:**
+
+- `fs.cancel {stream}`, from the client, stops a read or abandons a write (its temp file is kept
+  if it has an `upload_id`, for resuming, and deleted otherwise). The daemon confirms with
+  `fs.done {stream, cancelled: true}`.
+- A daemon-side failure mid-stream is `{"event": "fs.error", "data": {"stream", "code",
+  "message"}}`. The stream is over, and FILE_DATA for it is ignored.
+- A dropped connection cancels its streams.
+
+`fs.done`, `fs.error` and `fs.ack` (from the daemon) go to the connection that owns the stream,
+whether or not it subscribed to events.
+
+### Errors
+
+`fs.*` failures use the usual error object, with these codes: `not_found`, `exists`,
+`permission_denied`, `not_a_directory`, `is_a_directory`, `not_empty`, `cross_device`,
+`no_space`, `read_only`, `conflict`, `changed`, `too_many_streams`, `io_error` (anything else,
+with the OS message), `bad_request`.
+
+### Not in this version
+
+Watching directories for changes (`fs.watch`), checksums, and server-side copy. These may come
+later as additive features.
 
 ## Resize
 
