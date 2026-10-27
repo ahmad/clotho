@@ -196,3 +196,10 @@ is verified; this is a standing go for this round.
   (2026-10-27). The backups are `*.bak-2026-10-27-clotho-hooks` next to ~/.claude/settings.json and
   ~/.codex/config.toml.
 - TestFlight build 202610271418 (bundling clothod 0.1.7) was uploaded by the user.
+- App icon: "Panes" (option 3 of clothod's options page) on iOS and the Mac. The user said this
+  directly to clothod ("I like option 3. Panes. use that everywhere"). The user also told clothod
+  "upload to testflight when the icon is in". The upload runs from the Mac's own session, so the
+  user runs testflight.sh.
+- imac has Start at login installed; the user turned it on from Settings (confirmed 2026-10-27).
+- Machine group headers put the chevron on the left of the name, the same as the Agents "Quiet"
+  header (user feedback).
