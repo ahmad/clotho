@@ -23,9 +23,31 @@ final class AgentsUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
 
         XCTAssertTrue(app.staticTexts["Agents"].waitForExistence(timeout: 5))
-        let first = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Waiting'")).firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        // Three fake agents: waiting, running and done. Running has no attention, so it starts under Quiet.
+        let waiting = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Waiting'")).firstMatch
+        XCTAssertTrue(waiting.waitForExistence(timeout: 5))
+        let quiet = app.descendants(matching: .any).matching(identifier: "quietAgents").firstMatch
+        XCTAssertTrue(quiet.waitForExistence(timeout: 5), "no Quiet group")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Running'")).firstMatch.exists, "Quiet starts folded")
         attach(app, "agents")
+
+        // Resolve the lowest agent on top (a finished one): it leaves the top for Quiet. Other tests' panes may
+        // be fake agents too, so count relative to what's there.
+        let resolveButtons = app.buttons.matching(identifier: "Resolve")
+        let onTop = resolveButtons.count
+        XCTAssertGreaterThanOrEqual(onTop, 2, "waiting and done need the user")
+        let doneOnTop = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Done'")).count
+        resolveButtons.element(boundBy: onTop - 1).tap()
+        let resolved = expectation(for: NSPredicate(format: "count == %d", onTop - 1), evaluatedWith: resolveButtons)
+        wait(for: [resolved], timeout: 5)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Done'")).count, doneOnTop - 1)
+        quiet.tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Done'")).firstMatch.waitForExistence(timeout: 5),
+                      "the resolved agent isn't under Quiet")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Running'")).firstMatch.exists)
+        attach(app, "resolved")
+
+        let first = waiting
         first.tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         attach(app, "opened")

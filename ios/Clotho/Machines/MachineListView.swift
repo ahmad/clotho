@@ -85,8 +85,8 @@ struct MachineListView: View {
         }
     }
 
+    /// Opening an agent doesn't resolve it (as on the Mac): Resolve, typing or a reply does.
     private func open(_ row: AgentRow) {
-        connections.existing(row.machineID)?.ackAgent(row.pane)
         path = [.pane(row.machineID, row.tab, row.pane)]
     }
 

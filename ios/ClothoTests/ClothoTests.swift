@@ -80,4 +80,16 @@ final class ClothoTests: XCTestCase {
         let pixel = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).jpegData(withCompressionQuality: 1) { _ in }
         XCTAssertEqual(ImagePaste.png(pixel)?.prefix(4), Data([0x89, 0x50, 0x4e, 0x47]), "JPEG becomes PNG")
     }
+
+    /// The Agents list: only agents with the daemon's attention on top, everything else folded under Quiet.
+    func testAgentsSplitByAttention() {
+        func row(_ pane: PaneID, _ state: AgentInfo.State, _ attention: Bool?) -> AgentRow {
+            AgentRow(machineID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, machineName: "m", pane: pane, tab: 1,
+                     workspace: "w", title: "t", info: AgentInfo(kind: "claude", state: state, source: "hook", attention: attention))
+        }
+        let parts = AgentRow.split([row(1, .running, nil), row(2, .done, true), row(3, .waiting, false),
+                                    row(4, .waiting, true), row(5, .error, true), row(6, .done, false)])
+        XCTAssertEqual(parts.attention.map(\.pane), [4, 5, 2], "waiting, then errors, then finished")
+        XCTAssertEqual(parts.quiet.map(\.pane), [3, 1, 6], "running, idle and resolved agents")
+    }
 }

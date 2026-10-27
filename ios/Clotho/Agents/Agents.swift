@@ -44,6 +44,14 @@ struct AgentRow: Identifiable, Hashable {
         }
     }
 
+    /// The Agents list's two parts: agents that need the user (the daemon's `attention`), at the top with a
+    /// Resolve action, and the quiet rest (running, idle, resolved), folded away. Resolving on any device
+    /// clears attention everywhere; the agent comes back to the top when attention is raised again.
+    static func split(_ rows: [AgentRow]) -> (attention: [AgentRow], quiet: [AgentRow]) {
+        let sorted = sorted(rows)
+        return (sorted.filter(\.wantsAttention), sorted.filter { !$0.wantsAttention })
+    }
+
     static func == (a: AgentRow, b: AgentRow) -> Bool { a.id == b.id && a.info == b.info && a.title == b.title }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
