@@ -74,7 +74,13 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
 - Plaintext, before encryption:
   `{"v":1, "m":<label>, "p":<pane>, "k":<kind>, "s":<state>, "msg":<message, at most 400 bytes>, "t":<since>}`.
   `msg` is the agent's own message (for example "Allow cargo test --release?"), never pane output.
-- Ciphertext on the wire: `base64(enc || ct)`, about 600 bytes at the most, well inside APNs's 4 KB.
+- Padding: clothod adds `"pad":"<spaces>"` as the last key, so every plaintext is exactly 1024 bytes
+  (2048 only when the label and an escape-heavy message are unusually long; clothod shortens the
+  message, then the label, so a record never exceeds 2048).
+  Otherwise the ciphertext's length would give away the message's. Readers ignore unknown keys, and an
+  unpadded record from an older clothod still opens.
+- Ciphertext on the wire: `base64(enc || ct)`, about 1,430 characters for a 1024-byte record (at most 2,800, for
+  2048), under the relay's 3,000-character limit and well inside APNs's 4 KB.
 - APNs payload the relay builds:
   ```json
   {"aps": {"alert": {"title": "Clotho", "body": "An agent needs you"},
@@ -88,7 +94,7 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
 - The private key lives in a Keychain access group shared by the app and the extension,
   `AfterFirstUnlockThisDeviceOnly` (alerts must decrypt while the phone is locked), never synced.
 
-What each party can still see: Apple sees the token, timing and ciphertext size. The relay and
+What each party can still see: Apple sees the token, timing and ciphertext size (which padding makes the same for almost every alert). The relay and
 its host additionally see the sending machine's IP address. Neither sees machine names, pane
 titles, agent messages or anything from a terminal.
 
