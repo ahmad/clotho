@@ -239,8 +239,9 @@ extension AppDelegate {
         guard let session = connections[machine] else { return }
         let location = session.store.state.location(of: pane)
         let title = "\(after.kindName) \(after.state == .waiting ? "is waiting" : after.state == .done ? "finished" : "hit an error")"
-        let place = [session.title, location?.workspace.name, location.map { session.store.displayTitle(of: $0.tab) }]
-            .compactMap { $0 }.joined(separator: " › ")
+        // machine · workspace › tab, as in the Agents panel and on iOS.
+        let inside = [location?.workspace.name, location.map { session.store.displayTitle(of: $0.tab) }].compactMap { $0 }
+        let place = ([session.title] + (inside.isEmpty ? [] : [inside.joined(separator: " › ")])).joined(separator: " · ")
         // Answerable from the notification when the daemon can type for us.
         let canReply = session.store.hello?.features.contains(.paneKeys) == true
         let category = canReply ? (after.state == .waiting ? Self.waitingCategory : Self.finishedCategory) : nil
@@ -396,7 +397,7 @@ final class AgentRow: ChromeItem {
         icon.image = NSImage(systemSymbolName: shown.symbol, accessibilityDescription: shown.label)?
             .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         icon.contentTintColor = shown.color
-        // Where it is, as herdr shows it: machine · workspace (bold) · tab.
+        // Where it is: machine · workspace (bold) › tab, as on iOS.
         let strong = info.needsAttention ? Theme.foreground : NSColor(hex: 0xA9B0B6)
         let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Theme.dimText]
         let title = NSMutableAttributedString(string: entry.machineName + " · ", attributes: quiet)
@@ -404,7 +405,7 @@ final class AgentRow: ChromeItem {
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: strong,
         ]))
         if let tab = entry.tabTitle, !tab.isEmpty {
-            title.append(NSAttributedString(string: " · " + tab, attributes: quiet))
+            title.append(NSAttributedString(string: " › " + tab, attributes: quiet))
         }
         colorsOwnTitle = true
         // Attributed text brings its own line breaking, so truncation is set on it as well.

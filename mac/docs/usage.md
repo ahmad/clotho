@@ -34,7 +34,7 @@ New tabs and splits open in the focused pane's folder. When a pane's program exi
 
 ## Agents
 
-The **Agents** panel at the bottom of the sidebar (drag the line above it to resize it) lists the coding agents (Claude Code, Codex) running in panes on every connected machine. Those waiting for you come first, then ones that finished or failed since you last looked, then running ones. Each row shows the agent's state, where it runs (machine · workspace · tab), which agent it is and what it last said, and how long ago its state changed; hover for the details, including whether the status comes from the agent's hooks or was detected from the terminal. Click a row to open its pane, which also marks it as seen.
+The **Agents** panel at the bottom of the sidebar (drag the line above it to resize it) lists the coding agents (Claude Code, Codex) running in panes on every connected machine. Those waiting for you come first, then ones that finished or failed since you last looked, then running ones. Each row shows the agent's state, where it runs (machine · workspace › tab), which agent it is and what it last said, and how long ago its state changed; hover for the details, including whether the status comes from the agent's hooks or was detected from the terminal. Click a row to open its pane, which also marks it as seen.
 
 Workspaces and tabs with an agent show a dot: amber while one waits for you, green when it finished, red on an error, and blue while it runs. The dock icon shows how many agents need you.
 
