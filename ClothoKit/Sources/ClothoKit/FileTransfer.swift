@@ -26,6 +26,10 @@ public final class FileTransfer: @unchecked Sendable {
     public let destination: FileBackend
     /// Concurrent file streams per copy; the protocol asks for at most 4.
     public var maxStreams = 4
+    /// FILE_DATA frame size and flow-control window for both the reads and the writes (nil keeps the
+    /// defaults, 256 KiB and 4 MiB). Smaller values keep terminals responsive on slow links.
+    public var chunk: Int?
+    public var window: Int?
 
     private let lock = NSLock()
     private var progress = Progress()
@@ -112,10 +116,12 @@ public final class FileTransfer: @unchecked Sendable {
 
     private func copyFile(_ entry: FileEntry, to path: String, conflict: Conflict) async throws {
         report { $0.current = entry.name }
-        let data = StreamedSource(backend: source, entry: entry)
+        let data = StreamedSource(backend: source, entry: entry, chunk: chunk, window: window)
         defer { data.close() }
-        let options = FileWriteOptions(size: entry.size, overwrite: conflict == .replace, mode: entry.mode, mtimeNs: entry.mtimeNs,
+        var options = FileWriteOptions(size: entry.size, overwrite: conflict == .replace, mode: entry.mode, mtimeNs: entry.mtimeNs,
                                        uploadID: Self.uploadID(path, data.fingerprint), source: data.fingerprint)
+        if let chunk { options.chunk = chunk }
+        if let window { options.window = window }
         do {
             _ = try await destination.write(path, options: options, source: data) { [weak self] bytes in
                 self?.setWritten(path, bytes)
@@ -173,17 +179,24 @@ final class StreamedSource: FileDataSource, @unchecked Sendable {
     let entry: FileEntry
     private let lock = NSLock()
     private var stream: FileReadStream?
+    let chunk: Int?
+    let window: Int?
 
-    init(backend: FileBackend, entry: FileEntry) {
+    init(backend: FileBackend, entry: FileEntry, chunk: Int? = nil, window: Int? = nil) {
         self.backend = backend
         self.entry = entry
+        self.chunk = chunk
+        self.window = window
     }
 
     var size: UInt64 { entry.size }
     var fingerprint: String { "\(entry.size):\(entry.mtimeNs)" }
 
     func open(at offset: UInt64) async throws -> AsyncThrowingStream<Data, Error> {
-        let stream = try await backend.read(entry.path, options: FileReadOptions(offset: offset, expectSize: entry.size, expectMtimeNs: entry.mtimeNs))
+        var options = FileReadOptions(offset: offset, expectSize: entry.size, expectMtimeNs: entry.mtimeNs)
+        if let chunk { options.chunk = chunk }
+        if let window { options.window = window }
+        let stream = try await backend.read(entry.path, options: options)
         lock.withLock { self.stream = stream }
         return stream.data
     }

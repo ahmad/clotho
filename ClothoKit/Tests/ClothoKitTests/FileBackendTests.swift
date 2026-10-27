@@ -95,6 +95,28 @@ enum FileBackendChecks {
 }
 
 final class LocalFileBackendTests: XCTestCase {
+    /// An interrupted write with an upload id keeps its part file, and the same id and source resume it.
+    func testUploadResumes() async throws {
+        let root = NSTemporaryDirectory() + "ckt-files-\(UUID().uuidString.prefix(6))"
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let files = LocalFileBackend()
+        let path = filePath(root, "resume.bin")
+        let data = FileBackendChecks.randomData(1 << 20)
+        let options = FileWriteOptions(size: UInt64(data.count), uploadID: "ckt-local", source: "test-source")
+        do {
+            _ = try await files.write(path, options: options, source: MemorySource(data: data, failAfter: 600_000), progress: { _ in })
+            XCTFail("the interrupted write succeeded")
+        } catch {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path), "a partial file replaced the target")
+        let started = Progress()
+        _ = try await files.write(path, options: options, source: MemorySource(data: data), progress: { started.setFirst($0) })
+        XCTAssertGreaterThan(started.value, 0, "the second attempt started over")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), data)
+        let left = try FileManager.default.contentsOfDirectory(atPath: root)
+        XCTAssertEqual(left, ["resume.bin"], "part files were left behind")
+    }
+
     func testMetadata() async throws {
         let root = NSTemporaryDirectory() + "ckt-files-\(UUID().uuidString.prefix(6))"
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
@@ -236,6 +258,9 @@ extension ClothodBackendTests {
         // Up: this device → clothod (the daemon sees the same disk, in another folder).
         try FileManager.default.createDirectory(atPath: filePath(root, "up"), withIntermediateDirectories: true)
         let upload = FileTransfer(from: local, to: backend)
+        upload.chunk = 32 << 10
+        upload.window = 512 << 10
+        upload.maxStreams = 2
         let last = ProgressBox()
         try await upload.copy([tree], into: filePath(root, "up"), conflict: .replace) { last.set($0) }
         XCTAssertEqual(last.value?.totalFiles, 3)
