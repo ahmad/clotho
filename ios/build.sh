@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Builds Clotho for the simulator. Usage: ./build.sh [build|test] [simulator id]
+# Builds Clotho for the simulator. Usage: ./build.sh [build|test] [simulator id] [xcodebuild args...]
+# (e.g. ./build.sh test "" -only-testing:ClothoTests/SSHIntegrationTests).
 # `test` starts the "Local Mac (dev)" clothod first and always runs scripts/cleanup-dev.sh afterwards, so no
 # test daemon outlives the run.
 cd "$(dirname "$0")"
@@ -15,5 +16,5 @@ if [ "$action" = test ]; then
 fi
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -destination "platform=iOS Simulator,id=$sim" \
   -derivedDataPath build -skipPackagePluginValidation -skipMacroValidation \
-  $([ "$action" = test ] && echo -test-timeouts-enabled YES -default-test-execution-time-allowance 180) "$action" 2>&1 \
+  $([ "$action" = test ] && echo -test-timeouts-enabled YES -default-test-execution-time-allowance 180) "${@:3}" "$action" 2>&1 \
   | grep -E "error:|warning: .*/ios/Clotho|\*\* |Test Case.*(passed|failed|skipped)|Executed" | grep -v SPMCustomBuildCommand
