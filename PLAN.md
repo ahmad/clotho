@@ -181,3 +181,7 @@ is verified; this is a standing go for this round.
 - A checkmark on each row resolves it, through `agent.ack`. It drops into the collapsed section on
   every device, and comes back out when attention is raised again.
 - Same on the Mac and the iPhone. No daemon change.
+- How agents raise attention: hook-less Claude Code never rings the bell in Clotho (TERM_PROGRAM=clotho
+  isn't one it rings for), so detected agents would never reach the top. The user chose agent hooks
+  ("Set Up Agent Status…") on each machine (2026-10-27). Opening an agent no longer acks it; only
+  the checkmark, typing, or a quick reply do.
