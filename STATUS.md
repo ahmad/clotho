@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-27, updated after clothod 0.1.7)
+# Status and handoff (2026-10-27, updated after clothod 0.1.10)
 
 Development moved from this Mac's sessions to devbox. Everything from the old agents (clothod-80, mac-d8,
 ios-c2 and the orchestrator) is committed. CLAUDE.md has the rules. This file has where things stand and
@@ -6,43 +6,46 @@ what the old agents learned. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.7** runs on all three machines (macbook, devbox, imac). It was upgraded in place on
-  2026-10-27; the holders kept their pids, and 0.1.6 was pruned. It adds the following:
-  - `pane.clipboard`, which forwards OSC 52 copies (0.1.6)
-  - `settings.get`/`set`, a runtime scrollback setting (0..50000; about 3 MB per 1000 lines per full pane)
-  - `service.*`, start at login (launchd or systemd --user). It's installed nowhere yet; the user
-    turns it on in Settings. devbox needs `sudo loginctl enable-linger ahmad` first.
-  - hook reports that raise attention even after detection guessed the same state
-  - All four builds have been run, linux-aarch64 under qemu. test-all is all green from the Mac,
-    including imac.
-- **The Mac app** in `~/Applications/Clotho.app` bundles 0.1.7 and has the following:
-  - Shift+Return sends a newline; Cmd+Left/Right/Delete work.
-  - Rename doesn't flicker.
-  - Option/Shift-drag selects, right-click opens the pane menu in apps that take the mouse, and
-    OSC 52 copies reach the clipboard.
-  - Image paste and file drop into remote agents go to `~/.cache/clotho/paste/`.
-  - The Agents panel shows attention agents first, with Resolve; the rest are under "Quiet".
-  - Machine groups collapse.
-  - A Settings window: notifications, scrollback, start at login.
-  - Part-file cleanup.
-  - A Developer ID release path (`build-app.sh --release`), waiting for the user's certificate and
-    notary profile.
-- **iOS:** the same features as the Mac (image paste and Paste Photo, a newline key, the hardware
-  Cmd keys, the agents list with Quiet, Settings), plus the host-key deadlock fix. The full suite is
-  green against 0.1.7. The TestFlight upload is waiting for the user.
-- **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets, APNS_KEY and
-  HANDLE_KEYS, exist in Cloudflare only.
-- **GitHub:** git@github.com:ahmad/clotho.git (private). For this round the user asked for a push
-  after each verified piece. The orchestrator pushes exact verified commits (`git push origin <sha>:main`).
-- **The Mac reaches imac under clotho-mac** through a `Host imac` entry in the Mac's ~/.ssh/config
-  (the backup is ~/.ssh/config.bak-2026-10-27).
+- **clothod 0.1.10** runs on macbook, devbox and imac, upgraded in place (holders 9573, 1799611 and
+  27331 kept their pids through 0.1.6 to 0.1.10). Since 0.1.8, upgrades win on attempt 1 (an upgrade
+  lock, `current` moved first, and the app no longer runs `install` when `current` exists). It
+  has the following:
+  - pane.clipboard (OSC 52)
+  - the settings (scrollback) and service (start at login) requests
+  - attention that clears only on agent.ack or real work, never on input or viewing
+  - agent.mute
+  - numeric version ordering pinned by a test
+- **Start at login:** on for imac (the user turned it on). Off on macbook; off on devbox, which needs
+  `sudo loginctl enable-linger ahmad` first.
+- **Agent hooks** (Claude Code and Codex) are installed on all three machines. The backups are
+  `*.bak-2026-10-27-clotho-hooks`.
+- **The Mac app** bundles 0.1.10 and has the following:
+  - Shift+Return, the Cmd editing keys, rename without flicker
+  - Option/Shift-drag selection and the right-click pane menu in agent TUIs, OSC 52 copies
+  - image paste and drop into remote agents
+  - the Agents panel: attention first, hover-only Mute and Resolve over a pinned time, a Quiet
+    subsection
+  - left chevrons, accent-blue selection, thicker tabs, whole-app zoom (with a separate terminal
+    zoom on Option+Cmd)
+  - a Settings window
+  - Create Workspace outline buttons, and a Manage Machines footer and panel (add, edit, remove,
+    reorder)
+  - the Panes icon
+  - Developer ID notarization, waiting for the user's certificate
+- **iOS:** TestFlight build 202610271602 (clothod 0.1.10), uploaded by the user. It has parity with
+  the Mac: image paste, Paste Photo, the Newline key, the Cmd keys, the long-press menu in agent
+  TUIs, the agents list with Resolve, Mute and Quiet, Settings, accent selection, the Panes icon, and
+  the host-key deadlock fix.
+- **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets exist in
+  Cloudflare only.
+- **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes exact verified
+  commits (`git push origin <sha>:main`).
+- **The Mac reaches imac under clotho-mac** through a `Host imac` entry in the Mac's ~/.ssh/config.
+- **The website** (clotho.app, waitlist CTA) is built by a separate session in ~/Projects/clotho.app.
 - **Known issues:**
-  - On macbook, upgrades need one retry, because the app restarts the old serve mid-upgrade. clothod
-    is investigating.
   - One interrupted upload hung for 10 minutes once and didn't reproduce.
   - Resume after a cut is unproven against test daemons.
-  - Hook-less Claude Code never raises attention (TERM_PROGRAM=clotho), so the user is setting up
-    hooks.
+  - linux-aarch64 has run only under qemu.
 
 ## Waiting on the user
 
