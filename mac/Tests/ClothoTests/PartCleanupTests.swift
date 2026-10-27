@@ -57,5 +57,24 @@ final class PartCleanupTests: XCTestCase {
         XCTAssertTrue(cleanNow)
         let gone = await PartCleanup.sweep(root.appendingPathComponent("missing").path, on: LocalFileBackend())
         XCTAssertTrue(gone, "a folder that's gone counts as clean")
+        let unreachable = await PartCleanup.sweep(root.path, on: Unreachable())
+        XCTAssertFalse(unreachable, "a machine that can't list the folder now keeps it for later")
     }
+}
+
+/// File access that fails the way a dropped connection does.
+private final class Unreachable: FileBackend, @unchecked Sendable {
+    let supportsFiles = true
+    let homeDirectory: String? = "/"
+    private var error: BackendError { BackendError(code: "disconnected", message: "not connected to clothod") }
+    func stat(_ path: String) async throws -> FileEntry { throw error }
+    func list(_ path: String, hidden: Bool, limit: Int?, cursor: String?) async throws -> FileListing { throw error }
+    func mkdir(_ path: String, parents: Bool) async throws -> FileEntry { throw error }
+    func setattr(_ path: String, mtimeNs: String?, mode: Int?) async throws -> FileEntry { throw error }
+    func rename(_ from: String, to: String, overwrite: Bool) async throws -> FileEntry { throw error }
+    func remove(_ path: String, recursive: Bool) async throws { throw error }
+    func statfs(_ path: String) async throws -> FileSpace { throw error }
+    func read(_ path: String, options: FileReadOptions) async throws -> FileReadStream { throw error }
+    func write(_ path: String, options: FileWriteOptions, source: FileDataSource,
+               progress: @escaping @Sendable (UInt64) -> Void) async throws -> FileEntry { throw error }
 }

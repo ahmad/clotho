@@ -42,8 +42,13 @@ enum PartCleanup {
         var remaining = 0
         while let directory = queue.first, seen < maxEntries {
             queue.removeFirst()
-            guard let listing = try? await files.listAll(directory) else {
-                if directory == folder { return true }
+            let listing: (dir: FileEntry, entries: [FileEntry])
+            do {
+                listing = try await files.listAll(directory)
+            } catch {
+                // Gone counts as clean; anything else (no connection, no permission) means try again later.
+                if directory == folder { return error.fileErrorCode == .notFound }
+                remaining += 1
                 continue
             }
             seen += listing.entries.count
