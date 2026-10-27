@@ -10,7 +10,7 @@ extension AppDelegate {
     /// Runs `clothod <arguments>` on a machine, off the main thread.
     func runClothod(on key: MachineKey, _ arguments: [String]) async throws -> RemoteCommandResult {
         if key == Self.localKey {
-            guard let daemon = localDaemon else { throw RemoteInstaller.Failure(message: "This Mac's sessions don't run on clothod.") }
+            guard let daemon = localDaemon else { throw RemoteInstaller.Failure(message: "This Mac's shells don't run on clothod.") }
             return try await Task.detached {
                 let result = try daemon.runClothod(arguments)
                 return RemoteCommandResult(status: result.status, stdout: result.stdout, stderr: result.stderr)
@@ -70,7 +70,7 @@ extension AppDelegate {
     func hasHookSourcedAgents(_ key: MachineKey) -> Bool {
         if let status = hookStatus[key], !status.isEmpty, status.values.allSatisfy({ $0 }) { return true }
         return hookSourcedMachines.contains(key)
-            || sessions[key]?.store.state.panes.contains { $0.agent?.isHookSourced == true } == true
+            || connections[key]?.store.state.panes.contains { $0.agent?.isHookSourced == true } == true
     }
 
     /// Asks the machine's clothod which agents have hooks (`hooks status`: "claude: installed" lines).
@@ -95,7 +95,7 @@ extension AppDelegate {
 
     /// Shows what installing the hooks changes on the machine, and installs them only if the user agrees.
     func setUpAgentHooks(on key: MachineKey) {
-        guard let session = sessions[key], window.attachedSheet == nil else { return }
+        guard let session = connections[key], window.attachedSheet == nil else { return }
         let name = session.title
         Task { @MainActor in
             var previews: [(agent: String, text: String)] = []

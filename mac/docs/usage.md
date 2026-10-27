@@ -8,58 +8,60 @@
 open ~/Applications/Clotho.app
 ```
 
-On launch, Clotho connects to its session daemon, clothod, and starts it if it isn't running. The daemon ships inside the app; Clotho installs it into `~/Library/Application Support/clothod/bin/<version>/` and always runs it from there, so updating the app never swaps the binary under running sessions. If the daemon has no sessions yet, Clotho opens one with a shell.
+On launch, Clotho connects to its terminal daemon, clothod, and starts it if it isn't running. The daemon ships inside the app; Clotho installs it into `~/Library/Application Support/clothod/bin/<version>/` and always runs it from there, so updating the app never swaps the binary under running shells. If the daemon has no workspaces yet, Clotho opens one with a shell.
 
 The close, minimize and full-screen buttons are in the top-left corner. Drag empty space in the sidebar or tab bar to move the window, and double-click the tab bar to zoom it. Use **Control-Command-F** to fill the whole display.
 
-## Sessions, tabs, and panes
+## Workspaces, tabs, and panes
 
 ```text
 Machine: this Mac (remote machines come later)
-└── Session: a project or task (a workspace in the daemon)
+└── Workspace: a project or task
     └── Tab: a terminal layout
         ├── Pane: a shell or command
         └── Pane: another shell or command
 ```
 
-The sidebar lists the sessions under this Mac's name, and each saved SSH machine below it with its own sessions (see [Remote machines](#remote-machines)). Click one to switch to it, double-click to rename it, or use its close button. The tab bar shows the focused session's tabs; double-click a tab to rename it. A tab without a name shows its active pane's title, or its folder.
+The sidebar lists the workspaces under this Mac's name, and each saved SSH machine below it with its own workspaces (see [Remote machines](#remote-machines)). Click one to switch to it, or use its close button. The tab bar shows the focused workspace's tabs. A tab without a name shows its active pane's title, or its folder.
 
-Right-click a pane for its menu: split it in any direction, maximize or close it, open a new tab or session, copy, paste, clear or find, upload files into its folder, or browse its machine's files. (A program that uses the mouse, such as vim with `mouse=a`, gets right-clicks instead; Clotho's menu is still in the menu bar.)
+Rename in place, as in Finder: double-click a workspace in the sidebar or a tab in the tab bar, press **⌃Return** to rename the current workspace, or use **Rename Workspace** (⇧⌘R) or **Rename Tab**. The name turns into a field with its text selected. Return or clicking anywhere else saves it, and Esc cancels. Clearing a tab's name makes it show its pane's title again.
+
+Right-click a pane for its menu: split it in any direction, maximize or close it, open a new tab or workspace, copy, paste, clear or find, upload files into its folder, or browse its machine's files. (A program that uses the mouse, such as vim with `mouse=a`, gets right-clicks instead; Clotho's menu is still in the menu bar.)
 
 Click a pane to focus it. The focused pane has a blue outline when a tab has more than one. Drag the line between two panes to resize them.
 
-New tabs and splits open in the focused pane's folder. When a pane's program exits, the pane closes and focus moves to the pane that takes its place. A tab closes with its last pane; a session stays until you close it.
+New tabs and splits open in the focused pane's folder. When a pane's program exits, the pane closes and focus moves to the pane that takes its place. A tab closes with its last pane; a workspace stays until you close it.
 
 ## Agents
 
-The **Agents** panel at the bottom of the sidebar (drag the line above it to resize it) lists the coding agents (Claude Code, Codex) running in panes on every connected machine. Those waiting for you come first, then ones that finished or failed since you last looked, then running ones. Each row shows the agent's state, where it runs (machine · session · tab), which agent it is and what it last said, and how long ago its state changed; hover for the details, including whether the status comes from the agent's hooks or was detected from the terminal. Click a row to open its pane, which also marks it as seen.
+The **Agents** panel at the bottom of the sidebar (drag the line above it to resize it) lists the coding agents (Claude Code, Codex) running in panes on every connected machine. Those waiting for you come first, then ones that finished or failed since you last looked, then running ones. Each row shows the agent's state, where it runs (machine · workspace · tab), which agent it is and what it last said, and how long ago its state changed; hover for the details, including whether the status comes from the agent's hooks or was detected from the terminal. Click a row to open its pane, which also marks it as seen.
 
-Sessions and tabs with an agent show a dot: amber while one waits for you, green when it finished, red on an error, and blue while it runs. The dock icon shows how many agents need you.
+Workspaces and tabs with an agent show a dot: amber while one waits for you, green when it finished, red on an error, and blue while it runs. The dock icon shows how many agents need you.
 
 You can answer an agent that's asking you something without opening its pane. Its notification has **Approve (1)**, **Deny (Esc)** and **Reply**, and when its hooks report it waiting for you, right-clicking its row offers **1**, **2**, **3**, **Return**, **Esc** and **Reply…** (type a line, sent with Return). Each answer is typed into the agent's pane as its terminal expects, and marks the agent seen. (This needs clothod 0.1.1 or later on that machine.)
 
 Clotho sends a notification when an agent needs you: when it starts waiting for you, finishes, or fails, as reported by its hooks, or when it rings the terminal bell. An agent detected only from the terminal that has gone quiet shows as idle and doesn't alert, since that may just be a slow reply or a long build. Opening the pane, or typing in it, marks it seen on every device. You don't get a notification for the pane you're looking at. Click it to open the pane. The **Agents** menu turns each kind of notification on or off. Right-click a machine and turn off **Monitor Agents** to leave its agents out of the section, the notifications and the dock count. A machine that can't be reached shows as such in the section, so its agents are never silently missing.
 
-## Sessions survive quitting
+## Shells survive quitting
 
-Quitting Clotho (**⌘Q**) or closing its window only disconnects. The daemon keeps every shell running, and reopening Clotho brings back each session, tab, split and screen as it was, including full-screen programs such as vim or Claude Code.
+Quitting Clotho (**⌘Q**) or closing its window only disconnects. The daemon keeps every shell running, and reopening Clotho brings back each workspace, tab, pane and screen as it was, including full-screen programs such as vim or Claude Code.
 
 If the daemon's logic process restarts or crashes, Clotho reconnects within a moment and catches up on whatever the panes printed meanwhile. The sidebar shows "reconnecting…" while it waits. The shells live in a separate holder process, so they survive this too.
 
-Closing a pane, tab or session ends the programs in it. Sessions don't survive a reboot.
+Closing a pane, tab or workspace ends the programs in it. Shells don't survive a reboot.
 
 ## Keyboard shortcuts
 
 **⌘** means Command, **⇧** Shift, **⌥** Option, and **⌃** Control. **Help → Keyboard Shortcuts** (**⌘/**) shows them in the app.
 
-### Sessions and tabs
+### Workspaces and tabs
 
 | Action | Shortcut |
 | --- | --- |
-| New session | ⌘N |
-| Rename session | ⇧⌘R |
-| Close session | ⇧⌘W |
-| Previous / next session | ⇧⌘↑ / ⇧⌘↓ |
+| New workspace | ⌘N |
+| Rename workspace | ⇧⌘R or ⌃Return |
+| Close workspace | ⇧⌘W |
+| Previous / next workspace | ⇧⌘↑ / ⇧⌘↓ |
 | New tab | ⌘T |
 | Rename tab | ⌘R |
 | Close tab | ⌥⌘W |
@@ -99,7 +101,7 @@ Resizing moves the nearest divider toward the arrow. A maximized pane fills its 
 | Quit Clotho | ⌘Q |
 | Toggle shortcut overlay | ⌘/ |
 
-Closing a session always asks first. Closing a tab or pane asks too, with a "Don't ask again" option for each. Option acts as the terminal's Meta key.
+Closing a workspace always asks first. Closing a tab or pane asks too, with a "Don't ask again" option for each. Option acts as the terminal's Meta key.
 
 ## Transfer files
 
@@ -132,7 +134,7 @@ A toast in the corner shows each transfer's progress and result. Its cancel butt
 
 ## Remote machines
 
-Clotho runs sessions on other machines over SSH: Linux (x86_64 or ARM) and macOS. The sidebar lists each machine under its own header, with its sessions below it, and the window shows one machine's session at a time.
+Clotho runs workspaces on other machines over SSH: Linux (x86_64 or ARM) and macOS. The sidebar lists each machine under its own header, with its workspaces below it, and the window shows one workspace at a time.
 
 ### Add a machine
 
@@ -148,29 +150,29 @@ Then click **+ Add Machine** at the bottom of the sidebar (or choose **File → 
 
 With Tailscale, connect both machines to the tailnet and use the remote machine's MagicDNS name or Tailscale IP as the host. See [Tailscale's connection guide](https://tailscale.com/docs/how-to/connect-to-devices).
 
-### Connect and start sessions
+### Connect and start workspaces
 
-A machine you haven't connected to shows **Connect** under its name. Click it to connect and start a session there. The first time, Clotho installs its session daemon, clothod, on the machine: it uploads the matching build that ships inside the app into `~/.local/share/clothod/bin/` (Linux) or `~/Library/Application Support/clothod/bin/` (macOS). Nothing else is installed, and no root access is needed.
+A machine you haven't connected to shows **Connect** under its name. Click it to connect and start a workspace there. The first time, Clotho installs its terminal daemon, clothod, on the machine: it uploads the matching build that ships inside the app into `~/.local/share/clothod/bin/` (Linux) or `~/Library/Application Support/clothod/bin/` (macOS). Nothing else is installed, and no root access is needed.
 
-Once connected, a machine works like this Mac: **+ New Session** under its name starts another session, and every shortcut acts on the machine whose session is showing. **⇧⌘↑** and **⇧⌘↓** step through the sessions of every connected machine in sidebar order. Dropping files on a remote pane copies them to that pane's folder on that machine.
+Once connected, a machine works like this Mac: **+ New Workspace** under its name starts another workspace, and every shortcut acts on the machine whose workspace is showing. **⇧⌘↑** and **⇧⌘↓** step through the workspaces of every connected machine in sidebar order. Dropping files on a remote pane copies them to that pane's folder on that machine.
 
-Sessions on a machine keep running when you quit Clotho, disconnect, or lose the network, and normally when you log out of the machine. (On a Linux machine set to end a user's processes at logout, they survive only with lingering on, `loginctl enable-linger`; Clotho shows clothod's warning once if that's the case.) Clotho reconnects connected machines when it starts, after the Mac wakes, and when the network changes, and catches up on what each pane printed meanwhile.
+Shells on a machine keep running when you quit Clotho, disconnect, or lose the network, and normally when you log out of the machine. (On a Linux machine set to end a user's processes at logout, they survive only with lingering on, `loginctl enable-linger`; Clotho shows clothod's warning once if that's the case.) Clotho reconnects connected machines when it starts, after the Mac wakes, and when the network changes, and catches up on what each pane printed meanwhile.
 
 The status under a machine's name shows where it stands: connecting or installing, reconnecting with the last error, or nothing once it's connected (a green dot). For a machine that isn't connected, the dot shows the last SSH check: green if ssh connects, red if it doesn't (hover for ssh's message).
 
 Right-click a machine's name for its menu:
 
-- **New Session**, or **Connect** and **Connect and Start a Session**.
+- **New Workspace**, or **Connect** and **Connect and Start a Workspace**.
 - **Browse Files** opens the file browser on it.
-- **Reconnect** drops and re-establishes the connection; **Disconnect** stops showing its sessions, which keep running there.
+- **Reconnect** drops and re-establishes the connection; **Disconnect** stops showing its workspaces, which keep running there.
 - **Check Connection** runs the SSH check again (machines that aren't connected).
-- **Edit…** changes its name or SSH target, and **Remove…** takes it off Clotho's list. Neither touches the machine or its sessions.
+- **Edit…** changes its name or SSH target, and **Remove…** takes it off Clotho's list. Neither touches the machine or its shells.
 
 ### Updates
 
-Clotho never restarts a daemon on its own. When an update brings a newer clothod, Clotho installs it next to the running one (on this Mac at launch, on another machine when it connects) and keeps using the running daemon. A notice then offers **Restart Daemon**: that restarts the daemon's logic process on the new build, and your shells, programs and sessions carry on untouched.
+Clotho never restarts a daemon on its own. When an update brings a newer clothod, Clotho installs it next to the running one (on this Mac at launch, on another machine when it connects) and keeps using the running daemon. A notice then offers **Restart Daemon**: that restarts the daemon's logic process on the new build, and your shells and programs carry on untouched.
 
-If a machine's sessions were started by a build too old for the new one to take over, the notice offers **Restart Sessions…** instead. That ends the programs running in that machine's sessions, so it always asks first; until then you keep using the sessions as they are.
+If a machine's shells were started by a clothod too old for the new one to take over, the notice offers **Restart clothod…** instead. That ends every shell on that machine, so it always asks first; until then everything keeps working as it is.
 
 ### Agent status
 
@@ -182,13 +184,13 @@ Pass these after `--args`, for example `open -n ~/Applications/Clotho.app --args
 
 | Option | Effect |
 | --- | --- |
-| `-ClothodRuntimeDir <dir>` | Use a separate daemon with its socket in `<dir>`, for a session set kept apart from the usual one. `CLOTHOD_RUNTIME_DIR` does the same. Keep the path short; socket paths are limited to about 100 bytes. |
+| `-ClothodRuntimeDir <dir>` | Use a separate daemon with its socket in `<dir>`, for a set of workspaces kept apart from the usual one. `CLOTHOD_RUNTIME_DIR` does the same. Keep the path short; socket paths are limited to about 100 bytes. |
 | `-ClothodPath <path>` | Run this clothod binary in place instead of installing the bundled one. `CLOTHOD_BIN` does the same. |
 | `-RemoteInstallDir <dir>` / `-RemoteRuntimeDir <dir>` | Install clothod into, and run it from, these directories on remote machines (the remote shell expands `$HOME` and `$(id -u)`). The dev build uses `$HOME/.local/share/clotho-dev/bin` and `/tmp/clothod-dev-$(id -u)`. |
 | `-FakeAgents YES` | With `-Backend fake`, put fake agents in panes and move them through their states. `-AgentNotifications NO` logs notifications instead of showing them. |
 | `-PaneMenu "<item>"` | Log the focused pane's right-click menu and choose that item (for scripted testing). |
-| `-ConnectMachine <name>` | Connect to that saved machine and start a session there (for scripted testing). |
-| `-Backend fake` | Run shells inside the app with no daemon. Sessions end when the app quits. For UI work. |
+| `-ConnectMachine <name>` | Connect to that saved machine and start a workspace there (for scripted testing). |
+| `-Backend fake` | Run shells inside the app with no daemon. Shells end when the app quits. For UI work. |
 | `-LaunchInBackground YES` | Open behind other windows without taking keyboard focus. |
 | `-StartFullScreen YES` | Open filling the display. |
 | `-TraceFrames YES` | Log every pane data frame to and from the daemon, with pane, seq and length. |
@@ -201,8 +203,8 @@ For scripted testing, `-RunShortcuts "Split Right,New Tab"` fires menu items by 
 
 | Symptom | What to check |
 | --- | --- |
-| "Couldn't start the session backend" | The log names the clothod binary and socket it tried. Check that `Clotho.app/Contents/MacOS/clothod` exists (rebuild with `./build-app.sh`), and look at clothod's own logs in `~/Library/Application Support/clothod/`. |
-| This Mac's sessions stay on "Reconnecting" | Run `~/Library/Application\ Support/clothod/bin/*/clothod status`. Clotho starts the daemon again on its own; if that keeps failing, its logs say why. |
+| "Couldn't start clothod" | The log names the clothod binary and socket it tried. Check that `Clotho.app/Contents/MacOS/clothod` exists (rebuild with `./build-app.sh`), and look at clothod's own logs in `~/Library/Application Support/clothod/`. |
+| This Mac's workspaces stay on "Reconnecting" | Run `~/Library/Application\ Support/clothod/bin/*/clothod status`. Clotho starts the daemon again on its own; if that keeps failing, its logs say why. |
 | A machine stays on "Reconnecting" | The status line has ssh's or clothod's error. Test `ssh -o BatchMode=yes user@host true`. Clotho keeps retrying, up to every 30 seconds; right-click the machine and choose **Reconnect** to try at once. |
 | "Has no clothod build" for a machine | Clotho carries builds for Linux and macOS on x86_64 and ARM only. |
 | A pane shows a smaller terminal in its top-left corner | Another client sized that pane. It takes this window's size again once you type in it. |
@@ -212,7 +214,7 @@ For scripted testing, `-RunShortcuts "Split Right,New Tab"` fires menu items by 
 | An upload can't find the pane's folder | The daemon hasn't learned the folder yet. Wait a moment after `cd`, or use the file browser. |
 | Desktop, Documents or Downloads is inaccessible | Review Clotho under System Settings → Privacy & Security → Files and Folders. |
 
-The app's log is `~/Library/Logs/Clotho.log`. The daemon's command-line client, `clotho` (build it with `cargo build` in `clotho/clothod`; it lands in `target/debug/`), shows the daemon's view: `clotho ls` lists sessions, tabs and panes, and `clotho text <pane>` prints a pane's screen.
+The app's log is `~/Library/Logs/Clotho.log`. The daemon's command-line client, `clotho` (build it with `cargo build` in `clotho/clothod`; it lands in `target/debug/`), shows the daemon's view: `clotho ls` lists workspaces, tabs and panes, and `clotho text <pane>` prints a pane's screen.
 
 ## Saved state
 

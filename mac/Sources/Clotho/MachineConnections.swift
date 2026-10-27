@@ -26,7 +26,7 @@ struct TabKey: Hashable {
 
 /// A machine's daemon connection and its model.
 @MainActor
-final class MachineSession {
+final class MachineConnection {
     let machine: Machine
     let store: ModelStore
 
@@ -49,9 +49,9 @@ final class MachineSession {
 extension AppDelegate {
     nonisolated static let localKey: MachineKey = "local"
 
-    var focusedSession: MachineSession { sessions[focusedMachine] ?? sessions[Self.localKey]! }
+    var focusedConnection: MachineConnection { connections[focusedMachine] ?? connections[Self.localKey]! }
     /// The focused machine's model; shortcuts and the tab bar work on it.
-    var store: ModelStore { focusedSession.store }
+    var store: ModelStore { focusedConnection.store }
 
     func tabKey(_ tab: TabID) -> TabKey { TabKey(machine: focusedMachine, tab: tab) }
 
@@ -63,8 +63,8 @@ extension AppDelegate {
 
     // MARK: Connecting
 
-    func addSession(_ session: MachineSession) {
-        sessions[session.key] = session
+    func addSession(_ session: MachineConnection) {
+        connections[session.key] = session
         session.store.onChange = { [weak self] in self?.sync() }
         session.store.onBell = { [weak self] pane in self?.bell(pane) }
         let key = session.key
@@ -74,20 +74,20 @@ extension AppDelegate {
     }
 
     /// Connects to a remote machine's daemon (installing it as needed). `show` switches the window to it
-    /// (opening a first session if it has none); `newSession` always starts one there.
-    func connect(_ machine: Machine, newSession: Bool = false, show: Bool = false) {
+    /// (opening a first workspace if it has none); `startWorkspace` always starts one there.
+    func connect(_ machine: Machine, startWorkspace: Bool = false, show: Bool = false) {
         guard !machine.isLocal else { return }
-        if sessions[machine.key] != nil {
-            if newSession || show { focus(machine: machine.key) }
-            if newSession { self.newSession(nil) }
+        if connections[machine.key] != nil {
+            if startWorkspace || show { focus(machine: machine.key) }
+            if startWorkspace { self.newWorkspace(nil) }
             return
         }
         let (backend, installer) = makeRemoteBackend(for: machine)
-        let session = MachineSession(machine: machine, backend: backend)
+        let session = MachineConnection(machine: machine, backend: backend)
         remoteInstallers[machine.key] = installer
         addSession(session)
         if !connectedMachineIDs.contains(machine.key) { connectedMachineIDs.append(machine.key) }
-        if newSession || show { focusedMachine = machine.key }
+        if startWorkspace || show { focusedMachine = machine.key }
         sync()
         Task { @MainActor in
             do {
@@ -95,9 +95,9 @@ extension AppDelegate {
                 checkRemoteDaemonUpdate(machine.key)
                 offerHolderRestartIfNeeded(session)
                 refreshHookStatus(machine.key)
-                // A machine with no sessions yet gets one when it's the one being looked at.
+                // A machine with no workspaces yet gets one when it's the one being looked at.
                 let empty = try await session.store.backend.getState().workspaces.isEmpty
-                if newSession || (empty && focusedMachine == machine.key) {
+                if startWorkspace || (empty && focusedMachine == machine.key) {
                     _ = try await session.store.backend.createWorkspace(name: nil, spawn: spawnOptions())
                 }
             } catch {
@@ -107,9 +107,9 @@ extension AppDelegate {
         }
     }
 
-    /// Closes the connection. The machine's sessions keep running there.
+    /// Closes the connection. The machine's workspaces keep running there.
     func disconnect(_ key: MachineKey) {
-        guard key != Self.localKey, let session = sessions.removeValue(forKey: key) else { return }
+        guard key != Self.localKey, let session = connections.removeValue(forKey: key) else { return }
         session.store.stop()
         remoteInstallers[key] = nil
         connectedMachineIDs.removeAll { $0 == key }
@@ -123,7 +123,7 @@ extension AppDelegate {
     }
 
     func focus(machine key: MachineKey) {
-        guard sessions[key] != nil, focusedMachine != key else { return }
+        guard connections[key] != nil, focusedMachine != key else { return }
         focusedMachine = key
         sync()
     }
@@ -136,7 +136,7 @@ extension AppDelegate {
         let sshOptions = SSHProcessTransport.baseOptions + Self.sshMultiplexOptions
         guard let dist = Bundle.main.resourceURL?.appendingPathComponent("clothod-dist"),
               FileManager.default.fileExists(atPath: dist.appendingPathComponent("manifest.json").path) else {
-            log("\(label): no bundled clothod builds; remote sessions need the app built with build-app.sh")
+            log("\(label): no bundled clothod builds; remote connections need the app built with build-app.sh")
             return (ClothodBackend(configuration: .init(transport: SSHProcessTransport(target: target, remoteCommand: {
                 throw RemoteInstaller.Failure(message: "This build of Clotho doesn't include clothod for remote machines.")
             }))), nil)
@@ -171,11 +171,11 @@ extension AppDelegate {
         "-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/cm-clothoapp-%C", "-o", "ControlPersist=600",
     ]
 
-    /// clothod's warnings (for example that sessions won't survive logout), once per machine per run.
+    /// clothod's warnings (for example that workspaces won't survive logout), once per machine per run.
     func showRemoteWarning(_ line: String, for key: MachineKey) {
         guard !warnedMachines.contains(key + line) else { return }
         warnedMachines.insert(key + line)
-        let name = sessions[key]?.title ?? "the machine"
+        let name = connections[key]?.title ?? "the machine"
         showNotice("\(name): " + line.replacingOccurrences(of: "clothod: warning:", with: "").trimmingCharacters(in: .whitespaces),
                    detail: nil, action: nil, then: nil)
     }
@@ -183,18 +183,18 @@ extension AppDelegate {
     /// The machine's running holder is older than this build can drive (bridge exit 3). Its shells are
     /// untouched; restarting them is the user's call.
     func offerRemoteRestart(_ key: MachineKey, message: String) {
-        guard let session = sessions[key], noticeBar == nil || !upgradeNoticeMachines.contains(key) else { return }
+        guard let session = connections[key], noticeBar == nil || !upgradeNoticeMachines.contains(key) else { return }
         upgradeNoticeMachines.insert(key)
-        showNotice("Clotho was updated. Restart the sessions on \(session.title) to finish upgrading; this ends the programs running there.",
-                   detail: message, action: "Restart Sessions…") { [weak self] in self?.confirmRemoteRestart(key) }
+        showNotice("\(session.title) runs an older clothod that can't be updated in place. Restarting it finishes the update and ends every shell on \(session.title).",
+                   detail: message, action: "Restart clothod…") { [weak self] in self?.confirmRemoteRestart(key) }
     }
 
     func confirmRemoteRestart(_ key: MachineKey) {
-        guard let session = sessions[key], let installer = remoteInstallers[key], window.attachedSheet == nil else { return }
+        guard let session = connections[key], let installer = remoteInstallers[key], window.attachedSheet == nil else { return }
         let alert = NSAlert()
-        alert.messageText = "Restart all sessions on \(session.title)?"
+        alert.messageText = "Restart clothod on \(session.title)?"
         alert.informativeText = "Every shell and program running in Clotho on \(session.title) ends."
-        alert.addButton(withTitle: "Restart Sessions")
+        alert.addButton(withTitle: "End all shells and restart")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn else { return }
@@ -238,7 +238,7 @@ extension AppDelegate {
         // Network changes come in bursts (an interface going down, a VPN, DHCP); one reconnect covers them.
         guard Date().timeIntervalSince(lastRemoteReconnect) > 2 else { return }
         lastRemoteReconnect = Date()
-        for session in sessions.values where !session.machine.isLocal {
+        for session in connections.values where !session.machine.isLocal {
             log("\(session.machine.label): reconnecting after \(reason)")
             session.store.backend.reconnectNow()
         }
@@ -249,12 +249,12 @@ extension AppDelegate {
     /// The sidebar's groups: this Mac, then each saved machine, connected or not.
     func sidebarGroups() -> [SidebarGroup] {
         var groups: [SidebarGroup] = []
-        let local = sessions[Self.localKey]!
+        let local = connections[Self.localKey]!
         groups.append(SidebarGroup(key: Self.localKey, title: local.title, status: connectionStatus(local.store.connection, isLocal: true),
                                    workspaces: local.store.state.workspaces, selected: selectedWorkspace(in: local),
                                    isConnected: true, isLocal: true, badges: workspaceBadges(local)))
         for machine in remoteMachines {
-            if let session = sessions[machine.key] {
+            if let session = connections[machine.key] {
                 groups.append(SidebarGroup(key: machine.key, title: machine.label, status: connectionStatus(session.store.connection, isLocal: false),
                                            workspaces: session.store.state.workspaces, selected: selectedWorkspace(in: session),
                                            isConnected: true, isLocal: false, badges: workspaceBadges(session)))
@@ -274,7 +274,7 @@ extension AppDelegate {
         return groups
     }
 
-    private func workspaceBadges(_ session: MachineSession) -> [WorkspaceID: NSColor] {
+    private func workspaceBadges(_ session: MachineConnection) -> [WorkspaceID: NSColor] {
         var badges: [WorkspaceID: NSColor] = [:]
         for workspace in session.store.state.workspaces {
             badges[workspace.id] = agentBadge(machine: session.key, panes: workspace.tabs.flatMap(\.layout.panes))
@@ -282,7 +282,7 @@ extension AppDelegate {
         return badges
     }
 
-    private func selectedWorkspace(in session: MachineSession) -> WorkspaceID? {
+    private func selectedWorkspace(in session: MachineConnection) -> WorkspaceID? {
         session.key == focusedMachine ? session.store.focusedWorkspace?.id : nil
     }
 
@@ -304,10 +304,10 @@ struct SidebarGroup {
     let status: (color: NSColor?, text: String?)
     let workspaces: [Workspace]
     let selected: WorkspaceID?
-    /// Connected (or connecting) machines list their sessions; others offer Connect.
+    /// Connected (or connecting) machines list their workspaces; others offer Connect.
     let isConnected: Bool
     let isLocal: Bool
-    /// Agent badges for sessions.
+    /// Agent badges for workspaces.
     let badges: [WorkspaceID: NSColor]
 }
 

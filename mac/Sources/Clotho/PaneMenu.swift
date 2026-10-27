@@ -1,12 +1,12 @@
 import AppKit
 import ClothoKit
 
-// The right-click menu on a terminal: splits, tabs, sessions, editing and files, for the pane that was
+// The right-click menu on a terminal: splits, tabs, workspaces, editing and files, for the pane that was
 // clicked. Programs that use the mouse (vim with `mouse=a`, for example) get right-clicks instead, as in
 // any terminal.
 extension AppDelegate {
     func paneMenu(for key: PaneKey) -> NSMenu? {
-        guard let session = sessions[key.machine], let pane = session.store.state.pane(key.pane),
+        guard let session = connections[key.machine], let pane = session.store.state.pane(key.pane),
               let host = paneHosts[key] else { return nil }
         // The menu acts on this pane, so it becomes the focused one first.
         window.makeFirstResponder(host.terminal)
@@ -31,7 +31,7 @@ extension AppDelegate {
 
         menu.addItem(.separator())
         add("New Tab", "t", [.command]) { [weak self] in self?.newTab(nil) }
-        add("New Session", "n", [.command]) { [weak self] in self?.newSession(nil) }
+        add("New Workspace", "n", [.command]) { [weak self] in self?.newWorkspace(nil) }
 
         menu.addItem(.separator())
         let terminal = host.terminal

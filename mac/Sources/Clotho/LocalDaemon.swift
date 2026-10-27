@@ -71,7 +71,7 @@ struct LocalDaemon: Sendable {
         log("clothod start (\(path)) exited with \(result.status)")
         switch result.status {
         case 0: return
-        case 3: throw Failure.holderTooOld(result.stderr.isEmpty ? "The running sessions use an older clothod." : result.stderr)
+        case 3: throw Failure.holderTooOld(result.stderr.isEmpty ? "The running shells use an older clothod." : result.stderr)
         default: throw Failure.failed(result.stderr.isEmpty ? "clothod start exited with \(result.status)" : result.stderr)
         }
     }
@@ -99,7 +99,7 @@ struct LocalDaemon: Sendable {
         log("clothod upgrade (\(path)) exited with \(result.status): \(result.stdout) \(result.stderr)")
         switch result.status {
         case 0: return
-        case 3: throw Failure.holderTooOld(result.stderr.isEmpty ? "The running sessions use an older clothod." : result.stderr)
+        case 3: throw Failure.holderTooOld(result.stderr.isEmpty ? "The running shells use an older clothod." : result.stderr)
         default: throw Failure.failed(result.stderr.isEmpty ? "clothod upgrade exited with \(result.status)" : result.stderr)
         }
     }
@@ -111,8 +111,8 @@ struct LocalDaemon: Sendable {
         for dir in [runtimeDir, installDir].compactMap({ $0 }) { try? FileManager.default.removeItem(atPath: dir) }
     }
 
-    /// Ends every session (the holder and its shells), then starts the current version.
-    func restartSessions() throws {
+    /// Ends every workspace (the holder and its shells), then starts the current version.
+    func restartClothod() throws {
         let path = try installedPath()
         _ = try Self.run(path, ["shutdown"], runtimeDir: runtimeDir, installDir: installDir)
         try start()

@@ -363,7 +363,7 @@ extension AppDelegate {
     /// its connection. Throws a message for the browser when the machine can't share files yet.
     func fileBackend(for machine: Machine) throws -> FileBackend {
         if machine.isLocal { return Self.localFiles }
-        guard let session = sessions[machine.key] else {
+        guard let session = connections[machine.key] else {
             throw FileError(message: "Connect to \(machine.label) to browse its files.")
         }
         guard let files = session.store.backend as? FileBackend, let hello = session.store.hello else {
@@ -420,7 +420,7 @@ extension AppDelegate {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = true
         panel.prompt = "Upload"
-        panel.message = "Choose files to send to the active pane's folder on \(focusedSession.machine.label)."
+        panel.message = "Choose files to send to the active pane's folder on \(focusedConnection.machine.label)."
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK else { return }
             self?.upload(panel.urls)
@@ -430,7 +430,7 @@ extension AppDelegate {
     // Sends local files to a pane's folder (the focused pane's by default) on that pane's machine, as its
     // daemon reports the folder.
     func upload(_ urls: [URL], toPane key: PaneKey? = nil) {
-        let session = key.flatMap { sessions[$0.machine] } ?? focusedSession
+        let session = key.flatMap { connections[$0.machine] } ?? focusedConnection
         let machine = session.machine
         guard let folder = session.store.state.pane(key?.pane ?? focusedPaneID)?.cwd else {
             let failed = Transfer(title: "Upload to \(machine.label)", sources: [], destination: Location(machine: machine, path: "~"))
@@ -530,7 +530,7 @@ final class FileBrowserOverlay: NSView {
         // FilesMachine (a launch argument, for testing) overrides which machine the left side shows.
         // "label" or "label:/path".
         let override = UserDefaults.standard.string(forKey: "FilesMachine")?.split(separator: ":", maxSplits: 1).map(String.init)
-        let active = machine ?? override.flatMap { o in Machine.all().first { $0.label == o[0] } } ?? app.focusedSession.machine
+        let active = machine ?? override.flatMap { o in Machine.all().first { $0.label == o[0] } } ?? app.focusedConnection.machine
         let activePath = override.flatMap { $0.count > 1 ? $0[1] : nil }
         let localPath = UserDefaults.standard.string(forKey: "LocalBrowserPath") ?? "~/Downloads"
         left = FilePane(app: app, machine: active, path: activePath, choosable: true)
@@ -925,7 +925,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     func start() {
         if let requestedPath { return load(requestedPath) }
         // A machine with a connected daemon opens in its focused pane's folder.
-        if let folder = app?.sessions[machine.key]?.store.focusedPane?.cwd { return load(folder) }
+        if let folder = app?.connections[machine.key]?.store.focusedPane?.cwd { return load(folder) }
         load(machine.lastFolder ?? "~")
     }
 

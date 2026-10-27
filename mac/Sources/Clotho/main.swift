@@ -120,7 +120,7 @@ final class WindowButtons: NSView {
     }
 }
 
-/// "Clotho Dev.app" (build-app.sh --dev) keeps its log and sessions apart from the installed app.
+/// "Clotho Dev.app" (build-app.sh --dev) keeps its log and workspaces apart from the installed app.
 let isDevBuild = Bundle.main.object(forInfoDictionaryKey: "ClothoDevBuild") as? Bool == true
 
 // Appends a line to ~/Library/Logs/Clotho.log (Clotho Dev.log for the dev build) so problems can be diagnosed.
@@ -153,11 +153,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var emptyLabel: NSTextField!
     var shortcutsOverlay: ShortcutsOverlay?
     var fileBrowser: FileBrowserOverlay?
+    var renameMonitor: Any?
     let transfers = TransferManager()
     var transferToast: TransferToast!
 
-    // One daemon connection per machine (see MachineSessions.swift); the window shows the focused one.
-    var sessions: [MachineKey: MachineSession] = [:]
+    // One daemon connection per machine (see MachineConnections.swift); the window shows the focused one.
+    var connections: [MachineKey: MachineConnection] = [:]
     var focusedMachine: MachineKey = AppDelegate.localKey {
         didSet { UserDefaults.standard.set(focusedMachine, forKey: "FocusedMachine") }
     }
@@ -174,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastAgentNotification: [String: (state: AgentInfo.State, date: Date)] = [:]
     /// Machines whose daemon runs an older build than the one installed, waiting for the user.
     var pendingDaemonUpdates: Set<MachineKey> = []
-    /// Machines whose legacy holder needs a sessions restart to finish an update, waiting for the user.
+    /// Machines whose legacy holder needs a clothod restart to finish an update, waiting for the user.
     var pendingHolderRestarts: Set<MachineKey> = []
     var agentClock: Timer?
     var upgradeNoticeMachines: Set<MachineKey> = []
@@ -263,18 +264,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             focus(machine: key)
             run { try await $0.focus(.workspace(id)) }
         }
-        sidebar.onRename = { [weak self] key, id in
-            self?.focus(machine: key)
-            self?.renameWorkspace(id)
+        sidebar.onRename = { [weak self] key, id, name in
+            guard let store = self?.connections[key]?.store else { return }
+            Task { try? await store.backend.renameWorkspace(id, name: name) }
         }
+        sidebar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
         sidebar.onClose = { [weak self] key, id in
             self?.focus(machine: key)
             self?.closeWorkspace(id)
         }
-        sidebar.onNewWorkspace = { [weak self] key in self?.newSession(on: key) }
+        sidebar.onNewWorkspace = { [weak self] key in self?.newWorkspace(on: key) }
         sidebar.onConnect = { [weak self] key in
             guard let self, let machine = remoteMachines.first(where: { $0.key == key }) else { return }
-            // Shows the machine's sessions; a first one only if it has none.
+            // Shows the machine's workspaces; a first one only if it has none.
             connect(machine, show: true)
         }
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
@@ -302,8 +304,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         tabBar.translatesAutoresizingMaskIntoConstraints = false
         tabBar.onSelect = { [weak self] id in self?.run { try await $0.focus(.tab(id)) } }
         tabBar.onClose = { [weak self] id in self?.closeTab(id) }
-        tabBar.onRename = { [weak self] id in self?.renameTab(withID: id) }
+        tabBar.onRename = { [weak self] id, title in
+            self?.run { try await $0.renameTab(id, title: title.isEmpty ? nil : title) }
+        }
+        tabBar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
         tabBar.onNewTab = { [weak self] in self?.newTab(nil) }
+        installRenameShortcut()
         container.addSubview(tabBar)
         tabBarLeading = tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor)
 
@@ -373,11 +379,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let (backend, daemon) = Self.makeBackend()
         localDaemon = daemon
-        addSession(MachineSession(machine: .local, backend: backend))
+        addSession(MachineConnection(machine: .local, backend: backend))
         startBackend()
         // Remote machines that were connected last time connect again, and focus returns where it was.
         for machine in remoteMachines where connectedMachineIDs.contains(machine.key) { connect(machine) }
-        if let saved = UserDefaults.standard.string(forKey: "FocusedMachine"), sessions[saved] != nil { focusedMachine = saved }
+        if let saved = UserDefaults.standard.string(forKey: "FocusedMachine"), connections[saved] != nil { focusedMachine = saved }
         watchForWakeAndNetworkChanges()
         setUpAgentNotifications()
         installAgentsMenu()
@@ -437,7 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         // FakeAgents=YES (with Backend=fake) puts fake agents in this Mac's panes and moves them through
         // their states, for building the Agents section without clothod.
-        if UserDefaults.standard.bool(forKey: "FakeAgents"), let fake = sessions[Self.localKey]?.store.backend as? FakeBackend {
+        if UserDefaults.standard.bool(forKey: "FakeAgents"), let fake = connections[Self.localKey]?.store.backend as? FakeBackend {
             let steps: [(TimeInterval, Int, AgentInfo?)] = [
                 (3, 0, AgentInfo(kind: "claude", state: .running, source: "hook", message: "Editing Sources/Model.swift")),
                 (3, 1, AgentInfo(kind: "codex", state: .running, message: "Running the test suite")),
@@ -450,7 +456,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ]
             for (time, index, agent) in steps {
                 DispatchQueue.main.asyncAfter(deadline: .now() + time) { [self] in
-                    let panes = sessions[Self.localKey]?.store.state.panes.map(\.id) ?? []
+                    let panes = connections[Self.localKey]?.store.state.panes.map(\.id) ?? []
                     guard index < panes.count else { return log("FakeAgents: no pane \(index)") }
                     log("FakeAgents: pane \(panes[index]) → \(agent?.state.rawValue ?? "none")")
                     fake.setAgent(panes[index], agent)
@@ -470,7 +476,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if applyAfter > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + applyAfter) { [self] in
                 // Dev builds only: also run the switch on machines already on the newest build, to exercise it.
-                if isDevBuild { pendingDaemonUpdates.formUnion(sessions.keys) }
+                if isDevBuild { pendingDaemonUpdates.formUnion(connections.keys) }
                 log("ApplyDaemonUpdates: \(pendingDaemonUpdates.sorted())")
                 applyDaemonUpdates()
             }
@@ -503,10 +509,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         }
-        // ConnectMachine="devbox" connects to that saved machine and starts a session there.
+        // ConnectMachine="devbox" connects to that saved machine and starts a workspace there.
         if let name = UserDefaults.standard.string(forKey: "ConnectMachine"),
            let machine = remoteMachines.first(where: { $0.label == name }) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in connect(machine, newSession: true) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in connect(machine, startWorkspace: true) }
         }
         // DumpScreens="5|9" logs each shown pane's text and cursor at those seconds after launch, which works
         // even while the window is covered (SwiftTerm stops drawing then, so screenshots go stale).
@@ -548,7 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             log("backend: no clothod binary (tried \(override ?? bundled ?? "nothing")), using the fake backend")
             return (FakeBackend(), nil)
         }
-        // The dev build runs its own daemon, so testing never touches the user's sessions.
+        // The dev build runs its own daemon, so testing never touches the user's workspaces.
         let runtimeDir = defaults.string(forKey: "ClothodRuntimeDir") ?? env["CLOTHOD_RUNTIME_DIR"]
             ?? (isDevBuild ? (NSTemporaryDirectory() as NSString).appendingPathComponent("clotho-dev") : nil)
         var configured = LocalDaemon(source: source, runInPlace: override != nil, runtimeDir: runtimeDir)
@@ -573,7 +579,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func startBackend() {
-        guard let local = sessions[Self.localKey] else { return }
+        guard let local = connections[Self.localKey] else { return }
         let daemon = localDaemon
         Task { @MainActor in
             do {
@@ -582,7 +588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 try await local.store.start()
                 await upgradeLocalLogicProcessIfNeeded(local)
                 refreshHookStatus(Self.localKey)
-                // clothod brings back the previous layout; only an empty daemon gets a first session. (Retried
+                // clothod brings back the previous layout; only an empty daemon gets a first workspace. (Retried
                 // briefly, since an upgrade above reconnects.)
                 var state: ModelState?
                 for attempt in 0..<40 {
@@ -594,17 +600,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                 }
                 if state?.workspaces.isEmpty == true {
-                    _ = try await local.store.backend.createWorkspace(name: "Session 1", spawn: spawnOptions())
+                    _ = try await local.store.backend.createWorkspace(name: "Workspace 1", spawn: spawnOptions())
                 }
             } catch LocalDaemon.Failure.holderTooOld(let message) {
                 // The shells belong to an older holder that this version can't drive. They're untouched;
                 // ending them is the user's call.
                 log("clothod: \(message)")
-                showNotice("Clotho was updated. Restart your sessions to finish upgrading; this ends the programs running in them.",
-                           detail: message, action: "Restart Sessions…") { [weak self] in self?.confirmRestartSessions() }
+                showNotice("This Mac runs an older clothod that can't be updated in place. Restarting it finishes the update and ends every shell on this Mac.",
+                           detail: message, action: "Restart clothod…") { [weak self] in self?.confirmRestartClothod() }
             } catch {
                 log("backend failed to start: \(error)")
-                emptyLabel.stringValue = "Couldn't start the session backend: \(error.localizedDescription)"
+                emptyLabel.stringValue = "Couldn't start clothod: \(error.localizedDescription)"
             }
         }
     }
@@ -612,7 +618,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// `start` leaves an older daemon running, so after an update the app may be talking to the previous
     /// build. Its logic process can be swapped without touching the shells, but that restarts it, which
     /// the user decides: this only offers it (see DaemonUpdates.swift).
-    func upgradeLocalLogicProcessIfNeeded(_ local: MachineSession) async {
+    func upgradeLocalLogicProcessIfNeeded(_ local: MachineConnection) async {
         // The hello arrives through the event stream, just after start() returns.
         for _ in 0..<20 where local.store.hello == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
         guard let daemon = localDaemon, !daemon.runInPlace, local.store.hello != nil,
@@ -635,30 +641,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         offerDaemonUpdate(for: Self.localKey)
     }
 
-    func confirmRestartSessions() {
+    func confirmRestartClothod() {
         guard let daemon = localDaemon, window.attachedSheet == nil else { return }
         let alert = NSAlert()
-        alert.messageText = "Restart all sessions on this Mac?"
-        alert.informativeText = "Every shell and program running in Clotho on this Mac ends. Sessions on other machines aren't affected."
-        alert.addButton(withTitle: "Restart Sessions")
+        alert.messageText = "Restart clothod on this Mac?"
+        alert.informativeText = "Every shell and program running in Clotho on this Mac ends. Other machines aren't affected."
+        alert.addButton(withTitle: "End all shells and restart")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn else { return }
             hideNotice()
             Task { @MainActor in
                 do {
-                    try await Task.detached { try daemon.restartSessions() }.value
+                    try await Task.detached { try daemon.restartClothod() }.value
                     self.startBackend()
                 } catch {
-                    self.showNotice("Couldn't restart the sessions.", detail: error.localizedDescription, action: nil, then: nil)
+                    self.showNotice("Restarting clothod failed.", detail: error.localizedDescription, action: nil, then: nil)
                 }
             }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Only disconnects; every machine's daemon keeps its sessions.
-        sessions.values.forEach { $0.store.stop() }
+        // Only disconnects; every machine's daemon keeps its workspaces.
+        connections.values.forEach { $0.store.stop() }
         // The dev build's daemons are temporary: shut them down and delete them, here and on every machine.
         if isDevBuild { cleanUpDevDaemons() }
     }

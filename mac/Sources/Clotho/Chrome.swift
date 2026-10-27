@@ -1,7 +1,7 @@
 import AppKit
 import ClothoKit
 
-// The native chrome around the panes: a sidebar of workspaces ("sessions" in the menus) and a tab
+// The native chrome around the panes: a sidebar of workspaces and a tab
 // bar for the focused workspace. Both redraw from the model on every change.
 
 /// A clickable row or tab: highlights on hover and when selected, with an optional close button.
@@ -78,11 +78,97 @@ class ChromeItem: NSView {
 
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
 
+    // MARK: Inline rename
+
+    private var editor: NSTextField?
+    private var commitEdit: ((String) -> Void)?
+    private var clickMonitor: Any?
+    /// Called once an edit ends, committed or not.
+    var onEditingEnded: (() -> Void)?
+    var isEditing: Bool { editor != nil }
+
+    /// Swaps the title for a field with `text` selected, as Finder does. Return or clicking anywhere
+    /// else commits; Esc cancels.
+    func beginEditing(_ text: String, commit: @escaping (String) -> Void) {
+        guard editor == nil, let window else { return }
+        let field = NSTextField(string: text)
+        field.font = label.font
+        field.alignment = label.alignment
+        field.textColor = Theme.foreground
+        field.backgroundColor = Theme.background
+        field.drawsBackground = true
+        field.isBordered = false
+        field.focusRingType = .none
+        field.cell?.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.delegate = self
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 3
+        field.layer?.borderWidth = 1
+        field.layer?.borderColor = Theme.accent.cgColor
+        field.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -3),
+            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            field.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        label.isHidden = true
+        closeButton.isHidden = true
+        editor = field
+        commitEdit = commit
+        window.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+        // A click outside the field commits, even on views that don't take focus (other rows, the bar).
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            if let self, let field = editor, event.window === field.window,
+               !field.bounds.contains(field.convert(event.locationInWindow, from: nil)) {
+                endEditing(commit: true)
+            }
+            return event
+        }
+    }
+
+    func endEditing(commit: Bool) {
+        guard let field = editor else { return }
+        editor = nil
+        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+        clickMonitor = nil
+        let text = field.stringValue.trimmingCharacters(in: .whitespaces)
+        let done = commitEdit
+        commitEdit = nil
+        field.delegate = nil
+        field.removeFromSuperview()
+        label.isHidden = false
+        updateColors()
+        if commit { done?(text) }
+        onEditingEnded?()
+    }
+
     private func updateColors() {
         layer?.backgroundColor = (isSelected ? selectedColor : hovering ? hoverColor : .clear).cgColor
         if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
-        closeButton.isHidden = !(hovering || isSelected) || onClose == nil
+        closeButton.isHidden = !(hovering || isSelected) || onClose == nil || editor != nil
     }
+}
+
+extension ChromeItem: NSTextFieldDelegate {
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertLineBreak(_:)),
+             #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)):
+            endEditing(commit: true)
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            endEditing(commit: false)
+            return true
+        default:
+            return false
+        }
+    }
+
+    // Focus moving elsewhere (another window, the terminal) commits too.
+    func controlTextDidEndEditing(_ obj: Notification) { endEditing(commit: true) }
 }
 
 final class TabBarView: NSView {
@@ -90,10 +176,16 @@ final class TabBarView: NSView {
 
     var onSelect: ((TabID) -> Void)?
     var onClose: ((TabID) -> Void)?
-    var onRename: ((TabID) -> Void)?
+    /// A tab's title was edited in place (an empty title goes back to the pane's).
+    var onRename: ((TabID, String) -> Void)?
     var onNewTab: (() -> Void)?
+    /// After an inline edit ends, so the terminal can take focus back.
+    var onEditingEnded: (() -> Void)?
 
     private let stack = NSStackView()
+    private var items: [TabID: (item: ChromeItem, title: String, custom: String?)] = [:]
+    /// The latest update, held back while a title is being edited so the field isn't rebuilt away.
+    private var pending: (() -> Void)?
     private let addButton = NSButton()
 
     override init(frame: NSRect) {
@@ -130,16 +222,22 @@ final class TabBarView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(tabs: [(id: TabID, title: String, maximized: Bool, badge: NSColor?)], selected: TabID?) {
+    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?) {
+        if items.values.contains(where: { $0.item.isEditing }) {
+            pending = { [weak self] in self?.update(tabs: tabs, selected: selected) }
+            return
+        }
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        items = [:]
         for (index, tab) in tabs.enumerated() {
             let item = ChromeItem(closable: true)
+            items[tab.id] = (item, tab.title, tab.custom)
             item.label.stringValue = (tab.maximized ? "⤢ " : "") + tab.title
             item.label.alignment = .center
             item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
             item.isSelected = tab.id == selected
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
-            item.onDoubleClick = { [weak self] in self?.onRename?(tab.id) }
+            item.onDoubleClick = { [weak self] in self?.beginRename(tab.id) }
             item.onClose = { [weak self] in self?.onClose?(tab.id) }
             item.isSelected = tab.id == selected
             if let badge = tab.badge {
@@ -165,6 +263,26 @@ final class TabBarView: NSView {
         }
     }
 
+    private func runPending() {
+        let update = pending
+        pending = nil
+        update?()
+    }
+
+    /// Edits a tab's title in place, starting from the title it shows.
+    func beginRename(_ id: TabID) {
+        guard let (item, shown, custom) = items[id] else { return }
+        item.onEditingEnded = { [weak self] in
+            self?.onEditingEnded?()
+            self?.runPending()
+        }
+        item.beginEditing(custom ?? shown) { [weak self] text in
+            // Committing the pane's own title unchanged leaves the tab following it.
+            guard text != (custom ?? shown) else { return }
+            self?.onRename?(id, text)
+        }
+    }
+
     @objc private func addTapped() { onNewTab?() }
 
     // Clicks on empty tab bar space drag the window; a double-click zooms it.
@@ -183,7 +301,13 @@ final class SidebarView: NSView {
     static let topInset: CGFloat = 34
 
     var onSelect: ((MachineKey, WorkspaceID) -> Void)?
-    var onRename: ((MachineKey, WorkspaceID) -> Void)?
+    /// A workspace's name was edited in place.
+    var onRename: ((MachineKey, WorkspaceID, String) -> Void)?
+    /// After an inline edit ends, so the terminal can take focus back.
+    var onEditingEnded: (() -> Void)?
+    private var rows: [String: (row: WorkspaceRow, name: String)] = [:]
+    /// The latest update, held back while a name is being edited so the field isn't rebuilt away.
+    private var pending: (() -> Void)?
     var onClose: ((MachineKey, WorkspaceID) -> Void)?
     var onNewWorkspace: ((MachineKey) -> Void)?
     var onConnect: ((MachineKey) -> Void)?
@@ -191,7 +315,7 @@ final class SidebarView: NSView {
     var machineMenu: ((MachineKey) -> NSMenu)?
 
     // Two panels, as in herdr: on top, one column grouped by machine (this Mac, then each saved SSH
-    // machine, each with its sessions); at the bottom, every agent on every machine. A divider between
+    // machine, each with its workspaces); at the bottom, every agent on every machine. A divider between
     // them sets the agents panel's height.
     private let column = NSStackView()
     private let agentsColumn = NSStackView()
@@ -217,7 +341,7 @@ final class SidebarView: NSView {
         }
         let saved = CGFloat(UserDefaults.standard.double(forKey: "AgentsPanelHeight"))
         agentsHeight = agentsScroll.heightAnchor.constraint(equalToConstant: saved > 0 ? saved : 220)
-        // The sessions panel keeps some room even when the window is short.
+        // The workspaces panel keeps some room even when the window is short.
         let sessionsMinimum = scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 80)
         agentsHeight.priority = .defaultHigh
         NSLayoutConstraint.activate([
@@ -296,13 +420,18 @@ final class SidebarView: NSView {
     var agentsMenu: (() -> NSMenu)?
 
     func update(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) {
+        if rows.values.contains(where: { $0.row.isEditing }) {
+            pending = { [weak self] in self?.update(agents: agents, unreachable: unreachable, groups: groups) }
+            return
+        }
+        rows = [:]
         column.arrangedSubviews.forEach { $0.removeFromSuperview() }
         agentsColumn.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         // The agents panel: every agent on every machine, most urgent first.
         let needing = agents.filter(\.info.needsAttention).count
         let agentsHeader = MachineHeader(title: needing > 0 ? "Agents · \(needing)" : "Agents",
-                                         status: (needing > 0 ? AgentInfo.State.waiting.color : nil, nil), newSessionTooltip: nil)
+                                         status: (needing > 0 ? AgentInfo.State.waiting.color : nil, nil), newWorkspaceTooltip: nil)
         agentsHeader.contextMenu = { [weak self] in self?.agentsMenu?() }
         add(agentsHeader, to: agentsColumn)
         agentsColumn.setCustomSpacing(4, after: agentsHeader)
@@ -317,7 +446,7 @@ final class SidebarView: NSView {
                 to: agentsColumn)
         }
         if agents.isEmpty && unreachable.isEmpty {
-            add(note("No agents running", tooltip: "Claude Code and Codex sessions in any pane show up here.", color: Theme.dimText),
+            add(note("No agents running", tooltip: "Claude Code and Codex running in any pane show up here.", color: Theme.dimText),
                 to: agentsColumn)
         }
 
@@ -325,13 +454,13 @@ final class SidebarView: NSView {
             if index > 0, let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
             let key = group.key
             let header = MachineHeader(title: group.title, status: group.status,
-                                       newSessionTooltip: group.isConnected ? (group.isLocal ? "New Session (⌘N)" : "New session on \(group.title)") : nil)
-            header.onNewSession = { [weak self] in self?.onNewWorkspace?(key) }
+                                       newWorkspaceTooltip: group.isConnected ? (group.isLocal ? "New Workspace (⌘N)" : "New workspace on \(group.title)") : nil)
+            header.onNewWorkspace = { [weak self] in self?.onNewWorkspace?(key) }
             header.contextMenu = { [weak self] in self?.machineMenu?(key) }
             add(header)
             column.setCustomSpacing(4, after: header)
             guard group.isConnected else {
-                add(actionButton("Connect", symbol: "arrow.right", tooltip: "Connect to \(group.title) and show its sessions") { [weak self] in
+                add(actionButton("Connect", symbol: "arrow.right", tooltip: "Connect to \(group.title) and show its workspaces") { [weak self] in
                     self?.onConnect?(key)
                 })
                 continue
@@ -343,20 +472,42 @@ final class SidebarView: NSView {
                 row.detail.stringValue = workspace.tabs.count > 1 ? "\(workspace.tabs.count)" : ""
                 row.toolTip = workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
                 row.onClick = { [weak self] in self?.onSelect?(key, workspace.id) }
-                row.onDoubleClick = { [weak self] in self?.onRename?(key, workspace.id) }
+                row.onDoubleClick = { [weak self] in self?.beginRename(key, workspace.id) }
+                rows[Self.rowKey(key, workspace.id)] = (row, workspace.name)
                 row.onClose = { [weak self] in self?.onClose?(key, workspace.id) }
                 row.isSelected = workspace.id == group.selected
                 row.setBadge(group.badges[workspace.id])
                 add(row, height: Self.rowHeight)
             }
             if group.workspaces.isEmpty {
-                add(actionButton("New Session", symbol: "plus", tooltip: header.toolTip ?? "New Session") { [weak self] in
+                add(actionButton("New Workspace", symbol: "plus", tooltip: header.toolTip ?? "New Workspace") { [weak self] in
                     self?.onNewWorkspace?(key)
                 })
             }
         }
         if let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
         add(actionButton("Add Machine", symbol: "plus", tooltip: "Save an SSH machine") { [weak self] in self?.onAddMachine?() })
+    }
+
+    private func runPending() {
+        let update = pending
+        pending = nil
+        update?()
+    }
+
+    private static func rowKey(_ machine: MachineKey, _ id: WorkspaceID) -> String { "\(machine)/\(id)" }
+
+    /// Edits a workspace's name in place.
+    func beginRename(_ machine: MachineKey, _ id: WorkspaceID) {
+        guard let (row, name) = rows[Self.rowKey(machine, id)] else { return }
+        row.onEditingEnded = { [weak self] in
+            self?.onEditingEnded?()
+            self?.runPending()
+        }
+        row.beginEditing(name) { [weak self] text in
+            guard !text.isEmpty, text != name else { return }
+            self?.onRename?(machine, id, text)
+        }
     }
 
     private func add(_ view: NSView, height: CGFloat? = nil, to target: NSStackView? = nil) {
@@ -414,13 +565,13 @@ final class SidebarView: NSView {
     override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
-/// A machine's name in small capitals, with a status dot, a + for a new session on it, and an optional
+/// A machine's name in small capitals, with a status dot, a + for a new workspace on it, and an optional
 /// status line under it. Right-click it for the machine's menu.
 final class MachineHeader: NSView {
     var contextMenu: (() -> NSMenu?)?
-    var onNewSession: (() -> Void)?
+    var onNewWorkspace: (() -> Void)?
 
-    init(title: String, status: (color: NSColor?, text: String?), newSessionTooltip: String?) {
+    init(title: String, status: (color: NSColor?, text: String?), newWorkspaceTooltip: String?) {
         super.init(frame: .zero)
         let label = NSTextField(labelWithString: title.uppercased())
         label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
@@ -438,14 +589,14 @@ final class MachineHeader: NSView {
         detail.maximumNumberOfLines = 3
         detail.isHidden = status.text == nil
         detail.toolTip = status.text
-        let add = ClosureButton(title: "") { [weak self] in self?.onNewSession?() }
-        add.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Session")?
+        let add = ClosureButton(title: "") { [weak self] in self?.onNewWorkspace?() }
+        add.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Workspace")?
             .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
         add.isBordered = false
         add.contentTintColor = Theme.dimText
-        add.toolTip = newSessionTooltip
-        add.isHidden = newSessionTooltip == nil
-        toolTip = newSessionTooltip
+        add.toolTip = newWorkspaceTooltip
+        add.isHidden = newWorkspaceTooltip == nil
+        toolTip = newWorkspaceTooltip
         for view in [label, dot, detail, add] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -474,7 +625,7 @@ final class MachineHeader: NSView {
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
 }
 
-/// The line between the sessions and agents panels; drag it to resize the agents panel.
+/// The line between the workspaces and agents panels; drag it to resize the agents panel.
 final class AgentsDivider: NSView {
     var onDrag: ((CGFloat) -> Void)?
     var onEnd: (() -> Void)?
@@ -572,7 +723,7 @@ final class WorkspaceRow: ChromeItem {
 }
 
 /// A strip under the tab bar for things that need the user's attention but shouldn't block anything,
-/// such as an upgrade that needs the sessions restarted.
+/// such as an upgrade that needs clothod restarted.
 final class NoticeBar: NSView {
     init(message: String, detail: String?, action: String?, onAction: (() -> Void)?, onDismiss: @escaping () -> Void) {
         super.init(frame: .zero)

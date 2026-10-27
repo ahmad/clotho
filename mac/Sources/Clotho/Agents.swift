@@ -3,7 +3,7 @@ import ClothoKit
 import UserNotifications
 
 // Coding agents (Claude Code, Codex, …) on every machine: the sidebar's Agents section, badges on
-// sessions and tabs, notifications when one needs the user, and the dock badge. Agent state comes from
+// workspaces and tabs, notifications when one needs the user, and the dock badge. Agent state comes from
 // each daemon's pane `agent` field; every connected machine keeps an event subscription, which is cheap
 // (no pane output flows for panes that aren't on screen).
 
@@ -109,7 +109,7 @@ extension AppDelegate {
     /// Every agent on every monitored machine, most urgent first.
     func agentEntries() -> [AgentEntry] {
         var entries: [AgentEntry] = []
-        for (key, session) in sessions where monitorsAgents(key) {
+        for (key, session) in connections where monitorsAgents(key) {
             let state = session.store.state
             for pane in state.panes where pane.exited == nil {
                 guard let info = pane.agent else { continue }
@@ -128,7 +128,7 @@ extension AppDelegate {
 
     /// Monitored machines that can't be reached, so their agents aren't silently missing.
     func unreachableMonitoredMachines() -> [(name: String, reason: String)] {
-        sessions.values.filter { monitorsAgents($0.key) }.compactMap { session in
+        connections.values.filter { monitorsAgents($0.key) }.compactMap { session in
             if case .reconnecting(let reason) = session.store.connection { return (session.title, reason) }
             return nil
         }.sorted { $0.name < $1.name }
@@ -136,7 +136,7 @@ extension AppDelegate {
 
     /// The most urgent agent badge for a workspace or tab on a machine.
     func agentBadge(machine: MachineKey, panes: [PaneID]) -> NSColor? {
-        guard monitorsAgents(machine), let state = sessions[machine]?.store.state else { return nil }
+        guard monitorsAgents(machine), let state = connections[machine]?.store.state else { return nil }
         let agents = panes.compactMap { state.pane($0)?.agent }
         let urgent = agents.filter(\.needsAttention).min { rank($0) < rank($1) }
         return (urgent ?? agents.first { $0.badgeColor != nil })?.badgeColor
@@ -146,9 +146,9 @@ extension AppDelegate {
 
     // MARK: Opening
 
-    /// Shows the agent's pane (its machine, session, tab and pane) and acknowledges its state.
+    /// Shows the agent's pane (its machine, workspace, tab and pane) and acknowledges its state.
     func openAgent(machine: MachineKey, pane: PaneID) {
-        guard let session = sessions[machine] else { return }
+        guard let session = connections[machine] else { return }
         focus(machine: machine)
         if NSApp.isHidden || !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         window.makeKeyAndOrderFront(nil)
@@ -164,7 +164,7 @@ extension AppDelegate {
     /// Answers an agent without switching to its pane: `text` (pasted) and then `keys`, encoded by the
     /// machine's daemon for the agent's terminal modes (`pane.keys`). Answering also marks it seen.
     func reply(machine: MachineKey, pane: PaneID, text: String? = nil, keys: [String]) {
-        guard let session = sessions[machine], session.store.hello?.features.contains(.paneKeys) == true else {
+        guard let session = connections[machine], session.store.hello?.features.contains(.paneKeys) == true else {
             return log("reply to \(machine)/\(pane): this clothod can't send keys")
         }
         let backend = session.store.backend
@@ -181,7 +181,7 @@ extension AppDelegate {
 
     /// Asks for a line of text and sends it with Enter.
     func promptReply(machine: MachineKey, pane: PaneID) {
-        guard window.attachedSheet == nil, let session = sessions[machine], let agent = session.store.state.pane(pane)?.agent else { return }
+        guard window.attachedSheet == nil, let session = connections[machine], let agent = session.store.state.pane(pane)?.agent else { return }
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         let alert = NSAlert()
         alert.messageText = "Reply to \(agent.kindName) on \(session.title)"
@@ -236,7 +236,7 @@ extension AppDelegate {
         let key = "\(machine)/\(pane)"
         if let last = lastAgentNotification[key], last.state == after.state, Date().timeIntervalSince(last.date) < 60 { return }
         lastAgentNotification[key] = (after.state, Date())
-        guard let session = sessions[machine] else { return }
+        guard let session = connections[machine] else { return }
         let location = session.store.state.location(of: pane)
         let title = "\(after.kindName) \(after.state == .waiting ? "is waiting" : after.state == .done ? "finished" : "hit an error")"
         let place = [session.title, location?.workspace.name, location.map { session.store.displayTitle(of: $0.tab) }]
@@ -396,11 +396,11 @@ final class AgentRow: ChromeItem {
         icon.image = NSImage(systemSymbolName: shown.symbol, accessibilityDescription: shown.label)?
             .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
         icon.contentTintColor = shown.color
-        // Where it is, as herdr shows it: machine · session (bold) · tab.
+        // Where it is, as herdr shows it: machine · workspace (bold) · tab.
         let strong = info.needsAttention ? Theme.foreground : NSColor(hex: 0xA9B0B6)
         let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Theme.dimText]
         let title = NSMutableAttributedString(string: entry.machineName + " · ", attributes: quiet)
-        title.append(NSAttributedString(string: entry.workspace?.name ?? "Session", attributes: [
+        title.append(NSAttributedString(string: entry.workspace?.name ?? "Workspace", attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: strong,
         ]))
         if let tab = entry.tabTitle, !tab.isEmpty {

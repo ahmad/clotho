@@ -1,7 +1,7 @@
 import AppKit
 
 // Saved SSH machines: adding, editing and removing them, a connection check for machines that aren't
-// connected, and the sidebar's machine menu. Connected machines' sessions are in MachineSessions.swift.
+// connected, and the sidebar's machine menu. Connected machines' workspaces are in MachineConnections.swift.
 
 enum MachineStatus: Equatable {
     case unknown, checking, reachable
@@ -105,12 +105,12 @@ extension AppDelegate {
         guard let id = machine.id, window.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = "Remove \(machine.label)?"
-        alert.informativeText = "This only removes it from Clotho's list. Nothing on the machine changes, and its sessions keep running there."
+        alert.informativeText = "This only removes it from Clotho's list. Nothing on the machine changes, and its shells keep running there."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
-            // Its sessions keep running on the machine; Clotho just stops showing them.
+            // Its workspaces keep running on the machine; Clotho just stops showing them.
             self?.disconnect(machine.key)
             Machine.remove(id)
             self?.machineStatus[id] = nil
@@ -123,12 +123,12 @@ extension AppDelegate {
         let add = { (title: String, action: @escaping () -> Void) in menu.addItem(ClosureMenuItem(title: title, action: action)) }
         let machine = key == Self.localKey ? Machine.local : remoteMachines.first { $0.key == key }
         guard let machine else { return menu }
-        let connected = sessions[key] != nil
+        let connected = connections[key] != nil
         if connected || machine.isLocal {
-            add("New Session") { [weak self] in self?.newSession(on: key) }
+            add("New Workspace") { [weak self] in self?.newWorkspace(on: key) }
         } else {
             add("Connect") { [weak self] in self?.connect(machine) }
-            add("Connect and Start a Session") { [weak self] in self?.connect(machine, newSession: true) }
+            add("Connect and Start a Workspace") { [weak self] in self?.connect(machine, startWorkspace: true) }
         }
         add("Browse Files") { [weak self] in self?.showFileBrowser(on: machine) }
         // Agents on this machine show in the Agents section, notify and count toward the dock badge.
@@ -144,7 +144,7 @@ extension AppDelegate {
         }
         guard !machine.isLocal else { return menu }
         if connected {
-            add("Reconnect") { [weak self] in self?.sessions[key]?.store.backend.reconnectNow() }
+            add("Reconnect") { [weak self] in self?.connections[key]?.store.backend.reconnectNow() }
             add("Disconnect") { [weak self] in self?.disconnect(key) }
         } else {
             add("Check Connection") { [weak self] in self?.checkMachine(machine) }

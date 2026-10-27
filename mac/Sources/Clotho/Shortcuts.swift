@@ -2,7 +2,7 @@ import AppKit
 import ClothoKit
 
 // One table drives both the menu bar and the shortcuts window, so they can't drift apart.
-// Bindings follow Warp's macOS defaults; workspaces play the part of Warp's windows ("sessions").
+// Bindings follow Warp's macOS defaults; workspaces play the part of Warp's windows.
 struct Shortcut {
     let menu: String
     let title: String
@@ -85,11 +85,11 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Zoom Out", key: "-", action: #selector(zoomOut(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:))),
 
-            Shortcut(menu: "Session", title: "New Session", key: "n", action: #selector(newSession(_:))),
-            Shortcut(menu: "Session", title: "Close Session", key: "w", modifiers: [.command, .shift], action: #selector(closeSession(_:))),
-            Shortcut(menu: "Session", title: "Rename Session", key: "r", modifiers: [.command, .shift], action: #selector(renameSession(_:))),
-            Shortcut(menu: "Session", title: "Previous Session", key: Shortcut.arrows[2].key, modifiers: [.command, .shift], action: #selector(previousSession(_:))),
-            Shortcut(menu: "Session", title: "Next Session", key: Shortcut.arrows[3].key, modifiers: [.command, .shift], action: #selector(nextSession(_:))),
+            Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
+            Shortcut(menu: "Workspace", title: "Close Workspace", key: "w", modifiers: [.command, .shift], action: #selector(closeActiveWorkspace(_:))),
+            Shortcut(menu: "Workspace", title: "Rename Workspace", key: "r", modifiers: [.command, .shift], action: #selector(renameActiveWorkspace(_:))),
+            Shortcut(menu: "Workspace", title: "Previous Workspace", key: Shortcut.arrows[2].key, modifiers: [.command, .shift], action: #selector(previousWorkspace(_:))),
+            Shortcut(menu: "Workspace", title: "Next Workspace", key: Shortcut.arrows[3].key, modifiers: [.command, .shift], action: #selector(nextWorkspace(_:))),
 
             Shortcut(menu: "Tab", title: "New Tab", key: "t", action: #selector(newTab(_:))),
             Shortcut(menu: "Tab", title: "Close Tab", key: "w", modifiers: [.command, .option], action: #selector(closeActiveTab(_:))),
@@ -133,7 +133,7 @@ extension AppDelegate {
         return list
     }()
 
-    static let menuOrder = ["Clotho", "File", "Edit", "View", "Session", "Tab", "Pane", "Window", "Help"]
+    static let menuOrder = ["Clotho", "File", "Edit", "View", "Workspace", "Tab", "Pane", "Window", "Help"]
 
     func buildMenu() {
         let main = NSMenu()
@@ -196,19 +196,19 @@ extension AppDelegate {
     var focusedPaneID: PaneID? { store.focusedPane?.id }
 
     // On the focused machine.
-    @objc func newSession(_ sender: Any?) {
-        let name = "Session \(store.state.workspaces.count + 1)"
+    @objc func newWorkspace(_ sender: Any?) {
+        let name = "Workspace \(store.state.workspaces.count + 1)"
         let options = spawnOptions()
         run { _ = try await $0.createWorkspace(name: name, spawn: options) }
     }
 
-    func newSession(on key: MachineKey) {
+    func newWorkspace(on key: MachineKey) {
         focus(machine: key)
-        newSession(nil)
+        newWorkspace(nil)
     }
 
-    // Closing a session stops every agent in it, so it asks first.
-    @objc func closeSession(_ sender: Any?) {
+    // Closing a workspace stops every agent in it, so it asks first.
+    @objc func closeActiveWorkspace(_ sender: Any?) {
         guard let workspace = store.focusedWorkspace else { return }
         closeWorkspace(workspace.id)
     }
@@ -236,11 +236,11 @@ extension AppDelegate {
         }
     }
 
-    // Sessions cycle in sidebar order across every connected machine, wrapping around.
-    @objc func previousSession(_ sender: Any?) { stepSession(by: -1) }
-    @objc func nextSession(_ sender: Any?) { stepSession(by: 1) }
+    // Workspaces cycle in sidebar order across every connected machine, wrapping around.
+    @objc func previousWorkspace(_ sender: Any?) { stepWorkspace(by: -1) }
+    @objc func nextWorkspace(_ sender: Any?) { stepWorkspace(by: 1) }
 
-    func stepSession(by step: Int) {
+    func stepWorkspace(by step: Int) {
         let all = sidebarGroups().flatMap { group in group.workspaces.map { (machine: group.key, workspace: $0.id) } }
         guard !all.isEmpty else { return }
         let index = all.firstIndex { $0.machine == focusedMachine && $0.workspace == store.focusedWorkspace?.id } ?? 0
@@ -251,7 +251,7 @@ extension AppDelegate {
 
     // A new tab opens in the focused pane's folder.
     @objc func newTab(_ sender: Any?) {
-        guard let workspace = store.focusedWorkspace else { return newSession(sender) }
+        guard let workspace = store.focusedWorkspace else { return newWorkspace(sender) }
         let options = spawnOptions(cwd: store.focusedPane?.cwd)
         run { _ = try await $0.createTab(in: workspace.id, spawn: options) }
     }
@@ -266,7 +266,7 @@ extension AppDelegate {
         renameTab(withID: tab.id)
     }
 
-    @objc func renameSession(_ sender: Any?) {
+    @objc func renameActiveWorkspace(_ sender: Any?) {
         guard let workspace = store.focusedWorkspace else { return }
         renameWorkspace(workspace.id)
     }
@@ -365,7 +365,7 @@ extension AppDelegate {
 
 // A Warp-style card listing every shortcut in two columns, drawn over the terminal on a dimmed backdrop.
 final class ShortcutsOverlay: NSView {
-    static let columns = [["Session", "Tab", "Pane"], ["Clotho", "File", "Edit", "View", "Window", "Help"]]
+    static let columns = [["Workspace", "Tab", "Pane"], ["Clotho", "File", "Edit", "View", "Window", "Help"]]
     static let columnWidth: CGFloat = 300
     var onDismiss: (() -> Void)?
     let card = NSView()

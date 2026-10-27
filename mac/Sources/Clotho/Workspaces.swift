@@ -37,7 +37,7 @@ extension AppDelegate {
         sidebar.update(agents: agents, unreachable: unreachableMonitoredMachines(), groups: sidebarGroups())
         updateDockBadge(agents)
         let tabs = (workspace?.tabs ?? []).map {
-            (id: $0.id, title: store.displayTitle(of: $0), maximized: maximized[tabKey($0.id)] != nil,
+            (id: $0.id, title: store.displayTitle(of: $0), custom: $0.title, maximized: maximized[tabKey($0.id)] != nil,
              badge: agentBadge(machine: focusedMachine, panes: $0.layout.panes))
         }
         tabBar.update(tabs: tabs, selected: tab?.id)
@@ -45,20 +45,20 @@ extension AppDelegate {
         // One view per pane on every connected machine, kept while the pane exists so its screen survives
         // tab and machine switches.
         var live = Set<PaneKey>()
-        for (key, session) in sessions {
+        for (key, session) in connections {
             for pane in session.store.state.panes where pane.exited == nil { live.insert(PaneKey(machine: key, pane: pane.id)) }
         }
         for (key, host) in paneHosts where !live.contains(key) {
             host.detach()
             paneHosts[key] = nil
         }
-        maximized = maximized.filter { key, pane in sessions[key.machine]?.store.state.tab(key.tab)?.layout.contains(pane) == true }
+        maximized = maximized.filter { key, pane in connections[key.machine]?.store.state.tab(key.tab)?.layout.contains(pane) == true }
 
         var shown: [PaneID: PaneHostView] = [:]
         for id in tab?.layout.panes ?? [] {
             let key = PaneKey(machine: focusedMachine, pane: id)
             guard let pane = state.pane(id), live.contains(key) else { continue }
-            shown[id] = paneHosts[key] ?? makeHost(for: pane, on: focusedSession)
+            shown[id] = paneHosts[key] ?? makeHost(for: pane, on: focusedConnection)
         }
         let maximizedPane = tab.flatMap { maximized[tabKey($0.id)] }
         splitView.show(tab?.layout, hosts: shown, maximized: maximizedPane)
@@ -69,11 +69,11 @@ extension AppDelegate {
             host.showsFocusRing = shown.count > 1 && maximizedPane == nil
         }
 
-        let machineName = focusedSession.title
+        let machineName = focusedConnection.title
         if !store.isConnected && store.state.workspaces.isEmpty {
             emptyLabel.stringValue = "Connecting to \(machineName)…"
         } else if workspace == nil {
-            emptyLabel.stringValue = "No sessions on \(machineName). Press ⌘N to start one."
+            emptyLabel.stringValue = "No workspaces on \(machineName). Press ⌘N to start one."
         } else if tab == nil {
             emptyLabel.stringValue = "No tabs in \(workspace!.name). Press ⌘T to open one."
         } else {
@@ -89,7 +89,7 @@ extension AppDelegate {
         }
     }
 
-    private func makeHost(for pane: Pane, on session: MachineSession) -> PaneHostView {
+    private func makeHost(for pane: Pane, on session: MachineConnection) -> PaneHostView {
         let key = PaneKey(machine: session.key, pane: pane.id)
         let host = PaneHostView(pane: pane, store: session.store, font: Self.terminalFont(size: fontSize))
         host.terminal.machine = session.key
@@ -101,7 +101,7 @@ extension AppDelegate {
 
     // Clicking into a pane focuses it in its daemon, which every client shares.
     func firstResponderChanged() {
-        guard let terminal = window.firstResponder as? PaneTerminalView, let session = sessions[terminal.machine],
+        guard let terminal = window.firstResponder as? PaneTerminalView, let session = connections[terminal.machine],
               session.store.state.focus.pane != terminal.paneID, session.store.state.pane(terminal.paneID) != nil else { return }
         focus(machine: terminal.machine)
         let pane = terminal.paneID
@@ -125,44 +125,39 @@ extension AppDelegate {
         return options
     }
 
-    // MARK: Prompts
-
-    func prompt(_ title: String, value: String, placeholder: String, then done: @escaping (String) -> Void) {
-        guard window.attachedSheet == nil else { return }
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        field.stringValue = value
-        field.placeholderString = placeholder
-        alert.accessoryView = field
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { response in
-            guard response == .alertFirstButtonReturn else { return }
-            done(field.stringValue.trimmingCharacters(in: .whitespaces))
-        }
-    }
+    // MARK: Renaming (in place, in the sidebar and the tab bar)
 
     func renameWorkspace(_ id: WorkspaceID) {
-        guard let workspace = store.state.workspace(id) else { return }
-        prompt("Rename Session", value: workspace.name, placeholder: "Session name") { [weak self] name in
-            guard !name.isEmpty else { return }
-            self?.run { try await $0.renameWorkspace(id, name: name) }
-        }
+        sidebar.beginRename(focusedMachine, id)
     }
 
     func renameTab(withID id: TabID) {
-        guard let tab = store.state.tab(id) else { return }
-        prompt("Rename Tab", value: tab.title ?? "", placeholder: "Leave empty to show the pane's title") { [weak self] title in
-            self?.run { try await $0.renameTab(id, title: title.isEmpty ? nil : title) }
+        tabBar.beginRename(id)
+    }
+
+    /// The terminal takes the keyboard back after an inline rename, unless the click that ended it
+    /// went to something else that takes typing.
+    func focusTerminalAfterEdit() {
+        guard window.firstResponder == nil || window.firstResponder === window else { return }
+        window.makeFirstResponder(activeTerminal)
+    }
+
+    /// Ctrl-Return renames the current workspace in place (Finder's rename is Return on a selected
+    /// item; the terminal needs plain Return, so the sidebar takes it with Control).
+    func installRenameShortcut() {
+        renameMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === window, [36, 76].contains(event.keyCode),
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
+                  !(window.firstResponder is NSText) else { return event }
+            renameActiveWorkspace(nil)
+            return nil
         }
     }
 
     // MARK: Closing (each asks first; see confirmClose)
 
     func closeWorkspace(_ id: WorkspaceID) {
-        confirmClose("Session", info: "This closes all of its tabs and panes, and stops anything running in them.",
+        confirmClose("Workspace", info: "This closes all of its tabs and panes, and stops anything running in them.",
                      allowSkipping: false) { [weak self] in self?.run { try await $0.closeWorkspace(id) } }
     }
 
