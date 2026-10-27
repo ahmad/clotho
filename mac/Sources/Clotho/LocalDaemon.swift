@@ -126,7 +126,11 @@ struct LocalDaemon: Sendable {
         if let runtimeDir { environment["CLOTHOD_RUNTIME_DIR"] = runtimeDir }
         if let installDir { environment["CLOTHOD_INSTALL_DIR"] = installDir }
         // A private runtime dir is a temporary instance: it ends itself, and removes its dir, once unused.
-        if runtimeDir != nil { environment["CLOTHOD_EPHEMERAL"] = "exit" }
+        // It also keeps its own config, so changing settings never writes the user's config.toml.
+        if let runtimeDir {
+            environment["CLOTHOD_EPHEMERAL"] = "exit"
+            environment["CLOTHOD_CONFIG"] = filePath(runtimeDir, "config.toml")
+        }
         process.environment = environment
         // Files, not pipes: `start` forks the daemon, which must not hold a pipe we wait on.
         let out = FileManager.default.temporaryDirectory.appendingPathComponent("clothod-\(UUID().uuidString).out")

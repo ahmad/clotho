@@ -44,6 +44,10 @@ public final class ModelStore: ObservableObject {
     /// Called for every model change, after `state` is updated (AppKit observers that don't use Combine).
     public var onChange: (() -> Void)?
     public var onBell: ((PaneID) -> Void)?
+    /// The daemon's settings as of its last `settings` event (fetch them first with `backend.getSettings()`).
+    @Published public private(set) var settings: DaemonSettings?
+    /// The machine's settings changed, from any client.
+    public var onSettings: ((DaemonSettings) -> Void)?
     /// An agent changed state: the pane, its previous info and its new one.
     public var onAgentChange: ((PaneID, AgentInfo?, AgentInfo?) -> Void)?
 
@@ -65,6 +69,22 @@ public final class ModelStore: ObservableObject {
             }
         }
         try await backend.start()
+    }
+
+    /// Fetches the daemon's settings into `settings` (events keep them current afterwards).
+    @discardableResult
+    public func loadSettings() async throws -> DaemonSettings {
+        let loaded = try await backend.getSettings()
+        settings = loaded
+        return loaded
+    }
+
+    /// Changes the daemon's settings and keeps `settings` in step with the reply.
+    @discardableResult
+    public func changeSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings {
+        let changed = try await backend.setSettings(change)
+        settings = changed
+        return changed
     }
 
     public func stop() {
@@ -107,6 +127,9 @@ public final class ModelStore: ObservableObject {
             onChange?()
         case .bell(let pane):
             onBell?(pane)
+        case .settings(let new):
+            settings = new
+            onSettings?(new)
         case .clipboard(let pane, let text, let selection):
             sinks[pane]?.sink?.paneClipboard(text: text, selection: selection)
         case .subscribed(let pane, let subscription):

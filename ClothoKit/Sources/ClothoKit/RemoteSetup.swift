@@ -190,7 +190,12 @@ public enum RemoteSetup {
     public static func envPrefix(installDir: String?, runtimeDir: String?, ephemeral: String? = nil) -> String {
         var parts: [String] = []
         if let installDir { parts.append("CLOTHOD_INSTALL_DIR=\(installDir)") }
-        if let runtimeDir { parts.append("CLOTHOD_RUNTIME_DIR=\(runtimeDir)") }
+        if let runtimeDir {
+            parts.append("CLOTHOD_RUNTIME_DIR=\(runtimeDir)")
+            // A private instance keeps its settings to itself: settings.set must never write the user's
+            // config.toml, which their own daemon reads.
+            parts.append("CLOTHOD_CONFIG=\(runtimeDir)/config.toml")
+        }
         if let ephemeral { parts.append("CLOTHOD_EPHEMERAL=\(quote(ephemeral))") }
         return parts.isEmpty ? "" : "env " + parts.joined(separator: " ") + " "
     }

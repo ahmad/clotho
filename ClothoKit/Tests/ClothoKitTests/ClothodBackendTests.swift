@@ -32,7 +32,10 @@ final class ClothodBackendTests: XCTestCase {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args
         // A private runtime dir needs an ephemeral instance; it also cleans itself up if a test dies.
-        process.environment = ProcessInfo.processInfo.environment.merging(["CLOTHOD_RUNTIME_DIR": runtimeDir, "CLOTHOD_EPHEMERAL": "60"]) { $1 }
+        // Its own config too, so settings.set never writes the user's.
+        process.environment = ProcessInfo.processInfo.environment.merging([
+            "CLOTHOD_RUNTIME_DIR": runtimeDir, "CLOTHOD_EPHEMERAL": "60", "CLOTHOD_CONFIG": runtimeDir + "/config.toml",
+        ]) { $1 }
         let out = Pipe()
         process.standardOutput = out
         process.standardError = out
@@ -125,6 +128,46 @@ final class ClothodBackendTests: XCTestCase {
         } }
         try await waitFor("clipboard event") { !clips().isEmpty }
         XCTAssertEqual(clips(), ["hello clip"])
+    }
+
+    /// settings.get / settings.set against the test daemon's own config file, and the settings event.
+    func testSettings() async throws {
+        let backend = makeBackend()
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        let hello = { collector.all.compactMap { e -> Hello? in if case .connected(let h) = e { return h }; return nil }.first }
+        try await waitFor("hello") { hello() != nil }
+        try XCTSkipUnless(hello()?.features.contains(.settings) == true, "this clothod predates settings")
+        let before = try await backend.getSettings()
+        // Never write anything but this test's config.
+        XCTAssertEqual(before.config, runtimeDir + "/config.toml")
+        guard before.config == runtimeDir + "/config.toml" else { return }
+        let limits = before.limits.scrollbackLines
+        XCTAssertLessThanOrEqual(limits.min, limits.default)
+        XCTAssertLessThanOrEqual(limits.default, limits.max)
+
+        let created = try await backend.createWorkspace(name: "settings", spawn: SpawnOptions(command: ["/bin/sh"]))
+        let target = limits.default == 1000 ? 1200 : 1000
+        let after = try await backend.setSettings(.init(scrollbackLines: target))
+        XCTAssertEqual(after.scrollbackLines, target)
+        XCTAssertEqual(after.appliedPanes, [created.pane])
+        try await waitFor("settings event") {
+            collector.all.contains { if case .settings(let s) = $0 { return s.scrollbackLines == target }; return false }
+        }
+        let config = try String(contentsOfFile: runtimeDir + "/config.toml", encoding: .utf8)
+        XCTAssertTrue(config.contains("\(target)"), config)
+
+        // Out of range: refused, nothing changes.
+        do {
+            _ = try await backend.setSettings(.init(scrollbackLines: limits.max + 1))
+            XCTFail("an out-of-range value was accepted")
+        } catch let error as BackendError {
+            XCTAssertEqual(error.code, "bad_request")
+        }
+        let again = try await backend.getSettings()
+        XCTAssertEqual(again.scrollbackLines, target)
     }
 
     /// The process transport, with a stand-in "ssh" that pipes stdio to the local daemon's socket (what

@@ -378,6 +378,14 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("agent.ack", ["pane": pane])
     }
 
+    public func getSettings() async throws -> DaemonSettings {
+        try Self.decode(DaemonSettings.self, from: try await request("settings.get", nil))
+    }
+
+    public func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings {
+        try Self.decode(DaemonSettings.self, from: try await request("settings.set", change.params))
+    }
+
     public func resize(_ pane: PaneID, _ size: Size) async throws {
         _ = try await request("pane.resize", ["pane": pane, "cols": size.cols, "rows": size.rows])
     }
@@ -507,6 +515,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             event = (try? Self.decode(Pane.self, from: data)).map { .pane($0, rev: rev) }
         case "bell":
             event = pane.map { .bell($0) }
+        case "settings":
+            event = (try? Self.decode(DaemonSettings.self, from: data)).map { .settings($0) }
         case "pane.clipboard":
             guard let pane, let text = data["text"] as? String else { return }
             event = .clipboard(pane, text: text, selection: data["target"] as? String == "selection")

@@ -75,6 +75,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case fs
         /// `pane.clipboard` events: OSC 52 copies from a pane's application.
         case paneClipboard = "pane.clipboard"
+        /// `settings.get` / `settings.set` and `settings` events (clothod 0.1.7).
+        case settings
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -200,6 +202,8 @@ public enum SessionEvent: Sendable {
     /// `selection` is true for the primary selection (`p`/`s` targets), false for the clipboard.
     /// Applications can never read the clipboard.
     case clipboard(PaneID, text: String, selection: Bool)
+    /// The machine's daemon settings changed (by any client).
+    case settings(DaemonSettings)
 
     // A pane's data stream (only for subscribed panes), in order.
     /// The `pane.subscribe` reply, delivered in stream order ahead of the pane's first frame.
@@ -277,6 +281,11 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Only when hello's `features` contains `.paneKeys`; never fall back to raw bytes.
     func sendKeys(_ pane: PaneID, text: String?, keys: [String]) async throws
 
+    /// The daemon's machine-wide settings (`settings.get`), when hello's `features` contains `.settings`.
+    func getSettings() async throws -> DaemonSettings
+    /// Changes them (`settings.set`); only the fields given change. The reply is the new settings.
+    func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings
+
     // Push alerts (docs/push.md), when hello's `features` contains `.push`.
     func pushRegister(_ registration: PushRegistration) async throws
     func pushUnregister(device: String) async throws
@@ -290,6 +299,14 @@ public extension SessionBackend {
     func reconnectNow() {}
 
     func ackAgent(_ pane: PaneID) async throws {}
+
+    func getSettings() async throws -> DaemonSettings {
+        throw BackendError(code: "unknown_method", message: "this backend has no settings")
+    }
+
+    func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings {
+        throw BackendError(code: "unknown_method", message: "this backend has no settings")
+    }
 
     func sendKeys(_ pane: PaneID, text: String?, keys: [String]) async throws {
         throw BackendError(code: "unknown_method", message: "this backend can't send keys")
@@ -358,5 +375,52 @@ public struct PushDevice: Codable, Equatable, Sendable {
         self.env = env
         self.created = created
         self.lastError = lastError
+    }
+}
+
+/// A machine's daemon settings (protocol.md, "Settings"). They live in the machine's clothod config file
+/// and apply to every client.
+public struct DaemonSettings: Codable, Equatable, Sendable {
+    /// History kept per pane, for new panes and panes spawned without their own value.
+    public var scrollbackLines: Int
+    public var limits: Limits
+    /// The config file that holds them.
+    public var config: String?
+    /// After a set: the panes whose scrollback changed.
+    public var appliedPanes: [PaneID]?
+
+    public struct Limits: Codable, Equatable, Sendable {
+        public var scrollbackLines: Range
+
+        enum CodingKeys: String, CodingKey { case scrollbackLines = "scrollback_lines" }
+    }
+
+    public struct Range: Codable, Equatable, Sendable {
+        public var min: Int
+        public var max: Int
+        public var `default`: Int
+    }
+
+    /// The fields a `settings.set` changes; nil ones stay as they are.
+    public struct Change: Equatable, Sendable {
+        public var scrollbackLines: Int?
+        public init(scrollbackLines: Int? = nil) { self.scrollbackLines = scrollbackLines }
+
+        var params: [String: Any] {
+            var params: [String: Any] = [:]
+            if let scrollbackLines { params["scrollback_lines"] = scrollbackLines }
+            return params
+        }
+    }
+
+    public init(scrollbackLines: Int, limits: Limits, config: String? = nil, appliedPanes: [PaneID]? = nil) {
+        self.scrollbackLines = scrollbackLines
+        self.limits = limits
+        self.config = config
+        self.appliedPanes = appliedPanes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case scrollbackLines = "scrollback_lines", limits, config, appliedPanes = "applied_panes"
     }
 }
