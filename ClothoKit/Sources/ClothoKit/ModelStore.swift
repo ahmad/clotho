@@ -138,7 +138,7 @@ public final class ModelStore: ObservableObject {
     public func displayTitle(of tab: Tab) -> String {
         if let title = tab.title, !title.isEmpty { return title }
         let pane = state.pane(tab.activePane)
-        if let title = pane?.title, !title.isEmpty { return title }
+        if let title = pane?.displayTitle { return title }
         if let cwd = pane?.cwd { return (cwd as NSString).lastPathComponent }
         return "Shell"
     }

@@ -169,6 +169,45 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+public extension Pane {
+    /// The title as people should see it. Claude Code (and others) prefix their terminal title with a
+    /// status glyph, "✳ Fixing tests" or a spinner frame, which is noise in a list; only that leading
+    /// symbol and its space are dropped. A bare "Claude Code" says less than the folder, so that shows
+    /// the cwd's name instead.
+    var displayTitle: String? { Self.displayTitle(title, cwd: cwd) }
+
+    static func displayTitle(_ title: String?, cwd: String?) -> String? {
+        guard var text = title?.trimmingCharacters(in: .whitespaces), !text.isEmpty else { return nil }
+        // Nothing but a glyph is no title at all.
+        if text.unicodeScalars.count == 1, isStatusGlyph(text.unicodeScalars.first!) { return nil }
+        if let first = text.unicodeScalars.first, isStatusGlyph(first) {
+            let rest = text.unicodeScalars.dropFirst()
+            if let next = rest.first, next.properties.isWhitespace {
+                text = String(String.UnicodeScalarView(rest)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        if text.isEmpty { return nil }
+        if text == "Claude Code", let cwd, !cwd.isEmpty, cwd != "/" { return (cwd as NSString).lastPathComponent }
+        return text
+    }
+
+    /// A single symbol a program puts before its title: Claude Code's ✳ ✶ ✻ ✽ ✢, braille spinners, · and *,
+    /// and other symbol characters. Never a letter, digit or ordinary punctuation like "(" or "#".
+    private static func isStatusGlyph(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x2800...0x28FF: return true                  // braille (spinners)
+        case 0x2700...0x27BF, 0x2600...0x26FF: return true  // dingbats, misc symbols (✳ ✶ ✻ ✽ ✢, ★)
+        case 0x25A0...0x25FF: return true                   // geometric shapes (● ◐ ▶)
+        default: break
+        }
+        if "·*•".unicodeScalars.contains(scalar) { return true }
+        switch scalar.properties.generalCategory {
+        case .otherSymbol, .mathSymbol: return scalar.value > 0x7F
+        default: return false
+        }
+    }
+}
+
 public struct Tab: Codable, Equatable, Sendable, Identifiable {
     public var id: TabID
     /// Nil means "show the active pane's title".

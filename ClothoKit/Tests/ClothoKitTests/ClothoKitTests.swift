@@ -220,3 +220,21 @@ final class PushModelTests: XCTestCase {
         XCTAssertEqual(Hello.Feature(rawValue: "push"), .push)
     }
 }
+
+final class DisplayTitleTests: XCTestCase {
+    func testStripsOnlyALeadingStatusGlyph() {
+        XCTAssertEqual(Pane.displayTitle("✳ SSH status on this machine", cwd: "/x"), "SSH status on this machine")
+        XCTAssertEqual(Pane.displayTitle("⠐ Fixing tests", cwd: "/x"), "Fixing tests")
+        XCTAssertEqual(Pane.displayTitle("✶  Thinking", cwd: nil), "Thinking")
+        XCTAssertEqual(Pane.displayTitle("✳ Claude Code", cwd: "/Users/a/macbook-analytics-app"), "macbook-analytics-app")
+        XCTAssertEqual(Pane.displayTitle("Claude Code", cwd: nil), "Claude Code")
+        // Left alone: no symbol, a symbol not followed by a space, or ordinary punctuation.
+        XCTAssertEqual(Pane.displayTitle("vim notes.md", cwd: "/x"), "vim notes.md")
+        XCTAssertEqual(Pane.displayTitle("✳notes", cwd: nil), "✳notes")
+        XCTAssertEqual(Pane.displayTitle("#1 build", cwd: nil), "#1 build")
+        XCTAssertEqual(Pane.displayTitle("(main) repo", cwd: nil), "(main) repo")
+        XCTAssertEqual(Pane.displayTitle("ahmad@mac: ~", cwd: nil), "ahmad@mac: ~")
+        XCTAssertNil(Pane.displayTitle("✳ ", cwd: nil))
+        XCTAssertNil(Pane.displayTitle(nil, cwd: "/x"))
+    }
+}

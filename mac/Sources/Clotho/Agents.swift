@@ -115,7 +115,7 @@ extension AppDelegate {
                 guard let info = pane.agent else { continue }
                 let location = state.location(of: pane.id)
                 entries.append(AgentEntry(machine: key, machineName: session.title, pane: pane.id, workspace: location?.workspace,
-                                          tab: location?.tab, paneTitle: pane.title,
+                                          tab: location?.tab, paneTitle: pane.displayTitle,
                                           tabTitle: location.map { session.store.displayTitle(of: $0.tab) }, info: info,
                                           canReply: session.store.hello?.features.contains(.paneKeys) == true))
             }
