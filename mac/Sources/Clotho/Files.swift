@@ -1,5 +1,6 @@
 import AppKit
 import ClothoKit
+import SystemConfiguration
 import UniformTypeIdentifiers
 
 // MARK: Machines
@@ -12,7 +13,11 @@ struct Machine: Equatable {
     let target: String?
 
     var isLocal: Bool { target == nil }
-    static let local = Machine(id: nil, label: "Local", target: nil)
+    /// This Mac, named by its Computer Name.
+    static var local: Machine { Machine(id: nil, label: ComputerName.current, target: nil) }
+
+    /// The same machine, even if its name changed since.
+    static func == (a: Machine, b: Machine) -> Bool { a.id == b.id && a.target == b.target }
 
     static func all() -> [Machine] {
         let saved = UserDefaults.standard.array(forKey: "Machines") as? [[String: String]] ?? []
@@ -57,6 +62,42 @@ struct Machine: Equatable {
     var lastFolder: String? {
         get { UserDefaults.standard.string(forKey: isLocal ? "LocalBrowserPath" : "BrowserPath.\(id!)") }
         nonmutating set { UserDefaults.standard.set(newValue, forKey: isLocal ? "LocalBrowserPath" : "BrowserPath.\(id!)") }
+    }
+}
+
+/// This Mac's Computer Name (System Settings › General › About), cached and kept current: the name
+/// the user gave it, rather than the hostname the network hands out.
+enum ComputerName {
+    /// Posted on the main queue when the user renames the computer.
+    static let didChange = Notification.Name("ClothoComputerNameDidChange")
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cached: String?
+    nonisolated(unsafe) private static var store: SCDynamicStore?
+
+    static var current: String {
+        lock.withLock {
+            if let cached { return cached }
+            let name = read()
+            cached = name
+            return name
+        }
+    }
+
+    private static func read() -> String {
+        (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? Host.current().localizedName ?? "This Mac"
+    }
+
+    /// Starts following renames. Call once at launch.
+    static func observe() {
+        guard store == nil, let created = SCDynamicStoreCreate(nil, "Clotho" as CFString, { _, _, _ in
+            ComputerName.lock.withLock { ComputerName.cached = nil }
+            DispatchQueue.main.async { NotificationCenter.default.post(name: ComputerName.didChange, object: nil) }
+        }, nil) else { return }
+        let key = SCDynamicStoreKeyCreateComputerName(nil)
+        SCDynamicStoreSetNotificationKeys(created, [key] as CFArray, nil)
+        SCDynamicStoreSetDispatchQueue(created, DispatchQueue.main)
+        store = created
     }
 }
 

@@ -37,13 +37,9 @@ final class MachineConnection {
 
     var key: MachineKey { machine.key }
 
-    /// The machine's name as its daemon reports it, or its saved name.
-    var title: String {
-        if machine.isLocal {
-            return store.hello?.machine.map { $0.hostname.replacingOccurrences(of: ".local", with: "") } ?? "Local"
-        }
-        return machine.label
-    }
+    /// The name the user knows the machine by: this Mac's Computer Name, or the saved machine's name.
+    /// Never the hostname a daemon reports, which the network assigns (mac.lan).
+    var title: String { machine.isLocal ? ComputerName.current : machine.label }
 }
 
 extension AppDelegate {

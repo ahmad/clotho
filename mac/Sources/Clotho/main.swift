@@ -286,6 +286,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         sidebar.agentsMenu = { [weak self] in self?.agentsNotificationMenu() ?? NSMenu() }
         sidebar.machineMenu = { [weak self] key in self?.menu(forMachine: key) ?? NSMenu() }
+        ComputerName.observe()
+        NotificationCenter.default.addObserver(forName: ComputerName.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sync() }
+        }
         NotificationCenter.default.addObserver(forName: Machine.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.sync() }
         }
