@@ -1,0 +1,23 @@
+[package]
+name = "clotho"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "clotho"
+path = "src/lib.rs"
+
+[[bin]]
+name = "clotho"
+path = "src/main.rs"
+
+[dependencies]
+clotho-proto.workspace = true
+clotho-vt.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

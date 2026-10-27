@@ -1,0 +1,12 @@
+[package]
+name = "clotho-holder"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clotho-proto.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+nix.workspace = true
+libc.workspace = true

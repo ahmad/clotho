@@ -1,0 +1,9 @@
+# Static Linux builds link with the lld that ships with Rust, so no cross toolchain is needed:
+#   cargo build --release --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+
+# Release binaries for every platform clients bundle: scripts/dist.sh (writes dist/).

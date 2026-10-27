@@ -1,0 +1,102 @@
+name: Clotho
+options:
+  bundleIdPrefix: nyc.amin
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MARKETING_VERSION: "0.1.0"
+    DEVELOPMENT_TEAM: TEAMID0000
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  ClothoKit:
+    path: ../ClothoKit
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.2.0
+  swift-nio-ssh:
+    url: https://github.com/apple/swift-nio-ssh
+    from: 0.9.0
+  swift-nio:
+    url: https://github.com/apple/swift-nio
+    from: 2.65.0
+targets:
+  Clotho:
+    type: application
+    platform: iOS
+    sources:
+      - Clotho
+      # The clothod builds the app installs on machines, deflated by the pre-build script (an iOS app may
+      # not contain other platforms' executables).
+      - path: build-resources/dist
+        type: folder
+        buildPhase: resources
+    preBuildScripts:
+      - name: Pack clothod builds
+        script: python3 "$SRCROOT/scripts/pack-dist.py" "$SRCROOT/../clothod/dist" "$SRCROOT/build-resources/dist"
+        basedOnDependencyAnalysis: false
+    dependencies:
+      - package: ClothoKit
+        product: ClothoKit
+      - package: SwiftTerm
+      - package: swift-nio-ssh
+        product: NIOSSH
+      - package: swift-nio
+        product: NIOCore
+      - package: swift-nio
+        product: NIOPosix
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho
+        # The pre-build script writes build-resources/dist.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        PRODUCT_NAME: Clotho
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_CFBundleDisplayName: Clotho
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Clotho connects to your machines over SSH on your local network and tailnet."
+        CODE_SIGN_STYLE: Automatic
+  ClothoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - ClothoTests
+    dependencies:
+      - target: Clotho
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.tests
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Clotho.app/Clotho
+  ClothoUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - ClothoUITests
+    dependencies:
+      - target: Clotho
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.uitests
+        TEST_TARGET_NAME: Clotho
+schemes:
+  Clotho:
+    build:
+      targets:
+        Clotho: all
+        ClothoTests: [test]
+        ClothoUITests: [test]
+    test:
+      targets:
+        - ClothoTests
+        - ClothoUITests
