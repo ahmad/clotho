@@ -494,13 +494,18 @@ async fn running_builds(dir: &std::path::Path) -> Option<(PathBuf, String, Strin
 /// if something else revives another build. Returns whether the holder runs `exe` too.
 async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool> {
     let want = build_id(exe)?;
-    for attempt in 1..=5 {
+    // Count only stops of another build: a daemon that holds the lock but is still starting
+    // (slow on a loaded machine) isn't reachable yet, so wait for it rather than give up.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut attempt = 0;
+    while attempt < 5 && std::time::Instant::now() < deadline {
         match running_builds(dir).await {
             Some((cur, _, holder, _)) if same_file(&cur, exe) => {
                 // Started by us (or already right): the holder followed unless it can't.
                 return Ok(holder == want);
             }
             Some((cur, ..)) => {
+                attempt += 1;
                 eprintln!("clothod: switching from {} (attempt {attempt})", cur.display());
                 call(dir.to_path_buf(), "daemon.stop").await?;
             }
@@ -532,7 +537,18 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
         if dir.join("CLOTHOD_TEST_FAIL_UPGRADE").exists() {
             bail!("injected failure (test)");
         }
-        let after = running_builds(&dir).await.context("daemon not reachable after the switch")?;
+        // Under load the new serve can take a while to answer (recovering every pane, moving
+        // the holder in place), so wait for the switch to settle before judging it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let after = loop {
+            let after = running_builds(&dir).await;
+            let settled = after.as_ref().is_some_and(|a| !same_file(&a.0, &target) || !a.3 || a.2 == id);
+            if settled || std::time::Instant::now() >= deadline {
+                break after;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        };
+        let after = after.context("daemon not reachable after the switch")?;
         anyhow::ensure!(same_file(&after.0, &target), "serve runs {}, not {}", after.0.display(), target.display());
         if after.3 {
             anyhow::ensure!(after.2 == id, "holder runs {}, not {id}", after.2);

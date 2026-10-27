@@ -65,6 +65,9 @@ pub(crate) struct Client {
     /// Bytes of pane output queued but not yet written to the socket.
     queued: AtomicUsize,
     events: AtomicBool,
+    /// Said hello as an app or other real client, not one of clothod's own probes
+    /// (`clothod-*`: upgrade, status, ps, report). Only these keep an exit-mode instance alive.
+    real: AtomicBool,
     /// This connection's fs.* transfer streams.
     pub(crate) fs: crate::fs::Streams,
 }
@@ -254,6 +257,7 @@ pub struct Daemon {
     dirty: AtomicBool,
     stop: Notify,
     shutdown_all: AtomicBool,
+    had_real_client: AtomicBool,
     push: Arc<crate::push::Push>,
 }
 
@@ -457,6 +461,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         dirty: AtomicBool::new(false),
         stop: Notify::new(),
         shutdown_all: AtomicBool::new(false),
+        had_real_client: AtomicBool::new(false),
         // Ephemeral (test) instances keep registrations with themselves, so they go away together.
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
     });
@@ -1179,6 +1184,7 @@ impl Daemon {
             file_tx,
             queued: AtomicUsize::new(0),
             events: AtomicBool::new(false),
+            real: AtomicBool::new(false),
             fs: Default::default(),
         });
         self.clients.lock().unwrap().insert(id, client.clone());
@@ -1239,6 +1245,11 @@ impl Daemon {
                         let r = self.request(&client, &method, &params).await;
                         if method == "hello" && r.is_ok() {
                             hello = true;
+                            let name = params.get("client").and_then(Value::as_str).unwrap_or("");
+                            if !name.starts_with("clothod-") {
+                                client.real.store(true, Ordering::SeqCst);
+                                self.had_real_client.store(true, Ordering::SeqCst);
+                            }
                         }
                         r
                     };
@@ -1272,10 +1283,11 @@ impl Daemon {
         let none_left = {
             let mut clients = self.clients.lock().unwrap();
             clients.remove(&id);
-            clients.is_empty()
+            !clients.values().any(|c| c.real.load(Ordering::SeqCst))
         };
-        // Only real clients count: `start` probes readiness with a bare connect.
-        if none_left && hello && platform::ephemeral() == Some(platform::Ephemeral::Exit) {
+        // Only real clients count: `start` probes readiness with a bare connect, and `upgrade`
+        // talks to a fresh serve before the apps have reconnected to it.
+        if none_left && self.had_real_client.load(Ordering::SeqCst) && platform::ephemeral() == Some(platform::Ephemeral::Exit) {
             eprintln!("clothod: last client of an ephemeral (exit) instance left; shutting down");
             self.shutdown_all.store(true, Ordering::SeqCst);
             self.stop.notify_one();

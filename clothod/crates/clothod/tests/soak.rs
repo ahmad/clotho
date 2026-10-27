@@ -65,10 +65,17 @@ impl Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        let pids: Vec<u32> = ["clothod.pid", "holder.pid"].iter().filter_map(|f| self.pid(f)).collect();
         let _ = self.cmd(&bin(), &["shutdown"]).output();
         if let Some(mut c) = self.serve.take() {
             let _ = c.kill();
             let _ = c.wait();
+        }
+        // Let them finish exiting (they clean up the runtime dir) before the temp dir goes, or
+        // its removal races with theirs and leaves the dir behind.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pids.iter().any(|p| clotho_proto::platform::process_alive(*p)) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }
@@ -240,7 +247,17 @@ async fn soak() {
             let t = Instant::now();
             let out = inst.cmd(v2.to_str().unwrap(), &["upgrade"]).output().unwrap();
             inst.serve.take(); // replaced; Drop uses shutdown
-            assert!(out.status.success(), "upgrade under load: {}", String::from_utf8_lossy(&out.stderr));
+            if !out.status.success() {
+                let mut logs = String::new();
+                for d in [inst.root.path().to_path_buf(), inst.root.path().join("state")] {
+                    for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                        if e.path().extension().is_some_and(|x| x == "log") {
+                            logs += &format!("--- {}\n{}\n", e.path().display(), std::fs::read_to_string(e.path()).unwrap_or_default());
+                        }
+                    }
+                }
+                panic!("upgrade under load ({:?}): {}\n{logs}", t.elapsed(), String::from_utf8_lossy(&out.stderr));
+            }
             eprintln!("soak: in-place upgrade under load took {:?}", t.elapsed());
             assert_eq!(inst.pid("holder.pid"), Some(holder_pid), "same holder after the upgrade");
             // Everyone reconnects after a serve switch.

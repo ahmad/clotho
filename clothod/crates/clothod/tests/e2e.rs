@@ -119,6 +119,12 @@ impl Drop for Env {
     }
 }
 
+/// `want` is a line of the screen. Output can also land on the prompt line (`$ want`), when
+/// input arrives before the shell has printed its prompt and the terminal echoes it early.
+fn has_line(lines: &[String], want: &str) -> bool {
+    lines.iter().any(|l| l == want || l.strip_prefix("$ ") == Some(want))
+}
+
 fn sh() -> Value {
     json!({"command": ["/bin/sh"], "env": {"PS1": "$ ", "ENV": ""}, "cols": 80, "rows": 24})
 }
@@ -207,7 +213,7 @@ async fn detach_reattach_gets_the_exact_screen() {
     assert_eq!(r["mode"], "snapshot");
 
     c1.input(pane, b"echo before-app\r");
-    wait_for_text(&c1, pane, T, |l| l.iter().any(|l| l == "before-app")).await.unwrap();
+    wait_for_text(&c1, pane, T, |l| has_line(l, "before-app")).await.unwrap();
     let vim = vim();
     if let Some(vim) = vim {
         c1.input(pane, format!("{vim} -u NONE -i NONE -N -n /tmp/clotho-e2e-scratch.txt\r").as_bytes());
@@ -239,7 +245,7 @@ async fn detach_reattach_gets_the_exact_screen() {
         c2.input(pane, b"\x04");
         c2.input(pane, b"printf '\\033[?1049l'\r");
     }
-    wait_for_text(&c2, pane, T, |l| l.iter().any(|l| l == "before-app") && l.iter().all(|l| !l.contains("placed") && !l.contains("line two"))).await.unwrap();
+    wait_for_text(&c2, pane, T, |l| has_line(l, "before-app") && l.iter().all(|l| !l.contains("placed") && !l.contains("line two"))).await.unwrap();
     sync(&mut c2, &mut s2).await.unwrap();
     assert_matches_daemon(&c2, &s2).await;
 }
@@ -279,14 +285,14 @@ async fn killing_the_logic_process_keeps_shells_and_screens() {
     s1b.vt = s1.vt;
     c.input(p1, b"\x04"); // end `cat`
     c.input(p1, b"printf '\\033[?1049l'; echo alive-$((40+2))\r");
-    wait_for_text(&c, p1, T, |l| l.iter().any(|l| l == "alive-42")).await.unwrap();
+    wait_for_text(&c, p1, T, |l| has_line(l, "alive-42")).await.unwrap();
     sync(&mut c, &mut s1b).await.unwrap();
     assert_matches_daemon(&c, &s1b).await;
     let (lines, _) = daemon_text(&c, p1).await;
     assert!(lines.iter().any(|l| l.contains("one")), "primary screen from before the restart: {lines:?}");
 
     c.input(p2, b"go\r");
-    wait_for_text(&c, p2, T, |l| l.iter().any(|l| l == "during-down")).await.unwrap();
+    wait_for_text(&c, p2, T, |l| has_line(l, "during-down")).await.unwrap();
 }
 
 #[tokio::test]
@@ -301,7 +307,7 @@ async fn output_while_the_logic_process_is_down_is_kept() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     env.start();
     let c = env.client().await;
-    wait_for_text(&c, p, Duration::from_secs(2), |l| l.iter().any(|l| l == "printed-while-down")).await.unwrap();
+    wait_for_text(&c, p, Duration::from_secs(2), |l| has_line(l, "printed-while-down")).await.unwrap();
 }
 
 #[tokio::test]
@@ -311,7 +317,7 @@ async fn restart_after_heavy_output_uses_the_pushed_snapshot() {
     let p = new_pane(&c, sh()).await;
     // ~6 MB: more than the 4 MiB buffer, so recovery has to start from a pushed snapshot.
     c.input(p, b"i=0; while [ $i -lt 60000 ]; do echo \"line $i $(printf '%0.sx' 1 2 3 4 5 6 7 8 9 0)xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); done; echo done-$((1+1))\r");
-    wait_for_text(&c, p, Duration::from_secs(120), |l| l.iter().any(|l| l == "done-2")).await.unwrap();
+    wait_for_text(&c, p, Duration::from_secs(120), |l| has_line(l, "done-2")).await.unwrap();
     let (_, mut s) = subscribe(&mut c, p, None).await;
     sync(&mut c, &mut s).await.unwrap();
     let seq = daemon_seq(&c, p).await;
@@ -337,7 +343,7 @@ async fn resume_sends_only_missed_output_or_a_snapshot() {
     let mut c = env.client().await;
     let (_, mut s) = subscribe(&mut c, p, None).await;
     c.input(p, b"echo first\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "first")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "first")).await.unwrap();
     sync(&mut c, &mut s).await.unwrap();
     let n = s.seq;
     drop(c);
@@ -350,7 +356,7 @@ async fn resume_sends_only_missed_output_or_a_snapshot() {
 
     // Small gap: exactly the missed bytes.
     reference.input(p, b"for i in 1 2 3 4 5; do echo missed-$i; done\r");
-    wait_for_text(&reference, p, T, |l| l.iter().any(|l| l == "missed-5")).await.unwrap();
+    wait_for_text(&reference, p, T, |l| has_line(l, "missed-5")).await.unwrap();
     sync(&mut reference, &mut full).await.unwrap();
     let mut c = env.client().await;
     let (r, mut resumed) = subscribe(&mut c, p, Some(n)).await;
@@ -366,7 +372,7 @@ async fn resume_sends_only_missed_output_or_a_snapshot() {
 
     // Large gap (> 1 MiB): a snapshot instead.
     reference.input(p, b"head -c 1500000 /dev/zero | tr '\\0' 'y'; echo; echo big-done\r");
-    wait_for_text(&reference, p, T, |l| l.iter().any(|l| l == "big-done")).await.unwrap();
+    wait_for_text(&reference, p, T, |l| has_line(l, "big-done")).await.unwrap();
     let mut c = env.client().await;
     let (r, mut resumed) = subscribe(&mut c, p, Some(n)).await;
     assert_eq!(r["mode"], "snapshot");
@@ -392,9 +398,9 @@ async fn last_typer_sets_the_size() {
     // Nobody typed yet: the latest subscriber's viewport wins.
     assert_eq!((r["cols"].as_u64(), r["rows"].as_u64()), (Some(60), Some(20)));
     a.input(p, b"stty size\r");
-    wait_for_text(&a, p, T, |l| l.iter().any(|l| l == "30 100")).await.unwrap();
+    wait_for_text(&a, p, T, |l| has_line(l, "30 100")).await.unwrap();
     b.input(p, b"stty size\r");
-    wait_for_text(&b, p, T, |l| l.iter().any(|l| l == "20 60")).await.unwrap();
+    wait_for_text(&b, p, T, |l| has_line(l, "20 60")).await.unwrap();
 }
 
 #[tokio::test]
@@ -495,7 +501,7 @@ async fn vim_survives_a_logic_restart() {
     c.input(p, b":q!\r");
     wait_for_text(&c, p, T, |l| !l.iter().any(|l| l == "~")).await.unwrap();
     c.input(p, b"echo vim-exited\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "vim-exited")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "vim-exited")).await.unwrap();
 }
 
 /// The daemon's VT answers terminal queries. A restart replays old output, including queries,
@@ -605,7 +611,7 @@ async fn new_serve_adopts_an_older_compatible_holder() {
     sync(&mut c, &mut s2).await.unwrap();
     assert_same_screen(&s, &s2);
     c.input(p, b"\x04printf '\\033[?1049l'; echo $X\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "kept-23")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "kept-23")).await.unwrap();
 
     let status = Command::new(&v2).arg("status").arg("--runtime-dir").arg(env.path()).output().unwrap();
     let status = String::from_utf8_lossy(&status.stdout);
@@ -642,7 +648,7 @@ async fn incompatible_holder_is_refused_and_left_alone() {
     let c = env.client().await;
     assert_eq!(daemon_text(&c, p).await, before);
     c.input(p, b"echo $Y\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "still-42")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "still-42")).await.unwrap();
 }
 
 #[test]
@@ -695,7 +701,7 @@ async fn deleted_runtime_dir_heals_without_a_second_daemon() {
     assert_eq!(c.hello["instance"], instance, "same holder");
     assert_eq!(c.hello["pid"], pid, "same daemon");
     c.input(p, b"echo $Z\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "survived-2")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "survived-2")).await.unwrap();
     drop(c);
 
     // The holder's socket went too. A restarted serve finds the holder through the state dir
@@ -705,7 +711,7 @@ async fn deleted_runtime_dir_heals_without_a_second_daemon() {
     let c = env.client().await;
     assert_eq!(c.hello["instance"], instance, "same holder after serve restart");
     c.input(p, b"echo again-$Z\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "again-survived-2")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "again-survived-2")).await.unwrap();
 }
 
 /// `shutdown` then `start` back to back gets a fresh, working instance (not the dying holder).
@@ -730,7 +736,7 @@ async fn shutdown_then_start_back_to_back() {
         assert_ne!(c.hello["instance"], first, "a new holder");
         let p = new_pane(&c, sh()).await;
         c.input(p, b"echo fresh\r");
-        wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "fresh")).await.unwrap();
+        wait_for_text(&c, p, T, |l| has_line(l, "fresh")).await.unwrap();
     }
 }
 
@@ -1245,7 +1251,7 @@ async fn upgrade_switches_builds_despite_an_old_restarter() {
     assert_eq!(exe, std::path::Path::new(&installed).canonicalize().unwrap(), "the upgraded build runs");
     assert_eq!(c.hello["instance"], instance, "same holder");
     c.input(p, b"echo $U\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "kept-9")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "kept-9")).await.unwrap();
 }
 
 /// Leftovers of earlier runs killed before Drop could clean up: clothod processes of ours
@@ -1393,7 +1399,7 @@ async fn holder_refuses_an_incompatible_target_and_survives_exec_failure() {
     assert_shell_alive(&c, p, &shell).await;
     let p2 = new_pane(&c, sh()).await; // and it still works
     c.input(p2, b"echo fresh\r");
-    wait_for_text(&c, p2, T, |l| l.iter().any(|l| l == "fresh")).await.unwrap();
+    wait_for_text(&c, p2, T, |l| has_line(l, "fresh")).await.unwrap();
     drop(c);
     std::fs::remove_file(env.path().join("CLOTHOD_TEST_EXEC_FAIL")).unwrap();
 
@@ -1492,6 +1498,11 @@ async fn ephemeral_instances_clean_up_after_themselves() {
         }
     };
     start("exit");
+    // clothod's own probes (status here; upgrade does the same) come and go without ending it.
+    let st = Command::new(test_bin()).args(["status", "--runtime-dir"]).arg(&dir).env("CLOTHOD_STATE_DIR", root.path().join("state")).output().unwrap();
+    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(dir.join("clothod.sock").exists(), "a probe is not the last client");
     let c = Client::connect(&dir).await.unwrap();
     let holder: u32 = std::fs::read_to_string(dir.join("holder.pid")).unwrap().trim().parse().unwrap();
     new_pane(&c, sh()).await;
@@ -1865,7 +1876,7 @@ async fn firehose_output_applies_backpressure_instead_of_failing() {
     // Still responsive: new panes, input, output.
     let p = new_pane(&c, sh()).await;
     c.input(p, b"echo alive-$((3*4))\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "alive-12")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "alive-12")).await.unwrap();
     assert!(!env.log().contains("holder closed the connection"), "{}", env.log());
     let s = c.request("state.get", json!({})).await.unwrap();
     assert!(s["panes"][0]["seq"].as_u64().unwrap() > 1 << 20, "the firehose did run");
