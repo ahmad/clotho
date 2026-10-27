@@ -48,8 +48,12 @@ struct LocalDaemon: Sendable {
         let bundled = try bundledInstallPath()
         let base = ((bundled as NSString).deletingLastPathComponent as NSString).deletingLastPathComponent
         let current = (base as NSString).appendingPathComponent("current/clothod")
-        // `install` installs only on a machine with no clothod (or this exact build), and refuses otherwise,
-        // which is fine: then the machine's own `current` is used, whatever version it is.
+        // With a `current`, it's used as is and nothing is installed: running `install` here could point
+        // `current` back at the bundled build in the middle of an upgrade (while that build's dir still
+        // exists), and the app's next `start` would bring the old daemon back.
+        if FileManager.default.isExecutableFile(atPath: current) { return current }
+        // First install: `install` installs only on a machine with no clothod (or this exact build), and
+        // refuses otherwise, which is fine: then an older build from before `current` is used.
         let installed = try Self.run(source, ["install"], runtimeDir: runtimeDir, installDir: installDir)
         if FileManager.default.isExecutableFile(atPath: current) { return current }
         let builds = ((try? FileManager.default.contentsOfDirectory(atPath: base)) ?? [])
