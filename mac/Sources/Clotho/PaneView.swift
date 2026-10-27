@@ -70,6 +70,30 @@ final class PaneTerminalView: TerminalView {
         }
     }
 
+    // MARK: Selecting while the app takes the mouse
+
+    /// Set from an Option-press to its release, while mouse reporting is turned off for it.
+    private var optionSelecting = false
+
+    /// An app that takes mouse events (Claude Code, Codex, vim with mouse=a) gets clicks and drags, so
+    /// a drag selects nothing. Holding a modifier still selects text here, as in other Mac terminals:
+    /// Shift (SwiftTerm, as in Ghostty and kitty, unless the app captures Shift) or Option (as in iTerm2).
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.option), allowMouseReporting {
+            optionSelecting = true
+            allowMouseReporting = false
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        if optionSelecting {
+            optionSelecting = false
+            allowMouseReporting = true
+        }
+    }
+
     func enableFileDrops() { registerForDraggedTypes([.fileURL]) }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }

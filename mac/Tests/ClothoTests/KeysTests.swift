@@ -167,3 +167,58 @@ final class ClipboardTests: XCTestCase {
         XCTAssertEqual(NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), "hello clotho")
     }
 }
+
+/// With mouse reporting on, plain drags go to the app; Option and Shift drags select text here.
+@MainActor
+final class MouseSelectionTests: XCTestCase {
+    override func setUp() { _ = NSApplication.shared }
+
+    private func drag(_ view: PaneTerminalView, _ modifiers: NSEvent.ModifierFlags) {
+        func event(_ type: NSEvent.EventType, _ x: CGFloat) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: 150), modifierFlags: modifiers, timestamp: 0,
+                               windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        view.mouseDown(with: event(.leftMouseDown, 10))
+        view.mouseDragged(with: event(.leftMouseDragged, 120))
+        view.mouseDragged(with: event(.leftMouseDragged, 250))
+        view.mouseUp(with: event(.leftMouseUp, 250))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+
+    private func setUpView() -> (PaneTerminalView, Recorder) {
+        let view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let recorder = Recorder()
+        view.terminalDelegate = recorder
+        view.feedFromBackend(Data("some text the agent printed\r\n\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1006h".utf8))
+        return (view, recorder)
+    }
+
+    private func hasSelection(_ view: PaneTerminalView) -> Bool {
+        view.validateUserInterfaceItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+    }
+
+    func testPlainDragGoesToTheApp() {
+        let (view, recorder) = setUpView()
+        drag(view, [])
+        XCTAssertTrue(String(decoding: recorder.sent, as: UTF8.self).hasPrefix("\u{1b}[<0;"), "an SGR mouse report")
+        XCTAssertFalse(hasSelection(view))
+    }
+
+    func testOptionDragSelects() {
+        let (view, recorder) = setUpView()
+        drag(view, .option)
+        XCTAssertEqual(recorder.sent, [], "nothing reported to the app")
+        XCTAssertTrue(hasSelection(view))
+        XCTAssertTrue(view.allowMouseReporting, "reporting comes back after the press")
+        // And the next plain drag goes to the app again.
+        drag(view, [])
+        XCTAssertFalse(recorder.sent.isEmpty)
+    }
+
+    func testShiftDragSelects() {
+        let (view, recorder) = setUpView()
+        drag(view, .shift)
+        XCTAssertEqual(recorder.sent, [])
+        XCTAssertTrue(hasSelection(view))
+    }
+}
