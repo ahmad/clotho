@@ -23,7 +23,12 @@ struct AgentRow: Identifiable, Hashable {
     /// The daemon's `attention`: set when an agent reports it needs the user (or rings the bell), cleared when
     /// the agent starts working again or the user resolves it (agent.ack, on any device). Viewing, opening or
     /// typing doesn't clear it. A detected agent that just went quiet is waiting without it.
-    var wantsAttention: Bool { info.attention == true }
+    /// A muted agent never wants it (AgentInfo.needsAttention).
+    var wantsAttention: Bool { info.needsAttention }
+
+    /// Muted by the user (agent.mute): it stays under Quiet and sends no notifications until unmuted or until
+    /// this agent session ends.
+    var isMuted: Bool { info.isMuted }
 
     /// Anything wanting attention first (waiting, then errors, then finished), then the rest; newest first within each.
     static func sorted(_ rows: [AgentRow]) -> [AgentRow] {
@@ -75,6 +80,21 @@ extension MachineConnection {
         return rows
     }
 
+    /// Whether this machine's daemon takes `agent.mute` (always for made-up agents).
+    var canMute: Bool { FakeAgents.enabled || (store.hello?.features.contains(.agentMute) ?? false) }
+
+    /// `agent.mute`: keeps the agent quiet (no attention, no notifications) until unmuted or until this agent
+    /// session ends. The daemon owns it, so it applies on every device.
+    func muteAgent(_ pane: PaneID, _ muted: Bool) {
+        if store.state.pane(pane)?.agent == nil {
+            if muted { fakeMuted.insert(pane) } else { fakeMuted.remove(pane) }
+            objectWillChange.send()
+            return
+        }
+        guard canMute else { return }
+        run(muted ? "Mute" : "Unmute") { try await $0.muteAgent(pane, muted: muted) }
+    }
+
     /// `agent.ack`: the user resolved this agent. The only place the app clears attention (Resolve).
     func ackAgent(_ pane: PaneID) {
         if store.state.pane(pane)?.agent == nil {
@@ -108,7 +128,9 @@ extension MachineConnection {
         ]
         return AgentInfo(kind: pane.id % 2 == 0 ? "codex" : "claude", state: state, source: "hook", message: messages[state],
                          since: Date().timeIntervalSince1970 - Double(pane.id) * 90,
-                         attention: state != .running && state != .starting && !fakeAcked.contains(pane.id))
+                         attention: state != .running && state != .starting && !fakeAcked.contains(pane.id)
+                            && !fakeMuted.contains(pane.id),
+                         muted: fakeMuted.contains(pane.id))
     }
 }
 
@@ -141,7 +163,8 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
 
     func agentChanged(machine: Machine, pane: PaneID, title: String, before: AgentInfo?, after: AgentInfo?) {
         // Only when the daemon raises attention (false → true), not on every state change.
-        guard authorized, let after, after.attention == true, before?.attention != true else { return }
+        // A muted agent never notifies (needsAttention is false while muted).
+        guard authorized, let after, after.needsAttention, before?.needsAttention != true else { return }
         let content = UNMutableNotificationContent()
         content.title = AlertText.title(kind: after.kind, state: after.state.rawValue, machine: machine.displayName)
         content.body = after.message ?? title

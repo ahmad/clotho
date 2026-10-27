@@ -93,6 +93,18 @@ final class ClothoTests: XCTestCase {
         XCTAssertEqual(parts.quiet.map(\.pane), [3, 1, 6], "running, idle and resolved agents")
     }
 
+    /// A muted agent stays under Quiet whatever its attention says, and takes no reply.
+    func testMutedAgentsAreQuiet() {
+        let info = AgentInfo(kind: "claude", state: .waiting, source: "hook", attention: true, muted: true)
+        let row = AgentRow(machineID: UUID(), machineName: "m", pane: 7, tab: 1, workspace: "w", title: "t", info: info)
+        XCTAssertTrue(row.isMuted)
+        XCTAssertFalse(row.wantsAttention)
+        XCTAssertFalse(row.acceptsReply)
+        let parts = AgentRow.split([row])
+        XCTAssertTrue(parts.attention.isEmpty)
+        XCTAssertEqual(parts.quiet.map(\.pane), [7])
+    }
+
     /// Scrollback choices stay within the daemon's limits and always include the current value.
     func testScrollbackChoicesAndLoginService() throws {
         func makeRange(_ min: Int, _ max: Int, _ def: Int) throws -> DaemonSettings.Range {

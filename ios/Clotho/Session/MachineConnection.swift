@@ -53,6 +53,7 @@ final class MachineConnection: ObservableObject, Identifiable {
 
     /// Fake agents (see `FakeAgents`) the user acknowledged.
     var fakeAcked: Set<PaneID> = []
+    var fakeMuted: Set<PaneID> = []
 
     private var panes: [PaneID: PaneHostView] = [:]
     private var hostKeyObserver: NSObjectProtocol?
@@ -145,7 +146,7 @@ final class MachineConnection: ObservableObject, Identifiable {
     /// Removes delivered alerts for panes that no longer need the user (answered here or on another device).
     private func clearStaleAlerts() {
         guard store.isConnected else { return }
-        let attention = Set(store.state.panes.filter { $0.agent?.attention == true }.map(\.id))
+        let attention = Set(store.state.panes.filter { $0.agent?.needsAttention == true }.map(\.id))
         guard attention != lastAttention else { return }
         lastAttention = attention
         AgentNotifier.shared.removeDelivered(machine: machine.id, except: attention)

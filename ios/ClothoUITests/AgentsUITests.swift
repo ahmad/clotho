@@ -48,6 +48,22 @@ final class AgentsUITests: XCTestCase {
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Running'")).firstMatch.exists)
         attach(app, "resolved")
 
+        // Mute the waiting agent: it leaves the top for Quiet, marked muted. Unmute takes the mark away.
+        let topBeforeMute = resolveButtons.count
+        waiting.press(forDuration: 1.2)
+        let mute = app.buttons["Mute"]
+        XCTAssertTrue(mute.waitForExistence(timeout: 3), "no Mute in the agent's menu")
+        mute.tap()
+        wait(for: [expectation(for: NSPredicate(format: "count == %d", topBeforeMute - 1), evaluatedWith: resolveButtons)], timeout: 5)
+        let muted = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Muted'")).firstMatch
+        XCTAssertTrue(muted.waitForExistence(timeout: 5), "the muted agent isn't marked under Quiet")
+        attach(app, "muted")
+        muted.press(forDuration: 1.2)
+        let unmute = app.buttons["Unmute"]
+        XCTAssertTrue(unmute.waitForExistence(timeout: 3), "no Unmute on a muted agent")
+        unmute.tap()
+        XCTAssertTrue(muted.waitForNonExistence(timeout: 5), "still marked muted after Unmute")
+
         // Opening an agent never resolves it: back on the list it's still on top with its Resolve.
         let stillOnTop = resolveButtons.count
         waiting.tap()

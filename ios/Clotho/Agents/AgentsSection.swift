@@ -27,6 +27,8 @@ struct AgentsSection: View {
                         ForEach(parts.quiet) { row in
                             Button { open(row) } label: { AgentRowView(row: row) }
                                 .tint(.primary)
+                                .swipeActions(edge: .trailing) { muteButton(row) }
+                                .contextMenu { muteButton(row) }
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -57,6 +59,7 @@ struct AgentsSection: View {
         .swipeActions(edge: .trailing) {
             Button { resolve(row) } label: { Label("Resolve", systemImage: "checkmark") }
                 .tint(.green)
+            muteButton(row)
         }
         .swipeActions(edge: .leading) {
             if row.acceptsReply, let connection {
@@ -71,12 +74,28 @@ struct AgentsSection: View {
         }
         .contextMenu {
             Button { resolve(row) } label: { Label("Resolve", systemImage: "checkmark") }
+            muteButton(row)
             if row.acceptsReply, let connection {
                 if connection.canReply {
                     Button { replying = row } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
                 } else {
                     Text("Update clothod on \(row.machineName) to reply")
                 }
+            }
+        }
+    }
+
+    /// Mute keeps an agent under Quiet with no notifications until it's unmuted or its session ends; Unmute
+    /// undoes it (the agent comes back to the top the next time it needs the user). Daemons without
+    /// `agent.mute` get neither.
+    @ViewBuilder private func muteButton(_ row: AgentRow) -> some View {
+        if let connection = connections.existing(row.machineID), connection.canMute {
+            if row.isMuted {
+                Button { connection.muteAgent(row.pane, false) } label: { Label("Unmute", systemImage: "bell") }
+                    .tint(.indigo)
+            } else {
+                Button { connection.muteAgent(row.pane, true) } label: { Label("Mute", systemImage: "bell.slash") }
+                    .tint(.indigo)
             }
         }
     }
@@ -106,6 +125,9 @@ struct AgentRowView: View {
                         .foregroundStyle(row.info.state == .waiting && !row.wantsAttention ? .secondary : row.info.state.color)
                     if row.wantsAttention {
                         Circle().fill(Color.accentColor).frame(width: 7, height: 7).accessibilityLabel("Needs attention")
+                    }
+                    if row.isMuted {
+                        Image(systemName: "bell.slash").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Muted")
                     }
                     Spacer()
                     if let since = row.info.sinceDate {
