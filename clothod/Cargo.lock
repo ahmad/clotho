@@ -171,7 +171,7 @@ dependencies = [
 
 [[package]]
 name = "clotho"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clotho-proto",
@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "clotho-holder"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clotho-proto",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "clotho-proto"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "serde",
@@ -206,14 +206,14 @@ dependencies = [
 
 [[package]]
 name = "clotho-vt"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "alacritty_terminal",
 ]
 
 [[package]]
 name = "clothod"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64",
