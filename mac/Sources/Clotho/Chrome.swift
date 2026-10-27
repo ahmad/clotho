@@ -517,15 +517,17 @@ final class SidebarView: NSView {
         }
         if !others.isEmpty {
             let expanded = UserDefaults.standard.bool(forKey: "AgentsOthersExpanded")
-            let section = MachineHeader(title: "Running · \(others.count)", status: (nil, nil), newWorkspaceTooltip: nil, collapsed: !expanded)
+            let section = DisclosureRow(title: "Quiet", count: others.count, expanded: expanded)
             section.toolTip = "Agents that don't need you: running, idle or resolved"
-            section.onToggle = { [weak self] in
-                UserDefaults.standard.set(!expanded, forKey: "AgentsOthersExpanded")
-                self?.latest?()
+            section.onClick = { [weak self, weak section] in
+                section?.chevron.setExpanded(!expanded, animated: true) {
+                    UserDefaults.standard.set(!expanded, forKey: "AgentsOthersExpanded")
+                    self?.latest?()
+                }
             }
-            if let last = agentsColumn.arrangedSubviews.last { agentsColumn.setCustomSpacing(8, after: last) }
-            add(section, to: agentsColumn)
-            agentsColumn.setCustomSpacing(4, after: section)
+            if let last = agentsColumn.arrangedSubviews.last { agentsColumn.setCustomSpacing(6, after: last) }
+            add(section, height: 26, to: agentsColumn)
+            agentsColumn.setCustomSpacing(2, after: section)
             if expanded { others.forEach { addAgent($0, false) } }
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
@@ -549,7 +551,11 @@ final class SidebarView: NSView {
                                        newWorkspaceTooltip: group.isConnected ? (group.isLocal ? "New Workspace (⌘N)" : "New workspace on \(group.title)") : nil,
                                        collapsed: group.isConnected ? isCollapsed : nil, count: group.workspaces.count)
             header.onNewWorkspace = { [weak self] in self?.onNewWorkspace?(key) }
-            if group.isConnected { header.onToggle = { [weak self] in self?.toggleCollapsed(key) } }
+            if group.isConnected {
+                header.onToggle = { [weak self, weak header] in
+                    header?.chevron?.setExpanded(isCollapsed, animated: true) { self?.toggleCollapsed(key) }
+                }
+            }
             header.contextMenu = { [weak self] in self?.machineMenu?(key) }
             add(header)
             column.setCustomSpacing(4, after: header)
@@ -683,6 +689,8 @@ final class MachineHeader: NSView {
     var onNewWorkspace: (() -> Void)?
     /// Clicking the header (not its +) collapses or expands the group, when set.
     var onToggle: (() -> Void)?
+    /// The group's disclosure chevron (machines that can collapse).
+    private(set) var chevron: DisclosureChevron?
 
     /// `collapsed` nil: no disclosure chevron (the Agents header). `count` shows after the title while
     /// collapsed, so a closed group still says how many workspaces it holds.
@@ -714,23 +722,23 @@ final class MachineHeader: NSView {
         add.toolTip = newWorkspaceTooltip
         add.isHidden = newWorkspaceTooltip == nil
         toolTip = newWorkspaceTooltip
-        let chevron = NSImageView()
-        chevron.image = NSImage(systemSymbolName: collapsed == true ? "chevron.right" : "chevron.down",
-                                accessibilityDescription: collapsed == true ? "Show workspaces" : "Hide workspaces")?
-            .withSymbolConfiguration(.init(pointSize: 8, weight: .bold))
-        chevron.contentTintColor = Theme.dimText
+        // The chevron follows the title, so titles stay in line with the workspace rows below.
+        let chevron = DisclosureChevron(expanded: collapsed == false)
         chevron.isHidden = collapsed == nil
+        chevron.setAccessibilityLabel(collapsed == true ? "Show workspaces" : "Hide workspaces")
+        if collapsed != nil { self.chevron = chevron }
         for view in [chevron, label, dot, detail, add] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            chevron.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 3),
             chevron.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            chevron.widthAnchor.constraint(equalToConstant: 8),
+            chevron.widthAnchor.constraint(equalToConstant: DisclosureChevron.size),
+            chevron.heightAnchor.constraint(equalToConstant: DisclosureChevron.size),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            dot.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            dot.leadingAnchor.constraint(equalTo: collapsed == nil ? label.trailingAnchor : chevron.trailingAnchor, constant: collapsed == nil ? 6 : 3),
             dot.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             dot.widthAnchor.constraint(equalToConstant: 6),
             dot.heightAnchor.constraint(equalToConstant: 6),
@@ -892,6 +900,111 @@ final class NoticeBar: NSView {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// A disclosure chevron: SF Symbols chevron.right, turned down when expanded (animated). It's drawn in its
+/// own layer, so the rotation animates around its centre without disturbing Auto Layout.
+final class DisclosureChevron: NSView {
+    static let size: CGFloat = 14
+    private let glyph = CALayer()
+    private(set) var isExpanded: Bool
+
+    init(expanded: Bool) {
+        isExpanded = expanded
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.size, height: Self.size))
+        wantsLayer = true
+        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [Theme.dimText]))
+        glyph.contents = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        glyph.contentsGravity = .center
+        glyph.setAffineTransform(Self.transform(expanded))
+        layer?.addSublayer(glyph)
+        setAccessibilityRole(.disclosureTriangle)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private static func transform(_ expanded: Bool) -> CGAffineTransform {
+        // Clockwise a quarter turn: right becomes down.
+        expanded ? CGAffineTransform(rotationAngle: -.pi / 2) : .identity
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glyph.bounds = bounds
+        glyph.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        glyph.contentsScale = window?.backingScaleFactor ?? 2
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        glyph.contentsScale = window?.backingScaleFactor ?? 2
+    }
+
+    /// Turns the chevron, then calls `done` (after the animation when animated).
+    func setExpanded(_ expanded: Bool, animated: Bool, then done: (() -> Void)? = nil) {
+        isExpanded = expanded
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(animated ? 0.15 : 0)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeInEaseOut))
+        CATransaction.setDisableActions(!animated)
+        CATransaction.setCompletionBlock { done?() }
+        glyph.setAffineTransform(Self.transform(expanded))
+        CATransaction.commit()
+    }
+}
+
+/// A subsection header inside a panel, such as the Agents panel's Quiet section: a row that highlights on
+/// hover and toggles on click, with the chevron in the rows' icon column, the title in secondary text, and a
+/// small count badge at the end, like Mail's and Finder's sidebars.
+final class DisclosureRow: ChromeItem {
+    let chevron: DisclosureChevron
+    private let badge = NSTextField(labelWithString: "")
+    private let pill = NSView()
+
+    init(title: String, count: Int, expanded: Bool) {
+        chevron = DisclosureChevron(expanded: expanded)
+        super.init(closable: false)
+        colorsOwnTitle = true
+        label.stringValue = title
+        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        label.textColor = Theme.dimText
+        badge.stringValue = "\(count)"
+        badge.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        badge.textColor = NSColor(hex: 0x5F676D)
+        badge.alignment = .center
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = NSColor(hex: 0x2B3034).cgColor
+        pill.layer?.cornerRadius = 7
+        pill.isHidden = count == 0
+        setAccessibilityLabel("\(title), \(count) agents")
+        for view in [chevron, pill, badge] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        // The title follows the chevron, which sits where the agent rows show their status icons.
+        constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.isActive = false }
+        NSLayoutConstraint.activate([
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: DisclosureChevron.size),
+            chevron.heightAnchor.constraint(equalToConstant: DisclosureChevron.size),
+            label.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: 6),
+            pill.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            pill.centerYAnchor.constraint(equalTo: centerYAnchor),
+            pill.heightAnchor.constraint(equalToConstant: 14),
+            pill.widthAnchor.constraint(greaterThanOrEqualToConstant: 20),
+            badge.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 5),
+            badge.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -5),
+            badge.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: pill.leadingAnchor, constant: -6),
         ])
     }
 
