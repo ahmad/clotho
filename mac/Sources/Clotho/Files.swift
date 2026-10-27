@@ -187,6 +187,8 @@ final class Transfer {
 final class TransferManager {
     private(set) var transfers: [Transfer] = []
     var onChange: (() -> Void)?
+    /// After every transfer with something to copy ends; `ok` is false for a failure or cancel.
+    var onEnded: ((Transfer, _ ok: Bool) -> Void)?
     /// The file access for a machine, or why there's none.
     var files: ((Machine) throws -> FileBackend)?
 
@@ -287,6 +289,7 @@ final class TransferManager {
         case .running: return
         }
         transfer.onFinish?(ok)
+        if !transfer.sources.isEmpty { onEnded?(transfer, ok) }
         onChange?()
         // Finished rows linger briefly; failures stay longer so the reason can be read.
         DispatchQueue.main.asyncAfter(deadline: .now() + (ok ? 3 : 10)) { [weak self] in self?.remove(transfer) }
@@ -394,6 +397,13 @@ extension AppDelegate {
         transferToast.autoresizingMask = [.minXMargin, .maxYMargin]
         container.addSubview(transferToast)
         transfers.onChange = { [weak self] in self?.transferToast.refresh() }
+        // Unfinished uploads leave part files behind (see PartCleanup).
+        transfers.onEnded = { [weak self] transfer, ok in
+            guard let self else { return }
+            if !ok { noteUnfinishedTransfer(to: transfer.destination) }
+            cleanUpPartFiles()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.cleanUpPartFiles() }
         transfers.files = { [weak self] machine in
             guard let self else { throw FileError(message: "Clotho is closing") }
             return try fileBackend(for: machine)
