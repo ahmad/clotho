@@ -25,11 +25,11 @@ what the old agents learned. The orchestrator keeps it current.
 - **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets, APNS_KEY and
   HANDLE_KEYS, exist in Cloudflare only.
 - **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes, and only when the
-  user asks.
-- **The Mac can't SSH to imac under clotho-mac.** imac only authorizes the Mac's
-  id_ed25519_clotho key, which the Mac's ssh config uses only for GitHub. Run the imac suite from
-  devbox. test-all.sh now reports such hosts as UNCHECKED and fails the run. Fixing the keys is the
-  user's call.
+  user asks. For the current round (see PLAN.md, "Next round"), the user asked for a push after each
+  verified piece.
+- **The Mac reaches imac under clotho-mac** through a `Host imac` entry in the Mac's ~/.ssh/config
+  (added 2026-10-27; the backup is ~/.ssh/config.bak-2026-10-27). test-all.sh reports unreachable
+  hosts as UNCHECKED and fails the run.
 
 ## Waiting on the user
 

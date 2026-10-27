@@ -147,3 +147,29 @@ owns the PTY fds shapes spawn, resize, reconnect and the output buffer.
   user's project folders.
 - Right-click and Ctrl-click always open the pane menu, even in apps that take the mouse.
   Option+right-click passes through to the app.
+
+## Next round (user decision, 2026-10-27)
+
+The user approved all of the following. The orchestrator commits and pushes to GitHub as each piece
+is verified; this is a standing go for this round.
+- clothod:
+  - `clothod service install|uninstall|status` (a LaunchAgent or a systemd --user unit), also
+    exposed through the protocol. The user turns it on per machine from the apps; agents never
+    install it on the user's machines.
+  - A runtime scrollback setting through the protocol, persisted to config.toml.
+  - Run the macos-x86_64 and linux-aarch64 builds for real.
+  - Release 0.1.7 and upgrade in place on all three machines.
+- mac:
+  - A Settings window (notification mutes, scrollback, start at login).
+  - Collapsible machine groups, wider agent rows, and cleanup of orphaned upload parts.
+  - Transfer tests against imac, a large tree and a slow link.
+  - A Developer ID and notarized release path (the user creates the cert and the notary profile).
+- ios:
+  - Parity: image paste and photo upload into remote agents, a newline key, the hardware-keyboard
+    Cmd keys, and the pane menu in apps that take the mouse.
+  - The same settings as the Mac.
+  - A fix for the host-key hang.
+  - A TestFlight build at the end, which the user uploads at the Mac.
+- The Mac reaches imac under clotho-mac through a `Host imac` entry in the Mac's ~/.ssh/config
+  (`IdentityFile ~/.ssh/id_ed25519_clotho`). The original config is backed up as
+  config.bak-2026-10-27.
