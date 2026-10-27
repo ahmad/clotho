@@ -1,6 +1,6 @@
 # Push alerts: agent attention to the iPhone
 
-Status: **design draft** (2026-10-26). Nothing here is built yet. Owners: the daemon hook is
+Status: **in progress** (2026-10-26). The relay (`ios/relay/`), the extension and the app side are built and tested in the simulator; the clothod side is in progress, and deploying needs the user's accounts (below). Owners: the daemon hook is
 clothod's, the relay and the app side are iOS's.
 
 Today the phone learns about agent attention only while the app is open and connected. This
@@ -160,9 +160,12 @@ same relay on devbox; the protocol and the app are identical, only the `relay` U
      Then I deploy to `clotho-push.<account>.workers.dev` and set the .p8 with `wrangler secret put`.
    - devbox: OK to add a user systemd service there.
    - VPS: which provider, and that the user creates the box.
-4. **OK to change the App ID**: turn on Push Notifications for `nyc.amin.clotho` and add an App
-   Group and Keychain group for the extension. Xcode's automatic signing does this on the next build;
-   it changes the provisioning profile in the user's account.
+4. **OK to change the App ID**: turn on Push Notifications for `nyc.amin.clotho`, register the
+   extension's id `nyc.amin.clotho.notify`, and share a Keychain group between them. No App Group is
+   needed: the label carries the machine's name. Xcode's automatic signing does all of it on the first
+   device or TestFlight build with `PUSH=YES`; it changes the provisioning profiles in the user's
+   account. Until then, device and TestFlight builds leave push out (`push.yml` is included only with
+   `PUSH=YES`, which `build.sh` sets for the simulator).
 5. **Lock-screen text** (a choice with a default): show the agent's message ("Allow cargo test
    --release?") or only "Claude is waiting on devbox". The default is the message; iOS's own
    "Show Previews" setting still applies on top.
@@ -178,3 +181,12 @@ same relay on devbox; the protocol and the app are identical, only the `relay` U
   connect, a per-machine "Alerts" toggle with "Send test alert", and clearing stale alerts on open.
   The simulator on Apple silicon receives real sandbox pushes, so the whole path can be tested
   before a device pass.
+
+## Testing without the accounts
+
+`node ios/relay/dev.js` runs the same relay on http://127.0.0.1:8787 and delivers with `xcrun simctl
+push`. Debug simulator builds use it by default, and `-PushSelfTest YES` makes the app send itself an
+alert through it (ClothoUITests/PushUITests). Simulated pushes skip notification service extensions,
+so they show the generic text; decryption is unit-tested against a fixed vector (ClothoTests/PushTests,
+shared with clothod's tests), and the extension itself runs only for real APNs pushes, which needs the
+.p8.

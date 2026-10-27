@@ -52,6 +52,12 @@ struct MachineEditor: View {
                 }
 
                 Section {
+                    Toggle("Agent alerts", isOn: Binding(get: { machine.alerts ?? true }, set: { machine.alerts = $0 }))
+                } footer: {
+                    Text("Alerts when an agent on this machine needs you, even while Clotho is closed. Encrypted on the machine; only this iPhone can read them.")
+                }
+
+                Section {
                     Toggle("Test install directories", isOn: Binding(get: { machine.devDirs ?? false },
                                                                      set: { machine.devDirs = $0 }))
                 } footer: {

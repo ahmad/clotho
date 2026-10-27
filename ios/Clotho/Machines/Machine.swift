@@ -26,6 +26,8 @@ struct Machine: Codable, Identifiable, Hashable, Sendable {
     var remoteCommand: String?
     /// For `.localSocket`.
     var socketPath: String?
+    /// Agent alerts from this machine while the app is closed (docs/push.md). Nil means on.
+    var alerts: Bool?
     var modifiedAt: Date
 
     init(id: UUID = UUID(), name: String, kind: Kind = .ssh, host: String = "", port: Int = 22, user: String = "",

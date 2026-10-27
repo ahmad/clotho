@@ -109,13 +109,16 @@ enum FakeAgents {
 
 // MARK: - Notifications
 
-/// Local notifications when an agent starts needing the user, while the app is running. Background alerts
-/// need the APNs relay (later).
+/// Local notifications when an agent starts needing the user, while the app is running. While it's closed,
+/// machines send the same alert as a push (docs/push.md, PushRegistrar); both use the pane's collapse id
+/// as their identifier, so one replaces the other instead of stacking.
 @MainActor
 final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = AgentNotifier()
     /// The user tapped a notification; the home screen opens that pane.
     var onOpen: ((UUID, PaneID) -> Void)?
+    /// Whether the app has a live connection to a machine, whose own notifications make its pushes redundant.
+    var isLive: ((UUID) -> Bool)?
     private var authorized = false
 
     func setUp() {
@@ -130,23 +133,38 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
         // Only when the daemon raises attention (false → true), not on every state change.
         guard authorized, let after, after.attention == true, before?.attention != true else { return }
         let content = UNMutableNotificationContent()
-        let name = after.kind.prefix(1).uppercased() + after.kind.dropFirst()
-        switch after.state {
-        case .waiting: content.title = "\(name) is waiting on \(machine.displayName)"
-        case .error: content.title = "\(name) hit an error on \(machine.displayName)"
-        default: content.title = "\(name) finished on \(machine.displayName)"
-        }
+        content.title = AlertText.title(kind: after.kind, state: after.state.rawValue, machine: machine.displayName)
         content.body = after.message ?? title
         content.sound = .default
         content.threadIdentifier = machine.id.uuidString
         content.userInfo = ["machine": machine.id.uuidString, "pane": pane]
-        let request = UNNotificationRequest(identifier: "\(machine.id.uuidString)/\(pane)", content: content, trigger: nil)
+        let label = PushLabel.make(machine: machine.id, name: machine.displayName)
+        let request = UNNotificationRequest(identifier: PushLabel.collapseID(label: label, pane: pane), content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+
+    /// Removes delivered agent notifications (local or pushed) for a machine's panes that no longer want attention.
+    func removeDelivered(machine: UUID, except attention: Set<PaneID>) {
+        let center = UNUserNotificationCenter.current()
+        center.getDeliveredNotifications { delivered in
+            let stale = delivered.filter { note in
+                let info = note.request.content.userInfo
+                guard info["machine"] as? String == machine.uuidString, let pane = (info["pane"] as? NSNumber)?.uint64Value else { return false }
+                return !attention.contains(pane)
+            }.map(\.request.identifier)
+            if !stale.isEmpty { center.removeDeliveredNotifications(withIdentifiers: stale) }
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner, .sound, .list])
+        // A push for a machine the app is connected to repeats the local notification it already showed.
+        let info = notification.request.content.userInfo
+        let pushed = notification.request.trigger is UNPushNotificationTrigger
+        let machine = (info["machine"] as? String).flatMap(UUID.init(uuidString:))
+        Task { @MainActor in
+            if pushed, let machine, self.isLive?(machine) == true { completionHandler([]) } else { completionHandler([.banner, .sound, .list]) }
+        }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,

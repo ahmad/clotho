@@ -3,6 +3,7 @@ import UIKit
 
 @main
 struct ClothoApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var machines = MachineList()
     @StateObject private var connections = Connections()
     @Environment(\.scenePhase) private var scenePhase

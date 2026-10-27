@@ -1,0 +1,34 @@
+# Push alerts (docs/push.md): the APNs entitlement, the Keychain group shared with the extension, and the
+# notification service extension. Included only with PUSH=YES (build.sh sets it for the simulator), so a
+# device or TestFlight build doesn't register new identifiers or capabilities in the developer account
+# until the user has turned them on.
+targets:
+  Clotho:
+    dependencies:
+      - target: ClothoNotify
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Clotho/Clotho.entitlements
+  ClothoNotify:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ClothoNotify
+      - Clotho/Push/PushShared.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.notify
+        PRODUCT_NAME: ClothoNotify
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: ClothoNotify/ClothoNotify.entitlements
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: ClothoNotify/Info.plist
+      properties:
+        CFBundleDisplayName: Clotho Alerts
+        # An extension's versions must match its app's.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService

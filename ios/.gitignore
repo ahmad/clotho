@@ -1,3 +1,4 @@
 build/
 build-resources/
 Clotho.xcodeproj/
+ClothoNotify/Info.plist

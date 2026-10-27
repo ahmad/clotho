@@ -10,7 +10,8 @@ import SwiftUI
 /// already applied (live or replay) instead of reloading a snapshot.
 @MainActor
 final class MachineConnection: ObservableObject, Identifiable {
-    let machine: Machine
+    /// Updated in place when edits don't change the endpoint (a rename, the alerts switch).
+    private(set) var machine: Machine
     let store: ModelStore
     private let backend: ClothodBackend
     private var started = false
@@ -55,6 +56,10 @@ final class MachineConnection: ObservableObject, Identifiable {
 
     private var panes: [PaneID: PaneHostView] = [:]
     private var hostKeyObserver: NSObjectProtocol?
+    private var pushObserver: NSObjectProtocol?
+    /// What this machine was last told about alerts (instance, on or off, handle, label); nil to tell it again.
+    private var pushSynced: String?
+    private var lastAttention: Set<PaneID>?
     private let transport: ClothodTransport
 
     var id: UUID { machine.id }
@@ -72,6 +77,8 @@ final class MachineConnection: ObservableObject, Identifiable {
             // The probe that ran before this connection compares the machine's clothod with the app's.
             let status = (self.transport as? SSHTransport)?.versionStatus ?? .current
             if status != self.versionStatus { self.versionStatus = status }
+            self.syncPush()
+            self.clearStaleAlerts()
         }
         store.onAgentChange = { [weak self] pane, before, after in
             guard let self else { return }
@@ -84,10 +91,64 @@ final class MachineConnection: ObservableObject, Identifiable {
                   let trusted = note.userInfo?["trusted"] as? String, let presented = note.userInfo?["presented"] as? String else { return }
             MainActor.assumeIsolated { self?.hostKeyChange = (trusted, presented) }
         }
+        pushObserver = NotificationCenter.default.addObserver(forName: .pushHandleChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncPush() }
+        }
     }
 
     deinit {
         if let hostKeyObserver { NotificationCenter.default.removeObserver(hostKeyObserver) }
+        if let pushObserver { NotificationCenter.default.removeObserver(pushObserver) }
+    }
+
+    /// The saved machine changed without changing how to reach it.
+    func update(_ machine: Machine) {
+        guard machine != self.machine else { return }
+        self.machine = machine
+        syncPush()
+    }
+
+    // MARK: Push alerts
+
+    var supportsPush: Bool { store.hello?.features.contains(.push) ?? false }
+    var alertsOn: Bool { machine.alerts ?? true }
+
+    /// Registers this phone with the machine's clothod for alerts while the app is closed, or unregisters it
+    /// when the user turned them off. Again after every reconnect to a new daemon instance, a new relay
+    /// handle or a rename, so the machine always has a current registration.
+    private func syncPush() {
+        guard store.isConnected, supportsPush, let hello = store.hello else { return }
+        let registrar = PushRegistrar.shared
+        let registration = alertsOn ? registrar.registration(for: machine) : nil
+        if alertsOn && registration == nil { return }
+        let key = [hello.instance, String(alertsOn), registration?.handle ?? "", registration?.label ?? ""].joined(separator: "|")
+        guard key != pushSynced else { return }
+        pushSynced = key
+        let backend = store.backend, device = registrar.device, name = machine.displayName
+        Task {
+            do {
+                if let registration { try await backend.pushRegister(registration) } else { try await backend.pushUnregister(device: device) }
+                log("[\(name)] push: \(registration == nil ? "unregistered" : "registered")")
+            } catch {
+                log("[\(name)] push: \(registration == nil ? "unregister" : "register") failed: \(error.localizedDescription)")
+                if self.pushSynced == key { self.pushSynced = nil }
+            }
+        }
+    }
+
+    /// Asks the machine to send this phone a test alert through the relay.
+    func sendTestAlert() {
+        let device = PushRegistrar.shared.device
+        run("Test alert") { try await $0.pushTest(device: device) }
+    }
+
+    /// Removes delivered alerts for panes that no longer need the user (answered here or on another device).
+    private func clearStaleAlerts() {
+        guard store.isConnected else { return }
+        let attention = Set(store.state.panes.filter { $0.agent?.attention == true }.map(\.id))
+        guard attention != lastAttention else { return }
+        lastAttention = attention
+        AgentNotifier.shared.removeDelivered(machine: machine.id, except: attention)
     }
 
     /// The user accepted the new host key after the warning.
@@ -241,7 +302,10 @@ final class Connections: ObservableObject {
     private var recomputeScheduled = false
 
     func connection(for machine: Machine) -> MachineConnection {
-        if let existing = connections[machine.id], existing.machine.endpoint == machine.endpoint { return existing }
+        if let existing = connections[machine.id], existing.machine.endpoint == machine.endpoint {
+            existing.update(machine)
+            return existing
+        }
         connections[machine.id]?.disconnect()
         let connection = MachineConnection(machine: machine, transport: Self.transport(for: machine))
         connections[machine.id] = connection

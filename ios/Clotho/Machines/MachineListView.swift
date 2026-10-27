@@ -75,6 +75,7 @@ struct MachineListView: View {
             }
             .onAppear {
                 AgentNotifier.shared.onOpen = { machine, pane in openPane(machine: machine, pane: pane) }
+                AgentNotifier.shared.isLive = { [connections] id in connections.existing(id)?.store.isConnected == true }
             }
             .sheet(item: $editing) { machine in
                 MachineEditor(machine: machine) { saved in

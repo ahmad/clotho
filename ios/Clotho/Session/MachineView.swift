@@ -55,6 +55,13 @@ struct MachineView: View {
                     Text("The sessions on \(connection.machine.displayName) run under an older clothod that can't be updated in place. A one-time restart finishes the update, and it ends every shell there.")
                 }
             }
+            if connection.supportsPush, connection.alertsOn, PushRegistrar.shared.handle != nil {
+                Section {
+                    Button("Send test alert") { connection.sendTestAlert() }
+                } footer: {
+                    Text("\(connection.machine.displayName) sends this iPhone an encrypted alert through the relay, the way it does when an agent needs you while Clotho is closed.")
+                }
+            }
             // In the list rather than over it, so it never covers the rows above.
             if store.state.workspaces.isEmpty {
                 Section {

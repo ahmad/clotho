@@ -1,0 +1,10 @@
+{
+  "name": "clotho-push",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "node dev.js",
+    "deploy": "npx wrangler@4 deploy"
+  }
+}

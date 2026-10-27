@@ -162,7 +162,7 @@ struct PaneScreen: View {
 
     private func paneTitle(_ id: PaneID) -> String {
         let pane = store.state.pane(id)
-        if let title = pane?.title, !title.isEmpty { return title }
+        if let title = pane?.displayTitle { return title }
         if let cwd = pane?.cwd { return (cwd as NSString).lastPathComponent }
         return "Shell"
     }

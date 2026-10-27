@@ -104,3 +104,15 @@ skips on devbox.
   user-level permission hooks (AgentHQ) don't answer the prompt first.
 - Not built yet: push notifications through an APNs relay, file
   browsing (`fs.*`), and CloudKit sync of the machine list.
+
+## Push alerts
+
+Agent alerts while the app is closed; the design is docs/push.md.
+
+- `relay/`: the Cloudflare Worker relay (plain JS). `cd relay && npm test` runs its tests; `node dev.js`
+  runs it locally, delivering to the booted simulator with `simctl push`.
+- `ClothoNotify/`: the notification service extension that decrypts alerts. It and the push
+  entitlements come from `push.yml`, included only with `PUSH=YES` (`build.sh` sets it), so device and
+  TestFlight builds don't touch the developer account's identifiers until push is set up there.
+- The relay URL: `PushRegistrar.deployedRelay`, or `-PushRelay <url>`; Debug simulator builds default to
+  the dev relay. Each machine has an "Agent alerts" switch, and "Send test alert" on its screen.
