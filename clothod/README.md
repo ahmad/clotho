@@ -155,7 +155,18 @@ allocator on macOS. musl's own malloc, under a busy daemon's churn, kept gigabyt
 live heap stayed ~165 MB (24 GB RSS in an hour-long soak). `debug.stats` reports the live heap,
 queues and buffers (and on Linux the kernel's view, from `/proc/self/smaps_rollup`).
 
-SOAK_RESULTS
+Soak (`tests/soak.rs`, one hour, 20 panes of heavy output, 3 followers, a reconnect every ~5 s,
+in-place upgrade at 30 min). The test fails if serve passes 400 MB or the holder 200 MB.
+
+| | Linux x86_64 | macOS arm64 |
+|---|---|---|
+| produced | 63.7 MB/s | 74.2 MB/s |
+| probe round-trip p50 / p99 / max | 2.9 / 6.7 / 14 ms | 0.36 / 1.2 / 83 ms |
+| reconnects | 704 | 714 |
+| serve RSS peak (end) | 154 MB (152) | 176 MB (148) |
+| holder RSS peak (end) | 89 MB (88) | 154 MB during the upgrade (22) |
+
+Memory stayed flat after the first minutes, and the upgrade didn't change latency.
 
 ## Not built yet
 
