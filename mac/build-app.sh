@@ -27,8 +27,20 @@ cp .build/release/Clotho "$APP/Contents/MacOS/Clotho"
 # machines over SSH, see ../docs/remote.md), and this Mac's build next to the executable, where Clotho
 # installs it from. The builds come fresh from clothod's dist script, so a stale or debug daemon never
 # ends up in the app. CLOTHOD_DIST bundles an existing dist/ directory instead of building one.
+#
+# dist.sh only builds a release for a version newer than clothod/RELEASED, so rebuilding the app
+# without a new clothod reuses clothod/dist when it holds that release. A dev app with no such dist
+# gets a dev dist of the same version, kept apart in clothod/target/dist-dev so it never replaces
+# the release builds.
+CLOTHOD_VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' ../clothod/Cargo.toml)
+dist_version() { sed -n 's/.*"version": "\(.*\)".*/\1/p' "$1/manifest.json" 2>/dev/null | head -1; }
 if [[ -n "${CLOTHOD_DIST:-}" ]]; then
   DIST="$CLOTHOD_DIST"
+elif [[ "$CLOTHOD_VERSION" == "$(cat ../clothod/RELEASED 2>/dev/null)" && "$(dist_version ../clothod/dist)" == "$CLOTHOD_VERSION" ]]; then
+  DIST=../clothod/dist
+elif $DEV; then
+  DIST_DIR=target/dist-dev ../clothod/scripts/dist.sh --dev
+  DIST=../clothod/target/dist-dev
 else
   ../clothod/scripts/dist.sh
   DIST=../clothod/dist
