@@ -127,11 +127,20 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         current?.close()
     }
 
+    /// A file stream that the daemon owes data, acks or fs.done for this long fails with `stalled`
+    /// and drops the connection (0 turns it off).
+    public var fileStallTimeout: TimeInterval {
+        get { locked { _fileStallTimeout } }
+        set { locked { _fileStallTimeout = newValue } }
+    }
+    private var _fileStallTimeout: TimeInterval = 60
+
     private var skipBackoff = false
     private var lastReceived = Date.distantPast
 
-    /// A link can stall silently (a sleeping network), so when nothing has arrived for a while, ping;
-    /// if no reply comes, drop the connection, which starts a reconnect.
+    /// A link can stall silently (a sleeping network, a wedged SSH connection), so when nothing has
+    /// arrived for `interval`, ping; if no reply comes in twice that, drop the connection, which starts a
+    /// reconnect. Over SSH that's 15 s and 30 s (clothod's recommendation).
     private func startHeartbeat(for stream: ByteStream, every interval: TimeInterval) {
         Task { [weak self] in
             while true {
@@ -139,10 +148,11 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 guard let self, self.locked({ self.connection === stream }) else { return }
                 let quiet = Date().timeIntervalSince(self.locked { self.lastReceived })
                 guard quiet >= interval else { continue }
-                let answered = await self.answersWithin(interval) { try await self.ping() }
+                // clothod writes replies ahead of file data, so a busy transfer doesn't delay the answer.
+                let answered = await self.answersWithin(interval * 2) { try await self.ping() }
                 guard self.locked({ self.connection === stream }) else { return }
                 if !answered {
-                    self.configuration.log?("no answer from \(self.configuration.transport.name) in \(Int(interval)) s; reconnecting")
+                    self.configuration.log?("no answer from \(self.configuration.transport.name) in \(Int(interval * 2)) s; reconnecting")
                     stream.close()
                     return
                 }
@@ -380,6 +390,20 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
 
     public func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         _ = try await request("agent.mute", ["pane": pane, "muted": muted])
+    }
+
+    public func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult {
+        var params: [String: Any] = ["pane": pane, "query": query, "regex": options.regex, "case_sensitive": options.caseSensitive]
+        params["limit"] = options.limit
+        if let before = options.before { params["before"] = ["line": before.line, "col": before.col] }
+        return try Self.decode(PaneSearchResult.self, from: try await request("pane.search", params))
+    }
+
+    public func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory {
+        var params: [String: Any] = ["pane": pane]
+        params["limit"] = limit
+        params["since"] = since
+        return try Self.decode(AgentHistory.self, from: try await request("agent.history", params))
     }
 
     public func getSettings() async throws -> DaemonSettings {

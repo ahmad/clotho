@@ -236,7 +236,8 @@ public struct SSHCommandRunner: RemoteCommandRunner {
     public func run(_ command: String, input: Data?) throws -> RemoteCommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sshPath)
-        process.arguments = options + [target, "--", command]
+        try SSHTarget.check(target)
+        process.arguments = options + ["--", target, command]
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.standardInput = input == nil ? FileHandle.nullDevice : stdin
         process.standardOutput = stdout
@@ -276,3 +277,23 @@ private final class Collected: @unchecked Sendable {
     }
 }
 #endif
+
+/// What a user typed as an SSH destination ("user@host", an alias), checked before it reaches ssh: one
+/// starting with "-" would be read as an option ("-oProxyCommand=…" runs a command), and whitespace or
+/// control characters have no place in a host. Every ssh call also puts "--" before the destination.
+public enum SSHTarget {
+    /// Why `target` can't be used, or nil when it's fine.
+    public static func problem(_ target: String) -> String? {
+        if target.isEmpty { return "Type an SSH target, such as you@host." }
+        if target.hasPrefix("-") { return "An SSH target can't start with \"-\"." }
+        if target.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }) {
+            return "An SSH target can't contain spaces or control characters."
+        }
+        return nil
+    }
+
+    /// Throws when `target` isn't usable (see `problem`).
+    public static func check(_ target: String) throws {
+        if let problem = problem(target) { throw RemoteInstaller.Failure(message: problem) }
+    }
+}

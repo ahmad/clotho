@@ -30,6 +30,11 @@ public final class FileTransfer: @unchecked Sendable {
     /// defaults, 256 KiB and 4 MiB). Smaller values keep terminals responsive on slow links.
     public var chunk: Int?
     public var window: Int?
+    /// After a dropped or stalled connection, each file is tried again after these waits (a resumed
+    /// upload continues where the daemon's part file ends), then the copy fails.
+    public var retryDelays: [TimeInterval] = [2, 5, 10, 20, 30]
+    /// A file is being tried again: its destination path, the error, and the attempt about to start (2…).
+    public var onRetry: (@Sendable (String, Error, Int) -> Void)?
 
     private let lock = NSLock()
     private var progress = Progress()
@@ -116,6 +121,26 @@ public final class FileTransfer: @unchecked Sendable {
 
     private func copyFile(_ entry: FileEntry, to path: String, conflict: Conflict) async throws {
         report { $0.current = entry.name }
+        var attempt = 1
+        while true {
+            do {
+                return try await copyFileOnce(entry, to: path, conflict: conflict)
+            } catch where Self.isRetryable(error) && attempt <= retryDelays.count {
+                let delay = retryDelays[attempt - 1]
+                attempt += 1
+                onRetry?(path, error, attempt)
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+        }
+    }
+
+    /// Errors that a new connection can fix: the link dropped, or stopped moving and was dropped.
+    public static func isRetryable(_ error: Error) -> Bool {
+        guard let error = error as? BackendError else { return false }
+        return ["disconnected", "stalled"].contains(error.code)
+    }
+
+    private func copyFileOnce(_ entry: FileEntry, to path: String, conflict: Conflict) async throws {
         let data = StreamedSource(backend: source, entry: entry, chunk: chunk, window: window)
         defer { data.close() }
         var options = FileWriteOptions(size: entry.size, overwrite: conflict == .replace, mode: entry.mode, mtimeNs: entry.mtimeNs,

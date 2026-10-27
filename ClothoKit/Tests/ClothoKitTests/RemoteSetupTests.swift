@@ -39,7 +39,7 @@ final class RemoteSetupTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
         let fakeSSH = root + "/ssh"
         // Skip ssh's options and the target, then run the command (stdin passes through).
-        try "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec /bin/sh -c \"$1\"\n"
+        try "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift 2\nexec /bin/sh -c \"$1\"\n"
             .write(toFile: fakeSSH, atomically: true, encoding: .utf8)
         chmod(fakeSSH, 0o755)
         let installDir = root + "/bin", runtimeDir = root + "/rt"
@@ -110,7 +110,7 @@ final class RemoteSetupTests: XCTestCase {
             try FileManager.default.createDirectory(atPath: "\(installDir)/\(existing)", withIntermediateDirectories: true)
             try FileManager.default.copyItem(atPath: dist.appendingPathComponent(build.file).path, toPath: "\(installDir)/\(existing)/clothod")
             let fakeSSH = root + "/ssh"
-            try "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec /bin/sh -c \"$1\"\n"
+            try "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift 2\nexec /bin/sh -c \"$1\"\n"
                 .write(toFile: fakeSSH, atomically: true, encoding: .utf8)
             chmod(fakeSSH, 0o755)
             var runner = SSHCommandRunner(target: "here", options: [])

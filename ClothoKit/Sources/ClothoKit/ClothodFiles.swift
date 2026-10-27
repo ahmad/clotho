@@ -20,6 +20,18 @@ final class FileStream: @unchecked Sendable {
     /// How the write ended (fs.done, fs.error, cancelled, or a dropped connection).
     var outcome: Result<FileEntry, Error>?
 
+    // For noticing a stream that stopped moving (see `watch`).
+    /// When the daemon last moved it along: data for a read, an ack for a write.
+    var lastActivity = Date()
+    /// Writes: how far we've sent, and whether the end was sent (so fs.done is owed).
+    var sent: UInt64 = 0
+    var finSent = false
+    /// Reads: how far data has arrived, and how far we've acked (the daemon may send to acked + window).
+    var received: UInt64 = 0
+    var readAcked: UInt64 = 0
+    /// Reads: the frame size; the daemon sends whole chunks, so it waits once one no longer fits.
+    var chunk: UInt64 = 1
+
     init(_ kind: Kind) { self.kind = kind }
 }
 
@@ -71,13 +83,20 @@ extension ClothodBackend: FileBackend {
         let (frames, feed) = AsyncThrowingStream.makeStream(of: Data.self)
         let result = try await request("fs.read", params, onReply: { [weak self] result in
             guard let self, let stream = Self.streamID(in: result) else { return }
-            self.locked { self.fileStreams[stream] = FileStream(.read(feed)) }
+            let state = FileStream(.read(feed))
+            let offset = ((result as? [String: Any])?["offset"] as? NSNumber)?.uint64Value ?? options.offset
+            state.received = offset
+            state.readAcked = offset
+            state.window = UInt64(options.window)
+            state.chunk = UInt64(max(options.chunk, 1))
+            self.locked { self.fileStreams[stream] = state }
         })
         guard let object = result as? [String: Any], let stream = Self.streamID(in: result) else {
             throw BackendError(code: "internal", message: "fs.read reply without a stream")
         }
         let offset = (object["offset"] as? NSNumber)?.uint64Value ?? options.offset
         let pump = ReadPump(frames: frames, backend: self, stream: stream, position: offset, window: UInt64(options.window))
+        watch(stream)
         return FileReadStream(size: (object["size"] as? NSNumber)?.uint64Value ?? 0, mtimeNs: object["mtime_ns"] as? String ?? "",
                               offset: offset, data: AsyncThrowingStream(unfolding: { try await pump.next() }),
                               cancel: { [weak self] in self?.cancelStream(stream) })
@@ -99,6 +118,8 @@ extension ClothodBackend: FileBackend {
             let object = result as? [String: Any]
             self.locked {
                 state.acked = (object?["offset"] as? NSNumber)?.uint64Value ?? 0
+                state.sent = state.acked
+                state.lastActivity = Date()
                 state.window = (object?["window"] as? NSNumber)?.uint64Value ?? UInt64(options.window)
                 self.fileStreams[stream] = state
             }
@@ -108,6 +129,7 @@ extension ClothodBackend: FileBackend {
         }
         let start = locked { state.acked }
         progress(start)
+        watch(stream)
         do {
             try await withTaskCancellationHandler {
                 var position = start
@@ -116,6 +138,8 @@ extension ClothodBackend: FileBackend {
                     try await waitForCredit(state, upTo: position + UInt64(piece.count))
                     sendFileData(stream: stream, offset: position, fin: false, piece)
                     position += UInt64(piece.count)
+                    let sent = position
+                    locked { state.sent = sent }
                 }
                 for try await data in try await source.open(at: start) {
                     try Task.checkCancellation()
@@ -127,6 +151,11 @@ extension ClothodBackend: FileBackend {
                     }
                 }
                 if !pending.isEmpty { try await sendPiece(pending) }
+                // fs.done is owed from here, so a missing one counts as a stall.
+                locked {
+                    state.finSent = true
+                    state.lastActivity = Date()
+                }
                 sendFileData(stream: stream, offset: position, fin: true, Data())
             } onCancel: {
                 self.cancelStream(stream)
@@ -185,6 +214,8 @@ extension ClothodBackend: FileBackend {
     func handleFileData(stream: UInt64, offset: UInt64, fin: Bool, bytes: Data) {
         locked {
             guard let state = fileStreams[stream], case .read(let feed) = state.kind else { return }
+            state.received = max(state.received, offset + UInt64(bytes.count))
+            state.lastActivity = Date()
             if !bytes.isEmpty { feed.yield(bytes) }
             if fin {
                 feed.finish()
@@ -201,6 +232,7 @@ extension ClothodBackend: FileBackend {
             let (waiter, progress): (CheckedContinuation<Void, Error>?, (@Sendable (UInt64) -> Void)?) = locked {
                 guard let state = fileStreams[stream], case .write = state.kind else { return (nil, nil) }
                 state.acked = max(state.acked, offset)
+                state.lastActivity = Date()
                 defer { state.creditWaiter = nil }
                 return (state.creditWaiter, state.progress)
             }
@@ -220,13 +252,65 @@ extension ClothodBackend: FileBackend {
         }
     }
 
+    /// We acked a read up to `offset`, which lets the daemon send more.
+    func noteReadAck(_ stream: UInt64, _ offset: UInt64) {
+        locked {
+            guard let state = fileStreams[stream] else { return }
+            // The window opening up is when the clock starts; data owed from before was already moving.
+            if !Self.readOwed(state) { state.lastActivity = Date() }
+            state.readAcked = max(state.readAcked, offset)
+        }
+    }
+
+    /// Whether a stream has been owed something by the daemon for longer than `timeout`: a write with
+    /// bytes unacked (or its fs.done), or a read whose window has room the daemon hasn't filled.
+    static func isStalled(_ state: FileStream, now: Date, timeout: TimeInterval) -> Bool {
+        guard state.outcome == nil, now.timeIntervalSince(state.lastActivity) >= timeout else { return false }
+        switch state.kind {
+        // The daemon acks each time a quarter window reaches disk, so less than that may wait for more.
+        case .write: return state.finSent || state.sent >= state.acked + max(state.window / 4, 1)
+        case .read: return readOwed(state)
+        }
+    }
+
+    /// Whether the daemon may send a read more: another whole chunk fits in what we've acked.
+    static func readOwed(_ state: FileStream) -> Bool {
+        state.received + min(state.chunk, state.window) <= state.readAcked + state.window
+    }
+
+    /// Checks a stream every few seconds until it ends. One that's stalled fails with `stalled`, and the
+    /// connection is dropped: a link that stops moving data is wedged (a half-open SSH connection, say),
+    /// and the reconnect gives the retry a fresh one.
+    func watch(_ stream: UInt64) {
+        let timeout = fileStallTimeout
+        guard timeout > 0 else { return }
+        Task { [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: UInt64(min(timeout / 4, 5) * 1_000_000_000))
+                guard let self else { return }
+                let verdict: Bool? = self.locked {
+                    guard let state = self.fileStreams[stream] else { return nil }
+                    return Self.isStalled(state, now: Date(), timeout: timeout)
+                }
+                guard let stalled = verdict else { return }
+                guard stalled else { continue }
+                let name = self.configuration.transport.name
+                self.configuration.log?("file stream \(stream) on \(name) made no progress for \(Int(timeout)) s; reconnecting")
+                self.endStream(stream, .failure(BackendError(code: "stalled",
+                    message: "Nothing moved for \(Int(timeout)) seconds, so Clotho dropped the stuck connection to \(name)")))
+                self.reconnectNow()
+                return
+            }
+        }
+    }
+
     /// Ends every open stream, when the connection is gone: the daemon has cancelled them.
     func failFileStreams(_ error: Error) {
         let streams: [UInt64] = locked { Array(fileStreams.keys) }
         streams.forEach { endStream($0, .failure(error)) }
     }
 
-    private func endStream(_ stream: UInt64, _ outcome: Result<FileEntry, Error>) {
+    func endStream(_ stream: UInt64, _ outcome: Result<FileEntry, Error>) {
         let waiters: [() -> Void] = locked {
             guard let state = fileStreams.removeValue(forKey: stream) else { return [] }
             switch state.kind {
@@ -273,6 +357,7 @@ private final class ReadPump: @unchecked Sendable {
         position += UInt64(chunk.count)
         if position - acked >= window / 4 {
             backend?.notify("fs.ack", ["stream": stream, "offset": position])
+            backend?.noteReadAck(stream, position)
             acked = position
         }
         return chunk

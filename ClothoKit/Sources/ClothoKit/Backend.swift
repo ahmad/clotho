@@ -77,6 +77,10 @@ public struct Hello: Codable, Equatable, Sendable {
         case paneClipboard = "pane.clipboard"
         /// `agent.mute`: the user mutes an agent until unmuted or its session ends.
         case agentMute = "agent.mute"
+        /// `pane.search`: search a pane's scrollback on the daemon (0.1.11).
+        case paneSearch = "pane.search"
+        /// `agent.history`: an agent's recorded transitions and messages (0.1.11).
+        case agentHistory = "agent.history"
         /// `settings.get` / `settings.set` and `settings` events (clothod 0.1.7).
         case settings
         /// `service.status` / `install` / `uninstall` and `service` events: start clothod at login (0.1.7).
@@ -285,6 +289,14 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Mutes or unmutes a pane's agent (`agent.mute`), when hello's `features` contains `.agentMute`.
     func muteAgent(_ pane: PaneID, muted: Bool) async throws
 
+    /// Searches the scrollback the daemon keeps for a pane (`pane.search`), newest match first, when hello's
+    /// `features` contains `.paneSearch`. A bad regex or an empty query fails with `bad_request`.
+    func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult
+
+    /// An agent's recorded history (`agent.history`), oldest first, when hello's `features` contains
+    /// `.agentHistory`. `since` (unix seconds) fetches only newer entries.
+    func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory
+
     /// Pastes `text` (bracketed if the app enabled it), then presses `keys` ("enter", "esc", "tab", "up",
     /// "ctrl+c", "shift+tab", "f5"…), encoded by the daemon for the pane's current modes (`pane.keys`).
     /// Only when hello's `features` contains `.paneKeys`; never fall back to raw bytes.
@@ -317,6 +329,14 @@ public extension SessionBackend {
 
     func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         throw BackendError(code: "unknown_method", message: "this backend can't mute agents")
+    }
+
+    func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult {
+        throw BackendError(code: "unknown_method", message: "this backend can't search scrollback")
+    }
+
+    func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory {
+        throw BackendError(code: "unknown_method", message: "this backend keeps no agent history")
     }
 
     func getSettings() async throws -> DaemonSettings {

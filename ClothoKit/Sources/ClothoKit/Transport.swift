@@ -188,7 +188,7 @@ public struct SSHProcessTransport: ClothodTransport {
 
     public var name: String { target }
     public var maxReconnectDelay: TimeInterval { 30 }
-    public var heartbeatInterval: TimeInterval? { 20 }
+    public var heartbeatInterval: TimeInterval? { 15 }
 
     public static let baseOptions = [
         "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
@@ -196,11 +196,13 @@ public struct SSHProcessTransport: ClothodTransport {
     ]
 
     public func open(progress: @escaping @Sendable (String) -> Void) throws -> ByteStream {
+        try SSHTarget.check(target)
         if let prepare { try prepare(progress) }
         progress("Connecting")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sshPath)
-        process.arguments = Self.baseOptions + extraOptions + [target, "--", try remoteCommand()]
+        // "--" ends ssh's options, so neither the target nor anything after it is read as one.
+        process.arguments = Self.baseOptions + extraOptions + ["--", target, try remoteCommand()]
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.standardInput = stdin
         process.standardOutput = stdout
@@ -220,7 +222,14 @@ public struct SSHProcessTransport: ClothodTransport {
         try? stdin.fileHandleForWriting.close()
         let target = target, onExit = onExit
         return ByteStream(readFD: readFD, writeFD: writeFD, onShutdown: {
-            if process.isRunning { process.terminate() }
+            guard process.isRunning else { return }
+            process.terminate()
+            // An ssh stuck in a write to a dead link may not get to its SIGTERM handler; the read loop
+            // only ends once the process is gone.
+            let pid = process.processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                if process.isRunning { kill(pid, SIGKILL) }
+            }
         }, closeReason: {
             process.waitUntilExit()
             let message = errors.text
