@@ -29,6 +29,7 @@ struct MachineView: View {
                             .tint(.primary)
                     }
                 }
+                    .listRowBackground(SelectionBackground(selected: store.state.focus.tab == tab.id))
                     .swipeActions {
                         Button(role: .destructive) {
                             connection.run("Close tab") { try await $0.closeTab(tab.id) }
@@ -57,6 +58,14 @@ struct MachineView: View {
                         if let name, !name.isEmpty { connection.run("Rename workspace") { try await $0.renameWorkspace(workspace.id, name: name) } }
                     }
                     .textCase(nil)
+                } else if workspace.id == store.focusedWorkspace?.id {
+                    // The current workspace: in the selection colour, with a leading bar (as on the Mac).
+                    HStack(spacing: 6) {
+                        Capsule().fill(Color.selection).frame(width: 3, height: 13)
+                        Text(workspace.name).foregroundStyle(Color.selection).fontWeight(.semibold)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(workspace.name), current")
                 } else {
                     Text(workspace.name)
                 }
@@ -203,7 +212,7 @@ private struct TabRow: View {
         let panes = tab.layout.panes.compactMap { store.state.pane($0) }
         HStack {
             Image(systemName: panes.count > 1 ? "rectangle.split.2x1" : "terminal")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(store.state.focus.tab == tab.id ? Color.selection : Color.secondary)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
                 Text(store.displayTitle(of: tab)).foregroundStyle(.primary).lineLimit(1)
@@ -215,11 +224,31 @@ private struct TabRow: View {
             if panes.count > 1 {
                 Text("\(panes.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
-            if store.state.focus.tab == tab.id {
-                Image(systemName: "smallcircle.filled.circle").font(.caption2).foregroundStyle(Color.accentColor)
+        }
+        .accessibilityAddTraits(store.state.focus.tab == tab.id ? .isSelected : [])
+    }
+}
+
+/// A list row's background, tinted with a leading bar when it's the selected tab.
+struct SelectionBackground: View {
+    let selected: Bool
+
+    var body: some View {
+        if selected {
+            ZStack(alignment: .leading) {
+                Color(.secondarySystemGroupedBackground)
+                Color.selection.opacity(0.18)
+                Rectangle().fill(Color.selection).frame(width: 4)
             }
+        } else {
+            Color(.secondarySystemGroupedBackground)
         }
     }
+}
+
+extension Color {
+    /// The selected pane, tab and workspace (#6C96B4, as on the Mac).
+    static let selection = Color(Theme.selection)
 }
 
 enum RenameTarget: Identifiable {

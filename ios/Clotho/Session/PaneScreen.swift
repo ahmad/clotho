@@ -92,12 +92,20 @@ struct PaneScreen: View {
                     Button { select(pane: id) } label: {
                         Text("\(index + 1) \(paneTitle(id))")
                             .font(.caption.weight(selected ? .semibold : .regular))
+                            .foregroundStyle(selected ? Color.white : Color.secondary)
                             .lineLimit(1)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(selected ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.08), in: Capsule())
+                            .background(selected ? Color.selection.opacity(0.55) : Color.white.opacity(0.08), in: Capsule())
+                            // The selected pane is underlined too, so it reads at a glance (as on the Mac).
+                            .overlay(alignment: .bottom) {
+                                if selected {
+                                    Capsule().fill(Color.selection).frame(height: 2.5).padding(.horizontal, 8).offset(y: 4)
+                                }
+                            }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }
             .padding(.horizontal, 8)

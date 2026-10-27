@@ -19,6 +19,9 @@ final class PaneActionsUITests: XCTestCase {
         // Two panes: the strip appears and the new (second) pane is shown.
         let second = app.buttons.matching(NSPredicate(format: "label BEGINSWITH '2 '")).firstMatch
         XCTAssertTrue(second.waitForExistence(timeout: 10))
+        // The shown pane is marked selected in the strip (#6C96B4 fill and underline).
+        XCTAssertTrue(second.isSelected, "the shown pane isn't marked selected")
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format: "label BEGINSWITH '1 '")).firstMatch.isSelected)
         sleep(2)
         app.typeText("echo split-$((6*7))\n")
         sleep(1)
@@ -27,6 +30,17 @@ final class PaneActionsUITests: XCTestCase {
         app.typeText("echo first-$((6*7))\n")
         sleep(1)
         attach(app, "split")
+
+        // The machine screen marks the current workspace and its focused tab.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        let current = app.descendants(matching: .any).matching(NSPredicate(format: "label ENDSWITH ', current'")).firstMatch
+        let focusedTab = app.buttons.matching(NSPredicate(format: "isSelected == true")).firstMatch
+        // The new workspace is last; earlier tests' workspaces may push it below the screen.
+        for _ in 0..<8 where !current.waitForExistence(timeout: 2) || !focusedTab.exists || !focusedTab.isHittable { app.swipeUp() }
+        XCTAssertTrue(current.exists, "no current-workspace marker")
+        attach(app, "machine screen")
+        focusedTab.tap()
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
 
         actions.tap()
         app.buttons["Close pane"].tap()

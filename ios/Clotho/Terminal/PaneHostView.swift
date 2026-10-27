@@ -347,6 +347,8 @@ enum Theme {
     static let background = UIColor(red: 0.08, green: 0.08, blue: 0.10, alpha: 1)
     static let foreground = UIColor(white: 0.9, alpha: 1)
     static let accent = UIColor(red: 0.55, green: 0.75, blue: 1, alpha: 1)
+    /// The selected pane, tab and workspace, as on the Mac (#6C96B4).
+    static let selection = UIColor(red: 0x6c / 255, green: 0x96 / 255, blue: 0xb4 / 255, alpha: 1)
 
     static var fontSize: CGFloat {
         let saved = UserDefaults.standard.double(forKey: "FontSize")
