@@ -7,6 +7,12 @@ use clotho_proto::{platform, read_frame, write_frame, Frame};
 use serde_json::json;
 use tokio::net::UnixStream;
 
+// musl's malloc holds on to memory freed after bursts (snapshots, replays); static Linux builds
+// use mimalloc instead (scripts/dist.sh).
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USAGE: &str = "usage: clothod <command> [--runtime-dir DIR]
 
 commands:

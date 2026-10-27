@@ -1882,6 +1882,55 @@ async fn firehose_output_applies_backpressure_instead_of_failing() {
     assert!(s["panes"][0]["seq"].as_u64().unwrap() > 1 << 20, "the firehose did run");
 }
 
+/// A connection whose queue is full when it subscribes (a reconnect resubscribing many panes)
+/// gets the reply at once and the pane's snapshot only once it has drained: memory per
+/// connection stays bounded.
+#[tokio::test]
+async fn subscribing_with_a_full_queue_defers_the_snapshot() {
+    use clotho_proto::{read_frame, write_frame};
+    let env = Env::new();
+    let c = env.client().await;
+    let mut fire = sh();
+    fire["command"] = json!(["/bin/sh", "-c", "yes firehose-0123456789-abcdefghijklmnopqrstuvwxyz"]);
+    let a = new_pane(&c, fire).await;
+    let mut quiet = sh();
+    quiet["command"] = json!(["/bin/sh", "-c", "printf b-ready; exec cat"]);
+    let b = new_pane(&c, quiet).await;
+    wait_for_text(&c, b, T, |l| l.first().is_some_and(|l| l == "b-ready")).await.unwrap();
+
+    let mut s = tokio::net::UnixStream::connect(env.path().join("clothod.sock")).await.unwrap();
+    write_frame(&mut s, &Frame::Json(json!({"id": 1, "method": "hello", "params": {"protocol": 1}}))).await.unwrap();
+    let Some(Frame::Json(v)) = read_frame(&mut s).await.unwrap() else { panic!() };
+    assert!(v["result"].is_object(), "{v}");
+    write_frame(&mut s, &Frame::Json(json!({"id": 2, "method": "pane.subscribe", "params": {"pane": a}}))).await.unwrap();
+    // Don't read: the firehose fills this connection's queue.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    write_frame(&mut s, &Frame::Json(json!({"id": 3, "method": "pane.subscribe", "params": {"pane": b, "have_seq": 0}}))).await.unwrap();
+
+    let (mut replied, mut resync) = (false, false);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        assert!(Instant::now() < deadline, "no deferred snapshot (replied {replied}, resync {resync})");
+        match tokio::time::timeout(Duration::from_secs(10), read_frame(&mut s)).await.unwrap().unwrap().unwrap() {
+            Frame::Json(v) if v["id"] == 3 => {
+                assert_eq!(v["result"]["mode"], "snapshot", "a full queue gets no replay: {v}");
+                replied = true;
+            }
+            Frame::Json(v) if v["event"] == "pane.resync" && v["data"]["pane"] == b => {
+                assert!(replied, "resync after the reply");
+                resync = true;
+            }
+            Frame::Snapshot { pane, data, .. } if pane == b => {
+                assert!(resync, "the snapshot comes after the queue drained, with pane.resync");
+                assert!(String::from_utf8_lossy(&data).contains("b-ready"));
+                break;
+            }
+            Frame::Output { pane, .. } => assert_ne!(pane, b, "no output for b before its snapshot"),
+            _ => {}
+        }
+    }
+}
+
 // ---- push --------------------------------------------------------------------------------
 
 /// A stand-in relay on 127.0.0.1: answers `POST /v1/push` with the next queued status (200 when

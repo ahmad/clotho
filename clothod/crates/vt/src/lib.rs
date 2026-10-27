@@ -27,8 +27,10 @@ use alacritty_terminal::vte::ansi::{
     Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler,
 };
 
-/// Lines of scrollback each pane keeps.
-pub const DEFAULT_SCROLLBACK: usize = 10_000;
+/// Lines of scrollback each pane keeps. Clients keep their own (deeper) history; this is what a
+/// new client's snapshot can start from (1000 lines by default), so more is mostly memory: each
+/// line costs cols × 24 bytes in the grid.
+pub const DEFAULT_SCROLLBACK: usize = 2_000;
 
 /// Something the terminal produced besides screen changes.
 #[derive(Debug, Clone, PartialEq, Eq)]

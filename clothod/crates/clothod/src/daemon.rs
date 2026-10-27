@@ -32,7 +32,7 @@ pub const INCOMPATIBLE: &str = "incompatible holder";
 /// Exit code of `clothod serve` / `clothod start` in that case.
 pub const EXIT_INCOMPATIBLE: i32 = 3;
 
-/// Output kept for client replay. Matches the holder's buffer.
+/// The holder's output buffer per pane (recovery replays from it).
 const RING_CAPACITY: usize = clotho_holder::RING_CAPACITY;
 /// Largest gap a reconnecting client gets as replayed output instead of a snapshot.
 const REPLAY_LIMIT: u64 = 1 << 20;
@@ -201,7 +201,9 @@ impl Pane {
             vt: Vt::new(info.cols, info.rows),
             vt_seq: info.seq_start,
             ring: {
-                let mut r = Ring::new(RING_CAPACITY);
+                // Only for replays to clients, which are capped at REPLAY_LIMIT (the holder
+                // keeps the longer buffer for recovery).
+                let mut r = Ring::new(REPLAY_LIMIT as usize);
                 r.reset(info.seq_start);
                 r
             },
@@ -1563,10 +1565,16 @@ impl Daemon {
         if let (None, Some((cols, rows))) = (owner, viewport) {
             self.resize(pp, cols, rows);
         }
-        pp.subs.insert(client.id, Sub { client: client.clone(), lagging: false, viewport });
+        // A connection that already has a full queue (a reconnect resubscribing many panes at
+        // once) gets this pane's snapshot only once it has drained, like a lagging client: the
+        // bytes queued per connection stay bounded instead of every pane's replay or snapshot
+        // piling up at the same moment.
+        let defer = client.queued.load(Ordering::Relaxed) > CLIENT_HIGH;
+        pp.subs.insert(client.id, Sub { client: client.clone(), lagging: defer, viewport });
 
         let end = pp.vt_seq;
         let mode = match have {
+            _ if defer => "snapshot",
             Some(h) if h == end => "live",
             Some(h) if h >= pp.ring.start() && h < end && end - h <= REPLAY_LIMIT => "replay",
             _ => "snapshot",
@@ -1581,6 +1589,7 @@ impl Daemon {
                     client.output(Frame::Output { pane, seq, data: chunk.to_vec() }.encode());
                 }
             }
+            "snapshot" if defer => self.watch_lagging(pane, client.id),
             "snapshot" => {
                 let data = self.snapshot(pp, Some(scrollback));
                 client.output(Frame::Snapshot { pane, seq: end, cols: pp.vt.cols(), rows: pp.vt.rows(), data }.encode());

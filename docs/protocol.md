@@ -396,7 +396,9 @@ The daemon picks one of three modes, and the reply always comes before the pane'
 
 `seq` in the reply is where the stream continues from, and `cols`/`rows` is the pane's current
 size. The default `scrollback` is 1000 lines of history in a snapshot (0 means none, and the cap is
-the 10,000 lines the daemon keeps).
+the 2,000 lines the daemon keeps; clients keep deeper history themselves). A connection whose
+queue is already full when it subscribes (a reconnect resubscribing many panes) gets the reply
+with mode `snapshot` at once, and the snapshot after `pane.resync` once its queue has drained.
 
 Subscribing again to a pane that is already subscribed restarts its stream the same way, which is
 how a client asks for a fresh snapshot.

@@ -59,12 +59,24 @@ impl Ring {
     }
 
     pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend(data);
-        if self.buf.len() > self.cap {
-            let drop = self.buf.len() - self.cap;
-            self.buf.drain(..drop);
-            self.start += drop as u64;
+        // Never hold more than `cap`: drop the oldest bytes first, then grow the buffer only as
+        // far as the cap (VecDeque's own growth doubles: 8 MiB of memory for a 4 MiB ring).
+        let skip = data.len().saturating_sub(self.cap);
+        let data = &data[skip..];
+        let over = (self.buf.len() + data.len()).saturating_sub(self.cap);
+        self.buf.drain(..over);
+        self.start += (over + skip) as u64;
+        let need = self.buf.len() + data.len();
+        if need > self.buf.capacity() {
+            let want = (self.buf.capacity() * 2).clamp(need, self.cap);
+            self.buf.reserve_exact(want - self.buf.len());
         }
+        self.buf.extend(data);
+    }
+
+    /// Bytes of memory the buffer holds (for tests and accounting).
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
     }
 
     /// Bytes from `seq` to the end, or `None` if `seq` is no longer (or not yet) buffered.
@@ -73,7 +85,15 @@ impl Ring {
             return None;
         }
         let skip = (seq - self.start) as usize;
-        Some(self.buf.iter().skip(skip).copied().collect())
+        let (a, b) = self.buf.as_slices();
+        let mut out = Vec::with_capacity(self.buf.len() - skip);
+        if skip < a.len() {
+            out.extend_from_slice(&a[skip..]);
+            out.extend_from_slice(b);
+        } else {
+            out.extend_from_slice(&b[skip - a.len()..]);
+        }
+        Some(out)
     }
 
     /// Restart the ring at `seq` (empty). Used when the logic side recovers mid-stream.
@@ -762,6 +782,25 @@ mod tests {
         assert_eq!(r.since(1), None);
         assert_eq!(r.since(6).unwrap(), b"");
         assert_eq!(r.since(7), None);
+        r.push(b"0123456789");
+        assert_eq!((r.start(), r.end()), (12, 16), "a push bigger than the ring keeps its tail");
+        assert_eq!(r.since(12).unwrap(), b"6789");
+    }
+
+    #[test]
+    fn ring_memory_stays_at_its_cap() {
+        let cap = 1 << 20;
+        let mut r = Ring::new(cap);
+        let chunk: Vec<u8> = (0..65_537u32).map(|i| i as u8).collect();
+        let mut all = Vec::new();
+        for _ in 0..40 {
+            r.push(&chunk);
+            all.extend_from_slice(&chunk);
+            assert!(r.capacity() <= cap + 64, "capacity {} for a {cap} ring", r.capacity());
+        }
+        assert_eq!(r.end(), all.len() as u64);
+        assert_eq!(r.since(r.start()).unwrap(), &all[all.len() - cap..]);
+        assert_eq!(r.since(r.end() - 10).unwrap(), &all[all.len() - 10..]);
     }
 }
 
