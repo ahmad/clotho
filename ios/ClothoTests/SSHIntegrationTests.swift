@@ -156,6 +156,60 @@ final class SSHIntegrationTests: XCTestCase {
         backend.stop()
         reader.cancel()
     }
+
+    /// OSC 52 from a shell (how Claude Code and Codex copy) reaches the clipboard of the pane on screen,
+    /// and only that one: a pane off screen copies nothing.
+    @MainActor
+    func testPaneCopyReachesClipboard() async throws {
+        let backend = ClothodBackend(configuration: .init(transport: SSHTransport(machine: machine), clientName: "clotho-ios-test",
+                                                          log: { print("backend: \($0)") }))
+        let store = ModelStore(backend: backend)
+        try await store.start()
+        defer { store.stop() }
+        let shown = try await backend.createWorkspace(name: "ios-copy-shown")
+        let hidden = try await backend.createWorkspace(name: "ios-copy-hidden")
+        func pane(_ id: PaneID) async throws -> Pane {
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                if let pane = store.state.pane(id) { return pane }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            throw XCTSkip("pane \(id) never appeared in the model")
+        }
+
+        var copied: [String] = [], hiddenCopied: [String] = [], confirmations = 0
+        let host = PaneHostView(pane: try await pane(shown.pane), store: store)
+        host.pasteboard = { copied.append($0) }
+        host.onCopy = { confirmations += 1 }
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        host.frame = window.bounds
+        window.addSubview(host)
+        window.isHidden = false
+        host.layoutIfNeeded()
+        let offscreen = PaneHostView(pane: try await pane(hidden.pane), store: store)
+        offscreen.pasteboard = { hiddenCopied.append($0) }
+
+        // Copies are live only, so type once the pane's stream has started (its snapshot arrived).
+        let subscribed = Date().addingTimeInterval(10)
+        while host.haveSeq == nil, Date() < subscribed { try await Task.sleep(nanoseconds: 50_000_000) }
+        XCTAssertNotNil(host.haveSeq, "the visible pane never subscribed")
+
+        // base64 of "clotho copy ✓", printed by the shell so the bytes come from the pane, not from us.
+        let text = "clotho copy ✓", encoded = Data(text.utf8).base64EncodedString()
+        let osc52 = "printf '\\033]52;c;%s\\a' \(encoded)\r"
+        backend.sendInput(shown.pane, Data(osc52.utf8))
+        backend.sendInput(hidden.pane, Data(osc52.utf8))
+        let deadline = Date().addingTimeInterval(15)
+        while copied.isEmpty, Date() < deadline { try await Task.sleep(nanoseconds: 100_000_000) }
+        try await Task.sleep(nanoseconds: 500_000_000) // room for a duplicate or a stray background copy
+
+        XCTAssertEqual(copied, [text], "the visible pane's copy, exactly once")
+        XCTAssertEqual(confirmations, 1)
+        XCTAssertEqual(hiddenCopied, [], "a pane off screen must not touch the clipboard")
+        host.removeFromSuperview()
+        try await backend.closeWorkspace(shown.workspace)
+        try await backend.closeWorkspace(hidden.workspace)
+    }
 }
 
 private actor OutputCollector {

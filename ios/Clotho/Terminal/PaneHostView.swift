@@ -52,6 +52,10 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     /// How the last subscribe resumed (live, replay or snapshot), shown briefly for checking resume.
     private(set) var lastMode: Subscription.Mode?
     var onModeChange: ((Subscription.Mode) -> Void)?
+    /// Called after the pane put text on the clipboard, for the "Copied" confirmation.
+    var onCopy: (() -> Void)?
+    /// Where pane copies go; tests swap in their own.
+    var pasteboard: PaneClipboard.Target = PaneClipboard.general
     private var sentViewport: Size?
     private var subscribed = false
     private var wantsSubscription = false
@@ -165,6 +169,11 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         applySize(Size(cols: cols, rows: rows))
     }
 
+    /// A copy from the pane (`pane.clipboard`); sent only to the pane's subscribers, so only to panes on screen.
+    func paneClipboard(text: String, selection: Bool) {
+        copyFromPane(text, selection: selection)
+    }
+
     func paneResync() {
         pending.removeAll()
     }
@@ -267,8 +276,39 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         UIApplication.shared.open(url)
     }
 
+    // OSC 52 seen by SwiftTerm in OUTPUT. A daemon with `pane.clipboard` sends each copy as an event
+    // instead (paneClipboard), and acting on the raw bytes too would copy twice, and again on every
+    // replay. Only older daemons rely on this path.
     func clipboardCopy(source: TerminalView, content: Data) {
-        if let text = String(data: content, encoding: .utf8) { UIPasteboard.general.string = text }
+        guard store.hello?.features.contains(.paneClipboard) != true,
+              let text = String(data: content, encoding: .utf8) else { return }
+        copyFromPane(text, selection: false)
+    }
+
+    /// The pane asked to set the clipboard (OSC 52; how Claude Code and Codex copy). Only the pane on
+    /// screen, with the app in front, may: a pane the user isn't looking at writing the phone's
+    /// clipboard would be a surprise, and they couldn't see what it copied.
+    func copyFromPane(_ text: String, selection: Bool) {
+        let foreground = UIApplication.shared.applicationState != .background
+        guard PaneClipboard.copy(text, selection: selection, visible: foreground && window != nil && subscribed,
+                                 to: pasteboard) else { return }
+        onCopy?()
+    }
+}
+
+/// Clipboard writes coming from a pane (OSC 52, docs/protocol.md "Clipboard"). Writes only: a pane can
+/// never read the clipboard (SwiftTerm's clipboardRead stays at its default, which refuses).
+enum PaneClipboard {
+    typealias Target = (String) -> Void
+    static let general: Target = { UIPasteboard.general.string = $0 }
+
+    /// Writes `text` if it's for the clipboard (not X11's primary selection, which iOS doesn't have), the
+    /// pane is visible and the text isn't empty; returns whether it did.
+    @discardableResult
+    static func copy(_ text: String, selection: Bool, visible: Bool, to pasteboard: Target) -> Bool {
+        guard !selection, visible, !text.isEmpty else { return false }
+        pasteboard(text)
+        return true
     }
 }
 

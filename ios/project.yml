@@ -38,7 +38,8 @@ targets:
         buildPhase: resources
     preBuildScripts:
       - name: Pack clothod builds
-        script: python3 "$SRCROOT/scripts/pack-dist.py" "$SRCROOT/../clothod/dist" "$SRCROOT/build-resources/dist"
+        # CLOTHOD_DIST (from build.sh) bundles another dist, e.g. a dev build of unreleased clothod.
+        script: python3 "$SRCROOT/scripts/pack-dist.py" "${CLOTHOD_DIST:-$SRCROOT/../clothod/dist}" "$SRCROOT/build-resources/dist"
         basedOnDependencyAnalysis: false
     dependencies:
       - package: ClothoKit

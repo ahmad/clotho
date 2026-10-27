@@ -11,6 +11,8 @@ struct PaneScreen: View {
     @State private var paneID: PaneID?
     @State private var mode: Subscription.Mode?
     @State private var browsingFiles: String?
+    /// Bumped each time the pane copies to the clipboard, which shows "Copied" briefly.
+    @State private var copies = 0
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
 
     init(connection: MachineConnection, initialTab: TabID, initialPane: PaneID? = nil) {
@@ -36,13 +38,14 @@ struct PaneScreen: View {
             if panes.count > 1 { paneStrip }
             ZStack(alignment: .topTrailing) {
                 if let pane {
-                    TerminalContainer(host: connection.terminal(for: pane), onMode: { mode = $0 })
+                    TerminalContainer(host: connection.terminal(for: pane), onMode: { mode = $0 }, onCopy: { copies += 1 })
                         .id(pane.id)
                 } else {
                     Color(Theme.background)
                 }
                 statusBadge
             }
+            .overlay(alignment: .bottom) { copiedBadge }
         }
         .background(Color(Theme.background))
         // Tap the title for the other tabs, or Rename to edit this one's title in place.
@@ -116,6 +119,24 @@ struct PaneScreen: View {
                 .task(id: mode) {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                     self.mode = nil
+                }
+        }
+    }
+
+    /// A short "Copied" after the pane (Claude Code, Codex, any OSC 52 app) put text on the clipboard.
+    @ViewBuilder private var copiedBadge: some View {
+        if copies > 0 {
+            Label("Copied", systemImage: "doc.on.clipboard")
+                .font(.caption)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(.thinMaterial, in: Capsule())
+                .padding(.bottom, 12)
+                .transition(.opacity)
+                .accessibilityIdentifier("copiedBadge")
+                .allowsHitTesting(false)
+                .task(id: copies) {
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    withAnimation { copies = 0 }
                 }
         }
     }
@@ -270,6 +291,7 @@ private struct ShortcutButtons: View {
 struct TerminalContainer: UIViewRepresentable {
     let host: PaneHostView
     var onMode: (Subscription.Mode) -> Void
+    var onCopy: () -> Void = {}
 
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
@@ -281,6 +303,7 @@ struct TerminalContainer: UIViewRepresentable {
     func updateUIView(_ container: UIView, context: Context) {
         if host.superview !== container { install(in: container) }
         host.onModeChange = onMode
+        host.onCopy = onCopy
     }
 
     private func install(in container: UIView) {
@@ -288,6 +311,7 @@ struct TerminalContainer: UIViewRepresentable {
         host.frame = container.bounds
         host.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         host.onModeChange = onMode
+        host.onCopy = onCopy
         container.addSubview(host)
         DispatchQueue.main.async { _ = host.terminal.becomeFirstResponder() }
     }

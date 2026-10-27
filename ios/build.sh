@@ -6,13 +6,16 @@
 cd "$(dirname "$0")"
 action=${1:-build}
 sim=${2:-$(xcrun simctl list devices booted | grep -m1 -o '[0-9A-F-]\{36\}')}
+# CLOTHOD_DIST=<dir> bundles (and tests against) that clothod dist instead of the release in clothod/dist, e.g.
+# CLOTHOD_DIST=$PWD/../clothod/target/dist-dev after `DIST_DIR=target/dist-dev clothod/scripts/dist.sh --dev`.
+export CLOTHOD_DIST=${CLOTHOD_DIST:-$PWD/../clothod/dist}
 # Simulator builds include push alerts (push.yml); see docs/push.md.
 # The packed clothod builds land here at build time; xcodegen needs the folder to exist (it is gitignored).
 mkdir -p build-resources/dist
 PUSH=YES xcodegen generate --quiet
 if [ "$action" = test ]; then
   trap 'scripts/cleanup-dev.sh' EXIT
-  mkdir -p /tmp/cki-ios-bin && rm -f /tmp/cki-ios-bin/clothod && cp ../clothod/dist/macos-aarch64/clothod /tmp/cki-ios-bin/clothod
+  mkdir -p /tmp/cki-ios-bin && rm -f /tmp/cki-ios-bin/clothod && cp "$CLOTHOD_DIST/macos-aarch64/clothod" /tmp/cki-ios-bin/clothod
   /tmp/cki-ios-bin/clothod start --runtime-dir /tmp/cki-ios --ephemeral
   scripts/ssh-test-server.sh
 fi

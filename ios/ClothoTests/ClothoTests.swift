@@ -30,4 +30,15 @@ final class ClothoTests: XCTestCase {
         XCTAssertFalse(row(.running, "hook", true).acceptsReply)
         XCTAssertFalse(row(.done, "hook", true).acceptsReply)
     }
+
+    /// Pane copies (OSC 52) reach the pasteboard only for the clipboard target, from a visible pane, with text.
+    func testPaneClipboardRules() {
+        var written: [String] = []
+        let pasteboard: PaneClipboard.Target = { written.append($0) }
+        XCTAssertTrue(PaneClipboard.copy("hi", selection: false, visible: true, to: pasteboard))
+        XCTAssertFalse(PaneClipboard.copy("bg", selection: false, visible: false, to: pasteboard), "pane not on screen")
+        XCTAssertFalse(PaneClipboard.copy("x11", selection: true, visible: true, to: pasteboard), "no primary selection on iOS")
+        XCTAssertFalse(PaneClipboard.copy("", selection: false, visible: true, to: pasteboard), "empty copy")
+        XCTAssertEqual(written, ["hi"])
+    }
 }
