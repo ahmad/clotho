@@ -195,7 +195,8 @@ is verified; this is a standing go for this round.
 - Agent hooks (Claude Code and Codex) were installed on all three machines at the user's request
   (2026-10-27). The backups are `*.bak-2026-10-27-clotho-hooks` next to ~/.claude/settings.json and
   ~/.codex/config.toml.
-- TestFlight build 202610271418 (bundling clothod 0.1.7) was uploaded by the user.
+- TestFlight build 202610271418 (bundling clothod 0.1.7) was uploaded by the user, then 202610271446
+  (the Panes icon, clothod 0.1.8).
 - App icon: "Panes" (option 3 of clothod's options page) on iOS and the Mac. The user said this
   directly to clothod ("I like option 3. Panes. use that everywhere"). The user also told clothod
   "upload to testflight when the icon is in". The upload runs from the Mac's own session, so the
