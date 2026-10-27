@@ -299,3 +299,53 @@ fn osc52_reads_are_never_answered() {
         assert!(vt.feed(b"\x1b]52;p;?\x1b\\").is_empty());
     }
 }
+
+/// An OSC that never ends must not grow the terminal without bound: past MAX_OSC it is dropped
+/// whole (nothing dispatched, no bell), and the terminal works normally after its terminator.
+#[test]
+fn an_endless_osc_is_dropped_not_buffered() {
+    for end in [&b"\x07"[..], b"\x1b\\"] {
+        let mut vt = Vt::new(20, 3);
+        let mut events = vt.feed(b"\x1b]0;");
+        let chunk = vec![b'A'; 1 << 20];
+        for _ in 0..(MAX_OSC >> 20) + 2 {
+            events.extend(vt.feed(&chunk));
+        }
+        assert!(vt.guard.buf.capacity() <= MAX_OSC + 1, "held {} bytes", vt.guard.buf.capacity());
+        events.extend(vt.feed(end));
+        events.extend(vt.feed(b"\x1b]2;ok\x07hi"));
+        assert_eq!(events, vec![VtEvent::Title(Some("ok".into()))], "nothing from the dropped OSC, not even a bell");
+        assert_eq!(vt.screen_text()[0].trim_end(), "hi");
+    }
+}
+
+/// OSC strings split across feeds, back to back, and ended every way vte ends them still work.
+#[test]
+fn osc_guard_keeps_normal_sequences_intact() {
+    let input: &[u8] = b"a\x1b]2;one\x07b\x1b]2;two\x1b\\c\x1b]7;file://h/tmp\x1b\\\x1b]2;three\x18d\x1b[1me\x1b";
+    for split in 0..input.len() {
+        let mut vt = Vt::new(20, 3);
+        let mut ev = vt.feed(&input[..split]);
+        ev.extend(vt.feed(&input[split..]));
+        let titles: Vec<_> = ev.iter().filter_map(|e| if let VtEvent::Title(t) = e { t.clone() } else { None }).collect();
+        assert_eq!(titles, ["one", "two", "three"], "split at {split}");
+        assert_eq!(vt.cwd(), Some("/tmp"));
+        assert_eq!(vt.screen_text()[0].trim_end(), "abcde", "split at {split}");
+    }
+}
+
+/// Titles keep no control characters (C1 ones like U+009C would end the OSC early in a client
+/// that honours them) and are capped; an OSC 7 cwd with control characters is ignored.
+#[test]
+fn titles_and_cwds_are_printable_and_bounded() {
+    let mut vt = Vt::new(20, 3);
+    vt.feed("\x1b]2;a\u{9c}b\u{9b}2Jc\x7fd\x07".as_bytes());
+    assert_eq!(vt.title(), Some("ab2Jcd"));
+    vt.feed(format!("\x1b]2;{}\x07", "x".repeat(MAX_TITLE * 2)).as_bytes());
+    assert_eq!(vt.title().unwrap().chars().count(), MAX_TITLE);
+    vt.feed(b"\x1b]7;file://h/ok\x07");
+    vt.feed(b"\x1b]7;file://h/bad%0Aline\x07");
+    assert_eq!(vt.cwd(), Some("/ok"));
+    let snap = vt.snapshot(None);
+    assert!(!String::from_utf8_lossy(&snap).contains('\u{9c}'));
+}

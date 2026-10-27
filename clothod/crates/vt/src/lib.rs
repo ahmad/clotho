@@ -33,6 +33,18 @@ use alacritty_terminal::vte::ansi::{
 /// line costs cols × 24 bytes in the grid.
 pub const DEFAULT_SCROLLBACK: usize = 2_000;
 
+/// Longest OSC string (the bytes between `ESC ]` and its terminator) the terminal accepts: room
+/// for an OSC 52 copy of 1 MiB (base64) and its prefix. vte buffers an OSC string without limit
+/// until it ends, so a pane printing `ESC ] 0 ;` and then endless bytes (a hostile file, a
+/// binary blob) would grow serve without bound. Longer ones are dropped whole, never cut short.
+pub const MAX_OSC: usize = (1 << 20) / 3 * 4 + 4 + 4096;
+
+/// Longest title kept (in chars); longer ones are cut. Titles go out in every pane event.
+pub const MAX_TITLE: usize = 1024;
+
+/// Longest OSC 7 working directory kept (in bytes); longer ones are ignored.
+pub const MAX_CWD: usize = 4096;
+
 /// Something the terminal produced besides screen changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VtEvent {
@@ -169,7 +181,10 @@ impl vte::Perform for Tracker {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         if params.first() == Some(&&b"7"[..]) && params.len() > 1 {
             let url = params[1..].join(&b';');
-            self.cwd = Some(cwd_from_osc7(&String::from_utf8_lossy(&url)));
+            let cwd = cwd_from_osc7(&String::from_utf8_lossy(&url));
+            if cwd.len() <= MAX_CWD && !cwd.chars().any(char::is_control) {
+                self.cwd = Some(cwd);
+            }
         }
     }
 }
@@ -197,6 +212,94 @@ fn cwd_from_osc7(url: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Holds back OSC strings until they end, so the parsers only ever see whole ones of at most
+/// [`MAX_OSC`] bytes (see there). Its idea of "inside an OSC" matches vte's: `ESC ]` starts one
+/// from any state, and BEL, CAN, SUB or ESC ends it.
+#[derive(Default)]
+struct OscGuard {
+    state: OscState,
+    /// The OSC so far, from its `]` (the `ESC` already went to the parsers).
+    buf: Vec<u8>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+enum OscState {
+    #[default]
+    Ground,
+    /// An `ESC` went through; a `]` now would start an OSC.
+    Esc,
+    /// Inside an OSC, held back in `buf`.
+    Osc,
+    /// Inside an OSC that went over [`MAX_OSC`]: dropping it up to its terminator.
+    Drop,
+}
+
+/// What to feed the parsers: borrowed runs of the input, or bytes the guard released.
+enum Piece<'a> {
+    Input(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl OscGuard {
+    fn filter<'a>(&mut self, bytes: &'a [u8]) -> Vec<Piece<'a>> {
+        let mut out = Vec::new();
+        // Start of the run of input not yet emitted, if passing through.
+        let mut run = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            match self.state {
+                OscState::Ground | OscState::Esc => {
+                    if self.state == OscState::Esc && b == b']' {
+                        if run < i {
+                            out.push(Piece::Input(&bytes[run..i]));
+                        }
+                        self.buf.clear();
+                        self.buf.push(b']');
+                        self.state = OscState::Osc;
+                        run = i + 1;
+                    } else {
+                        self.state = if b == 0x1b { OscState::Esc } else { OscState::Ground };
+                    }
+                }
+                OscState::Osc | OscState::Drop => {
+                    let end = matches!(b, 0x07 | 0x18 | 0x1a | 0x1b);
+                    if self.state == OscState::Osc {
+                        if end {
+                            let mut whole = std::mem::take(&mut self.buf);
+                            whole.push(b);
+                            out.push(Piece::Owned(whole));
+                        } else if self.buf.len() >= MAX_OSC {
+                            self.buf = Vec::new();
+                            self.state = OscState::Drop;
+                        } else {
+                            self.buf.push(b);
+                        }
+                    } else if end {
+                        // The parsers sit in Escape since the dropped OSC's ESC: CAN takes them
+                        // back to ground without dispatching anything (a BEL would ring).
+                        out.push(Piece::Owned(if b == 0x1b { vec![0x18, 0x1b] } else { vec![0x18] }));
+                    }
+                    if end {
+                        self.state = if b == 0x1b { OscState::Esc } else { OscState::Ground };
+                    }
+                    run = i + 1;
+                }
+            }
+        }
+        if matches!(self.state, OscState::Ground | OscState::Esc) && run < bytes.len() {
+            out.push(Piece::Input(&bytes[run..]));
+        }
+        if self.buf.capacity() > 64 << 10 && self.buf.is_empty() {
+            self.buf = Vec::new();
+        }
+        out
+    }
+}
+
+/// `s` without control characters (C0, DEL, C1), cut to `max` chars: what a title shows.
+pub fn printable(s: &str, max: usize) -> String {
+    s.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
 /// Copy-only OSC 52, stated rather than left to alacritty's default: a pane may set the
 /// clipboard but must never read it (a load would reply with the user's clipboard contents).
 fn term_config(scrollback: usize) -> Config {
@@ -209,6 +312,7 @@ pub struct Vt {
     listener: Listener,
     tracker: Tracker,
     parser: vte::Parser,
+    guard: OscGuard,
     title: Option<String>,
     scrollback: usize,
 }
@@ -228,6 +332,7 @@ impl Vt {
             listener,
             tracker: Tracker { kitty: [Vec::new(), Vec::new()], alt: false, rows, region: None, cwd: None },
             parser: vte::Parser::new(),
+            guard: OscGuard::default(),
             title: None,
             scrollback,
         }
@@ -260,8 +365,14 @@ impl Vt {
     /// Feed PTY output. Returns replies for the application and other notable events.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<VtEvent> {
         let cwd_before = self.tracker.cwd.clone();
-        self.parser.advance(&mut self.tracker, bytes);
-        self.processor.advance(&mut self.term, bytes);
+        for piece in self.guard.filter(bytes) {
+            let b = match &piece {
+                Piece::Input(b) => b,
+                Piece::Owned(b) => &b[..],
+            };
+            self.parser.advance(&mut self.tracker, b);
+            self.processor.advance(&mut self.term, b);
+        }
         let mut events = self.drain_events();
         if self.tracker.cwd != cwd_before {
             if let Some(cwd) = &self.tracker.cwd {
@@ -328,6 +439,7 @@ impl Vt {
                     out.push(VtEvent::Reply(format(size).into_bytes()));
                 }
                 Event::Title(t) => {
+                    let t = printable(&t, MAX_TITLE);
                     self.title = Some(t.clone());
                     out.push(VtEvent::Title(Some(t)));
                 }

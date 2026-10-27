@@ -149,8 +149,17 @@ pub fn default_dist() -> Option<PathBuf> {
     exe.ancestors().skip(1).take(4).map(|a| a.join("dist")).find(|d| d.join("manifest.json").is_file())
 }
 
+/// An SSH destination, never an option: ssh would read `-oProxyCommand=…` as one and run it.
+fn check_host(host: &str) -> Result<()> {
+    if host.is_empty() || host.starts_with('-') || host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        bail!("{host:?} is not an SSH destination");
+    }
+    Ok(())
+}
+
 impl Remote {
     pub fn new(host: &str) -> Result<Remote> {
+        check_host(host)?;
         let ssh = match std::env::var("CLOTHO_SSH") {
             Ok(s) if !s.trim().is_empty() => s.split_whitespace().map(String::from).collect(),
             _ => vec!["ssh".into(), "-T".into()],
@@ -349,5 +358,18 @@ impl Remote {
 
     pub fn dist(&self) -> &Path {
         &self.dist
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_host_can_not_be_an_ssh_option() {
+        for bad in ["-oProxyCommand=touch /tmp/x", "", "a b", "host\n-oX", "-p22"] {
+            assert!(super::check_host(bad).is_err(), "{bad:?}");
+        }
+        for ok in ["devbox", "ahmad@devbox", "macbook@imac", "user@[::1]", "h.example.com"] {
+            assert!(super::check_host(ok).is_ok(), "{ok:?}");
+        }
     }
 }

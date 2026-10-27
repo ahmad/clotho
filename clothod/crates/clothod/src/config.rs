@@ -67,14 +67,7 @@ pub fn set_scrollback_lines(n: usize) -> Result<PathBuf, String> {
     };
     let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| format!("{} is not valid TOML, not changing it: {e}", path.display()))?;
     doc["scrollback_lines"] = toml_edit::value(n as i64);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    // Atomic: a reader (or a crash) sees the old file or the new one.
-    let tmp = path.with_file_name(format!(".config.toml.{}", std::process::id()));
-    std::fs::write(&tmp, doc.to_string()).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", path.display())
-    })?;
+    // Atomic, keeping the file's permissions.
+    crate::write_atomic(&path, doc.to_string().as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(path)
 }

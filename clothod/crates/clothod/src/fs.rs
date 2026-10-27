@@ -26,7 +26,7 @@ const DEFAULT_WINDOW: u64 = 4 << 20;
 const PART_TTL_SECS: u64 = 24 * 3600;
 
 pub(crate) struct Ctx {
-    /// Where the part-file registry lives.
+    /// The instance's state dir (where 0.1.10 and earlier kept a part-file registry).
     pub state_dir: PathBuf,
 }
 
@@ -155,10 +155,20 @@ enum Handle {
 }
 
 struct Ctl {
-    /// Reads: what the client acknowledged.
+    /// Reads: what the client acknowledged. Writes: what reached the file.
     acked: AtomicU64,
     wake: Notify,
     cancelled: AtomicBool,
+    /// Writes: the flow-control window; data past `acked + window` is a broken client.
+    window: u64,
+    /// Writes: the client sent past its window, or another stream took the part file over.
+    failed: Mutex<Option<&'static str>>,
+}
+
+impl Ctl {
+    fn new(at: u64, window: u64) -> Arc<Ctl> {
+        Arc::new(Ctl { acked: AtomicU64::new(at), wake: Notify::new(), cancelled: AtomicBool::new(false), window, failed: Mutex::new(None) })
+    }
 }
 
 struct Chunk {
@@ -194,7 +204,16 @@ pub(crate) fn ack(client: &Arc<Client>, p: &Value) {
 
 /// A FILE_DATA frame from the client: data for a write stream.
 pub(crate) fn data(client: &Arc<Client>, stream: u64, offset: u64, flags: u8, data: Vec<u8>) {
-    if let Some(Handle::Write(_, tx)) = client.fs.map.lock().unwrap().get(&stream) {
+    let mut map = client.fs.map.lock().unwrap();
+    if let Some(Handle::Write(ctl, tx)) = map.get(&stream) {
+        // Queued data is memory: a client ignoring its window (more than one window ahead of
+        // the disk) loses the stream instead of growing serve.
+        let end = offset.saturating_add(data.len() as u64);
+        if end > ctl.acked.load(Ordering::SeqCst).saturating_add(2 * ctl.window) {
+            *ctl.failed.lock().unwrap() = Some("window_exceeded");
+            map.remove(&stream);
+            return;
+        }
         let _ = tx.send(Chunk { offset, fin: flags & FILE_FIN != 0, data });
     }
 }
@@ -372,7 +391,7 @@ fn read(client: &Arc<Client>, p: &Value) -> R<Value> {
     }
     let end = p["length"].as_u64().map_or(size, |l| size.min(offset.saturating_add(l)));
     let (chunk, window) = stream_params(p);
-    let ctl = Arc::new(Ctl { acked: AtomicU64::new(offset), wake: Notify::new(), cancelled: AtomicBool::new(false) });
+    let ctl = Ctl::new(offset, window);
     let id = client.fs.open(Handle::Read(ctl.clone()))?;
     let start = Arc::new(Notify::new());
     client.fs.pending_start.lock().unwrap().insert(id, start.clone());
@@ -434,61 +453,116 @@ fn read(client: &Arc<Client>, p: &Value) -> R<Value> {
 
 // ---- writes ------------------------------------------------------------------------------
 
-/// Part files of resumable writes: part path -> (source fingerprint, created unix secs).
-fn registry_path(ctx: &Ctx) -> PathBuf {
-    ctx.state_dir.join("fs-parts.json")
+/// The process umask, read once at startup ([`init_umask`]): new files without a requested mode
+/// get `0666 & !umask`, as `open` would have given them.
+static UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Read the umask. Call before any other thread starts: reading it means setting it.
+pub fn init_umask() {
+    let m = unsafe { libc::umask(0o077) };
+    unsafe { libc::umask(m) };
+    let _ = UMASK.set(m as u32);
 }
 
-fn load_parts(ctx: &Ctx) -> HashMap<String, (String, u64)> {
-    std::fs::read(registry_path(ctx)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+pub(crate) fn umask() -> u32 {
+    UMASK.get().copied().unwrap_or(0o022)
 }
 
-fn save_parts(ctx: &Ctx, parts: &HashMap<String, (String, u64)>) {
-    let _ = clotho_proto::platform::ensure_private_dir(&ctx.state_dir);
-    if let Ok(b) = serde_json::to_vec(parts) {
-        let tmp = registry_path(ctx).with_extension("tmp");
-        if std::fs::write(&tmp, b).is_ok() {
-            let _ = std::fs::rename(tmp, registry_path(ctx));
-        }
-    }
+fn default_mode() -> u32 {
+    0o666 & !umask()
 }
+
+/// Writes in progress, by part file, across all connections: a resumed write of the same part
+/// takes over from one still open on a connection that went half-open (nothing tells serve it
+/// died, and its stream would hold the part forever).
+static ACTIVE: Mutex<Option<HashMap<PathBuf, Arc<Ctl>>>> = Mutex::new(None);
+
+/// Part files older than this are swept from a directory a write goes to.
+const SWEEP_EVERY_SECS: u64 = 3600;
+static SWEPT: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-static PARTS_LOCK: Mutex<()> = Mutex::new(());
-
-/// Record (or forget, with `None`) a kept part file; also expire old ones.
-fn note_part(ctx: &Ctx, part: &Path, source: Option<&str>) {
-    let _g = PARTS_LOCK.lock().unwrap();
-    let mut parts = load_parts(ctx);
+/// Delete this user's part files in `dir` untouched for [`PART_TTL_SECS`] (at most hourly per
+/// dir). Part files live next to their target, so this finds them wherever the instance that
+/// wrote them went (a private instance's state dies with it).
+fn sweep(dir: &Path, keep: &Path) {
     let now = now_secs();
-    parts.retain(|p, (_, created)| {
-        let keep = now.saturating_sub(*created) < PART_TTL_SECS;
-        if !keep {
-            let _ = std::fs::remove_file(p);
+    {
+        let mut g = SWEPT.lock().unwrap();
+        let swept = g.get_or_insert_with(HashMap::new);
+        if swept.get(dir).is_some_and(|t| now.saturating_sub(*t) < SWEEP_EVERY_SECS) {
+            return;
         }
-        keep
-    });
-    let key = part.to_string_lossy().into_owned();
-    match source {
-        Some(s) => {
-            parts.insert(key, (s.to_string(), now));
+        swept.insert(dir.to_path_buf(), now);
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let uid = clotho_proto::platform::current_uid();
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let b = name.as_bytes();
+        if !b.starts_with(b".") || !b.windows(13).any(|w| w == b".clotho-part-") {
+            continue;
         }
-        None => {
-            parts.remove(&key);
+        let path = e.path();
+        let Ok(m) = std::fs::symlink_metadata(&path) else { continue };
+        if path != keep && m.is_file() && m.uid() == uid && now.saturating_sub(m.mtime().max(0) as u64) >= PART_TTL_SECS {
+            let _ = std::fs::remove_file(&path);
         }
     }
-    save_parts(ctx, &parts);
 }
 
-fn part_source(ctx: &Ctx, part: &Path) -> Option<String> {
-    let _g = PARTS_LOCK.lock().unwrap();
-    load_parts(ctx).get(&*part.to_string_lossy()).map(|(s, _)| s.clone())
+/// Open (or create) a part file, never following a symlink and only ever ours: in a shared
+/// directory (/tmp) someone else could have put a link or file at a predictable part name.
+/// Returns the file and how much of it is already there (`resume`), else an empty new file.
+fn open_part(part: &Path, resume: bool) -> std::io::Result<(std::fs::File, u64)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if resume {
+        let f = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NOFOLLOW).open(part);
+        match f {
+            Ok(f) => {
+                let m = f.metadata()?;
+                if m.is_file() && m.uid() == clotho_proto::platform::current_uid() && m.nlink() == 1 {
+                    return Ok((f, m.len()));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
+    }
+    // Not resumable: the name itself goes (a link, not what it points to), then a fresh file
+    // only we can read until it is complete.
+    match std::fs::remove_file(part) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(part)?;
+    Ok((f, 0))
+}
+
+/// Sweep and part-name parts of `source`: the first 12 hex digits of its SHA-256.
+fn source_tag(source: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(source.as_bytes())[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Forget `ctl` as the writer of `part`, unless another stream took it over.
+fn release(part: &Path, ctl: &Arc<Ctl>) {
+    let mut g = ACTIVE.lock().unwrap();
+    if let Some(m) = g.as_mut() {
+        if m.get(part).is_some_and(|c| Arc::ptr_eq(c, ctl)) {
+            m.remove(part);
+        }
+    }
 }
 
 fn write(ctx: &Ctx, client: &Arc<Client>, p: &Value) -> R<Value> {
+    // 0.1.10 and earlier kept a registry of part files in the state dir; parts are now found
+    // by name.
+    let _ = std::fs::remove_file(ctx.state_dir.join("fs-parts.json"));
     let requested = path_param(p, "path")?;
     // Writing through a symlink writes its target (the link survives).
     let target = match std::fs::symlink_metadata(&requested) {
@@ -517,57 +591,76 @@ fn write(ctx: &Ctx, client: &Arc<Client>, p: &Value) -> R<Value> {
         }
     }
     let size = p["size"].as_u64();
-    let mode = p["mode"].as_u64().map(|m| m as u32 & 0o7777).or(existing.as_ref().map(|m| m.mode() & 0o7777));
+    let mode = p["mode"].as_u64().map(|m| m as u32 & 0o7777).or(existing.as_ref().map(|m| m.mode() & 0o7777)).unwrap_or_else(default_mode);
     let set_mtime_ns = parse_ns(p.get("mtime_ns"))?;
     let upload_id: Option<String> = p["upload_id"]
         .as_str()
         .map(|u| u.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(64).collect::<String>())
         .filter(|u| !u.is_empty());
-    let source = p["source"].as_str().unwrap_or("").to_string();
-    let tag = upload_id.clone().unwrap_or_else(|| format!("{}-{}", std::process::id(), now_secs()));
+    let source = p["source"].as_str().unwrap_or("");
+    // A resumable part is named by its upload and its source, so only the same upload of the
+    // same data resumes it, whichever instance (or build) wrote it.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tag = match &upload_id {
+        Some(u) => format!("{u}-{}", source_tag(source)),
+        None => format!("{}-{}-{}", std::process::id(), now_secs(), SEQ.fetch_add(1, Ordering::Relaxed)),
+    };
     let mut part_name = OsString::from(".");
     part_name.push(&name);
     part_name.push(format!(".clotho-part-{tag}"));
     let part = dir.join(part_name);
-
-    // Resume only the same upload of the same source data.
-    let mut offset = 0;
-    if upload_id.is_some() {
-        if let Ok(m) = std::fs::metadata(&part) {
-            if part_source(ctx, &part).as_deref() == Some(source.as_str()) {
-                offset = m.len();
-            }
-        }
-    }
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(offset == 0)
-        .open(&part)
-        .map_err(|e| io_err(e, &part))?;
-    if upload_id.is_some() {
-        note_part(ctx, &part, Some(&source));
-    }
+    sweep(&dir, &part);
 
     let (_, window) = stream_params(p);
-    let ctl = Arc::new(Ctl { acked: AtomicU64::new(offset), wake: Notify::new(), cancelled: AtomicBool::new(false) });
-    let (tx, mut rx) = mpsc::unbounded_channel::<Chunk>();
-    let id = client.fs.open(Handle::Write(ctl.clone(), tx)).inspect_err(|_| {
-        if upload_id.is_none() {
-            let _ = std::fs::remove_file(&part);
+    // Take the part over from a stream still writing it (its connection went half-open), before
+    // opening it, so that stream no longer touches it.
+    let ctl = Ctl::new(0, window);
+    {
+        let mut g = ACTIVE.lock().unwrap();
+        if let Some(old) = g.get_or_insert_with(HashMap::new).insert(part.clone(), ctl.clone()) {
+            *old.failed.lock().unwrap() = Some("superseded");
+            old.wake.notify_one();
         }
-    })?;
+    }
+    let (file, offset) = match open_part(&part, upload_id.is_some()) {
+        Ok(f) => f,
+        Err(e) => {
+            release(&part, &ctl);
+            return Err(io_err(e, &part));
+        }
+    };
+    ctl.acked.store(offset, Ordering::SeqCst);
+    let (tx, mut rx) = mpsc::unbounded_channel::<Chunk>();
+    let id = match client.fs.open(Handle::Write(ctl.clone(), tx)) {
+        Ok(id) => id,
+        Err(e) => {
+            release(&part, &ctl);
+            if upload_id.is_none() {
+                let _ = std::fs::remove_file(&part);
+            }
+            return Err(e);
+        }
+    };
 
     let client = client.clone();
-    let ctx = Ctx { state_dir: ctx.state_dir.clone() };
+    let resumable = upload_id.is_some();
     tokio::spawn(async move {
         let file = Arc::new(file);
         let mut written = offset;
         let mut last_ack = offset;
         let finish: Result<Value, FsError> = loop {
-            let Some(chunk) = rx.recv().await else {
-                // Cancelled or connection gone.
-                break Err(err("cancelled", ""));
+            let chunk = tokio::select! {
+                c = rx.recv() => c,
+                _ = ctl.wake.notified() => None,
+            };
+            let Some(chunk) = chunk else {
+                let failed = *ctl.failed.lock().unwrap();
+                break Err(match failed {
+                    Some("superseded") => err("superseded", "another write of this upload took over"),
+                    Some(code) => err(code, format!("data past the stream's window ({window} bytes beyond {written})")),
+                    // Cancelled or connection gone.
+                    None => err("cancelled", ""),
+                });
             };
             if chunk.offset != written {
                 break Err(err("bad_request", format!("data at {} but the stream is at {written}", chunk.offset)));
@@ -580,6 +673,7 @@ fn write(ctx: &Ctx, client: &Arc<Client>, p: &Value) -> R<Value> {
                     Ok(Err(e)) => break Err(io_err(e, &part)),
                     Err(_) => break Err(err("io_error", "write task failed")),
                 }
+                ctl.acked.store(written, Ordering::SeqCst);
             }
             if written - last_ack >= window / 4 || (chunk.fin && written != last_ack) {
                 client.event("fs.ack", json!({"stream": id, "offset": written}));
@@ -590,21 +684,18 @@ fn write(ctx: &Ctx, client: &Arc<Client>, p: &Value) -> R<Value> {
             }
         };
         client.fs.close(id);
+        let superseded = matches!(&finish, Err(e) if e.code == "superseded");
+        if !superseded {
+            release(&part, &ctl);
+        }
         match finish {
-            Ok(entry) => {
-                if upload_id.is_some() {
-                    note_part(&ctx, &part, None);
-                }
-                client.event("fs.done", json!({"stream": id, "entry": entry}));
-            }
+            Ok(entry) => client.event("fs.done", json!({"stream": id, "entry": entry})),
             Err(e) => {
-                // Keep a resumable part file unless the data itself was rejected.
-                let keep = upload_id.is_some() && matches!(e.code, "cancelled" | "io_error" | "no_space");
+                // Keep a resumable part file unless the data itself was rejected (and always
+                // when another stream has it now).
+                let keep = superseded || (resumable && matches!(e.code, "cancelled" | "io_error" | "no_space" | "window_exceeded"));
                 if !keep {
                     let _ = std::fs::remove_file(&part);
-                    if upload_id.is_some() {
-                        note_part(&ctx, &part, None);
-                    }
                 }
                 if e.code == "cancelled" {
                     if ctl.cancelled.load(Ordering::SeqCst) {
@@ -626,7 +717,7 @@ fn finish_write(
     target: &Path,
     size: Option<u64>,
     written: u64,
-    mode: Option<u32>,
+    mode: u32,
     mtime: Option<i128>,
     overwrite: bool,
     expect: Option<i128>,
@@ -638,9 +729,7 @@ fn finish_write(
     }
     file.set_len(written).map_err(|e| io_err(e, part))?;
     file.sync_all().map_err(|e| io_err(e, part))?;
-    if let Some(m) = mode {
-        std::fs::set_permissions(part, std::fs::Permissions::from_mode(m)).map_err(|e| io_err(e, part))?;
-    }
+    std::fs::set_permissions(part, std::fs::Permissions::from_mode(mode)).map_err(|e| io_err(e, part))?;
     if let Some(ns) = mtime {
         set_mtime(part, ns).map_err(|e| io_err(e, part))?;
     }

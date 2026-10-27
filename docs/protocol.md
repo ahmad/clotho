@@ -34,7 +34,13 @@ u8   type
 ...  body
 ```
 
-The maximum `length` is 16 MiB. A peer that receives a larger frame closes the connection.
+The maximum `length` is 16 MiB. A peer that receives a larger frame closes the connection. JSON
+nested deeper than 128 levels is malformed, and so does the same.
+
+A client has to keep reading. If more than 64 MiB of replies and events are waiting for a client
+that has stopped reading (a half-open connection, a suspended app), the daemon closes the
+connection rather than buffering more: reconnect and resync as after any disconnect. Pane output
+has its own limit, below that (see [Subscribing](#subscribing)).
 
 | type | name     | body                                                                 | direction |
 |------|----------|----------------------------------------------------------------------|-----------|
@@ -208,7 +214,13 @@ the life of the object and never reused within an `instance`.
 - Pane fields:
   - `cols` and `rows` are the PTY size.
   - `seq` is the pane's output length so far (see [seq](#seq)).
-  - `title` comes from OSC 0/2, and is `null` if never set.
+  - `title` comes from OSC 0/2, and is `null` if never set. It holds no control characters (C0,
+    DEL, C1 are dropped) and at most 1024 characters. `cwd` comes from OSC 7 (at most 4096 bytes;
+    one with control characters is ignored) or the process.
+  - A pane's output is untrusted: the program may be `cat` of any file or a shell on another
+    machine. An OSC string over about 1.4 MiB (enough for a 1 MiB OSC 52 copy) is dropped whole,
+    unparsed, so endless output can't grow the daemon. Clients get the raw OUTPUT bytes regardless
+    and should apply their own limits.
   - `cwd` comes from OSC 7, with a fallback to the process's cwd (`/proc` on Linux, `proc_pidinfo`
     on macOS); it is `null` if unknown.
   - `exited` is `null` while the pane runs, then `{"code": 0}` or `{"signal": 9}`.
@@ -742,9 +754,11 @@ FILE_DATA:  u64 stream | u64 offset | u8 flags | bytes...      flags: 1 = FIN (l
 ← {"event": "fs.done", "data": {"stream": 4, "entry": {…}}}
 ```
 
-- **Atomic:** the bytes go to a hidden temp file next to the target (`.<name>.clotho-part-<id>`).
-  After FIN it is fsynced, `size` (if given) is checked, `mode` and `mtime_ns` are applied, and it
-  is renamed over the target. Readers never see a partial file.
+- **Atomic:** the bytes go to a hidden temp file next to the target (`.<name>.clotho-part-<tag>`).
+  It is created exclusively, mode 0600, and never through a symlink: until the write completes,
+  only the user can read it, even in a shared directory. After FIN it is fsynced, `size` (if
+  given) is checked, the final mode and `mtime_ns` are applied, and it is renamed over the target.
+  Readers never see a partial file.
 - **Symlinks:** writing to a path that is a symlink writes to the file it points to (the temp file
   goes next to the link's target), so links survive edits. A dangling link is `not_found`.
 - **Conflicts:** `overwrite` defaults to false, so an existing target is `exists` unless
@@ -755,12 +769,23 @@ FILE_DATA:  u64 stream | u64 offset | u8 flags | bytes...      flags: 1 = FIN (l
   default a replaced file keeps its old mode, and a new file gets 0644 less the umask.
 - **Mtime:** `mtime_ns` sets the final file's modification time (copies keep their times).
   Without it, it's the time of the write.
-- **Resume:** a client-chosen `upload_id` names the part file. It is kept whenever a write with
-  an `upload_id` doesn't finish, whether through `fs.cancel` or a dropped connection, and it is
-  deleted after 24 h if nobody resumes it. A later write with the same `upload_id`, path and
-  `source` (any string identifying the local data, for example `size:mtime`) continues where the
-  part file ends: the reply's `offset`. If `source` differs, the part is discarded and the write
-  starts at 0. Without `upload_id`, every write starts at 0 and nothing is kept.
+- **Resume:** with a client-chosen `upload_id`, the part file is named after the upload and a
+  hash of `source` (any string identifying the local data, for example `size:mtime`):
+  `.<name>.clotho-part-<upload_id>-<12 hex digits>`. It is kept whenever such a write doesn't
+  finish (`fs.cancel`, a dropped connection, `window_exceeded`). A later write with the same
+  `upload_id`, path and `source` continues where the part file ends: the reply's `offset`. If
+  `source` differs, it's a different part file and the write starts at 0. Without `upload_id`,
+  every write starts at 0 and nothing is kept.
+  - Resume needs nothing but the part file, so it works after a serve restart, an upgrade, or
+    the end of the instance that started the upload (a private instance's state dies with it).
+    Since 0.1.11; 0.1.10 and earlier kept a registry in the instance's state dir, and their part
+    files don't resume after an upgrade (they are swept like any other).
+  - Parts nobody resumes are deleted 24 h after their last write, by the next write into the
+    same directory (at most one sweep per directory an hour).
+  - **Taking over:** if a write of the same part is still open, on this or another connection,
+    the new write takes it over and the old stream ends with `fs.error` `superseded`. A
+    connection that went half-open (the link died and nothing told the daemon) never holds a
+    resume up. The client should still close the old connection.
 
 **Ending a stream early:**
 
@@ -769,6 +794,13 @@ FILE_DATA:  u64 stream | u64 offset | u8 flags | bytes...      flags: 1 = FIN (l
 - A failure mid-stream is `{"event": "fs.error", "data": {"stream", "code", "message"}}`. The
   stream is over and FILE_DATA for it is ignored.
 - A dropped connection cancels its streams (keeping part files, as above).
+- A write whose data runs more than two windows ahead of what reached the disk ends with
+  `fs.error` `window_exceeded`; a client that keeps to its window never sees it.
+- **Liveness:** during a write the daemon sends `fs.ack` every quarter window that reaches the
+  disk. A dead link shows up as no acks while data is outstanding, but a wedged SSH multiplexer
+  can keep a dead connection looking open for minutes. Clients should also `ping` (replies go out
+  ahead of file data) every 15 s and drop the connection after 30 s without a reply, then resume
+  on a fresh one.
 - `fs.done`, `fs.error` and `fs.ack` (from the daemon) go to the connection that owns the stream,
   whether or not it subscribed to events.
 
@@ -791,7 +823,8 @@ for both apps, so they behave the same.
 `fs.*` failures use the usual error object, with these codes: `not_found`, `exists`,
 `permission_denied`, `not_a_directory`, `is_a_directory`, `not_empty`, `cross_device`,
 `no_space`, `read_only`, `conflict`, `changed`, `too_many_streams`, `bad_request`, and `io_error`
-(anything else, with the OS message).
+(anything else, with the OS message). Stream-only codes (in `fs.error`): `superseded` and
+`window_exceeded` (both since 0.1.11).
 
 ### Later
 

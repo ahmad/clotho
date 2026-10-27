@@ -370,3 +370,82 @@ async fn bridge_exits_when_the_daemon_dies_and_reconnect_resumes() {
     wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "back-42")).await.unwrap();
 }
 
+
+/// An upload over SSH is cut mid-stream (the ssh process dies, as when a proxy or the network
+/// goes), against a remote instance that outlives the connection. The reconnected client
+/// resumes from what reached the remote disk and the file arrives intact.
+#[tokio::test]
+async fn upload_resumes_after_the_ssh_link_is_cut() {
+    use clotho_proto::Frame;
+    let h = need_host!();
+    let Session { client: mut c, child: mut ssh, path, .. } = h.r.connect().await.unwrap();
+    let instance = c.hello["instance"].clone();
+    let dir = format!("{}/files", h.runtime);
+    c.request("fs.mkdir", json!({"path": dir, "parents": true})).await.unwrap();
+    let data: Vec<u8> = (0..(24u32 << 20)).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    let params = json!({"path": format!("{dir}/up.bin"), "size": data.len(), "upload_id": "cut-1", "source": "test", "chunk": 262144, "window": 4 << 20});
+    let r = c.request("fs.write", params.clone()).await.unwrap();
+    let s = r["stream"].as_u64().unwrap();
+    // Send everything the window allows, and cut the link once part of it is on disk.
+    let (mut pos, mut acked) = (0u64, 0u64);
+    let deadline = Instant::now() + T;
+    while acked < 6 << 20 {
+        while pos < acked + (4 << 20) {
+            c.send(Frame::FileData { stream: s, offset: pos, flags: 0, data: data[pos as usize..pos as usize + 262144].to_vec() });
+            pos += 262144;
+        }
+        if let Ok(Some(Frame::Json(v))) = tokio::time::timeout(Duration::from_millis(200), c.recv()).await {
+            if v["event"] == "fs.ack" && v["data"]["stream"] == s {
+                acked = v["data"]["offset"].as_u64().unwrap();
+            }
+        }
+        assert!(Instant::now() < deadline, "no progress: acked {acked}");
+    }
+    ssh.kill().await.unwrap();
+    drop(c);
+
+    let Session { client: mut c, .. } = h.r.bridge(&path).await.unwrap();
+    assert_eq!(c.hello["instance"], instance, "same long-lived instance");
+    let r = c.request("fs.write", params).await.unwrap();
+    let from = r["offset"].as_u64().unwrap();
+    assert!(from >= acked && from <= pos && from % 262144 == 0, "resumes at {from} (acked {acked}, sent {pos})");
+    let s = r["stream"].as_u64().unwrap();
+    let mut pos = from;
+    let mut acked = from;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let done = loop {
+        while pos < data.len() as u64 && pos < acked + (4 << 20) {
+            let end = (pos + 262144).min(data.len() as u64);
+            c.send(Frame::FileData { stream: s, offset: pos, flags: 0, data: data[pos as usize..end as usize].to_vec() });
+            pos = end;
+            if pos == data.len() as u64 {
+                c.send(Frame::FileData { stream: s, offset: pos, flags: clotho_proto::frame::FILE_FIN, data: Vec::new() });
+            }
+        }
+        if let Ok(Some(Frame::Json(v))) = tokio::time::timeout(Duration::from_millis(200), c.recv()).await {
+            if v["data"]["stream"] == s {
+                match v["event"].as_str() {
+                    Some("fs.ack") => acked = v["data"]["offset"].as_u64().unwrap(),
+                    Some("fs.done") | Some("fs.error") => break v,
+                    _ => {}
+                }
+            }
+        }
+        assert!(Instant::now() < deadline, "upload stuck at {acked}");
+    };
+    assert_eq!(done["event"], "fs.done", "{done}");
+    assert_eq!(done["data"]["entry"]["size"], data.len());
+    // The remote file is the data, byte for byte.
+    use sha2::Digest;
+    let want: String = sha2::Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
+    let out = std::process::Command::new(&h.r.ssh[0])
+        .args(&h.r.ssh[1..])
+        .arg(&h.r.host)
+        .arg(format!("(sha256sum {0} 2>/dev/null || shasum -a 256 {0}) | cut -d' ' -f1; ls -a {1} | grep -c clotho-part", sq(&format!("{dir}/up.bin")), sq(&dir)))
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout).to_string();
+    let mut lines = out.lines();
+    assert_eq!(lines.next(), Some(want.as_str()), "{out}");
+    assert_eq!(lines.next(), Some("0"), "no part file left: {out}");
+}

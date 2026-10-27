@@ -51,6 +51,8 @@ The runtime dir (sockets, locks) defaults to $CLOTHOD_RUNTIME_DIR or the OS defa
 
 fn main() {
     clothod::alloc::tune();
+    // Before any thread exists: reading the umask means setting it for a moment.
+    clothod::fs::init_umask();
     match run() {
         Ok(()) => {}
         Err(e) => {

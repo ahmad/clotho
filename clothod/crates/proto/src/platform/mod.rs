@@ -259,11 +259,22 @@ pub fn own_processes() -> Vec<ProcInfo> {
 /// Install id of an executable: `<version>-<hash of its bytes>` (FNV-1a; identifies a build,
 /// not a security measure). Builds of one version get different ids.
 pub fn build_id(path: &Path) -> std::io::Result<String> {
-    let data = std::fs::read(path)?;
+    use std::io::Read;
+    // Streamed: serve hashes its own executable at startup, and a debug build is >100 MB.
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 256 << 10];
     let mut h: u64 = 0xcbf29ce484222325;
-    for b in data {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+    loop {
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        for &b in &buf[..n] {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
     }
     Ok(format!("{}-{:012x}", env!("CARGO_PKG_VERSION"), h >> 16))
 }

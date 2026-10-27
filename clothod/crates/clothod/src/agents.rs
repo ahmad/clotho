@@ -136,11 +136,20 @@ fn home() -> Result<PathBuf> {
 /// The command every hook runs: the newest installed clothod (`<base>/current`), only inside a
 /// clotho pane, never failing. `$CLOTHOD_REPORT` overrides the binary (tests, dev builds).
 fn report_command(args: &str) -> String {
-    let bin = platform::install_base().join("current").join("clothod");
+    report_command_for(&platform::install_base().join("current").join("clothod"), args)
+}
+
+fn report_command_for(bin: &Path, args: &str) -> String {
     format!(
-        r#"c="${{CLOTHOD_REPORT:-{}}}"; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report {args}; true {MARKER}"#,
-        bin.display()
+        r#"c=${{CLOTHOD_REPORT:-}}; [ -n "$c" ] || c={}; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report {args}; true {MARKER}"#,
+        sh_quote(&bin.to_string_lossy())
     )
+}
+
+/// One shell word in single quotes: the install path is spliced into hook commands, and a home
+/// directory may contain `"`, `$` or backquotes.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn claude_settings() -> Result<PathBuf> {
@@ -180,8 +189,8 @@ fn codex_script() -> String {
     // user's own notify program, which runs after us with the payload.
     let bin = platform::install_base().join("current").join("clothod");
     format!(
-        r#"for a; do j=$a; done; c="${{CLOTHOD_REPORT:-{}}}"; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report --codex-notify "$j"; [ $# -gt 1 ] && exec "$@"; exit 0"#,
-        bin.display()
+        r#"for a; do j=$a; done; c=${{CLOTHOD_REPORT:-}}; [ -n "$c" ] || c={}; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report --codex-notify "$j"; [ $# -gt 1 ] && exec "$@"; exit 0"#,
+        sh_quote(&bin.to_string_lossy())
     )
 }
 
@@ -198,13 +207,7 @@ fn backup(path: &Path) -> Result<()> {
 }
 
 fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    let tmp = path.with_extension(format!("clotho-tmp-{}", std::process::id()));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    Ok(crate::write_atomic(path, data)?)
 }
 
 fn read_json(path: &Path) -> Result<Value> {
@@ -379,4 +382,40 @@ pub fn hooks(args: &[String], install_self: impl Fn() -> Result<()>) -> Result<(
         _ => bail!("usage: clothod hooks <print|install|uninstall> <claude|codex>, or clothod hooks status"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The install path is one shell word whatever it contains: a home directory with quotes,
+    /// `$(...)` or backquotes must neither break the hook nor run anything.
+    #[test]
+    fn hook_command_quotes_the_install_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let weird = dir.path().join("it's \"$(touch pwned)\" `touch pwned2` ${HOME}");
+        std::fs::create_dir_all(&weird).unwrap();
+        let bin = weird.join("clothod");
+        let out = dir.path().join("ran");
+        std::fs::write(&bin, format!("#!/bin/sh\necho \"$@\" > '{}'\n", out.display())).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let cmd = report_command_for(&bin, "--claude-hook");
+        let st = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .current_dir(dir.path())
+            .env("CLOTHO_PANE", "1")
+            .env_remove("CLOTHOD_REPORT")
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "report --claude-hook");
+        assert!(!dir.path().join("pwned").exists() && !dir.path().join("pwned2").exists());
+        // $CLOTHOD_REPORT still overrides it.
+        let other = dir.path().join("other");
+        std::fs::write(&other, format!("#!/bin/sh\necho other > '{}'\n", out.display())).unwrap();
+        std::fs::set_permissions(&other, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::process::Command::new("sh").arg("-c").arg(&cmd).env("CLOTHO_PANE", "1").env("CLOTHOD_REPORT", &other).status().unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "other");
+    }
 }

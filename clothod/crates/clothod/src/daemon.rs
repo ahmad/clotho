@@ -50,6 +50,14 @@ const CLIENT_HIGH: usize = 8 << 20;
 const CLIENT_LOW: usize = 1 << 20;
 /// Output frame size when replaying.
 const CHUNK: usize = 256 << 10;
+/// Replies and events queued for a client that has stopped reading: past this the connection
+/// is dropped (the client reconnects and resyncs) rather than growing serve without bound. A
+/// half-open connection (a phone that went away) never reads again, and events keep coming.
+const CONTROL_MAX: usize = 64 << 20;
+
+fn control_max() -> usize {
+    std::env::var("CLOTHOD_TEST_CONTROL_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(CONTROL_MAX)
+}
 
 enum Msg {
     Control(Vec<u8>),
@@ -76,11 +84,25 @@ pub(crate) struct Client {
     real: AtomicBool,
     /// This connection's fs.* transfer streams.
     pub(crate) fs: crate::fs::Streams,
+    /// Set (and `kill` notified) when the client fell too far behind: the connection ends.
+    dropped: AtomicBool,
+    kill: tokio::sync::Notify,
+    control_max: usize,
 }
 
 impl Client {
     fn control(&self, frame: Vec<u8>) {
-        self.control_queued.fetch_add(frame.len(), Ordering::Relaxed);
+        if self.dropped.load(Ordering::Relaxed) {
+            return;
+        }
+        let queued = self.control_queued.fetch_add(frame.len(), Ordering::Relaxed) + frame.len();
+        if queued > self.control_max {
+            if !self.dropped.swap(true, Ordering::SeqCst) {
+                eprintln!("clothod: client {}: {queued} bytes of replies and events unread; dropping the connection", self.id);
+                self.kill.notify_one();
+            }
+            return;
+        }
         let _ = self.tx.send(Msg::Control(frame));
     }
 
@@ -1386,6 +1408,9 @@ impl Daemon {
             events: AtomicBool::new(false),
             real: AtomicBool::new(false),
             fs: Default::default(),
+            dropped: AtomicBool::new(false),
+            kill: tokio::sync::Notify::new(),
+            control_max: control_max(),
         });
         self.clients.lock().unwrap().insert(id, client.clone());
 
@@ -1418,7 +1443,11 @@ impl Daemon {
 
         let mut hello = false;
         loop {
-            let frame = match read_frame(&mut rd).await {
+            let read = tokio::select! {
+                r = read_frame(&mut rd) => r,
+                _ = client.kill.notified() => break,
+            };
+            let frame = match read {
                 Ok(Some(f)) => f,
                 Ok(None) => break,
                 Err(e) => {

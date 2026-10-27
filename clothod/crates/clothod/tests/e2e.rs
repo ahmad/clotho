@@ -2915,3 +2915,219 @@ printf done; exec cat > {}"#,
     let _ = subscribe(&mut c, p, Some(0)).await;
     assert!(clipboard_events(&mut c, p, Duration::from_secs(1)).await.is_empty(), "restart re-sent copies");
 }
+
+/// Wait for the fs.ack of `stream` reaching `offset`, returning the other frames seen.
+async fn wait_ack(c: &mut Client, stream: u64, offset: u64) {
+    let deadline = Instant::now() + T;
+    loop {
+        if let Some(Frame::Json(v)) = c.try_recv() {
+            if v["event"] == "fs.ack" && v["data"]["stream"] == stream && v["data"]["offset"].as_u64() >= Some(offset) {
+                return;
+            }
+        }
+        assert!(Instant::now() < deadline, "no ack for {offset}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The fs.error / fs.done event for `stream`, if one comes within `wait`.
+async fn stream_end(c: &mut Client, stream: u64, wait: Duration) -> Option<Value> {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(50), c.recv()).await {
+            Ok(Some(Frame::Json(v))) if (v["event"] == "fs.error" || v["event"] == "fs.done") && v["data"]["stream"] == stream => return Some(v),
+            Ok(None) => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn part_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().contains(".clotho-part-")).collect()
+}
+
+/// The slow-link failure (docs/security.md, Transfers): a connection goes half-open mid-upload,
+/// the client resumes on a new one while the old stream is still open, and the instance that
+/// held the upload goes away entirely (a private instance's state dir with it). The upload
+/// still resumes from what reached the disk, and the part file is private until it's done.
+#[tokio::test]
+async fn fs_resume_takes_over_a_half_open_stream_and_outlives_the_instance() {
+    use std::os::unix::fs::PermissionsExt;
+    let files = tempfile::Builder::new().prefix("clt-files").tempdir_in("/tmp").unwrap();
+    let root = files.path().canonicalize().unwrap();
+    let big = pattern(3 << 20);
+    let params = json!({"path": root.join("big.bin"), "size": big.len(), "upload_id": "u-1", "source": "size+mtime", "chunk": 65536});
+
+    let env = Env::new();
+    let mut old = env.client().await;
+    let r = old.request("fs.write", params.clone()).await.unwrap();
+    let s_old = r["stream"].as_u64().unwrap();
+    write_stream(&mut old, s_old, 0, &big[..1 << 20], 65536, false).await;
+    wait_ack(&mut old, s_old, 1 << 20).await;
+    let parts = part_files(&root);
+    assert_eq!(parts.len(), 1, "{parts:?}");
+    assert_eq!(std::fs::metadata(&parts[0]).unwrap().permissions().mode() & 0o777, 0o600, "a part file is private while it is written");
+
+    // `old` goes silent (half-open: serve can't tell). A new connection resumes anyway.
+    let mut c = env.client().await;
+    let r = c.request("fs.write", params.clone()).await.unwrap();
+    assert_eq!(r["offset"], 1 << 20, "resumes while the old stream is still open");
+    let s = r["stream"].as_u64().unwrap();
+    let ended = stream_end(&mut old, s_old, T).await.expect("the old stream ends");
+    assert_eq!((ended["event"].clone(), ended["data"]["code"].clone()), (json!("fs.error"), json!("superseded")), "{ended}");
+    write_stream(&mut c, s, 1 << 20, &big[..2 << 20], 65536, false).await;
+    wait_ack(&mut c, s, 2 << 20).await;
+    // Data the superseded stream still sends goes nowhere.
+    old.send(Frame::FileData { stream: s_old, offset: 1 << 20, flags: 0, data: vec![0xEE; 65536] });
+
+    // The whole instance goes, with its runtime and state dirs.
+    drop((old, c));
+    drop(env);
+    let env = Env::new();
+    let mut c = env.client().await;
+    let r = c.request("fs.write", params.clone()).await.unwrap();
+    assert_eq!(r["offset"], 2 << 20, "a new instance resumes the part file");
+    let done = write_stream(&mut c, r["stream"].as_u64().unwrap(), 2 << 20, &big, 65536, true).await;
+    assert_eq!(done["event"], "fs.done", "{done}");
+    assert_eq!(std::fs::read(root.join("big.bin")).unwrap(), big);
+    assert!(part_files(&root).is_empty());
+    // No mode asked for: the umask decides, as for any new file.
+    std::fs::write(root.join("plain"), "x").unwrap();
+    let want = std::fs::metadata(root.join("plain")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(std::fs::metadata(root.join("big.bin")).unwrap().permissions().mode() & 0o777, want);
+
+    // Another source under the same upload id doesn't resume: different part.
+    let mut p2 = params.clone();
+    p2["path"] = json!(root.join("big2.bin"));
+    let r = c.request("fs.write", p2.clone()).await.unwrap();
+    write_stream(&mut c, r["stream"].as_u64().unwrap(), 0, &big[..65536], 65536, false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    c.request("fs.cancel", json!({"stream": r["stream"]})).await.unwrap();
+    p2["source"] = json!("changed");
+    let r = c.request("fs.write", p2).await.unwrap();
+    assert_eq!(r["offset"], 0);
+    c.request("fs.cancel", json!({"stream": r["stream"]})).await.unwrap();
+}
+
+/// In a shared directory, someone may plant a link where a part file will go. The write must
+/// replace the link, never write through it.
+#[tokio::test]
+async fn fs_part_files_never_follow_links() {
+    use sha2::Digest;
+    let env = Env::new();
+    let mut c = env.client().await;
+    let root = fs_root(&env);
+    let victim = root.join("victim");
+    std::fs::write(&victim, "precious").unwrap();
+    let tag: String = sha2::Sha256::digest(b"src")[..6].iter().map(|b| format!("{b:02x}")).collect();
+    let part = root.join(format!(".up.bin.clotho-part-u9-{tag}"));
+    std::os::unix::fs::symlink(&victim, &part).unwrap();
+    let r = c.request("fs.write", json!({"path": root.join("up.bin"), "upload_id": "u9", "source": "src"})).await.unwrap();
+    assert_eq!(r["offset"], 0, "a link is not a part file to resume");
+    let done = write_stream(&mut c, r["stream"].as_u64().unwrap(), 0, b"data", 4, true).await;
+    assert_eq!(done["event"], "fs.done", "{done}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+    assert_eq!(std::fs::read_to_string(root.join("up.bin")).unwrap(), "data");
+    assert!(std::fs::symlink_metadata(&part).is_err());
+}
+
+/// A client sending far past its write window loses the stream instead of queueing in serve.
+#[tokio::test]
+async fn fs_write_past_the_window_fails_the_stream() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let root = fs_root(&env);
+    let r = c.request("fs.write", json!({"path": root.join("w.bin"), "window": 4 << 20, "chunk": 65536, "upload_id": "w1"})).await.unwrap();
+    let s = r["stream"].as_u64().unwrap();
+    c.send(Frame::FileData { stream: s, offset: 0, flags: 0, data: vec![1; 65536] });
+    c.send(Frame::FileData { stream: s, offset: 9 << 20, flags: 0, data: vec![1; 65536] });
+    let ended = stream_end(&mut c, s, T).await.expect("stream ends");
+    assert_eq!(ended["data"]["code"], "window_exceeded", "{ended}");
+    assert_eq!(part_files(&root).len(), 1, "what reached the disk is kept for a resume");
+}
+
+/// A client that stops reading (a phone gone half-open) must not grow serve: past the control
+/// queue limit its connection is dropped, and everyone else carries on.
+#[tokio::test]
+async fn a_client_that_stops_reading_is_dropped() {
+    use std::io::{Read, Write};
+    let mut env = Env::empty();
+    let bin = std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into());
+    env.start_with(&bin, &[("CLOTHOD_TEST_CONTROL_MAX", "1048576")]);
+    let mut stuck = std::os::unix::net::UnixStream::connect(env.path().join("clothod.sock")).unwrap();
+    let mut out = Frame::Json(json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "stuck"}})).encode();
+    out.extend(Frame::Json(json!({"id": 2, "method": "events.subscribe", "params": {}})).encode());
+    stuck.write_all(&out).unwrap();
+    let c = env.client().await;
+    let ws = c.request("workspace.create", json!({"name": "w"})).await.unwrap();
+    let id = ws["workspace"].as_u64().or(ws["id"].as_u64()).unwrap_or(1);
+    let name = "n".repeat(2000);
+    let deadline = Instant::now() + T;
+    while !env.log().contains("dropping the connection") {
+        assert!(Instant::now() < deadline, "never dropped:\n{}", env.log());
+        for i in 0..50 {
+            let _ = c.request("workspace.rename", json!({"workspace": id, "name": format!("{name}{i}")})).await;
+        }
+    }
+    // The stuck client gets what was queued, then EOF.
+    stuck.set_read_timeout(Some(T)).unwrap();
+    let mut sink = Vec::new();
+    assert!(stuck.read_to_end(&mut sink).is_ok(), "the connection ends");
+    let stats = c.request("debug.stats", json!({})).await.unwrap();
+    assert_eq!(stats["clients"].as_array().unwrap().len(), 1, "{stats}");
+}
+
+/// Deeply nested JSON is refused (serde_json's recursion limit), not a stack overflow.
+#[tokio::test]
+async fn deeply_nested_json_closes_only_that_connection() {
+    use std::io::{Read, Write};
+    let env = Env::new();
+    let mut s = std::os::unix::net::UnixStream::connect(env.path().join("clothod.sock")).unwrap();
+    let mut body = vec![clotho_proto::frame::T_JSON];
+    body.extend(std::iter::repeat_n(b'[', 1 << 20));
+    let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+    frame.extend(body);
+    s.write_all(&frame).unwrap();
+    s.set_read_timeout(Some(T)).unwrap();
+    let mut sink = Vec::new();
+    let _ = s.read_to_end(&mut sink);
+    let c = env.client().await;
+    c.request("ping", json!({})).await.unwrap();
+}
+
+/// A pane printing an OSC that never ends (`cat` of a hostile file) costs serve at most
+/// MAX_OSC, not the size of the output; the pane works normally afterwards.
+#[tokio::test]
+async fn an_endless_osc_does_not_grow_serve() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let p = new_pane(&c, sh()).await;
+    let (_, mut s) = subscribe(&mut c, p, None).await;
+    sync(&mut c, &mut s).await.unwrap();
+    let before = c.request("debug.stats", json!({})).await.unwrap()["heap_peak"].as_u64().unwrap();
+    c.input(p, b"printf '\\033]0;'; head -c 100000000 /dev/zero | tr '\\0' A; printf '\\007'; echo osc-$((6*7))\r");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut peak = 0;
+    loop {
+        let f = tokio::time::timeout(Duration::from_secs(60), c.recv()).await.unwrap().unwrap();
+        // A client that fell behind gets a snapshot instead of the output.
+        if let Frame::Output { data, .. } | Frame::Snapshot { data, .. } = &f {
+            if String::from_utf8_lossy(data).contains("osc-42") {
+                break;
+            }
+        }
+        if let Frame::Json(v) = &f {
+            assert_ne!(v["event"], "pane", "no title from the dropped OSC: {}", &v.to_string()[..200.min(v.to_string().len())]);
+        }
+        assert!(Instant::now() < deadline);
+        if c.try_recv().is_none() {
+            let st = c.request("debug.stats", json!({})).await.unwrap();
+            peak = peak.max(st["heap_peak"].as_u64().unwrap());
+        }
+    }
+    let st = c.request("debug.stats", json!({})).await.unwrap();
+    let grew = st["heap_peak"].as_u64().unwrap().max(peak).saturating_sub(before);
+    eprintln!("endless OSC of 100 MB: heap peak {before} -> {} (+{} KiB)", before + grew, grew >> 10);
+    assert!(grew < 48 << 20, "serve grew {} MiB on a 100 MB OSC", grew >> 20);
+}

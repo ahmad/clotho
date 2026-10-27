@@ -269,14 +269,7 @@ fn contents(u: &Unit) -> String {
 }
 
 fn write_atomic(path: &Path, data: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_file_name(format!(".{}.{}", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    crate::write_atomic(path, data.as_bytes())
 }
 
 // ---- the three operations ------------------------------------------------------------------
