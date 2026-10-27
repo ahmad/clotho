@@ -16,10 +16,18 @@ private final class Recorder: NSObject, TerminalViewDelegate {
 }
 
 @MainActor
-final class ShiftReturnTests: XCTestCase {
+final class EditingKeyTests: XCTestCase {
     private func key(_ keyCode: UInt16, _ modifiers: NSEvent.ModifierFlags) -> NSEvent {
-        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0,
-                         context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: keyCode)!
+        let characters = [123: NSLeftArrowFunctionKey, 124: NSRightArrowFunctionKey, 51: 0x7f, 48: 0x09][Int(keyCode)]
+            .flatMap { UnicodeScalar($0).map(String.init) } ?? "\r"
+        return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0,
+                                context: nil, characters: characters, charactersIgnoringModifiers: characters,
+                                isARepeat: false, keyCode: keyCode)!
+    }
+
+    override func setUp() {
+        // SwiftTerm offers ⌘ keys to the main menu first.
+        _ = NSApplication.shared
     }
 
     private func terminal() -> (PaneTerminalView, Recorder) {
@@ -31,25 +39,46 @@ final class ShiftReturnTests: XCTestCase {
 
     func testShiftReturnSendsEscCRInLegacyMode() {
         let (view, recorder) = terminal()
-        XCTAssertTrue(view.sendShiftReturn(key(36, .shift)))
+        XCTAssertTrue(view.sendEditingKey(key(36, .shift)))
         XCTAssertEqual(recorder.sent, [0x1b, 0x0d])
         // Keypad Enter carries the numeric pad flag too.
         recorder.sent = []
-        XCTAssertTrue(view.sendShiftReturn(key(76, [.shift, .numericPad])))
+        XCTAssertTrue(view.sendEditingKey(key(76, [.shift, .numericPad])))
         XCTAssertEqual(recorder.sent, [0x1b, 0x0d])
         // Caps Lock doesn't count as a modifier.
         recorder.sent = []
-        XCTAssertTrue(view.sendShiftReturn(key(36, [.shift, .capsLock])))
+        XCTAssertTrue(view.sendEditingKey(key(36, [.shift, .capsLock])))
         XCTAssertEqual(recorder.sent, [0x1b, 0x0d])
+    }
+
+    func testCommandArrowsAndDeleteEditTheLine() {
+        let (view, recorder) = terminal()
+        // Arrow keys carry the function and numeric pad flags.
+        for (code, bytes) in [(UInt16(123), [UInt8(0x01)]), (124, [0x05]), (51, [0x15])] {
+            recorder.sent = []
+            XCTAssertTrue(view.sendEditingKey(key(code, [.command, .function, .numericPad])), "key \(code)")
+            XCTAssertEqual(recorder.sent, bytes, "key \(code)")
+        }
+        // Option-arrows are SwiftTerm's (ESC b / ESC f), and ⌘⌥/⌘⇧/⌃⌘ arrows are menu shortcuts.
+        for modifiers: NSEvent.ModifierFlags in [[.option], [.command, .option], [.command, .shift], [.command, .control], [.shift]] {
+            XCTAssertFalse(view.sendEditingKey(key(123, modifiers)))
+        }
+    }
+
+    /// The gap this fills: SwiftTerm sends nothing for ⌘← in legacy mode.
+    func testSwiftTermAloneSendsNothingForCommandLeft() {
+        let (view, recorder) = terminal()
+        view.keyDown(with: key(123, [.command, .function, .numericPad]))
+        XCTAssertEqual(recorder.sent, [])
     }
 
     func testOtherReturnsAreLeftToTheTerminal() {
         let (view, recorder) = terminal()
-        XCTAssertFalse(view.sendShiftReturn(key(36, [])), "plain Return stays CR, from SwiftTerm")
-        XCTAssertFalse(view.sendShiftReturn(key(36, [.command, .shift])), "⌘⇧↩ is Maximize Pane")
-        XCTAssertFalse(view.sendShiftReturn(key(36, [.control])), "⌃↩ renames the workspace")
-        XCTAssertFalse(view.sendShiftReturn(key(36, [.shift, .option])))
-        XCTAssertFalse(view.sendShiftReturn(key(48, .shift)), "Shift-Tab")
+        XCTAssertFalse(view.sendEditingKey(key(36, [])), "plain Return stays CR, from SwiftTerm")
+        XCTAssertFalse(view.sendEditingKey(key(36, [.command, .shift])), "⌘⇧↩ is Maximize Pane")
+        XCTAssertFalse(view.sendEditingKey(key(36, [.control])), "⌃↩ renames the workspace")
+        XCTAssertFalse(view.sendEditingKey(key(36, [.shift, .option])))
+        XCTAssertFalse(view.sendEditingKey(key(48, .shift)), "Shift-Tab")
         XCTAssertEqual(recorder.sent, [])
     }
 
@@ -58,7 +87,7 @@ final class ShiftReturnTests: XCTestCase {
         let (view, recorder) = terminal()
         view.feedFromBackend(Data("\u{1b}[>1u".utf8))
         XCTAssertEqual(view.keyboardEnhancementFlags.rawValue, 1)
-        XCTAssertFalse(view.sendShiftReturn(key(36, .shift)))
+        XCTAssertFalse(view.sendEditingKey(key(36, .shift)))
         view.keyDown(with: key(36, .shift))
         XCTAssertEqual(String(decoding: recorder.sent, as: UTF8.self), "\u{1b}[13;2u")
     }
@@ -92,5 +121,49 @@ final class HeldTitlesTests: XCTestCase {
         held.hold(1, from: nil, to: "a")
         held.hold(1, from: "a", to: "b")
         XCTAssertEqual(held.title(for: 1, model: nil), "b")
+    }
+}
+
+/// Copy and paste go through the Edit menu's copy: and paste: to SwiftTerm, which uses the general
+/// pasteboard. These save and restore whatever was on it.
+@MainActor
+final class ClipboardTests: XCTestCase {
+    private var saved: String?
+
+    override func setUp() {
+        _ = NSApplication.shared
+        saved = NSPasteboard.general.string(forType: .string)
+    }
+
+    override func tearDown() {
+        NSPasteboard.general.clearContents()
+        if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+    }
+
+    func testPasteSendsTheClipboard() {
+        let view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        let recorder = Recorder()
+        view.terminalDelegate = recorder
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("echo pasted", forType: .string)
+        view.paste(view)
+        // SwiftTerm hands pasted bytes to the main queue.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(String(decoding: recorder.sent, as: UTF8.self), "echo pasted")
+        // Bracketed paste when the app asked for it.
+        recorder.sent = []
+        view.feedFromBackend(Data("\u{1b}[?2004h".utf8))
+        view.paste(view)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(String(decoding: recorder.sent, as: UTF8.self), "\u{1b}[200~echo pasted\u{1b}[201~")
+    }
+
+    func testCopyPutsTheSelectionOnTheClipboard() {
+        let view = PaneTerminalView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        view.feedFromBackend(Data("hello clotho".utf8))
+        view.selectAll(nil)
+        XCTAssertTrue(view.validateUserInterfaceItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")))
+        view.copy(view)
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), "hello clotho")
     }
 }

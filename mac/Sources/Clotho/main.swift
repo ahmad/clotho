@@ -153,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var emptyLabel: NSTextField!
     var shortcutsOverlay: ShortcutsOverlay?
     var fileBrowser: FileBrowserOverlay?
-    var returnKeyMonitor: Any?
+    var keyMonitor: Any?
     let transfers = TransferManager()
     var transferToast: TransferToast!
 
@@ -313,7 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         tabBar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
         tabBar.onNewTab = { [weak self] in self?.newTab(nil) }
-        installReturnKeys()
+        installKeyMonitor()
         container.addSubview(tabBar)
         tabBarLeading = tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor)
 
@@ -437,7 +437,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Testing aids: TypeText="vim\\r|:q\\r" sends each step to the focused pane (\\r is Return, \\e is Esc),
     // and ResizeWindow="900x600|1400x900" sets the window size; both start after 3 seconds, 2 seconds apart.
     // A TypeText step "key:shift+return" instead posts that key as a key event, which goes through the
-    // window's key handling like a real press (modifiers shift, cmd, ctrl, alt; keys return, tab, esc),
+    // window's key handling like a real press (modifiers shift, cmd, ctrl, alt; keys return, enter, tab,
+    // esc, delete, left, right, a, c, v),
     // "type:new name" posts those characters as key events, for typing into whatever has focus, and
     // "click:600,300" clicks at that point of the window (from its bottom-left corner).
     func runTestScripts() {
@@ -580,7 +581,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func postTestKey(_ spec: String) {
         var parts = spec.lowercased().split(separator: "+").map(String.init)
         let name = parts.popLast() ?? ""
-        let keys: [String: (code: UInt16, char: String)] = ["return": (36, "\r"), "enter": (76, "\u{3}"), "tab": (48, "\t"), "esc": (53, "\u{1b}")]
+        let keys: [String: (code: UInt16, char: String)] = [
+            "return": (36, "\r"), "enter": (76, "\u{3}"), "tab": (48, "\t"), "esc": (53, "\u{1b}"), "delete": (51, "\u{7f}"),
+            "left": (123, String(UnicodeScalar(NSLeftArrowFunctionKey)!)), "right": (124, String(UnicodeScalar(NSRightArrowFunctionKey)!)),
+            "a": (0, "a"), "c": (8, "c"), "v": (9, "v"),
+        ]
         let flags: [String: NSEvent.ModifierFlags] = ["shift": .shift, "cmd": .command, "ctrl": .control, "alt": .option]
         guard let key = keys[name], parts.allSatisfy({ flags[$0] != nil }) else { return log("TypeText: unknown key \(spec)") }
         let modifiers = parts.reduce(into: NSEvent.ModifierFlags()) { $0.formUnion(flags[$1]!) }
