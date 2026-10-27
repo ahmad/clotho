@@ -1870,3 +1870,206 @@ async fn firehose_output_applies_backpressure_instead_of_failing() {
     let s = c.request("state.get", json!({})).await.unwrap();
     assert!(s["panes"][0]["seq"].as_u64().unwrap() > 1 << 20, "the firehose did run");
 }
+
+// ---- push --------------------------------------------------------------------------------
+
+/// A stand-in relay on 127.0.0.1: answers `POST /v1/push` with the next queued status (200 when
+/// none is queued) and hands each request's JSON body to the test.
+struct FakeRelay {
+    url: String,
+    statuses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u16>>>,
+    bodies: std::sync::mpsc::Receiver<(Instant, Value)>,
+}
+
+impl FakeRelay {
+    fn start() -> FakeRelay {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", l.local_addr().unwrap().port());
+        let statuses = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let (tx, bodies) = std::sync::mpsc::channel();
+        let st = statuses.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { return };
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                let (mut line, mut len) = (String::new(), 0usize);
+                r.read_line(&mut line).unwrap();
+                assert!(line.starts_with("POST /v1/push "), "{line}");
+                loop {
+                    line.clear();
+                    r.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; len];
+                r.read_exact(&mut body).unwrap();
+                let status = st.lock().unwrap().pop_front().unwrap_or(200);
+                let _ = tx.send((Instant::now(), serde_json::from_slice(&body).unwrap()));
+                let _ = write!(s, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}");
+            }
+        });
+        FakeRelay { url, statuses, bodies }
+    }
+
+    fn queue(&self, statuses: &[u16]) {
+        self.statuses.lock().unwrap().extend(statuses);
+    }
+
+    fn next(&self) -> (Instant, Value) {
+        self.bodies.recv_timeout(T).expect("a push reached the relay")
+    }
+
+    fn none_for(&self, d: Duration) {
+        if let Ok(b) = self.bodies.recv_timeout(d) {
+            panic!("unexpected push {b:?}");
+        }
+    }
+}
+
+// The iOS side's test key pair (docs/push.md).
+const PUSH_SK: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
+const PUSH_PK: &str = "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=";
+
+fn push_env() -> Env {
+    let mut env = Env::empty();
+    env.start_with(&std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into()), &[("CLOTHOD_TEST_PUSH_FAST", "1")]);
+    env
+}
+
+async fn register(c: &Client, device: &str, relay: &str) {
+    let r = json!({"device": device, "handle": format!("handle-{device}"), "key": PUSH_PK, "label": format!("00000000-0000-0000-0000-00000000C10D {device}"), "relay": relay, "env": "sandbox"});
+    c.request("push.register", r).await.unwrap();
+}
+
+async fn push_devices(c: &Client) -> Vec<Value> {
+    c.request("push.list", json!({})).await.unwrap()["devices"].as_array().unwrap().clone()
+}
+
+fn opened(body: &Value) -> Value {
+    let plain = clothod::push::open(PUSH_SK, body["ciphertext"].as_str().unwrap(), body["collapse_id"].as_str().unwrap().as_bytes()).expect("sealed to the phone's key");
+    serde_json::from_slice(&plain).unwrap()
+}
+
+#[tokio::test]
+async fn push_registrations_are_private_and_validated() {
+    let env = push_env();
+    let c = env.client().await;
+    let hello = c.request("hello", json!({"protocol": 1})).await.unwrap();
+    assert!(hello["features"].as_array().unwrap().contains(&json!("push")));
+    let base = json!({"device": "d1", "handle": "h", "key": PUSH_PK, "label": "L", "relay": "https://relay.example"});
+    for (k, v) in [("key", "bm90IGEga2V5"), ("relay", "http://relay.example"), ("env", "staging"), ("device", "")] {
+        let mut p = base.clone();
+        p[k] = json!(v);
+        let e = c.request("push.register", p).await.unwrap_err();
+        assert!(e.to_string().contains("bad_request"), "{k}: {e}");
+    }
+    c.request("push.register", base.clone()).await.unwrap();
+    register(&c, "d2", "http://127.0.0.1:9").await;
+    // Registering again replaces.
+    let mut again = base.clone();
+    again["label"] = json!("L2");
+    c.request("push.register", again).await.unwrap();
+    let devices = push_devices(&c).await;
+    assert_eq!(devices.len(), 2, "{devices:?}");
+    let d1 = devices.iter().find(|d| d["device"] == "d1").unwrap();
+    assert_eq!(d1["label"], "L2");
+    assert!(d1.get("handle").is_none() && d1.get("key").is_none(), "list never shows secrets: {d1}");
+
+    // Ephemeral instances keep registrations in their runtime dir, private to the user.
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(env.path().join("push.json")).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+
+    c.request("push.unregister", json!({"device": "d1"})).await.unwrap();
+    assert_eq!(push_devices(&c).await.len(), 1);
+    let e = c.request("push.test", json!({"device": "nope"})).await.unwrap_err();
+    assert!(e.to_string().contains("not_found"), "{e}");
+}
+
+#[tokio::test]
+async fn attention_pushes_a_sealed_alert_at_most_once_per_interval() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let report = |state: &str, msg: &str| c.request("agent.report", json!({"pane": p, "state": state, "kind": "claude", "message": msg}));
+
+    report("running", "").await.unwrap();
+    relay.none_for(Duration::from_millis(300));
+    report("waiting", "Allow cargo test --release?").await.unwrap();
+    let (first, body) = relay.next();
+    let label = "00000000-0000-0000-0000-00000000C10D phone";
+    assert_eq!(body["handle"], "handle-phone");
+    assert_eq!(body["collapse_id"], clothod::push::collapse_id(label, p));
+    let alert = opened(&body);
+    assert_eq!(alert["v"], 1);
+    assert_eq!(alert["m"], label);
+    assert_eq!(alert["p"], p);
+    assert_eq!((alert["k"].as_str(), alert["s"].as_str()), (Some("claude"), Some("waiting")));
+    assert_eq!(alert["msg"], "Allow cargo test --release?");
+    assert!(alert["t"].as_f64().unwrap() > 1.7e9);
+
+    // Still waiting: no second push. Acked, then asked again right away: it waits out the
+    // pane's interval (1 s with CLOTHOD_TEST_PUSH_FAST) and carries the latest state.
+    relay.none_for(Duration::from_millis(200));
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    report("running", "").await.unwrap();
+    report("error", "it broke").await.unwrap();
+    let (second, body) = relay.next();
+    assert!(second - first >= Duration::from_millis(900), "{:?}", second - first);
+    assert_eq!(opened(&body)["s"], "error");
+
+    // Cleared before the delayed push was due: nothing goes out.
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    report("running", "").await.unwrap();
+    report("waiting", "again").await.unwrap();
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    relay.none_for(Duration::from_millis(1500));
+}
+
+#[tokio::test]
+async fn relay_errors_retry_block_or_remove_the_registration() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+
+    // Unavailable, then fine: retried with backoff.
+    relay.queue(&[503, 429]);
+    c.request("push.test", json!({"device": "phone"})).await.unwrap_err();
+    relay.next();
+    let p = new_pane(&c, sh()).await;
+    c.request("agent.report", json!({"pane": p, "state": "waiting", "kind": "codex"})).await.unwrap();
+    let (a, _) = relay.next();
+    let (b, body) = relay.next();
+    assert!(b - a >= Duration::from_millis(90), "backoff between tries");
+    assert_eq!(opened(&body)["k"], "codex");
+    assert!(push_devices(&c).await[0]["last_error"].is_null(), "a success clears last_error");
+
+    // 403: kept, marked, and skipped until the phone registers again.
+    relay.queue(&[403]);
+    let e = c.request("push.test", json!({"device": "phone"})).await.unwrap_err();
+    assert!(e.to_string().contains("relay_error"), "{e}");
+    relay.next();
+    assert!(push_devices(&c).await[0]["last_error"].as_str().unwrap().contains("403"));
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    c.request("agent.report", json!({"pane": p, "state": "running"})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    c.request("agent.report", json!({"pane": p, "state": "done"})).await.unwrap();
+    relay.none_for(Duration::from_millis(500));
+    register(&c, "phone", &relay.url).await;
+    c.request("push.test", json!({"device": "phone"})).await.unwrap();
+    assert_eq!(opened(&relay.next().1)["k"], "clotho");
+
+    // 410: the phone's token is gone, so is the registration.
+    relay.queue(&[410]);
+    c.request("push.test", json!({"device": "phone"})).await.unwrap_err();
+    relay.next();
+    assert!(push_devices(&c).await.is_empty());
+}

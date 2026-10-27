@@ -86,7 +86,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
 → {"id": 1, "method": "hello", "params": {"protocol": 1, "client": "clotho-mac/0.1"}}
 ← {"id": 1, "result": {
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
-     "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio"],
+     "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -101,7 +101,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
 ```
 
 - `features` lists what this build supports, as strings: currently `pane.keys`, `agents`,
-  `agent.report.pid`, `ping` and `split.set_ratio`. Builds share version numbers, so check
+  `agent.report.pid`, `ping`, `split.set_ratio`, `fs` (Files, below) and `push` (`push.*`
+  requests, docs/push.md). Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
   protocol_max]`, which a successful `hello` reports. If the

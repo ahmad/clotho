@@ -254,6 +254,7 @@ pub struct Daemon {
     dirty: AtomicBool,
     stop: Notify,
     shutdown_all: AtomicBool,
+    push: Arc<crate::push::Push>,
 }
 
 #[derive(Debug)]
@@ -456,6 +457,8 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         dirty: AtomicBool::new(false),
         stop: Notify::new(),
         shutdown_all: AtomicBool::new(false),
+        // Ephemeral (test) instances keep registrations with themselves, so they go away together.
+        push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
     });
 
     // Recovery: panes with their snapshots and buffered output, up to `ready`.
@@ -1044,6 +1047,11 @@ impl Daemon {
             return;
         }
         p.agent = new;
+        let attention = |a: &Option<Agent>| a.as_ref().is_some_and(|a| a.attention);
+        if attention(&old) != attention(&p.agent) {
+            let alert = p.agent.as_ref().map(|a| crate::push::Alert { kind: a.kind.clone(), state: a.state.clone(), message: a.message.clone(), since: a.since });
+            self.push.attention(p.id, attention(&p.agent), alert);
+        }
         let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str());
         self.pane_event(p);
         if transition {
@@ -1296,7 +1304,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1311,6 +1319,7 @@ impl Daemon {
             }
             "ping" => Ok(json!({})),
             m if m.starts_with("fs.") => crate::fs::request(&self.fs_ctx(), client, m, p).await.map_err(|e| err(e.code, e.message)),
+            m if m.starts_with("push.") => self.push.request(m, p).await.map_err(|e| err(e.code, e.message)),
             "agent.report" => self.agent_report(p),
             "agent.ack" => {
                 let pane = param_u64(p, "pane")?;

@@ -310,7 +310,7 @@ fn set_mtime(path: &Path, ns: i128) -> std::io::Result<()> {
     let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
     let times = [
         libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT },
-        libc::timespec { tv_sec: ns.div_euclid(1_000_000_000) as libc::time_t, tv_nsec: ns.rem_euclid(1_000_000_000) as _ },
+        libc::timespec { tv_sec: ns.div_euclid(1_000_000_000) as _, tv_nsec: ns.rem_euclid(1_000_000_000) as _ },
     ];
     if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) } != 0 {
         return Err(std::io::Error::last_os_error());

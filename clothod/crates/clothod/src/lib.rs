@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod daemon;
 pub(crate) mod fs;
+pub mod push;
 pub mod model;
 
 use std::os::unix::process::CommandExt;

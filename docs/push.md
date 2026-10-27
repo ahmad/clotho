@@ -1,6 +1,6 @@
 # Push alerts: agent attention to the iPhone
 
-Status: **in progress** (2026-10-26). The relay (`ios/relay/`), the extension and the app side are built and tested in the simulator; the clothod side is in progress, and deploying needs the user's accounts (below). Owners: the daemon hook is
+Status: **in progress** (2026-10-26). The relay (`ios/relay/`), the extension and the app side are built and tested in the simulator. The clothod side is implemented (feature `push`; `clothod/src/push.rs`, tested against a fake relay and the shared vector) and ships in the next clothod release. Deploying needs the user's accounts (below). Owners: the daemon hook is
 clothod's, the relay and the app side are iOS's.
 
 Today the phone learns about agent attention only while the app is open and connected. This
@@ -174,9 +174,9 @@ same relay on devbox; the protocol and the app are identical, only the `relay` U
 
 - **clothod**: the `push` feature, `push.register/unregister/list/test`, registration storage, the
   sender with HPKE, coalescing, retry and 410 handling. It can be tested against a fake relay.
-  HTTPS from the static musl builds needs rustls with ring, whose C code needs a Linux cross C
-  compiler on the Mac. The plan is cargo-zigbuild (zig as the cross compiler), pending the user's OK
-  to install zig.
+  HTTPS is ureq with rustls (ring) and bundled web roots, so the static musl builds need no system
+  certificates; Linux builds are cross-compiled with cargo-zigbuild (zig as the C compiler).
+  `CLOTHOD_TEST_PUSH_FAST=1` shortens the 30 s / backoff / 10 min timings for tests.
 - **iOS**: the relay (in `ios/relay/`), the extension target, the APNs entitlement, registration on
   connect, a per-machine "Alerts" toggle with "Send test alert", and clearing stale alerts on open.
   The simulator on Apple silicon receives real sandbox pushes, so the whole path can be tested

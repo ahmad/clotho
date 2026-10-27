@@ -27,14 +27,19 @@ fi
 
 builds="macos-aarch64:aarch64-apple-darwin macos-x86_64:x86_64-apple-darwin linux-x86_64:x86_64-unknown-linux-musl linux-aarch64:aarch64-unknown-linux-musl"
 
-args=""
+# Linux builds link statically against musl; ring (TLS for push alerts) has C code, so they go
+# through cargo-zigbuild, with zig as the cross C compiler and linker.
+command -v cargo-zigbuild >/dev/null || { echo "dist: needs cargo-zigbuild and zig (brew install zig; cargo install cargo-zigbuild)" >&2; exit 1; }
+apple="" linux=""
 for b in $builds; do
     t=${b#*:}
     rustup target list --installed | grep -qx "$t" || rustup target add "$t"
-    args="$args --target $t"
+    case $t in *-linux-*) linux="$linux --target $t" ;; *) apple="$apple --target $t" ;; esac
 done
 # shellcheck disable=SC2086
-cargo build --release --bin clothod $args
+cargo build --release --bin clothod $apple
+# shellcheck disable=SC2086
+cargo zigbuild --release --bin clothod $linux
 
 host=target/release/clothod
 cargo build --release --bin clothod

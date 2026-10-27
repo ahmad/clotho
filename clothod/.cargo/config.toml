@@ -1,5 +1,7 @@
-# Static Linux builds link with the lld that ships with Rust, so no cross toolchain is needed:
-#   cargo build --release --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+# Static Linux builds: ring (TLS for push alerts) has C code, so cross builds from a Mac go through
+# cargo-zigbuild (brew install zig; cargo install cargo-zigbuild), which sets its own linker:
+#   cargo zigbuild --release --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl
+# rust-lld below is for crates without C code (and native builds on Linux need musl-gcc).
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
 

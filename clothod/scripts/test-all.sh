@@ -25,7 +25,8 @@ grep -q "FAILED\|panicked\|^error" target/test-all-macos.log && fail "macOS test
 
 step "Linux: e2e on $LINUX_HOST"
 T=x86_64-unknown-linux-musl
-if cargo build -q --target $T --bins && e2e=$(cargo test --target $T --no-run 2>&1 | sed -n 's/.*Executable tests\/e2e.rs (\(.*\))/\1/p') && [ -n "$e2e" ]; then
+# zigbuild: ring has C code (see .cargo/config.toml).
+if cargo zigbuild -q --target $T --bins && e2e=$(cargo zigbuild -q --target $T --tests --message-format=json 2>/dev/null | grep '"name":"e2e"' | sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | head -1) && [ -n "$e2e" ]; then
     rdir=$($SSH "$LINUX_HOST" 'mktemp -d /tmp/clt-ci.XXXXXX')
     scp -q "target/$T/debug/clothod" "target/$T/debug/clotho" "$e2e" "$LINUX_HOST:$rdir/" &&
         $SSH "$LINUX_HOST" "cd $rdir && CLOTHOD_BIN=\$PWD/clothod CLOTHO_BIN=\$PWD/clotho ./$(basename "$e2e") 2>&1" > target/test-all-linux.log
