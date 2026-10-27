@@ -122,6 +122,16 @@ detection covers agents without hooks (spec: `../docs/protocol.md`, "Agents").
 `clothod hooks print|install|uninstall claude|codex` manages the hooks. `install` edits the
 user's agent configuration, so apps run it only after the user confirms.
 
+## Start at login
+
+`clothod service install|uninstall|status` (and the `service.*` requests the apps use for their
+per-machine "Start at login" toggle) manages a LaunchAgent (`~/Library/LaunchAgents/
+nyc.amin.clotho.clothod.plist`) or a systemd user unit (`~/.config/systemd/user/clothod.service`).
+It runs `<install dir>/current/clothod start` once per login and never restarts anything, so it
+can't race an in-place upgrade, and removing it leaves the daemon running. On Linux it needs
+lingering (`sudo loginctl enable-linger $USER`), and `install` refuses without it; see
+`src/service.rs` and docs/protocol.md, "Start at login".
+
 ## Configuration
 
 `~/.config/clothod/config.toml` (or `$XDG_CONFIG_HOME/clothod/config.toml`, or `$CLOTHOD_CONFIG`),
@@ -171,6 +181,5 @@ Memory stayed flat after the first minutes, and the upgrade didn't change latenc
 
 ## Not built yet
 
-- launchd and systemd login units (see `crates/proto/src/platform/mod.rs`)
 - Never run: the linux-aarch64 and macos-x86_64 builds (no such test machine yet); they build
   and are static, but no test suite has run on them.

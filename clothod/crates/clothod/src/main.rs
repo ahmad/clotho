@@ -37,6 +37,10 @@ with no clients and no panes, or when its last client disconnects (exit).
              tell the daemon what the agent in this pane does (for agent hooks; silent, exit 0)
   hooks print|install|uninstall claude|codex, hooks status
              agent status hooks in ~/.claude/settings.json / ~/.codex/config.toml
+  service install|uninstall|status
+             start the daemon at login: a LaunchAgent (macOS) or systemd user unit (Linux) that
+             runs `<install dir>/current/clothod start` once per login and never restarts it.
+             Linux needs lingering (`loginctl enable-linger`). Prints the status as JSON.
   ps         list every clothod process of this user (role, runtime dir, build, pid, age);
              anything not belonging to the default instance is marked extra
   build-id [FILE]
@@ -92,6 +96,7 @@ fn run() -> Result<()> {
                 flags.push(args.next().context("--resume-fd needs a value")?);
             }
             _ if command.as_deref() == Some("build-id") => flags.push(a),
+            _ if command.as_deref() == Some("service") && !a.starts_with('-') => flags.push(a),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -145,6 +150,16 @@ fn run() -> Result<()> {
         "status" => rt.block_on(status(dir)),
         "install" => install(&dir, flags.iter().any(|f| f == "--print-path"), flags.iter().any(|f| f == "--prune")),
         "upgrade" => rt.block_on(upgrade(dir)),
+        "service" => {
+            let op = flags.iter().find(|f| !f.starts_with("--")).map(String::as_str).unwrap_or("status");
+            match clothod::service::request(&dir, op) {
+                Ok(v) => {
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                    Ok(())
+                }
+                Err(e) => bail!("service {op}: {} ({})", e.message, e.code),
+            }
+        }
         "ps" => {
             ps();
             Ok(())

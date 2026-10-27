@@ -87,7 +87,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
 ← {"id": 1, "result": {
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
-                  "pane.clipboard", "settings"],
+                  "pane.clipboard", "settings", "service"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -104,8 +104,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
 - `features` lists what this build supports, as strings: currently `pane.keys`, `agents`,
   `agent.report.pid`, `ping`, `split.set_ratio`, `fs` (Files, below), `push` (`push.*`
   requests, docs/push.md), `pane.clipboard` (OSC 52 copies, see
-  [Clipboard](#clipboard-osc-52)) and `settings` (`settings.get` and `settings.set`, see
-  [Settings](#settings)). Builds share version numbers, so check
+  [Clipboard](#clipboard-osc-52)), `settings` (`settings.get` and `settings.set`, see
+  [Settings](#settings)) and `service` (`service.*`, see [Start at login](#start-at-login)).
+  Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
   protocol_max]`, which a successful `hello` reports. If the
@@ -256,6 +257,9 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
 | `settings.get` | – | the settings object; see [Settings](#settings) |
 | `settings.set` | any settings to change, e.g. `scrollback_lines` | the settings object, plus `applied_panes`; see [Settings](#settings) |
+| `service.status` | – | the service object; see [Start at login](#start-at-login) |
+| `service.install` | – | the service object, after the login unit is written and registered |
+| `service.uninstall` | – | the service object, after the login unit is removed (the daemon keeps running) |
 | `daemon.stop` | – | `{}`, then the logic process exits; shells keep running in the holder |
 | `daemon.shutdown` | – | `{}`, then all panes are hung up and the holder and daemon exit |
 
@@ -292,8 +296,9 @@ File access (`fs.*`) is described in [Files](#files).
 | `pane.resync` | `{"pane"}` | the client fell behind on this pane, and a SNAPSHOT follows; see [Output](#output) |
 | `pane.clipboard` | `{"pane", "target", "text"}` | the pane's application copied text with OSC 52; see [Clipboard](#clipboard-osc-52) |
 | `settings` | the settings object | a client changed a setting (`settings.set`); see [Settings](#settings) |
+| `service` | the service object | a client installed or removed the login unit; see [Start at login](#start-at-login) |
 
-`state`, `pane`, `bell`, `agent` and `settings` go only to connections that called `events.subscribe`. `pane.resized`,
+`state`, `pane`, `bell`, `agent`, `settings` and `service` go only to connections that called `events.subscribe`. `pane.resized`,
 `pane.resync` and `pane.clipboard` are part of a pane's data stream: they go to every subscriber of that pane,
 whether or not it subscribed to events, in order with that pane's OUTPUT and SNAPSHOT frames.
 
@@ -341,6 +346,73 @@ them per machine, like "Start at login".
   changes. The daemon reads the file again when it starts, so edits by hand still work.
 - Every connection that called `events.subscribe` gets a `settings` event with the new settings
   object (including the client that made the change).
+
+## Start at login
+
+Feature flag: `service` in `hello.features`. A per-machine "Start at login" toggle: a
+LaunchAgent on macOS, a systemd user unit on Linux, managed by the daemon on that machine
+(`clothod service install|uninstall|status` does the same from a shell). Clients show it per
+machine and turn it on only when the user asks; nothing installs it on its own.
+
+```json
+→ {"id": 9, "method": "service.status"}
+← {"id": 9, "result": {
+     "supported": true, "manager": "systemd", "label": "clothod",
+     "file": "/home/me/.config/systemd/user/clothod.service",
+     "installed": false, "loaded": false, "up_to_date": false,
+     "command": ["/home/me/.local/share/clothod/bin/current/clothod", "start"],
+     "linger": false, "needs": ["linger"],
+     "message": "Start at login needs lingering on Linux: … `sudo loginctl enable-linger me`, then try again."}}
+```
+
+| field | meaning |
+|---|---|
+| `supported` | a unit can be managed here (Linux: a systemd user manager answers). If false, `message` says why |
+| `manager` | `launchd` or `systemd` |
+| `installed` | **the toggle's state**: the unit file is there, so the daemon starts at the next login |
+| `loaded` | the service manager has it right now (launchd: loaded in the GUI session; systemd: enabled) |
+| `up_to_date` | the file is what `install` would write now. If it's false while `installed`, `service.install` again refreshes it |
+| `command` | what it runs at login: `<install dir>/current/clothod start` |
+| `linger` | Linux: whether lingering is on (`null` on macOS or if unknown) |
+| `needs` | what is missing before `install` can work: `["linger"]` or `[]` |
+| `message` | a sentence for the user when something is missing, or `null` |
+
+What the unit does:
+- At login it runs `clothod start` once. That starts the daemon unless it runs already, in
+  which case it changes nothing, so there is never a second instance.
+- It never restarts the daemon: there's no `KeepAlive` and no `Restart=`. The in-place upgrade
+  stops serve and starts the new build itself, and a restarter would race it.
+- It runs `current`, so after an upgrade it starts the new build with no rewrite.
+- Removing it leaves the daemon and every shell running.
+
+`service.install`:
+- It's idempotent: an installed unit is rewritten and reloaded.
+- It writes the unit and registers it with the service manager. On Linux it also starts the
+  unit, which finds the running daemon.
+- It's all or nothing: on failure, the file is removed again.
+
+`service.uninstall`:
+- It unregisters and deletes the unit. Not installed isn't an error.
+
+Both answer with the new service object, and send a `service` event to event subscribers.
+
+Errors:
+
+| code | when |
+|---|---|
+| `needs_linger` | Linux without lingering; see below |
+| `unsupported` | no service manager to talk to |
+| `not_installed` | there is no `<install dir>/current/clothod` yet |
+| `conflict` | a file that clothod didn't write is where the unit goes; it's left alone |
+| `service_failed` | launchctl or systemctl failed; the message has their output |
+
+**Linux and lingering.** Without lingering, the systemd user manager stops when the user's last
+session ends, and it kills every process its units started, the daemon and all shells
+included. A daemon started on demand by a client survives logout, so a unit would make things
+worse. `service.install` therefore refuses with `needs_linger`, and clients should show
+`message`. Turning lingering on (`sudo loginctl enable-linger <user>`) usually needs an admin, so
+it's the user's step; clients don't run it. With lingering, the user manager starts at boot, so
+the daemon is up before anyone logs in.
 
 ## Agents
 

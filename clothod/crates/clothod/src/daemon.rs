@@ -1442,7 +1442,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1669,6 +1669,18 @@ impl Daemon {
                 let m = pp.vt.input_modes();
                 Ok(json!({"lines": pp.vt.screen_text(), "cursor": [col, row], "cols": pp.cols, "rows": pp.rows, "seq": pp.vt_seq,
                     "modes": {"kitty_flags": m.kitty, "bracketed_paste": m.bracketed_paste, "app_cursor": m.app_cursor, "app_keypad": m.app_keypad}}))
+            }
+            m if m.starts_with("service.") => {
+                let (dir, op) = (self.dir.clone(), m["service.".len()..].to_string());
+                // launchctl / systemctl can take a moment; keep them off the runtime threads.
+                let r = tokio::task::spawn_blocking(move || crate::service::request(&dir, &op))
+                    .await
+                    .map_err(|e| err("internal", e.to_string()))?
+                    .map_err(|e| err(e.code, e.message))?;
+                if m != "service.status" {
+                    self.broadcast("service", r.clone());
+                }
+                Ok(r)
             }
             "settings.get" => Ok(self.settings_json()),
             "settings.set" => self.set_settings(p),

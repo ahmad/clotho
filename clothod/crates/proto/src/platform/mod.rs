@@ -1,9 +1,7 @@
 //! Everything that differs between macOS and Linux lives here (and in the per-OS files).
 //!
-//! Login start is not implemented yet. The plan: a launchd agent
-//! (`~/Library/LaunchAgents/com.clotho.clothod.plist`) on macOS and a systemd user unit
-//! (`~/.config/systemd/user/clothod.service`) on Linux, both running `clothod serve`. Clients
-//! already start the daemon on demand with `clothod start`.
+//! Clients start the daemon on demand with `clothod start`; start at login (a LaunchAgent or a
+//! systemd user unit running `clothod start`) is `clothod::service`.
 
 use std::path::{Path, PathBuf};
 

@@ -2147,6 +2147,248 @@ async fn scrollback_memory_probe() {
     );
 }
 
+// ---- start at login ------------------------------------------------------------------------
+
+/// A login unit for one test instance: its own label and unit dir, and the test's install dir,
+/// so the user's own unit (and daemon) are never touched. Removed on drop, pass or fail.
+struct TestUnit {
+    label: String,
+    vars: Vec<(String, String)>,
+    runtime: PathBuf,
+}
+
+impl TestUnit {
+    fn new(env: &Env) -> TestUnit {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let label = if cfg!(target_os = "macos") {
+            format!("nyc.amin.clotho.clt-test-{}-{n}", std::process::id())
+        } else {
+            format!("clt-test-{}-{n}", std::process::id())
+        };
+        let home = env.dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut vars = vec![
+            ("CLOTHOD_SERVICE_LABEL".to_string(), label.clone()),
+            ("HOME".into(), home.to_string_lossy().into_owned()),
+            ("CLOTHOD_INSTALL_DIR".into(), env.dir.path().join("bin").to_string_lossy().into_owned()),
+        ];
+        if cfg!(target_os = "macos") {
+            // Where it would go for this HOME; explicit, so a daemon the unit starts (with the
+            // real HOME from launchd) finds the same file.
+            vars.push(("CLOTHOD_SERVICE_DIR".into(), home.join("Library/LaunchAgents").to_string_lossy().into_owned()));
+        } else {
+            // The user manager only reads units from its own search path; the runtime unit dir
+            // is in it and goes away with the manager. Lingering is the user's call (install
+            // refuses without it); the test checks the mechanics.
+            let dir = PathBuf::from(format!("/run/user/{}/systemd/user", unsafe { libc::getuid() }));
+            std::fs::create_dir_all(&dir).unwrap();
+            vars.push(("CLOTHOD_SERVICE_DIR".into(), dir.to_string_lossy().into_owned()));
+            vars.push(("CLOTHOD_TEST_ASSUME_LINGER".into(), "1".into()));
+        }
+        TestUnit { label, vars, runtime: env.path() }
+    }
+
+    fn vars(&self) -> Vec<(&str, &str)> {
+        self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+    }
+
+    /// `bin args --runtime-dir <test instance>`, with everything that makes it this instance.
+    fn cmd(&self, env: &Env, bin: &str, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new(bin);
+        cmd.args(args).arg("--runtime-dir").arg(env.path()).env("CLOTHOD_STATE_DIR", env.state());
+        cmd.env("CLOTHOD_REGISTRY_DIR", env.dir.path().join("registry")).env("CLOTHOD_CONFIG", env.dir.path().join("config.toml"));
+        cmd.env("CLOTHOD_RUNTIME_DIR", env.path());
+        for (k, v) in &self.vars {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    }
+
+    /// How often the service manager has run the unit, and whether the last run succeeded.
+    fn runs(&self) -> (String, bool) {
+        if cfg!(target_os = "macos") {
+            let out = manager(&["print", &format!("gui/{}/{}", unsafe { libc::getuid() }, self.label)]);
+            let field = |k: &str| out.lines().find_map(|l| l.trim().strip_prefix(k).map(|v| v.trim().to_string())).unwrap_or_default();
+            (field("runs = "), field("last exit code = ") == "0")
+        } else {
+            let out = manager(&["show", &format!("{}.service", self.label), "-p", "ActiveEnterTimestampMonotonic", "-p", "Result"]);
+            let field = |k: &str| out.lines().find_map(|l| l.strip_prefix(k).map(String::from)).unwrap_or_default();
+            (field("ActiveEnterTimestampMonotonic="), field("Result=") == "success")
+        }
+    }
+
+    /// What logging in does: the service manager runs the unit.
+    fn trigger(&self) {
+        let out = if cfg!(target_os = "macos") {
+            manager(&["kickstart", &format!("gui/{}/{}", unsafe { libc::getuid() }, self.label)])
+        } else {
+            manager(&["restart", &format!("{}.service", self.label)])
+        };
+        eprintln!("trigger: {out}");
+    }
+}
+
+impl Drop for TestUnit {
+    fn drop(&mut self) {
+        let mut cmd = Command::new(test_bin());
+        cmd.args(["service", "uninstall", "--runtime-dir"]).arg(&self.runtime);
+        for (k, v) in &self.vars {
+            cmd.env(k, v);
+        }
+        let _ = cmd.output();
+    }
+}
+
+/// launchctl (macOS) or `systemctl --user` (Linux); stdout and stderr together.
+fn manager(args: &[&str]) -> String {
+    let mut cmd = if cfg!(target_os = "macos") {
+        Command::new("launchctl")
+    } else {
+        let mut c = Command::new("systemctl");
+        c.arg("--user");
+        if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+            c.env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
+        }
+        c
+    };
+    let o = cmd.args(args).output().unwrap();
+    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+}
+
+/// pids of `clothod serve` processes for this runtime dir.
+fn serve_pids(env: &Env) -> Vec<u32> {
+    let dir = env.path().to_string_lossy().into_owned();
+    clotho_proto::platform::own_processes()
+        .into_iter()
+        .filter(|p| p.args.get(1).is_some_and(|a| a == "serve") && p.args.windows(2).any(|w| w[0] == "--runtime-dir" && w[1] == dir))
+        .map(|p| p.pid)
+        .collect()
+}
+
+async fn wait_serve(env: &Env, what: &str, cond: impl Fn(&Value) -> bool) -> Client {
+    let deadline = Instant::now() + T;
+    loop {
+        if let Ok(c) = Client::connect(&env.path()).await {
+            if cond(&c.hello) {
+                return c;
+            }
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn login_unit_adopts_the_daemon_never_fights_upgrades_and_uninstall_keeps_it() {
+    let mut env = Env::empty();
+    let unit = TestUnit::new(&env);
+    // The unit runs <install dir>/current/clothod, as on a real machine.
+    let out = unit.cmd(&env, &test_bin(), &["install"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    env.start_with(&test_bin(), &unit.vars());
+    let c = env.client().await;
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("service")), "{}", c.hello);
+    let (p, shell) = live_shell(&c).await;
+    let serve = c.hello["pid"].clone();
+    let holder = holder_pid(&env);
+
+    let s = c.request("service.status", json!({})).await.unwrap();
+    assert_eq!((s["installed"].clone(), s["loaded"].clone(), s["label"].clone()), (json!(false), json!(false), json!(unit.label)), "{s}");
+
+    // Install: the unit runs `clothod start` now, which finds this daemon and leaves it alone.
+    let s = c.request("service.install", json!({})).await.unwrap();
+    assert_eq!((s["installed"].clone(), s["loaded"].clone(), s["up_to_date"].clone()), (json!(true), json!(true), json!(true)), "{s}");
+    let file = std::fs::read_to_string(s["file"].as_str().unwrap()).unwrap();
+    let current = env.dir.path().join("bin/current/clothod").to_string_lossy().into_owned();
+    assert!(file.contains(&current) && file.contains(&env.path().to_string_lossy().into_owned()), "{file}");
+    let deadline = Instant::now() + T;
+    let first = loop {
+        let r = unit.runs();
+        if r.1 && !r.0.is_empty() && r.0 != "0" {
+            break r.0;
+        }
+        assert!(Instant::now() < deadline, "the unit didn't run (or failed): {r:?}\n{}", std::fs::read_to_string(env.state().join("service.log")).unwrap_or_default());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(env.client().await.hello["pid"], serve, "adopted, not replaced");
+    assert_eq!(serve_pids(&env).len(), 1, "one instance");
+    drop(c);
+    env.daemon.take(); // replaced from here on
+
+    // Upgrade with the unit installed: serve and holder move, and the unit never runs again.
+    let (v2, id2) = other_build(&env, "v2");
+    let out = unit.cmd(&env, &v2, &["upgrade"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = env.client().await;
+    assert_eq!((c.hello["build"].clone(), c.hello["holder"]["build"].clone()), (json!(id2), json!(id2)));
+    assert_eq!(holder_pid(&env), holder, "same holder");
+    assert_shell_alive(&c, p, &shell).await;
+    assert_eq!(unit.runs().0, first, "the unit stayed out of the upgrade");
+    assert_eq!(serve_pids(&env).len(), 1);
+    let s = c.request("service.status", json!({})).await.unwrap();
+    assert_eq!(s["up_to_date"], true, "`current` moved; the unit needs no rewrite: {s}");
+
+    // A login while it runs: still one instance, the same one.
+    let upgraded = c.hello["pid"].clone();
+    unit.trigger();
+    let deadline = Instant::now() + T;
+    while unit.runs().0 == first {
+        assert!(Instant::now() < deadline, "the unit didn't run again");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(unit.runs().1, "{:?}", unit.runs());
+    assert_eq!(env.client().await.hello["pid"], upgraded);
+    assert_eq!(serve_pids(&env).len(), 1);
+
+    // A login with the daemon stopped starts the installed (current) build; shells kept.
+    drop(c);
+    let out = unit.cmd(&env, &test_bin(), &["stop"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(serve_pids(&env).is_empty());
+    unit.trigger();
+    let c = wait_serve(&env, "the unit to start the daemon", |h| h["build"] == json!(id2)).await;
+    assert_eq!(holder_pid(&env), holder);
+    assert_shell_alive(&c, p, &shell).await;
+    assert_eq!(serve_pids(&env).len(), 1);
+
+    // Uninstall: the unit goes, the daemon stays.
+    let started = c.hello["pid"].clone();
+    let s = c.request("service.uninstall", json!({})).await.unwrap();
+    assert_eq!((s["installed"].clone(), s["loaded"].clone()), (json!(false), json!(false)), "{s}");
+    assert!(!std::path::Path::new(s["file"].as_str().unwrap()).exists());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    c.request("ping", json!({})).await.unwrap();
+    assert_eq!(env.client().await.hello["pid"], started);
+    assert_shell_alive(&c, p, &shell).await;
+    // Idempotent, and the CLI says the same.
+    c.request("service.uninstall", json!({})).await.unwrap();
+    let out = unit.cmd(&env, &test_bin(), &["service", "status"]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(v["installed"], false);
+
+    // Never somebody else's file.
+    let file = PathBuf::from(s["file"].as_str().unwrap());
+    std::fs::write(&file, "not ours\n").unwrap();
+    let e = c.request("service.install", json!({})).await.unwrap_err();
+    assert!(e.to_string().contains("conflict"), "{e}");
+    let e = c.request("service.uninstall", json!({})).await.unwrap_err();
+    assert!(e.to_string().contains("conflict"), "{e}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "not ours\n");
+    std::fs::remove_file(&file).unwrap();
+    let _ = unit.cmd(&env, &test_bin(), &["shutdown"]);
+}
+
+#[test]
+fn a_test_instance_cannot_touch_the_users_login_unit() {
+    let env = Env::empty();
+    for op in ["status", "install", "uninstall"] {
+        let out = Command::new(test_bin()).args(["service", op, "--runtime-dir"]).arg(env.path()).env_remove("CLOTHOD_SERVICE_LABEL").output().unwrap();
+        assert!(!out.status.success(), "{op}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("needs its own CLOTHOD_SERVICE_LABEL"), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
 // ---- push --------------------------------------------------------------------------------
 
 /// A stand-in relay on 127.0.0.1: answers `POST /v1/push` with the next queued status (200 when
