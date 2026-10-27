@@ -1,0 +1,12 @@
+<!-- Clotho app icon, option 3 "Panes" (user decision, 2026-10-27). iOS: full-bleed 1024x1024, no corner mask (iOS masks it). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#232a3d"/><stop offset="1" stop-color="#0c0e15"/></linearGradient></defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect x="168" y="214" width="688" height="596" rx="72" fill="#0a0d14" stroke="#33405a" stroke-width="18"/>
+  <path d="M566 214 V810 M566 512 H856" stroke="#33405a" stroke-width="18"/>
+  <path d="M262 410 L382 512 L262 614" fill="none" stroke="#9ccbff" stroke-width="58" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="414" y="580" width="96" height="40" rx="12" fill="#e6e9f2"/>
+  <rect x="626" y="300" width="160" height="30" rx="15" fill="#3a445c"/>
+  <rect x="626" y="370" width="112" height="30" rx="15" fill="#3a445c"/>
+  <circle cx="711" cy="661" r="48" fill="#fcc679"/>
+</svg>
