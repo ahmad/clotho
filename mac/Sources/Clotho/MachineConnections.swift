@@ -169,7 +169,7 @@ extension AppDelegate {
     /// keeps its own (it must never ride, or become, the installed app's connection). Testing aid, dev
     /// build only: SSHProxyCommand routes its SSH through a command (a throttling relay, say), on a
     /// separate connection.
-    static let sshMultiplexOptions: [String] = {
+    nonisolated static let sshMultiplexOptions: [String] = {
         var name = isDevBuild ? "cm-clothodev" : "cm-clothoapp"
         var proxy: [String] = []
         if isDevBuild, let command = UserDefaults.standard.string(forKey: "SSHProxyCommand"), !command.isEmpty {
