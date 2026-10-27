@@ -138,3 +138,12 @@ owns the PTY fds shapes spawn, resize, reconnect and the output buffer.
 - The user approved releasing it everywhere: clothod 0.1.6, upgraded in place on macbook, devbox and
   imac, the Mac app installed, and an iOS TestFlight build with the same support. This is together
   with the Shift+Return, rename-flicker and Cmd-arrow/Cmd-Delete fixes.
+
+## Image paste into remote agents (user decision, 2026-10-27)
+
+- When an image is pasted into a remote pane (Cmd+V, or Ctrl+V when an agent runs there), the Mac app
+  uploads it to `~/.cache/clotho/paste/` on that machine and pastes the path. Files older than 7 days
+  are pruned. Files dropped on a remote agent pane go to the same folder. Nothing lands in the
+  user's project folders.
+- Right-click and Ctrl-click always open the pane menu, even in apps that take the mouse.
+  Option+right-click passes through to the app.
