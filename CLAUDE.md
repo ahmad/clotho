@@ -46,8 +46,8 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
 - **This Mac** (Tailscale name `macbook`, `ahmad@macbook`): has Xcode. From devbox,
   `clotho-mac <command>` syncs the clone to `~/Builds/clotho-clothod` on the Mac and runs the command
   there, e.g. `clotho-mac ios/build.sh` or `clotho-mac mac/build-app.sh --dev`. Over SSH the login
-  keychain is locked, so codesigning, archives, TestFlight uploads and installing the Mac app need the
-  Mac's own session.
+  keychain is locked, so archives and TestFlight uploads need the Mac's own session. The Mac app is
+  signed ad hoc, so `mac/build-app.sh` installs fine over SSH.
 - **imac** (macOS arm64, `macbook@imac`): a remote test host.
 
 ## Build and test
@@ -55,7 +55,7 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
 - clothod:
   - `cd clothod && cargo test` runs the unit, snapshot and end-to-end tests.
   - `clothod/scripts/test-all.sh` runs them on every platform, plus the cleanliness check.
-  - `scripts/dist.sh` makes the release builds. The macOS builds need a Mac.
+  - `clothod/scripts/dist.sh` makes the release builds. The macOS builds need a Mac.
 - Mac:
   - `mac/build-app.sh --dev` builds `Clotho Dev.app` without installing it.
   - `mac/build-app.sh` installs to `~/Applications` and replaces the user's app. Run it only when the
