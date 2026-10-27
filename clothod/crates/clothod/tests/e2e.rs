@@ -348,7 +348,9 @@ async fn restart_after_heavy_output_uses_the_pushed_snapshot() {
     let mut c = env.client().await;
     let p = new_pane(&c, sh()).await;
     // ~6 MB: more than the 4 MiB buffer, so recovery has to start from a pushed snapshot.
-    c.input(p, b"i=0; while [ $i -lt 60000 ]; do echo \"line $i $(printf '%0.sx' 1 2 3 4 5 6 7 8 9 0)xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; i=$((i+1)); done; echo done-$((1+1))\r");
+    // One process, not a fork per line: under Rosetta the shell is translated too, and 60000
+    // forks alone outlast the timeout.
+    c.input(p, b"awk 'BEGIN { for (i = 0; i < 60000; i++) printf \"line %d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n\", i }'; echo done-$((1+1))\r");
     wait_for_text(&c, p, Duration::from_secs(120), |l| has_line(l, "done-2")).await.unwrap();
     let (_, mut s) = subscribe(&mut c, p, None).await;
     sync(&mut c, &mut s).await.unwrap();
