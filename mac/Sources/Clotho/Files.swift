@@ -113,8 +113,7 @@ struct FileError: LocalizedError {
 // Connection checks (`ssh <target> true`) share one multiplexed connection per machine.
 enum SSH {
     static var options: [String] {
-        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15",
-         "-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/cm-clothoapp-%C", "-o", "ControlPersist=600"]
+        ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15"] + AppDelegate.sshMultiplexOptions
     }
 
     static func quote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }

@@ -64,6 +64,7 @@ extension AppDelegate {
         session.store.onChange = { [weak self] in self?.sync() }
         session.store.onBell = { [weak self] pane in self?.bell(pane) }
         session.store.onSettings = { [weak self] _ in self?.settingsWindow?.reload() }
+        session.store.onService = { [weak self] _ in self?.settingsWindow?.reload() }
         let key = session.key
         session.store.onAgentChange = { [weak self] pane, before, after in
             self?.agentChanged(machine: key, pane: pane, from: before, to: after)
@@ -164,9 +165,19 @@ extension AppDelegate {
     }
 
     /// Shared with the file browser's ssh calls, so they all ride one connection per machine.
-    static let sshMultiplexOptions = [
-        "-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/cm-clothoapp-%C", "-o", "ControlPersist=600",
-    ]
+    /// One SSH connection per machine, shared by the session, installs and file access. The dev build
+    /// keeps its own (it must never ride, or become, the installed app's connection). Testing aid, dev
+    /// build only: SSHProxyCommand routes its SSH through a command (a throttling relay, say), on a
+    /// separate connection.
+    static let sshMultiplexOptions: [String] = {
+        var name = isDevBuild ? "cm-clothodev" : "cm-clothoapp"
+        var proxy: [String] = []
+        if isDevBuild, let command = UserDefaults.standard.string(forKey: "SSHProxyCommand"), !command.isEmpty {
+            name += "-proxied"
+            proxy = ["-o", "ProxyCommand=\(command)"]
+        }
+        return ["-o", "ControlMaster=auto", "-o", "ControlPath=\(NSHomeDirectory())/.ssh/\(name)-%C", "-o", "ControlPersist=600"] + proxy
+    }()
 
     /// clothod's warnings (for example that workspaces won't survive logout), once per machine per run.
     func showRemoteWarning(_ line: String, for key: MachineKey) {

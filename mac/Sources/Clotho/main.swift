@@ -406,18 +406,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if UserDefaults.standard.bool(forKey: "ShowFiles") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.showFileBrowser(nil) }
         }
-        // Testing aid: TestCopy="machine|source path|destination folder" copies through the transfer pipeline.
-        if let spec = UserDefaults.standard.string(forKey: "TestCopy")?.components(separatedBy: "|"), spec.count == 3,
+        // Testing aid: TestCopy="machine|source path|destination folder[|replace]" copies through the transfer
+        // pipeline. "remote:/path" as the source downloads from the machine; "other:/path" as the
+        // destination (a saved machine's name) copies between two remote machines through the app.
+        if let spec = UserDefaults.standard.string(forKey: "TestCopy")?.components(separatedBy: "|"), spec.count >= 3,
            let machine = Machine.all().first(where: { $0.label == spec[0] }) {
             Task { @MainActor in
-                // Once the machine's connection can share files (or after a minute, to show why not).
-                for _ in 0 ..< 60 where (try? self.fileBackend(for: machine)) == nil {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
                 let fromRemote = spec[1].hasPrefix("remote:")
                 let source = Location(machine: fromRemote ? machine : .local, path: fromRemote ? String(spec[1].dropFirst(7)) : spec[1])
-                let dest = Location(machine: fromRemote ? .local : machine, path: spec[2])
-                self.copy([source], to: dest) { ok in log("TestCopy finished ok=\(ok)") }
+                var dest = Location(machine: fromRemote ? .local : machine, path: spec[2])
+                if let colon = spec[2].firstIndex(of: ":"),
+                   let other = Machine.all().first(where: { $0.label == String(spec[2][..<colon]) }) {
+                    dest = Location(machine: other, path: String(spec[2][spec[2].index(after: colon)...]))
+                }
+                // Once both machines can share files (or after two minutes, to show why not).
+                for _ in 0 ..< 120 where (try? self.fileBackend(for: source.machine)) == nil || (try? self.fileBackend(for: dest.machine)) == nil {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+                log("TestCopy: \(source.machine.label):\(source.path) → \(dest.machine.label):\(dest.path)")
+                let started = Date()
+                let done = { (ok: Bool) in log("TestCopy finished ok=\(ok) in \(Int(Date().timeIntervalSince(started)))s") }
+                // A fourth field "replace" skips the Replace/Skip question (a rerun that should resume).
+                if spec.count > 3, spec[3] == "replace" {
+                    self.transfers.start(title: "TestCopy", sources: [source], to: dest, conflict: .replace, onFinish: done)
+                } else {
+                    self.copy([source], to: dest, then: done)
+                }
             }
         }
         // Testing aid: RunShortcuts="New Tab,Split Right" fires those menu items, a second apart.
@@ -459,6 +473,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
+                if step.hasPrefix("login:") {
+                    showSettings(nil)
+                    return settingsWindow?.setStartsAtLogin(step.hasSuffix("on"), on: focusedMachine) ?? ()
+                }
                 if step.hasPrefix("scrollback:"), let lines = Int(step.dropFirst(11)) {
                     showSettings(nil)
                     return settingsWindow?.setScrollback(lines, on: focusedMachine) ?? ()

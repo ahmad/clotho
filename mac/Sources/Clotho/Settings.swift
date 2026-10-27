@@ -58,12 +58,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// Fetches each connected machine's settings (events keep them current afterwards).
     func loadMachineSettings() {
         guard let app else { return }
-        for session in app.connections.values where session.store.hello?.features.contains(.settings) == true {
+        for session in app.connections.values {
             let store = session.store
             let key = session.key
+            let features = store.hello?.features ?? []
+            guard features.contains(.settings) || features.contains(.service) else { continue }
             Task { @MainActor [weak self] in
                 do {
-                    try await store.loadSettings()
+                    if features.contains(.settings) { try await store.loadSettings() }
+                    if features.contains(.service) { try await store.loadService() }
                     self?.errors[key] = nil
                 } catch {
                     self?.errors[key] = error.localizedDescription
@@ -80,12 +83,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func refreshIfNeeded() {
         guard let app, window?.isVisible == true else { return }
         let signature = app.connections.values.map { session in
-            "\(session.key):\(session.store.isConnected):\(session.store.hello?.version ?? "-"):\(session.store.settings != nil)"
+            "\(session.key):\(session.store.isConnected):\(session.store.hello?.version ?? "-"):\(session.store.settings != nil):\(session.store.service != nil)"
         }.sorted().joined(separator: ",") + "|\(app.remoteMachines.map(\.key))"
         guard signature != shownSignature else { return }
         shownSignature = signature
         // A machine that just connected gets its settings fetched.
-        if app.connections.values.contains(where: { $0.store.settings == nil && $0.store.hello?.features.contains(.settings) == true }) {
+        if app.connections.values.contains(where: {
+            ($0.store.settings == nil && $0.store.hello?.features.contains(.settings) == true)
+                || ($0.store.service == nil && $0.store.hello?.features.contains(.service) == true)
+        }) {
             loadMachineSettings()
         }
         reload()
@@ -130,15 +136,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             note("Connect to \(name) to change its clothod settings.", indent: 12)
             return
         }
-        guard hello.features.contains(.settings) else {
+        if !hello.features.contains(.settings) && !hello.features.contains(.service) {
             note("\(name) runs clothod \(hello.version). Scrollback and Start at Login need clothod 0.1.7 or later; update it from the machine's menu in the sidebar.", indent: 12)
             return
         }
-        guard let settings = session.store.settings else {
-            note("Loading…", indent: 12)
-            return
+        if hello.features.contains(.settings) {
+            if let settings = session.store.settings { scrollbackControls(settings, key: key) } else { note("Loading…", indent: 12) }
         }
+        if hello.features.contains(.service) {
+            if let service = session.store.service { loginControls(service, key: key, name: name) } else { note("Loading…", indent: 12) }
+        }
+        if let error = errors[key] { note(error, indent: 12, color: NSColor.systemRed) }
+    }
 
+    private func scrollbackControls(_ settings: DaemonSettings, key: MachineKey) {
         // Scrollback: a number field and a stepper, within the daemon's limits.
         let limits = settings.limits.scrollbackLines
         let field = NSTextField(string: "\(settings.scrollbackLines)")
@@ -176,13 +187,45 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         their oldest lines at once. Saved in \(settings.config ?? "clothod's config file").
         """, indent: 12)
 
-        // Start at login: needs clothod's service.* requests (next clothod).
-        let login = checkbox("Start clothod at login", on: false) { _ in }
-        login.isEnabled = false
-        add(login, indent: 12)
-        note("Coming with the next clothod: it keeps \(name)'s workspaces ready before Clotho connects.", indent: 12)
+    }
 
-        if let error = errors[key] { note(error, indent: 12, color: NSColor.systemRed) }
+    /// Start at login: the toggle is whether the service is installed.
+    private func loginControls(_ service: DaemonService, key: MachineKey, name: String) {
+        let login = checkbox("Start clothod at login", on: service.installed) { [weak self] on in self?.setStartsAtLogin(on, on: key) }
+        // Turning it off always works; turning it on needs a service manager and nothing missing.
+        login.isEnabled = service.installed || (service.supported && service.needs.isEmpty)
+        if service.installed && !service.upToDate {
+            let refresh = ClosureButton(title: "Refresh") { [weak self] in self?.setStartsAtLogin(true, on: key) }
+            refresh.bezelStyle = .rounded
+            refresh.controlSize = .small
+            let row = NSStackView(views: [login, refresh])
+            row.spacing = 8
+            add(row, indent: 12)
+            note("The installed login item is from another clothod build; Refresh rewrites it.", indent: 12)
+        } else {
+            add(login, indent: 12)
+        }
+        var lines = ["Keeps \(name)'s workspaces running from login, before Clotho connects. Turning it off leaves clothod running."]
+        if service.installed, !service.loaded { lines.append("Installed, but \(service.manager ?? "the service manager") hasn't loaded it.") }
+        if let message = service.message { lines.append(message) }
+        note(lines.joined(separator: " "), indent: 12)
+    }
+
+    func setStartsAtLogin(_ on: Bool, on key: MachineKey) {
+        guard let store = app?.connections[key]?.store else { return }
+        log("settings: \(key) start at login → \(on)")
+        Task { @MainActor [weak self] in
+            do {
+                let result = try await store.setStartsAtLogin(on)
+                self?.errors[key] = nil
+                log("settings: \(key) service installed=\(result.installed) loaded=\(result.loaded)")
+            } catch {
+                let message = (error as? BackendError)?.message ?? error.localizedDescription
+                self?.errors[key] = on ? "Couldn't turn on start at login: \(message)" : "Couldn't turn off start at login: \(message)"
+                log("settings: \(key) service failed: \(error)")
+            }
+            self?.reload()
+        }
     }
 
     static func lineFormatter(_ limits: DaemonSettings.Range) -> NumberFormatter {
