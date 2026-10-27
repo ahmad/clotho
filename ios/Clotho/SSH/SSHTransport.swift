@@ -42,7 +42,9 @@ final class SSHTransport: ClothodTransport, @unchecked Sendable {
 
     var name: String { runner.target }
     var maxReconnectDelay: TimeInterval { 30 }
-    var heartbeatInterval: TimeInterval? { 20 }
+    /// A ping after 15 s without traffic, and a reconnect if 15 s more pass without an answer (protocol.md:
+    /// clients ping every 15 s and drop the connection after 30 s of silence).
+    var heartbeatInterval: TimeInterval? { 15 }
 
     func open(progress: @escaping @Sendable (String) -> Void) throws -> ByteStream {
         // A link that went quiet (heartbeat timeout, network change) may look alive; start clean.

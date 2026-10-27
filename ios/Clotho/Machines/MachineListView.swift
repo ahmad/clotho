@@ -5,7 +5,7 @@ struct MachineListView: View {
     @EnvironmentObject private var machines: MachineList
     @EnvironmentObject private var connections: Connections
     @State private var editing: Machine?
-    @State private var path: [Route] = []
+    @EnvironmentObject private var navigator: Navigator
 
     /// Debug builds default new machines to the test install dirs, so trying things out never touches the
     /// daemon a machine already runs.
@@ -16,7 +16,7 @@ struct MachineListView: View {
     #endif
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack(path: $navigator.path) {
             List {
                 AgentsSection(rows: connections.agentRows, connections: connections) { row in open(row) }
                 Section(connections.agentRows.isEmpty ? "" : "Machines") {
@@ -51,14 +51,24 @@ struct MachineListView: View {
             .refreshable { await connections.refresh(machines.all) }
             .overlay {
                 if machines.all.isEmpty {
-                    ContentUnavailableView("No machines", systemImage: "desktopcomputer",
-                                           description: Text("Add a machine you can reach over SSH."))
+                    ContentUnavailableView {
+                        Label("No machines", systemImage: "desktopcomputer")
+                    } description: {
+                        Text("Add a Mac or Linux machine you can reach over SSH.")
+                    } actions: {
+                        Button("Add a Machine") { navigator.guide = .addMachine }.buttonStyle(.borderedProminent)
+                    }
                 }
             }
             .navigationTitle("Machines")
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { editing = Machine(name: "", devDirs: Self.defaultDevDirs) } label: { Label("Add machine", systemImage: "plus") }
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button { navigator.quickOpen = true } label: { Label("Quick Open", systemImage: "magnifyingglass") }
+                    Button { navigator.guide = .addMachine } label: { Label("Add machine", systemImage: "plus") }
+                }
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    Button { navigator.guide = .firstRun } label: { Label("Welcome Guide", systemImage: "questionmark.circle") }
+                    AppearanceMenu()
                 }
             }
             .navigationDestination(for: Route.self) { route in
@@ -73,10 +83,6 @@ struct MachineListView: View {
                     }
                 }
             }
-            .onAppear {
-                AgentNotifier.shared.onOpen = { machine, pane in openPane(machine: machine, pane: pane) }
-                AgentNotifier.shared.isLive = { [connections] id in connections.existing(id)?.store.isConnected == true }
-            }
             .sheet(item: $editing) { machine in
                 MachineEditor(machine: machine) { saved in
                     machines.save(saved)
@@ -88,30 +94,8 @@ struct MachineListView: View {
     /// Opening an agent never resolves it: it leaves the top of the list only when it starts working again or
     /// the user taps Resolve.
     private func open(_ row: AgentRow) {
-        path = [.pane(row.machineID, row.tab, row.pane)]
+        navigator.open(.pane(row.machineID, row.tab, row.pane))
     }
-
-    /// From a notification: the machine may not be connected yet, so wait for its model. Opening doesn't
-    /// resolve the agent either.
-    private func openPane(machine id: UUID, pane: PaneID) {
-        guard let machine = machines.machine(id) else { return }
-        let connection = connections.connection(for: machine)
-        connection.connect()
-        Task {
-            for _ in 0..<50 {
-                if let tab = connection.store.state.location(of: pane)?.tab {
-                    path = [.pane(id, tab.id, pane)]
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-        }
-    }
-}
-
-enum Route: Hashable {
-    case machine(UUID)
-    case pane(UUID, TabID, PaneID)
 }
 
 private struct MachineRow: View {

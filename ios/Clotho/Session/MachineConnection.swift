@@ -80,6 +80,7 @@ final class MachineConnection: ObservableObject, Identifiable {
             if status != self.versionStatus { self.versionStatus = status }
             self.syncPush()
             self.clearStaleAlerts()
+            if self.store.isConnected { AgentNotifier.shared.promptIfUndecided() }
         }
         store.onAgentChange = { [weak self] pane, before, after in
             guard let self else { return }

@@ -48,6 +48,19 @@ struct Machine: Codable, Identifiable, Hashable, Sendable {
 
     static let defaultBridgeCommand = "clothod bridge"
 
+    /// Why a host or user typed in can't be used, or nil. NIO SSH never hands them to a shell or an ssh
+    /// command line, but a leading "-" (an option to ssh, e.g. -oProxyCommand=…), whitespace and control
+    /// characters are never a real host or user, and refusing them keeps the machine usable from any SSH client.
+    static func problem(host: String, user: String) -> String? {
+        func bad(_ text: String) -> Bool {
+            text.hasPrefix("-") || text.unicodeScalars.contains { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }
+        }
+        if bad(host) { return "A host can't start with \"-\" or contain spaces or control characters." }
+        if bad(user) { return "A user name can't start with \"-\" or contain spaces or control characters." }
+        if host.contains("@") { return "Put the user name in User, and only the host name in Host." }
+        return nil
+    }
+
     /// What a connection depends on. Accepting a host key or renaming doesn't change it.
     var endpoint: [String] {
         [kind.rawValue, host, String(port), user, keyID ?? "", remoteCommand ?? "", socketPath ?? "", String(devDirs ?? false)]

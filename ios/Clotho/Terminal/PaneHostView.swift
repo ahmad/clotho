@@ -106,15 +106,18 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
 
         terminal.terminalDelegate = self
         terminal.font = Theme.font
-        terminal.nativeBackgroundColor = Theme.background
-        terminal.nativeForegroundColor = Theme.foreground
-        terminal.caretColor = Theme.accent
+        TerminalPalette.current(traitCollection).apply(to: terminal)
         terminal.optionAsMetaKey = true
-        terminal.keyboardAppearance = .dark
         keyBar.terminal = terminal
         terminal.inputAccessoryView = keyBar
         terminal.resizeFromBackend(cols: pane.cols, rows: pane.rows)
         addSubview(terminal)
+        // A text beam over the terminal with a trackpad or mouse (iPad), as over any text.
+        terminal.addInteraction(UIPointerInteraction(delegate: self))
+        // Light and dark (the system's, or the app's own choice) each have their own palette.
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: PaneHostView, _: UITraitCollection) in
+            TerminalPalette.current(self.traitCollection).apply(to: self.terminal)
+        }
         store.register(self, for: pane.id)
     }
 
@@ -344,9 +347,11 @@ enum PaneClipboard {
 }
 
 enum Theme {
-    static let background = UIColor(red: 0.08, green: 0.08, blue: 0.10, alpha: 1)
-    static let foreground = UIColor(white: 0.9, alpha: 1)
-    static let accent = UIColor(red: 0.55, green: 0.75, blue: 1, alpha: 1)
+    /// The terminal's background and foreground in the current appearance (TerminalPalette).
+    static let background = UIColor { UIColor(hex: TerminalPalette.current($0).background) }
+    static let foreground = UIColor { UIColor(hex: TerminalPalette.current($0).foreground) }
+    /// The caret and the key bar's latched Ctrl: #6C96B4, or #3F6E8F in light.
+    static let accent = UIColor { UIColor(hex: TerminalPalette.current($0).caret) }
     /// The selected pane, tab and workspace, as on the Mac (#6C96B4).
     static let selection = UIColor(red: 0x6c / 255, green: 0x96 / 255, blue: 0xb4 / 255, alpha: 1)
 
@@ -356,4 +361,10 @@ enum Theme {
     }
 
     static var font: UIFont { UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular) }
+}
+
+extension PaneHostView: UIPointerInteractionDelegate {
+    func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+        UIPointerStyle(shape: .verticalBeam(length: terminal.font.lineHeight))
+    }
 }

@@ -17,12 +17,21 @@ struct PaneScreen: View {
     @State private var pickingPhoto = false
     @State private var photo: PhotosPickerItem?
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
+    @AppStorage(AppearanceChoice.storageKey) private var appearance = AppearanceChoice.system
 
-    init(connection: MachineConnection, initialTab: TabID, initialPane: PaneID? = nil) {
+    /// In the iPad's detail column: switching tabs here moves the sidebar's selection, and a closed tab
+    /// goes back to the machine (instead of popping the stack).
+    private let onTabChange: ((TabID) -> Void)?
+    private let onTabGone: (() -> Void)?
+
+    init(connection: MachineConnection, initialTab: TabID, initialPane: PaneID? = nil,
+         onTabChange: ((TabID) -> Void)? = nil, onTabGone: (() -> Void)? = nil) {
         self.connection = connection
         store = connection.store
         _tabID = State(initialValue: initialTab)
         _paneID = State(initialValue: initialPane)
+        self.onTabChange = onTabChange
+        self.onTabGone = onTabGone
     }
 
     private var tab: ClothoKit.Tab? { store.state.tab(tabID) }
@@ -63,8 +72,10 @@ struct PaneScreen: View {
         }
         .background { ShortcutButtons(screen: self) }
         .onChange(of: tab == nil) { _, gone in
-            if gone { dismiss() }
+            guard gone else { return }
+            if let onTabGone { onTabGone() } else { dismiss() }
         }
+        .onChange(of: appearance) { AppearanceChoice.applyToAllWindows() }
         .onChange(of: fontSize) { _, size in
             connection.setFont(UIFont.monospacedSystemFont(ofSize: size, weight: .regular))
         }
@@ -92,11 +103,11 @@ struct PaneScreen: View {
                     Button { select(pane: id) } label: {
                         Text("\(index + 1) \(paneTitle(id))")
                             .font(.caption.weight(selected ? .semibold : .regular))
-                            .foregroundStyle(selected ? Color.white : Color.secondary)
+                            .foregroundStyle(selected ? Color.primary : Color.secondary)
                             .lineLimit(1)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(selected ? Color.selection.opacity(0.55) : Color.white.opacity(0.08), in: Capsule())
+                            .background(selected ? Color.selection.opacity(0.35) : Color.primary.opacity(0.08), in: Capsule())
                             // The selected pane is underlined too, so it reads at a glance (as on the Mac).
                             .overlay(alignment: .bottom) {
                                 if selected {
@@ -131,7 +142,7 @@ struct PaneScreen: View {
             Text(mode.rawValue)
                 .font(.caption2.monospaced())
                 .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(.black.opacity(0.5), in: Capsule())
+                .background(.thinMaterial, in: Capsule())
                 .foregroundStyle(.secondary)
                 .padding(6)
                 .accessibilityIdentifier("resumeMode")
@@ -198,6 +209,10 @@ struct PaneScreen: View {
                 Button("Larger") { fontSize = min(fontSize + 1, 28) }
                 Button("Smaller") { fontSize = max(fontSize - 1, 7) }
             }
+            Picker("Appearance", selection: $appearance) {
+                ForEach(AppearanceChoice.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.menu)
             Button { browsingFiles = pane?.cwd ?? "~" } label: { Label("Files here", systemImage: "folder") }
             Button { pickingPhoto = true } label: { Label("Paste Photo…", systemImage: "photo.on.rectangle") }
             Divider()
@@ -226,6 +241,7 @@ struct PaneScreen: View {
         tabID = id
         paneID = nil
         connection.run("Focus") { try await $0.focus(.tab(id)) }
+        onTabChange?(id)
     }
 
     func step(pane delta: Int) {
@@ -250,6 +266,7 @@ struct PaneScreen: View {
             await MainActor.run {
                 tabID = created.tab
                 paneID = created.pane
+                onTabChange?(created.tab)
             }
         }
     }
@@ -334,7 +351,9 @@ struct TerminalContainer: UIViewRepresentable {
     }
 
     func updateUIView(_ container: UIView, context: Context) {
-        if host.superview !== container { install(in: container) }
+        // Back from another container, unless another window shows this pane now (one terminal view per pane:
+        // the window that opened it last keeps it, instead of the two trading it on every update).
+        if host.superview !== container, host.window == nil || host.window === container.window { install(in: container) }
         host.onModeChange = onMode
         host.onCopy = onCopy
     }

@@ -30,6 +30,11 @@ struct MachineEditor: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
 
+                if let problem = Machine.problem(host: machine.host.trimmingCharacters(in: .whitespaces),
+                                                 user: machine.user.trimmingCharacters(in: .whitespaces)) {
+                    Section { Text(problem).font(.callout).foregroundStyle(.orange) }
+                }
+
                 Section {
                     KeyPicker(keyID: $machine.keyID)
                 } header: {
@@ -95,7 +100,9 @@ struct MachineEditor: View {
                         onSave(machine)
                         dismiss()
                     }
-                    .disabled(machine.host.trimmingCharacters(in: .whitespaces).isEmpty || machine.user.isEmpty)
+                    .disabled(machine.host.trimmingCharacters(in: .whitespaces).isEmpty || machine.user.isEmpty
+                              || Machine.problem(host: machine.host.trimmingCharacters(in: .whitespaces),
+                                                 user: machine.user.trimmingCharacters(in: .whitespaces)) != nil)
                 }
             }
         }

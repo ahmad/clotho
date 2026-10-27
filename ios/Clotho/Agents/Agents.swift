@@ -153,11 +153,41 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     var isLive: ((UUID) -> Bool)?
     private var authorized = false
 
+    /// While the welcome guide shows, it asks for permission itself, at its notifications step.
+    var deferPrompt = false
+
+    /// Becomes the notification delegate and reads the current permission. It doesn't ask for it: that waits
+    /// until there's a machine whose agents can need the user (the guide's step, or `promptIfUndecided`).
     func setUp() {
-        let center = UNUserNotificationCenter.current()
-        center.delegate = self
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-            Task { @MainActor in self.authorized = granted }
+        UNUserNotificationCenter.current().delegate = self
+        refreshAuthorization()
+        // UI tests other than the guide's expect the prompt at launch, as before the guide had a step for it.
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-UITesting") && !arguments.contains("-CleanState") { Task { await requestPermission() } }
+    }
+
+    /// The user can change the permission in Settings while the app is in the background.
+    func refreshAuthorization() {
+        Task {
+            let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+            authorized = [.authorized, .provisional, .ephemeral].contains(status)
+        }
+    }
+
+    /// Asks for permission (the system prompt shows once per install) and returns whether it was given.
+    @discardableResult
+    func requestPermission() async -> Bool {
+        let granted = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) ?? false
+        authorized = granted
+        return granted
+    }
+
+    /// Asks once a machine is connected, for users who skipped the guide's step.
+    func promptIfUndecided() {
+        guard !deferPrompt, !ProcessInfo.processInfo.arguments.contains("-UITesting") else { return }
+        Task {
+            guard await UNUserNotificationCenter.current().notificationSettings().authorizationStatus == .notDetermined, !deferPrompt else { return }
+            await requestPermission()
         }
     }
 

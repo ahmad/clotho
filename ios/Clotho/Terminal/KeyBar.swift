@@ -5,6 +5,9 @@ import UIKit
 /// the terminal's own send path, so they reach the pane like typed keys and respect cursor-key mode.
 final class KeyBar: UIInputView {
     static let height: CGFloat = 44
+    /// Keys in dark, and the Mac's light hover grey (#E1E3E1) with the light terminal's text in light.
+    static let keyBackground = UIColor { $0.userInterfaceStyle == .light ? UIColor(hex: 0xE1E3E1) : UIColor(white: 0.32, alpha: 1) }
+    static let keyForeground = UIColor { $0.userInterfaceStyle == .light ? UIColor(hex: 0x2B3035) : .white }
 
     weak var terminal: TerminalView? {
         didSet { observeControlReset() }
@@ -74,8 +77,8 @@ final class KeyBar: UIInputView {
 
     private func makeButton(_ label: String, _ key: Key) -> UIButton {
         var config = UIButton.Configuration.filled()
-        config.baseBackgroundColor = UIColor(white: 0.32, alpha: 1)
-        config.baseForegroundColor = .white
+        config.baseBackgroundColor = Self.keyBackground
+        config.baseForegroundColor = Self.keyForeground
         config.cornerStyle = .medium
         config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10)
         let isSymbol = label.contains(".") && UIImage(systemName: label) != nil
@@ -87,6 +90,7 @@ final class KeyBar: UIInputView {
             config.attributedTitle = title
         }
         let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in self?.press(key) })
+        button.isPointerInteractionEnabled = true
         button.accessibilityLabel = switch key {
         case .newline: "Newline"
         case .paste: "Paste"
@@ -123,8 +127,8 @@ final class KeyBar: UIInputView {
 
     private func updateCtrl() {
         let on = terminal?.controlModifier ?? false
-        ctrlButton.configuration?.baseBackgroundColor = on ? Theme.accent : UIColor(white: 0.32, alpha: 1)
-        ctrlButton.configuration?.baseForegroundColor = on ? .black : .white
+        ctrlButton.configuration?.baseBackgroundColor = on ? Theme.accent : Self.keyBackground
+        ctrlButton.configuration?.baseForegroundColor = on ? .white : Self.keyForeground
     }
 
     private func observeControlReset() {

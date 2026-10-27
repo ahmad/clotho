@@ -15,14 +15,28 @@ final class RemoteUITests: XCTestCase {
 
         // Reuse the machine from an earlier run.
         if !app.staticTexts["\(user)@\(host)"].exists {
+            // The + button runs the guide's machine setup (OnboardingUITests covers it step by step).
             app.buttons["Add machine"].tap()
             let fields = app.textFields
+            XCTAssertTrue(fields["Host"].waitForExistence(timeout: 5))
             fields["Host"].tap(); fields["Host"].typeText(host)
             fields["User"].tap(); fields["User"].typeText(user)
-            app.buttons["Generate new key"].tap()
-            app.buttons["Ed25519"].tap()
-            XCTAssertTrue(app.buttons["Copy public key"].waitForExistence(timeout: 5))
-            app.buttons["Save"].tap()
+            app.buttons["Continue"].tap()
+            app.buttons["generateKey"].tap()
+            app.buttons["I've Added the Key"].tap()
+            let trust = app.buttons["trustHostKey"]
+            XCTAssertTrue(trust.waitForExistence(timeout: 20))
+            trust.tap()
+            let install = app.buttons["Install clothod"]
+            XCTAssertTrue(install.waitForExistence(timeout: 20), "no login (\(host) needs the key, or Tailscale SSH)")
+            install.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["clothodRunning"].waitForExistence(timeout: 120))
+            app.buttons["Continue"].tap()
+            if app.buttons["allowNotifications"].waitForExistence(timeout: 3) { app.buttons["Not Now"].tap() }
+            XCTAssertTrue(app.descendants(matching: .any)["loginUnavailable"].waitForExistence(timeout: 10))
+            app.buttons["Continue"].tap()
+            app.buttons["openMachine"].tap()
+            app.navigationBars.buttons.element(boundBy: 0).tap()
         }
         app.staticTexts["\(user)@\(host)"].firstMatch.tap()
 

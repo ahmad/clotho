@@ -10,9 +10,17 @@ struct MachineView: View {
     @State private var confirmingUpdate = false
     @State private var confirmingRestart = false
 
-    init(connection: MachineConnection) {
+    /// Opens a tab somewhere else instead of pushing it (the iPad's detail column).
+    private let onOpenTab: ((TabID) -> Void)?
+
+    init(connection: MachineConnection, onOpenTab: ((TabID) -> Void)? = nil) {
         self.connection = connection
         store = connection.store
+        self.onOpenTab = onOpenTab
+    }
+
+    private func show(_ tab: TabID) {
+        if let onOpenTab { onOpenTab(tab) } else { openTab = tab }
     }
 
     private func workspaceSection(_ workspace: Workspace) -> some View {
@@ -25,7 +33,7 @@ struct MachineView: View {
                             if let name { connection.run("Rename tab") { try await $0.renameTab(tab.id, title: name.isEmpty ? nil : name) } }
                         }
                     } else {
-                        Button { openTab = tab.id } label: { TabRow(store: store, tab: tab) }
+                        Button { show(tab.id) } label: { TabRow(store: store, tab: tab) }
                             .tint(.primary)
                     }
                 }
@@ -45,7 +53,7 @@ struct MachineView: View {
             Button {
                 connection.run("New tab") { backend in
                     let created = try await backend.createTab(in: workspace.id)
-                    await MainActor.run { openTab = created.tab }
+                    await MainActor.run { show(created.tab) }
                 }
             } label: {
                 Label("New Tab", systemImage: "plus").font(.callout)
@@ -163,7 +171,7 @@ struct MachineView: View {
                     let name = "Workspace \(store.state.workspaces.count + 1)"
                     connection.run("New workspace") { backend in
                         let created = try await backend.createWorkspace(name: name)
-                        await MainActor.run { openTab = created.tab }
+                        await MainActor.run { show(created.tab) }
                     }
                 } label: {
                     Label("New Workspace", systemImage: "plus.rectangle.on.rectangle")
@@ -247,8 +255,11 @@ struct SelectionBackground: View {
 }
 
 extension Color {
-    /// The selected pane, tab and workspace (#6C96B4, as on the Mac).
-    static let selection = Color(Theme.selection)
+    /// The selected pane, tab and workspace: #6C96B4 as on the Mac, and a darker #3F6E8F in light
+    /// appearance, where #6C96B4 is only about 3:1 against white (#3F6E8F is about 5.5:1).
+    static let selection = Color(UIColor { traits in
+        traits.userInterfaceStyle == .light ? UIColor(red: 0x3f / 255, green: 0x6e / 255, blue: 0x8f / 255, alpha: 1) : Theme.selection
+    })
 }
 
 enum RenameTarget: Identifiable {

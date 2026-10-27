@@ -15,6 +15,10 @@ enum SSHError: Error, LocalizedError {
     case keyRejected
     case hostKeyChanged(host: String, trusted: String, presented: String)
     case timedOut(String)
+    /// The host key probe stopped before trusting the key (never shown).
+    case hostKeyNotTrusted
+    /// The port answered, but not with SSH.
+    case notSSH
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +29,8 @@ enum SSHError: Error, LocalizedError {
             return "The host key for \(host) changed (was \(HostKeys.fingerprint(trusted) ?? "?"), now \(HostKeys.fingerprint(presented) ?? "?")). "
                 + "Someone may be intercepting the connection. Not connecting."
         case .timedOut(let what): return "Timed out \(what)."
+        case .hostKeyNotTrusted: return "The machine's host key isn't trusted yet."
+        case .notSSH: return "The machine closed the connection before SSH started. Check that the port is its SSH port."
         }
     }
 }
@@ -71,6 +77,39 @@ final class SSHSession: @unchecked Sendable {
     func close() {
         channel.close(promise: nil)
     }
+
+    /// The host key `host` presents, read in the key exchange without trusting it or logging in, so the user
+    /// can compare its fingerprint before the first connection.
+    static func presentedHostKey(host: String, port: Int, timeout: TimeAmount = .seconds(10)) throws -> String {
+        let loop = group.next()
+        let captured = loop.makePromise(of: String.self)
+        let errors = ErrorRecorder()
+        let capture = HostKeyCapture(captured: captured)
+        let bootstrap = ClientBootstrap(group: loop)
+            .connectTimeout(timeout)
+            .channelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    let ssh = NIOSSHHandler(role: .client(.init(userAuthDelegate: NoAuthentication(), serverAuthDelegate: capture)),
+                                            allocator: channel.allocator, inboundChildChannelInitializer: nil)
+                    try channel.pipeline.syncOperations.addHandlers([ssh, ErrorHandler(errors: errors)])
+                }
+            }
+        let channel: Channel
+        do {
+            channel = try bootstrap.connect(host: host, port: port).wait()
+        } catch {
+            // NIO traps on a promise that's never completed.
+            captured.fail(error)
+            throw error
+        }
+        defer { channel.close(promise: nil) }
+        channel.closeFuture.whenComplete { _ in
+            captured.fail(errors.first ?? SSHError.notSSH)
+        }
+        loop.scheduleTask(in: timeout) { captured.fail(SSHError.timedOut("waiting for the machine's SSH server")) }
+        return try captured.futureResult.wait()
+    }
+
 
     /// Opens a session channel and lets `configure` add its handlers.
     private func openChannel(_ configure: @escaping (Channel) throws -> Void) throws -> Channel {
@@ -274,6 +313,26 @@ private final class HostKeyValidator: NIOSSHClientServerAuthenticationDelegate, 
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .hostKeyChanged, object: nil, userInfo: info)
         }
+    }
+}
+
+/// Records the presented host key and stops there (see `SSHSession.presentedHostKey`).
+private final class HostKeyCapture: NIOSSHClientServerAuthenticationDelegate, @unchecked Sendable {
+    private let captured: EventLoopPromise<String>
+
+    init(captured: EventLoopPromise<String>) { self.captured = captured }
+
+    func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+        captured.succeed(HostKeys.openSSH(hostKey))
+        validationCompletePromise.fail(SSHError.hostKeyNotTrusted)
+    }
+}
+
+/// Never logs in; the host key probe ends before authentication.
+private final class NoAuthentication: NIOSSHClientUserAuthenticationDelegate, @unchecked Sendable {
+    func nextAuthenticationType(availableMethods: NIOSSHAvailableUserAuthenticationMethods,
+                                nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>) {
+        nextChallengePromise.succeed(nil)
     }
 }
 
