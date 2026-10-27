@@ -3056,6 +3056,8 @@ async fn a_client_that_stops_reading_is_dropped() {
     let bin = std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into());
     env.start_with(&bin, &[("CLOTHOD_TEST_CONTROL_MAX", "1048576")]);
     let mut stuck = std::os::unix::net::UnixStream::connect(env.path().join("clothod.sock")).unwrap();
+    // Now: macOS refuses (EINVAL) to set it on a socket the peer has closed.
+    stuck.set_read_timeout(Some(T)).unwrap();
     let mut out = Frame::Json(json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "stuck"}})).encode();
     out.extend(Frame::Json(json!({"id": 2, "method": "events.subscribe", "params": {}})).encode());
     stuck.write_all(&out).unwrap();
@@ -3071,7 +3073,6 @@ async fn a_client_that_stops_reading_is_dropped() {
         }
     }
     // The stuck client gets what was queued, then EOF.
-    stuck.set_read_timeout(Some(T)).unwrap();
     let mut sink = Vec::new();
     assert!(stuck.read_to_end(&mut sink).is_ok(), "the connection ends");
     let stats = c.request("debug.stats", json!({})).await.unwrap();
@@ -3084,12 +3085,12 @@ async fn deeply_nested_json_closes_only_that_connection() {
     use std::io::{Read, Write};
     let env = Env::new();
     let mut s = std::os::unix::net::UnixStream::connect(env.path().join("clothod.sock")).unwrap();
+    s.set_read_timeout(Some(T)).unwrap();
     let mut body = vec![clotho_proto::frame::T_JSON];
     body.extend(std::iter::repeat_n(b'[', 1 << 20));
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend(body);
     s.write_all(&frame).unwrap();
-    s.set_read_timeout(Some(T)).unwrap();
     let mut sink = Vec::new();
     let _ = s.read_to_end(&mut sink);
     let c = env.client().await;
