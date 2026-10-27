@@ -856,7 +856,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateTabBarInset()
     }
 
-    static let sidebarWidthRange: ClosedRange<CGFloat> = 150...420
+    // Wide enough to read long agent titles in the Agents panel (rows stay one line each).
+    static let sidebarWidthRange: ClosedRange<CGFloat> = 150...640
 
     /// The width the sidebar was last dragged to.
     var savedSidebarWidth: CGFloat {

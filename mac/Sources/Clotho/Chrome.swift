@@ -355,6 +355,21 @@ final class SidebarView: NSView {
     /// The latest update, to redraw once a held title lets go.
     private var latest: (() -> Void)?
     private var heldNames = HeldTitles<String>()
+    /// Machines whose workspaces are hidden, remembered across launches.
+    private var collapsed = Set(UserDefaults.standard.stringArray(forKey: "CollapsedMachines") ?? [])
+
+    func toggleCollapsed(_ machine: MachineKey) {
+        if collapsed.contains(machine) { collapsed.remove(machine) } else { collapsed.insert(machine) }
+        UserDefaults.standard.set(collapsed.sorted(), forKey: "CollapsedMachines")
+        latest?()
+    }
+
+    func isCollapsed(_ machine: MachineKey) -> Bool { collapsed.contains(machine) }
+
+    /// Opens a machine's group, so a workspace being renamed or just made is visible.
+    func expand(_ machine: MachineKey) {
+        if collapsed.contains(machine) { toggleCollapsed(machine) }
+    }
     /// The latest update, held back while a name is being edited so the field isn't rebuilt away.
     private var pending: (() -> Void)?
     var onClose: ((MachineKey, WorkspaceID) -> Void)?
@@ -503,9 +518,12 @@ final class SidebarView: NSView {
         for (index, group) in groups.enumerated() {
             if index > 0, let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
             let key = group.key
+            let isCollapsed = collapsed.contains(key) && group.isConnected
             let header = MachineHeader(title: group.title, status: group.status,
-                                       newWorkspaceTooltip: group.isConnected ? (group.isLocal ? "New Workspace (⌘N)" : "New workspace on \(group.title)") : nil)
+                                       newWorkspaceTooltip: group.isConnected ? (group.isLocal ? "New Workspace (⌘N)" : "New workspace on \(group.title)") : nil,
+                                       collapsed: group.isConnected ? isCollapsed : nil, count: group.workspaces.count)
             header.onNewWorkspace = { [weak self] in self?.onNewWorkspace?(key) }
+            if group.isConnected { header.onToggle = { [weak self] in self?.toggleCollapsed(key) } }
             header.contextMenu = { [weak self] in self?.machineMenu?(key) }
             add(header)
             column.setCustomSpacing(4, after: header)
@@ -513,6 +531,10 @@ final class SidebarView: NSView {
                 add(actionButton("Connect", symbol: "arrow.right", tooltip: "Connect to \(group.title) and show its workspaces") { [weak self] in
                     self?.onConnect?(key)
                 })
+                continue
+            }
+            if isCollapsed {
+                if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title) collapsed (\(group.workspaces.count))") }
                 continue
             }
             for workspace in group.workspaces {
@@ -553,6 +575,7 @@ final class SidebarView: NSView {
 
     /// Edits a workspace's name in place.
     func beginRename(_ machine: MachineKey, _ id: WorkspaceID) {
+        expand(machine)
         guard let (row, name) = rows[Self.rowKey(machine, id)] else { return }
         row.onEditingEnded = { [weak self] in
             if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: editing ended, showing \(row.label.stringValue)") }
@@ -632,10 +655,16 @@ final class SidebarView: NSView {
 final class MachineHeader: NSView {
     var contextMenu: (() -> NSMenu?)?
     var onNewWorkspace: (() -> Void)?
+    /// Clicking the header (not its +) collapses or expands the group, when set.
+    var onToggle: (() -> Void)?
 
-    init(title: String, status: (color: NSColor?, text: String?), newWorkspaceTooltip: String?) {
+    /// `collapsed` nil: no disclosure chevron (the Agents header). `count` shows after the title while
+    /// collapsed, so a closed group still says how many workspaces it holds.
+    init(title: String, status: (color: NSColor?, text: String?), newWorkspaceTooltip: String?,
+         collapsed: Bool? = nil, count: Int = 0) {
         super.init(frame: .zero)
-        let label = NSTextField(labelWithString: title.uppercased())
+        let shownTitle = title.uppercased() + (collapsed == true && count > 0 ? "  \(count)" : "")
+        let label = NSTextField(labelWithString: shownTitle)
         label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         label.textColor = Theme.accent
         label.lineBreakMode = .byTruncatingTail
@@ -659,11 +688,20 @@ final class MachineHeader: NSView {
         add.toolTip = newWorkspaceTooltip
         add.isHidden = newWorkspaceTooltip == nil
         toolTip = newWorkspaceTooltip
-        for view in [label, dot, detail, add] {
+        let chevron = NSImageView()
+        chevron.image = NSImage(systemSymbolName: collapsed == true ? "chevron.right" : "chevron.down",
+                                accessibilityDescription: collapsed == true ? "Show workspaces" : "Hide workspaces")?
+            .withSymbolConfiguration(.init(pointSize: 8, weight: .bold))
+        chevron.contentTintColor = Theme.dimText
+        chevron.isHidden = collapsed == nil
+        for view in [chevron, label, dot, detail, add] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         NSLayoutConstraint.activate([
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            chevron.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 8),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 6),
             dot.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
@@ -685,6 +723,11 @@ final class MachineHeader: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let onToggle else { return window?.performDrag(with: event) ?? () }
+        onToggle()
+    }
 }
 
 /// The line between the workspaces and agents panels; drag it to resize the agents panel.

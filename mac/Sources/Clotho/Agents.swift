@@ -416,6 +416,9 @@ final class AgentRow: ChromeItem {
         label.maximumNumberOfLines = 1
         label.cell?.wraps = false
         label.cell?.truncatesLastVisibleLine = true
+        // Hovering a cut-off title or detail shows all of it in place, as Finder does.
+        label.allowsExpansionToolTips = true
+        detail.allowsExpansionToolTips = true
         // Which agent, then what it says.
         detail.stringValue = [info.kind, info.message ?? (shown.label == "Idle" ? "idle" : nil)].compactMap { $0 }.joined(separator: " · ")
         detail.font = NSFont.systemFont(ofSize: 11)
@@ -428,6 +431,7 @@ final class AgentRow: ChromeItem {
         elapsed.setContentHuggingPriority(.required, for: .horizontal)
         elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
         toolTip = [
+            title.string,
             "\(info.kindName) on \(entry.machineName): \(shown.label)",
             entry.place.isEmpty ? nil : entry.place,
             info.message,

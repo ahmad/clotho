@@ -199,6 +199,7 @@ extension AppDelegate {
     @objc func newWorkspace(_ sender: Any?) {
         let name = "Workspace \(store.state.workspaces.count + 1)"
         let options = spawnOptions()
+        sidebar.expand(focusedMachine)
         run { _ = try await $0.createWorkspace(name: name, spawn: options) }
     }
 
