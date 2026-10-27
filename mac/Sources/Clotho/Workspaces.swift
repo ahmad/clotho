@@ -33,6 +33,7 @@ extension AppDelegate {
         let workspace = store.focusedWorkspace
         let tab = store.focusedTab
 
+        settingsWindow?.refreshIfNeeded()
         let agents = agentEntries()
         sidebar.update(agents: agents, unreachable: unreachableMonitoredMachines(), groups: sidebarGroups())
         updateDockBadge(agents)

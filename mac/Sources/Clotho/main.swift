@@ -154,6 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var shortcutsOverlay: ShortcutsOverlay?
     var fileBrowser: FileBrowserOverlay?
     var keyMonitor: Any?
+    var settingsWindow: SettingsWindowController?
     let transfers = TransferManager()
     var transferToast: TransferToast!
 
@@ -445,7 +446,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // right-clicks, and either takes modifiers after the point, as in "click:600,300,ctrl" or
     // "rclick:600,300,alt". "menu:Paste" picks that item of the focused pane's right-click menu, and
     // "drop:/path/file" handles that file as if dropped on the focused pane. "resolve:0" presses the
-    // Agents checkmark for the focused machine's first pane.
+    // Agents checkmark for the focused machine's first pane. "scrollback:5000" opens Settings and sets the
+    // focused machine's scrollback through it.
     func runTestScripts() {
         let decode = { (text: String) in text.replacingOccurrences(of: "\\r", with: "\r").replacingOccurrences(of: "\\e", with: "\u{1b}") }
         for (i, step) in (UserDefaults.standard.string(forKey: "TypeText")?.components(separatedBy: "|") ?? []).enumerated() {
@@ -457,6 +459,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
+                if step.hasPrefix("scrollback:"), let lines = Int(step.dropFirst(11)) {
+                    showSettings(nil)
+                    return settingsWindow?.setScrollback(lines, on: focusedMachine) ?? ()
+                }
                 if step.hasPrefix("resolve:"), let index = Int(step.dropFirst(8)) {
                     let panes = store.state.panes.map(\.id)
                     return index < panes.count ? resolveAgent(machine: focusedMachine, pane: panes[index]) : log("TypeText: no pane \(index)")

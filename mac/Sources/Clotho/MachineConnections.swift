@@ -63,6 +63,7 @@ extension AppDelegate {
         connections[session.key] = session
         session.store.onChange = { [weak self] in self?.sync() }
         session.store.onBell = { [weak self] pane in self?.bell(pane) }
+        session.store.onSettings = { [weak self] _ in self?.settingsWindow?.reload() }
         let key = session.key
         session.store.onAgentChange = { [weak self] pane, before, after in
             self?.agentChanged(machine: key, pane: pane, from: before, to: after)

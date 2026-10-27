@@ -60,6 +60,7 @@ struct Shortcut {
 extension AppDelegate {
     static let shortcuts: [Shortcut] = {
         var list: [Shortcut] = [
+            Shortcut(menu: "Clotho", title: "Settings…", key: ",", action: #selector(showSettings(_:))),
             Shortcut(menu: "Clotho", title: "Hide Clotho", key: "h", action: #selector(NSApplication.hide(_:))),
             Shortcut(menu: "Clotho", title: "Quit Clotho", key: "q", action: #selector(NSApplication.terminate(_:))),
 
