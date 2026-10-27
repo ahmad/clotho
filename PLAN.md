@@ -173,3 +173,11 @@ is verified; this is a standing go for this round.
 - The Mac reaches imac under clotho-mac through a `Host imac` entry in the Mac's ~/.ssh/config
   (`IdentityFile ~/.ssh/id_ed25519_clotho`). The original config is backed up as
   config.bak-2026-10-27.
+
+## Agents panel: attention first, resolve to collapse (user decision, 2026-10-27)
+
+- Only agents that need attention (the daemon's `attention` flag) show at the top. All other agents
+  go in a collapsible "Running" section, collapsed by default.
+- A checkmark on each row resolves it, through `agent.ack`. It drops into the collapsed section on
+  every device, and comes back out when attention is raised again.
+- Same on the Mac and the iPhone. No daemon change.
