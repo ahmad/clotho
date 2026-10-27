@@ -8,6 +8,7 @@ struct AgentsSection: View {
     let connections: Connections
     let open: (AgentRow) -> Void
     @State private var replying: AgentRow?
+    @State private var history: AgentRow?
     @SceneStorage("AgentsQuietExpanded") private var quietExpanded = false
 
     var body: some View {
@@ -16,6 +17,11 @@ struct AgentsSection: View {
             Section {
                 ForEach(parts.attention) { row in
                     attentionRow(row)
+                }
+                .sheet(item: $history) { row in
+                    if let connection = connections.existing(row.machineID) {
+                        AgentHistoryView(connection: connection, pane: row.pane)
+                    }
                 }
                 .sheet(item: $replying) { row in
                     if let connection = connections.existing(row.machineID) {
@@ -28,7 +34,7 @@ struct AgentsSection: View {
                             Button { open(row) } label: { AgentRowView(row: row) }
                                 .tint(.primary)
                                 .swipeActions(edge: .trailing) { muteButton(row) }
-                                .contextMenu { muteButton(row) }
+                                .contextMenu { muteButton(row); historyButton(row) }
                         }
                     } label: {
                         HStack(spacing: 6) {
@@ -75,6 +81,7 @@ struct AgentsSection: View {
         .contextMenu {
             Button { resolve(row) } label: { Label("Resolve", systemImage: "checkmark") }
             muteButton(row)
+            historyButton(row)
             if row.acceptsReply, let connection {
                 if connection.canReply {
                     Button { replying = row } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
@@ -82,6 +89,13 @@ struct AgentsSection: View {
                     Text("Update clothod on \(row.machineName) to reply")
                 }
             }
+        }
+    }
+
+    /// What the agent did and asked, from the machine (`agent.history`).
+    @ViewBuilder private func historyButton(_ row: AgentRow) -> some View {
+        if let connection = connections.existing(row.machineID), connection.store.hello?.features.contains(.agentHistory) == true {
+            Button { history = row } label: { Label("History", systemImage: "clock.arrow.circlepath") }
         }
     }
 

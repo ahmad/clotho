@@ -1,3 +1,4 @@
+import ClothoKit
 @testable import Clotho
 import CryptoKit
 import NIOCore
@@ -113,18 +114,21 @@ final class NavigationTests: XCTestCase {
 
     func testQuickOpenRanking() {
         let id = UUID()
-        func item(_ kind: QuickOpenItem.Kind, _ title: String, _ detail: String = "") -> QuickOpenItem {
-            QuickOpenItem(kind: kind, title: title, detail: detail, symbol: "", route: .machine(id), id: title)
+        func entry(_ kind: QuickOpenItem.Kind, _ title: String, _ subtitle: String = "") -> QuickOpenEntry {
+            QuickOpenEntry(item: QuickOpenItem(kind: kind, title: title, subtitle: subtitle, id: title), symbol: "", route: .machine(id))
         }
-        let items = [item(.tab, "cargo test"), item(.tab, "claude", "clotho · devbox"), item(.workspace, "clotho"),
-                     item(.machine, "devbox"), item(.tab, "logs", "Workspace 2 · devbox")]
-        XCTAssertEqual(QuickOpenItem.ranked(items, query: "clotho").first?.title, "clotho", "an exact name beats a detail")
-        XCTAssertEqual(QuickOpenItem.ranked(items, query: "ct").first?.title, "cargo test", "word starts")
-        XCTAssertEqual(QuickOpenItem.ranked(items, query: "devbox").first?.title, "devbox")
-        XCTAssertTrue(QuickOpenItem.ranked(items, query: "zzz").isEmpty)
-        XCTAssertEqual(QuickOpenItem.ranked(items, query: "").map(\.kind).first, .tab)
-        XCTAssertNil(FuzzyScore.score("tc", in: "cat"))
+        let entries = [entry(.tab, "cargo test", "devbox › clotho"), entry(.tab, "zsh", "devbox › clotho"),
+                       entry(.workspace, "clotho", "devbox"), entry(.machine, "devbox")]
+        XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "clotho").first?.entry.item.title, "clotho")
+        XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "bigzsh").first?.entry.item.title, "zsh", "the subtitle matches too")
+        XCTAssertTrue(QuickOpenEntry.ranked(entries, query: "qqq").isEmpty)
+        XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "").map(\.entry.item.title), entries.map(\.item.title),
+                       "an empty query keeps the given order")
+        let top = QuickOpenEntry.ranked(entries, query: "ct").first
+        XCTAssertEqual(top?.entry.item.title, "cargo test")
+        XCTAssertEqual(top?.indices, [0, 6])
     }
+
 }
 
 final class MachineInputTests: XCTestCase {
@@ -136,5 +140,25 @@ final class MachineInputTests: XCTestCase {
         XCTAssertNotNil(Machine.problem(host: "devbox\u{07}", user: "ahmad"))
         XCTAssertNotNil(Machine.problem(host: "devbox", user: "-l"))
         XCTAssertNotNil(Machine.problem(host: "ahmad@devbox", user: "ahmad"))
+    }
+}
+
+final class PaneSearchTests: XCTestCase {
+    func testDaemonLinesMapToBufferRows() {
+        // 24 rows on screen under 76 lines of scrollback.
+        let geometry = BufferGeometry(lineCount: 100, rows: 24, cols: 80)
+        XCTAssertEqual(geometry.row(forLine: 0), 76, "the top screen row")
+        XCTAssertEqual(geometry.row(forLine: 23), 99)
+        XCTAssertEqual(geometry.row(forLine: -76), 0, "the oldest line held here")
+        XCTAssertNil(geometry.row(forLine: -77), "older than this device's history")
+        XCTAssertEqual(BufferGeometry(lineCount: 10, rows: 24, cols: 80).row(forLine: 3), 3, "a screen not yet full")
+    }
+
+    func testHistoryRowsRead() {
+        let waiting = AgentHistoryEntry(at: 0, event: "state", kind: "claude", state: "waiting", from: "running", message: "Allow?")
+        XCTAssertEqual(AgentHistoryRow.headline(waiting), "Claude: Running → Waiting")
+        XCTAssertEqual(AgentHistoryRow.headline(AgentHistoryEntry(at: 0, event: "attention", attention: false)), "Resolved")
+        XCTAssertEqual(AgentHistoryRow.headline(AgentHistoryEntry(at: 0, event: "gone", kind: "codex")), "Codex exited")
+        XCTAssertEqual(AgentHistoryRow.detail(AgentHistoryEntry(at: 0, event: "state", pid: 42, guess: true)), "detected from output · pid 42")
     }
 }

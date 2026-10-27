@@ -85,6 +85,9 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     var onModeChange: ((Subscription.Mode) -> Void)?
     /// Called after the pane put text on the clipboard, for the "Copied" confirmation.
     var onCopy: (() -> Void)?
+    /// After output or a snapshot reached the terminal, and after it scrolled (find in pane).
+    var onOutput: (() -> Void)?
+    var onScroll: (() -> Void)?
     /// Where pane copies go; tests swap in their own.
     var pasteboard: PaneClipboard.Target = PaneClipboard.general
     private var sentViewport: Size?
@@ -196,6 +199,7 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         // The snapshot starts with a full reset, so earlier state doesn't matter.
         terminal.feedFromBackend(bytes)
         haveSeq = seq
+        onOutput?()
     }
 
     func paneResized(cols: Int, rows: Int, seq: UInt64) {
@@ -225,6 +229,7 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         pending = Data()
         terminal.feedFromBackend(bytes)
         haveSeq = (haveSeq ?? 0) + UInt64(bytes.count)
+        onOutput?()
     }
 
     // MARK: Size
@@ -300,7 +305,7 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     // Titles and folders come from the daemon's model.
     func setTerminalTitle(source: TerminalView, title: String) {}
     func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
-    func scrolled(source: TerminalView, position: Double) {}
+    func scrolled(source: TerminalView, position: Double) { onScroll?() }
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
     // The daemon reports bells as events.
     func bell(source: TerminalView) {}

@@ -18,6 +18,20 @@ final class Navigator: ObservableObject {
     @Published var quickOpen = false
     var regular = false
 
+    /// The machine on screen, if any.
+    var focusedMachine: UUID? {
+        if regular {
+            switch selection {
+            case .machine(let id), .tab(let id, _): return id
+            case nil: return nil
+            }
+        }
+        switch path.last {
+        case .machine(let id), .pane(let id, _, _): return id
+        case nil: return nil
+        }
+    }
+
     func open(_ route: Route) {
         switch route {
         case .machine(let id):
@@ -91,7 +105,7 @@ struct RootView: View {
             .onAppear { AgentNotifier.shared.deferPrompt = true }
         }
         .sheet(isPresented: $navigator.quickOpen) {
-            QuickOpenView { route in
+            QuickOpenView(focusedMachine: navigator.focusedMachine) { route in
                 navigator.quickOpen = false
                 navigator.open(route)
             }

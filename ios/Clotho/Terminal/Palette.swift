@@ -1,30 +1,14 @@
+import ClothoKit
 import SwiftTerm
 import SwiftUI
 import UIKit
 
-/// The terminal's colours in each appearance, the same values as the Mac app's (ClothoPalette, once it's in
-/// ClothoKit). Light maps ANSI white to mid greys, so programs that print white on an assumed dark
-/// background stay readable.
-struct TerminalPalette {
-    var background: UInt32
-    var foreground: UInt32
-    var caret: UInt32
-    /// Nil keeps SwiftTerm's own selection colour (as the Mac does in dark).
-    var selection: UInt32?
-    var ansi: [UInt32]
+/// The terminal's colours in each appearance: ClothoKit's ClothoPalette, shared with the Mac app.
+typealias TerminalPalette = ClothoPalette
 
-    static let dark = TerminalPalette(
-        background: 0x1D2022, foreground: 0xC5CDD4, caret: 0x6C96B4, selection: nil,
-        ansi: [0x121212, 0xC76156, 0x57C78A, 0xC8A35A, 0x5785C7, 0xC756A9, 0x57C7C3, 0xA9B0B6,
-               0x292929, 0xD22D1E, 0x1CA05A, 0xE5A01A, 0x1458B8, 0xA43787, 0x4D9989, 0xD6DCE1])
-
-    static let light = TerminalPalette(
-        background: 0xF7F7F5, foreground: 0x2B3035, caret: 0x3F6E8F, selection: 0xC9D9E5,
-        ansi: [0x2B3035, 0xB3392F, 0x2E7D4F, 0x8A6400, 0x2F62A8, 0x9C3B86, 0x1E7A75, 0x80878D,
-               0x5E666C, 0xD0453A, 0x379A5E, 0xA87C00, 0x3B78C8, 0xB24C9C, 0x28948E, 0xA9AFB4])
-
-    static func current(_ traits: UITraitCollection) -> TerminalPalette {
-        traits.userInterfaceStyle == .light ? light : dark
+extension ClothoPalette {
+    static func current(_ traits: UITraitCollection) -> ClothoPalette {
+        traits.userInterfaceStyle == .light ? .light : .dark
     }
 
     /// SwiftTerm's selection colour, put back when leaving light.

@@ -255,11 +255,9 @@ struct SelectionBackground: View {
 }
 
 extension Color {
-    /// The selected pane, tab and workspace: #6C96B4 as on the Mac, and a darker #3F6E8F in light
-    /// appearance, where #6C96B4 is only about 3:1 against white (#3F6E8F is about 5.5:1).
-    static let selection = Color(UIColor { traits in
-        traits.userInterfaceStyle == .light ? UIColor(red: 0x3f / 255, green: 0x6e / 255, blue: 0x8f / 255, alpha: 1) : Theme.selection
-    })
+    /// The selected pane, tab and workspace: ClothoPalette's accent, #6C96B4 in dark as on the Mac and #3F6E8F
+    /// in light, where #6C96B4 is only about 3:1 against white (#3F6E8F is about 5.5:1).
+    static let selection = Color(UIColor { UIColor(hex: TerminalPalette.current($0).accent) })
 }
 
 enum RenameTarget: Identifiable {

@@ -18,6 +18,9 @@ struct PaneScreen: View {
     @State private var photo: PhotosPickerItem?
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
     @AppStorage(AppearanceChoice.storageKey) private var appearance = AppearanceChoice.system
+    @StateObject private var find: PaneFind
+    @State private var finding = false
+    @State private var showingHistory: PaneID?
 
     /// In the iPad's detail column: switching tabs here moves the sidebar's selection, and a closed tab
     /// goes back to the machine (instead of popping the stack).
@@ -30,6 +33,7 @@ struct PaneScreen: View {
         store = connection.store
         _tabID = State(initialValue: initialTab)
         _paneID = State(initialValue: initialPane)
+        _find = StateObject(wrappedValue: PaneFind(store: connection.store))
         self.onTabChange = onTabChange
         self.onTabGone = onTabGone
     }
@@ -48,6 +52,9 @@ struct PaneScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             if panes.count > 1 { paneStrip }
+            if finding {
+                FindBar(find: find, machine: connection.machine.displayName) { stopFinding() }
+            }
             ZStack(alignment: .topTrailing) {
                 if let pane {
                     TerminalContainer(host: connection.terminal(for: pane), onMode: { mode = $0 }, onCopy: { copies += 1 })
@@ -71,6 +78,11 @@ struct PaneScreen: View {
             ToolbarItem(placement: .primaryAction) { actionsMenu }
         }
         .background { ShortcutButtons(screen: self) }
+        // The find bar follows the pane on screen.
+        .onChange(of: currentPane) { if finding { attachFind() } }
+        .sheet(item: Binding(get: { showingHistory.map(HistoryTarget.init) }, set: { showingHistory = $0?.pane })) { target in
+            AgentHistoryView(connection: connection, pane: target.pane)
+        }
         .onChange(of: tab == nil) { _, gone in
             guard gone else { return }
             if let onTabGone { onTabGone() } else { dismiss() }
@@ -213,6 +225,10 @@ struct PaneScreen: View {
                 ForEach(AppearanceChoice.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.menu)
+            Button { startFinding() } label: { Label("Find…", systemImage: "magnifyingglass") }
+            if let pane, pane.agent != nil || store.hello?.features.contains(.agentHistory) == true {
+                Button { showingHistory = pane.id } label: { Label("Agent History", systemImage: "clock.arrow.circlepath") }
+            }
             Button { browsingFiles = pane?.cwd ?? "~" } label: { Label("Files here", systemImage: "folder") }
             Button { pickingPhoto = true } label: { Label("Paste Photo…", systemImage: "photo.on.rectangle") }
             Divider()
@@ -304,6 +320,23 @@ struct PaneScreen: View {
         connection.run("Close tab") { try await $0.closeTab(id) }
     }
 
+    func startFinding() {
+        finding = true
+        attachFind()
+    }
+
+    private func attachFind() {
+        guard let pane else { return }
+        // After the terminal is in its container.
+        DispatchQueue.main.async { find.attach(connection.terminal(for: pane)) }
+    }
+
+    private func stopFinding() {
+        finding = false
+        find.close()
+        if let pane { _ = connection.terminal(for: pane).terminal.becomeFirstResponder() }
+    }
+
     func changeFont(_ delta: Double) {
         fontSize = min(max(fontSize + delta, 7), 28)
     }
@@ -323,6 +356,7 @@ private struct ShortcutButtons: View {
             Button("Previous Pane") { screen.step(pane: -1) }.keyboardShortcut("[", modifiers: .command)
             Button("Next Tab") { screen.step(tab: 1) }.keyboardShortcut("]", modifiers: [.command, .shift])
             Button("Previous Tab") { screen.step(tab: -1) }.keyboardShortcut("[", modifiers: [.command, .shift])
+            Button("Find") { screen.startFinding() }.keyboardShortcut("f", modifiers: .command)
             Button("Bigger Text") { screen.changeFont(1) }.keyboardShortcut("+", modifiers: .command)
             Button("Smaller Text") { screen.changeFont(-1) }.keyboardShortcut("-", modifiers: .command)
             ForEach(1...9, id: \.self) { number in
@@ -367,6 +401,11 @@ struct TerminalContainer: UIViewRepresentable {
         container.addSubview(host)
         DispatchQueue.main.async { _ = host.terminal.becomeFirstResponder() }
     }
+}
+
+private struct HistoryTarget: Identifiable {
+    var pane: PaneID
+    var id: PaneID { pane }
 }
 
 private struct FilesStart: Identifiable {

@@ -1,88 +1,85 @@
 import ClothoKit
 import SwiftUI
 
-/// One thing quick open can jump to.
-struct QuickOpenItem: Identifiable, Hashable {
-    enum Kind: Int { case agent, tab, workspace, machine }
-
-    var kind: Kind
-    var title: String
-    /// Where it is: "Workspace · Machine".
-    var detail: String
+/// One thing quick open can jump to: ClothoKit's item (matched and ranked the same way as on the Mac) plus
+/// where it goes and how it looks here.
+struct QuickOpenEntry: Identifiable {
+    var item: QuickOpenItem
     var symbol: String
     var route: Route
-    var id: String
+    var id: String { item.id }
 
-    /// Everything on every connected machine, plus the machines themselves.
-    @MainActor static func all(machines: [Machine], connections: Connections) -> [QuickOpenItem] {
-        var items: [QuickOpenItem] = []
+    /// In the Mac's order, which an empty query keeps: agents that need the user, then the focused machine's
+    /// workspaces and tabs, then other machines' workspaces and tabs, then the machines.
+    @MainActor static func all(machines: [Machine], connections: Connections, focused: UUID?) -> [QuickOpenEntry] {
+        var entries: [QuickOpenEntry] = []
         for row in connections.agentRows where row.wantsAttention {
-            items.append(QuickOpenItem(kind: .agent, title: row.title, detail: "\(row.info.state.rawValue.capitalized) · \(row.workspace) · \(row.machineName)",
-                                       symbol: "sparkles", route: .pane(row.machineID, row.tab, row.pane),
-                                       id: "a\(row.machineID)-\(row.pane)"))
+            entries.append(QuickOpenEntry(
+                item: QuickOpenItem(kind: .agent, title: row.title,
+                                    subtitle: "\(row.info.state.rawValue.capitalized) · \(row.machineName) › \(row.workspace)",
+                                    id: "a\(row.machineID)-\(row.pane)"),
+                symbol: "sparkles", route: .pane(row.machineID, row.tab, row.pane)))
         }
-        for machine in machines {
-            items.append(QuickOpenItem(kind: .machine, title: machine.displayName, detail: machine.subtitle,
-                                       symbol: machine.kind == .localSocket ? "laptopcomputer" : "server.rack",
-                                       route: .machine(machine.id), id: "m\(machine.id)"))
+        let ordered = machines.filter { $0.id == focused } + machines.filter { $0.id != focused }
+        var tabs: [QuickOpenEntry] = []
+        for machine in ordered {
             guard let store = connections.existing(machine.id)?.store else { continue }
             for workspace in store.state.workspaces {
                 if let first = workspace.tabs.first {
-                    items.append(QuickOpenItem(kind: .workspace, title: workspace.name, detail: machine.displayName,
-                                               symbol: "folder", route: .pane(machine.id, first.id, first.activePane),
-                                               id: "w\(machine.id)-\(workspace.id)"))
+                    entries.append(QuickOpenEntry(
+                        item: QuickOpenItem(kind: .workspace, title: workspace.name, subtitle: machine.displayName,
+                                            id: "w\(machine.id)-\(workspace.id)"),
+                        symbol: "folder", route: .pane(machine.id, first.id, first.activePane)))
                 }
                 for tab in workspace.tabs {
-                    let cwd = store.state.pane(tab.activePane)?.cwd ?? ""
-                    items.append(QuickOpenItem(kind: .tab, title: store.displayTitle(of: tab),
-                                               detail: [workspace.name, machine.displayName, cwd].filter { !$0.isEmpty }.joined(separator: " · "),
-                                               symbol: tab.layout.panes.count > 1 ? "rectangle.split.2x1" : "terminal",
-                                               route: .pane(machine.id, tab.id, tab.activePane), id: "t\(machine.id)-\(tab.id)"))
+                    tabs.append(QuickOpenEntry(
+                        item: QuickOpenItem(kind: .tab, title: store.displayTitle(of: tab),
+                                            subtitle: "\(machine.displayName) › \(workspace.name)",
+                                            id: "t\(machine.id)-\(tab.id)"),
+                        symbol: tab.layout.panes.count > 1 ? "rectangle.split.2x1" : "terminal",
+                        route: .pane(machine.id, tab.id, tab.activePane)))
                 }
             }
+            // Each machine's workspaces, then its tabs, before the next machine's.
+            entries += tabs
+            tabs = []
         }
-        return items
+        for machine in machines {
+            entries.append(QuickOpenEntry(
+                item: QuickOpenItem(kind: .machine, title: machine.displayName, subtitle: machine.subtitle, id: "m\(machine.id)"),
+                symbol: machine.kind == .localSocket ? "laptopcomputer" : "server.rack", route: .machine(machine.id)))
+        }
+        return entries
     }
 
-    /// The items matching `query`, best first; all of them, in kind order, for an empty query.
-    static func ranked(_ items: [QuickOpenItem], query: String) -> [QuickOpenItem] {
-        let query = query.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return items.sorted { $0.kind.rawValue < $1.kind.rawValue } }
-        return items.compactMap { item -> (QuickOpenItem, Int)? in
-            let title = FuzzyScore.score(query, in: item.title)
-            let detail = FuzzyScore.score(query, in: item.detail).map { $0 / 3 }
-            guard let best = [title, detail].compactMap({ $0 }).max() else { return nil }
-            return (item, best)
+    /// The matches for `query`, best first, with the matched letters of each title.
+    static func ranked(_ entries: [QuickOpenEntry], query: String) -> [(entry: QuickOpenEntry, indices: [Int])] {
+        let byID = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return QuickOpen.rank(entries.map(\.item), query: query).compactMap { result in
+            byID[result.item.id].map { ($0, result.titleIndices) }
         }
-        .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.kind.rawValue < $1.0.kind.rawValue }
-        .map(\.0)
     }
-}
 
-/// A subsequence match: every query character in order, scored higher for consecutive runs, word starts and an
-/// early first match. (The Mac's ranking moves to ClothoKit, which this will use then.)
-enum FuzzyScore {
-    static func score(_ query: String, in text: String) -> Int? {
-        let q = Array(query.lowercased()), t = Array(text.lowercased()), original = Array(text)
-        guard !q.isEmpty else { return 0 }
-        var score = 0, qi = 0, last = -2, first = -1
-        for (i, c) in t.enumerated() where qi < q.count && c == q[qi] {
-            if first < 0 { first = i }
-            score += 10
-            if i == last + 1 { score += 15 }
-            let start = i == 0 || !original[i - 1].isLetter && !original[i - 1].isNumber || (original[i].isUppercase && original[i - 1].isLowercase)
-            if start { score += 20 }
-            last = i
-            qi += 1
+    /// The title with the matched letters in bold.
+    static func highlighted(_ title: String, _ indices: [Int]) -> AttributedString {
+        var text = AttributedString()
+        let marked = Set(indices)
+        for (offset, character) in title.enumerated() {
+            var piece = AttributedString(String(character))
+            if marked.contains(offset) {
+                piece.font = .body.bold()
+                piece.foregroundColor = .selection
+            }
+            text += piece
         }
-        guard qi == q.count else { return nil }
-        if t.starts(with: q) { score += 50 }
-        return score - first - (t.count - q.count) / 4
+        return text
     }
 }
 
 /// ⌘P, or the search button: find any tab, workspace, machine or waiting agent by name and jump to it.
 struct QuickOpenView: View {
+    /// The machine on screen, whose workspaces and tabs come first.
+    var focusedMachine: UUID?
     let open: (Route) -> Void
     @EnvironmentObject private var machines: MachineList
     @EnvironmentObject private var connections: Connections
@@ -92,16 +89,17 @@ struct QuickOpenView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        let results = QuickOpenItem.ranked(QuickOpenItem.all(machines: machines.all, connections: connections), query: query)
+        let results = QuickOpenEntry.ranked(QuickOpenEntry.all(machines: machines.all, connections: connections, focused: focusedMachine), query: query)
         NavigationStack {
             List {
-                ForEach(Array(results.prefix(50).enumerated()), id: \.element.id) { index, item in
-                    Button { open(item.route) } label: {
+                ForEach(Array(results.enumerated()), id: \.element.entry.id) { index, result in
+                    let entry = result.entry
+                    Button { open(entry.route) } label: {
                         HStack(spacing: 12) {
-                            Image(systemName: item.symbol).foregroundStyle(Color.selection).frame(width: 24)
+                            Image(systemName: entry.symbol).foregroundStyle(Color.selection).frame(width: 24)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title).lineLimit(1)
-                                Text(item.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                Text(QuickOpenEntry.highlighted(entry.item.title, result.indices)).lineLimit(1)
+                                Text(entry.item.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                             }
                         }
                     }
@@ -124,7 +122,7 @@ struct QuickOpenView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .submitLabel(.go)
-                        .onSubmit { if results.indices.contains(highlighted) { open(results[highlighted].route) } }
+                        .onSubmit { if results.indices.contains(highlighted) { open(results[highlighted].entry.route) } }
                         .accessibilityIdentifier("quickOpenField")
                 }
                 .padding(10)
