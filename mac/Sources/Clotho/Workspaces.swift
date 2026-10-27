@@ -93,7 +93,8 @@ extension AppDelegate {
         let key = PaneKey(machine: session.key, pane: pane.id)
         let host = PaneHostView(pane: pane, store: session.store, font: Self.terminalFont(size: fontSize))
         host.terminal.machine = session.key
-        host.terminal.onDropFiles = { [weak self] urls in self?.upload(urls, toPane: key) }
+        host.terminal.onDropFiles = { [weak self] urls in self?.dropFiles(urls, on: key) }
+        host.terminal.onPaste = { [weak self] terminal in self?.pasteImage(into: terminal, key: .command) ?? false }
         host.terminal.contextMenu = { [weak self] in self?.paneMenu(for: key) }
         paneHosts[key] = host
         return host
@@ -149,7 +150,12 @@ extension AppDelegate {
     func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === window else { return event }
-            if let terminal = window.firstResponder as? PaneTerminalView, terminal.sendEditingKey(event) { return nil }
+            if let terminal = window.firstResponder as? PaneTerminalView {
+                if terminal.sendEditingKey(event) { return nil }
+                // ⌃V with an image, for an agent on another machine (see ImagePaste).
+                if event.charactersIgnoringModifiers?.lowercased() == "v", event.modifierFlags.intersection([.shift, .control, .option, .command]) == .control,
+                   pasteImage(into: terminal, key: .control) { return nil }
+            }
             guard [36, 76].contains(event.keyCode), event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
                   !(window.firstResponder is NSText) else { return event }
             renameActiveWorkspace(nil)

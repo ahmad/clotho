@@ -442,7 +442,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // "type:new name" posts those characters as key events, for typing into whatever has focus, and
     // "click:600,300" clicks at that point of the window (from its bottom-left corner), "rclick:600,300"
     // right-clicks, and either takes modifiers after the point, as in "click:600,300,ctrl" or
-    // "rclick:600,300,alt".
+    // "rclick:600,300,alt". "menu:Paste" picks that item of the focused pane's right-click menu, and
+    // "drop:/path/file" handles that file as if dropped on the focused pane.
     func runTestScripts() {
         let decode = { (text: String) in text.replacingOccurrences(of: "\\r", with: "\r").replacingOccurrences(of: "\\e", with: "\u{1b}") }
         for (i, step) in (UserDefaults.standard.string(forKey: "TypeText")?.components(separatedBy: "|") ?? []).enumerated() {
@@ -453,6 +454,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("type:") { return postTestText(String(step.dropFirst(5))) }
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
+                if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
+                if step.hasPrefix("drop:") {
+                    return dropFiles([URL(fileURLWithPath: String(step.dropFirst(5)))], on: PaneKey(machine: focusedMachine, pane: pane))
+                }
                 backend.sendInput(pane, Data(decode(step).utf8))
             }
         }
@@ -498,14 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         // PaneMenu="Split Left" builds the focused pane's right-click menu, logs it, and picks that item.
         if let title = UserDefaults.standard.string(forKey: "PaneMenu") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [self] in
-                guard let pane = store.focusedPane?.id, let menu = paneMenu(for: PaneKey(machine: focusedMachine, pane: pane)) else {
-                    return log("PaneMenu: no focused pane")
-                }
-                log("PaneMenu: " + menu.items.map { $0.isSeparatorItem ? "|" : $0.title }.joined(separator: ", "))
-                guard let item = menu.items.first(where: { $0.title == title }) else { return log("PaneMenu: no item \(title)") }
-                _ = item.target?.perform(item.action, with: item)
-            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [self] in runPaneMenuItem(title) }
         }
         // QuickReply="30|1" (or "40|text:hello") answers the first waiting (or attention) agent then: keys
         // separated by commas, or text followed by Enter.
@@ -529,7 +527,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
            let machine = remoteMachines.first(where: { $0.label == name }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [self] in connect(machine, startWorkspace: true) }
         }
-        // DumpScreens="5|9" logs each shown pane's text and cursor at those seconds after launch, which works
+        // DumpScreens="5|9" logs each shown pane's text and cursor at those seconds after launch (the last 12
+    // non-empty lines, or DumpLines), which works
         // even while the window is covered (SwiftTerm stops drawing then, so screenshots go stale).
         for time in (UserDefaults.standard.string(forKey: "DumpScreens")?.components(separatedBy: "|") ?? []).compactMap(Double.init) {
             DispatchQueue.main.asyncAfter(deadline: .now() + time) { [self] in
@@ -538,7 +537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         .terminalContentSnapshot(region: .viewport) else { continue }
                     let lines = snapshot.rows.map { $0.text.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
                     let shown = lines.prefix { _ in true }.enumerated().filter { !$0.element.isEmpty }.map { "  \($0.offset): \($0.element)" }
-                    log("screen pane \(id) cursor \(snapshot.cursorColumn),\(snapshot.cursorRow)\n" + shown.prefix(12).joined(separator: "\n"))
+                    log("screen pane \(id) cursor \(snapshot.cursorColumn),\(snapshot.cursorRow)\n" + shown.suffix(UserDefaults.standard.integer(forKey: "DumpLines") > 0
+                        ? UserDefaults.standard.integer(forKey: "DumpLines") : 12).joined(separator: "\n"))
                 }
             }
         }
@@ -550,6 +550,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 window.setFrame(NSRect(x: window.frame.minX, y: window.frame.maxY - parts[1], width: parts[0], height: parts[1]), display: true)
             }
         }
+    }
+
+    /// Builds the focused pane's right-click menu, logs it, and picks the item with that title.
+    func runPaneMenuItem(_ title: String) {
+        guard let pane = store.focusedPane?.id, let menu = paneMenu(for: PaneKey(machine: focusedMachine, pane: pane)) else {
+            return log("PaneMenu: no focused pane")
+        }
+        log("PaneMenu: " + menu.items.map { $0.isSeparatorItem ? "|" : $0.title }.joined(separator: ", "))
+        guard let item = menu.items.first(where: { $0.title == title }) else { return log("PaneMenu: no item \(title)") }
+        _ = item.target?.perform(item.action, with: item)
     }
 
     /// Posts a left click, for TypeText's "click:" steps.

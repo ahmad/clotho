@@ -21,6 +21,14 @@ final class PaneTerminalView: TerminalView {
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
     // Files dropped on the terminal upload to the pane's folder; holding ⌥ types their paths instead.
     var onDropFiles: (([URL]) -> Void)?
+    /// Asked first on paste: (⌘V, Edit › Paste, the pane menu's Paste). True when it took the paste
+    /// (an image, see ImagePaste); false pastes the clipboard's text as before.
+    var onPaste: ((PaneTerminalView) -> Bool)?
+
+    override func paste(_ sender: Any) {
+        if onPaste?(self) == true { return }
+        super.paste(sender)
+    }
 
     nonisolated override func send(source: Terminal, data: ArraySlice<UInt8>) {
         if isFeeding { return }
