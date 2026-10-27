@@ -266,10 +266,14 @@ private final class HostKeyValidator: NIOSSHClientServerAuthenticationDelegate, 
         }
         let error = SSHError.hostKeyChanged(host: host, trusted: trusted, presented: presented)
         errors.record(error)
-        NotificationCenter.default.post(name: .hostKeyChanged, object: nil, userInfo: [
-            "machine": machineID, "trusted": trusted, "presented": presented,
-        ])
         validationCompletePromise.fail(error)
+        // Posted from the main queue, never from here: observers with `queue: .main` (every
+        // MachineConnection) make `post` wait for the main thread, which would stall the one SSH event
+        // loop every machine shares, and deadlock it outright while anything on main waits for SSH.
+        let info: [String: Any] = ["machine": machineID, "trusted": trusted, "presented": presented]
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .hostKeyChanged, object: nil, userInfo: info)
+        }
     }
 }
 

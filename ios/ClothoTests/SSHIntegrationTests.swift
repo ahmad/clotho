@@ -50,9 +50,15 @@ final class SSHIntegrationTests: XCTestCase {
         runner.reset()
     }
 
+    /// A changed host key fails the connection promptly, even while the calling thread is the main one and
+    /// something observes the change on the main queue, as every MachineConnection does. (That used to
+    /// deadlock: the SSH event loop posted synchronously to the main queue, which was waiting on that loop.)
     func testChangedHostKeyIsRefused() throws {
         TrustedHostKeys.shared.set("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl", for: machine.id)
         let changed = expectation(forNotification: .hostKeyChanged, object: nil)
+        let observer = NotificationCenter.default.addObserver(forName: .hostKeyChanged, object: nil, queue: .main) { _ in }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        XCTAssertTrue(Thread.isMainThread)
         let result = try NIOCommandRunner(machine: machine).run("echo hi", input: nil)
         XCTAssertEqual(result.status, 255)
         XCTAssertTrue(result.stderr.contains("changed"), result.stderr)
