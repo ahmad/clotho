@@ -92,4 +92,28 @@ final class ClothoTests: XCTestCase {
         XCTAssertEqual(parts.attention.map(\.pane), [4, 5, 2], "waiting, then errors, then finished")
         XCTAssertEqual(parts.quiet.map(\.pane), [3, 1, 6], "running, idle and resolved agents")
     }
+
+    /// Scrollback choices stay within the daemon's limits and always include the current value.
+    func testScrollbackChoicesAndLoginService() throws {
+        func makeRange(_ min: Int, _ max: Int, _ def: Int) throws -> DaemonSettings.Range {
+            try JSONDecoder().decode(DaemonSettings.Range.self, from: Data(#"{"min":\#(min),"max":\#(max),"default":\#(def)}"#.utf8))
+        }
+        let range = try makeRange(0, 50000, 2000)
+        XCTAssertEqual(ScrollbackChoices.values(current: 3000, range: range), [0, 1000, 2000, 3000, 5000, 10000, 20000, 50000])
+        XCTAssertEqual(ScrollbackChoices.values(current: 500, range: try makeRange(100, 5000, 1000)),
+                       [500, 1000, 2000, 5000])
+        XCTAssertEqual(ScrollbackChoices.label(2000, default: 2000), "2,000 lines (default)")
+        XCTAssertEqual(ScrollbackChoices.label(0, default: 2000), "None")
+        XCTAssertEqual(ScrollbackChoices.memory(10000), "about 29 MB")
+
+        let off = DaemonService(supported: true, manager: "launchd", installed: false)
+        XCTAssertTrue(LoginService.canToggle(off, testInstall: false))
+        XCTAssertFalse(LoginService.canToggle(off, testInstall: true), "never for the app's test install")
+        let linger = DaemonService(supported: true, manager: "systemd", installed: false, needs: ["linger"], message: "enable lingering")
+        XCTAssertFalse(LoginService.canToggle(linger, testInstall: false))
+        XCTAssertEqual(LoginService.footer(linger, machine: "devbox", testInstall: false), "enable lingering")
+        XCTAssertFalse(LoginService.canToggle(DaemonService(supported: false, installed: false, message: "no manager"), testInstall: false))
+        XCTAssertTrue(LoginService.canToggle(DaemonService(supported: true, installed: true, needs: ["linger"]), testInstall: false),
+                      "an installed service can always be turned off")
+    }
 }

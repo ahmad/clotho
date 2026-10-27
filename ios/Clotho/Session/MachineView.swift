@@ -92,6 +92,11 @@ struct MachineView: View {
                 } label: {
                     Label("Files", systemImage: "folder")
                 }
+                NavigationLink {
+                    MachineSettingsView(connection: connection)
+                } label: {
+                    Label("Settings", systemImage: "gearshape")
+                }
             }
             if connection.updateAvailable {
                 Section {
