@@ -211,3 +211,12 @@ final class FakeResizeTests: XCTestCase {
         }
     }
 }
+
+final class PushModelTests: XCTestCase {
+    func testDecodesPushList() throws {
+        let json = #"[{"device": "d1", "label": "mac", "relay": "https://r", "env": "sandbox", "created": 1761512345.5, "last_error": "410"}]"#
+        let devices = try JSONDecoder().decode([PushDevice].self, from: Data(json.utf8))
+        XCTAssertEqual(devices, [PushDevice(device: "d1", label: "mac", relay: "https://r", env: "sandbox", created: 1761512345.5, lastError: "410")])
+        XCTAssertEqual(Hello.Feature(rawValue: "push"), .push)
+    }
+}

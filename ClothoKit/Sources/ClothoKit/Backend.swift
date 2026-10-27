@@ -66,6 +66,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case agentReportPid = "agent.report.pid"
         case ping
         case splitSetRatio = "split.set_ratio"
+        /// Push alerts to phones through a relay (docs/push.md).
+        case push
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -263,6 +265,12 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// "ctrl+c", "shift+tab", "f5"…), encoded by the daemon for the pane's current modes (`pane.keys`).
     /// Only when hello's `features` contains `.paneKeys`; never fall back to raw bytes.
     func sendKeys(_ pane: PaneID, text: String?, keys: [String]) async throws
+
+    // Push alerts (docs/push.md), when hello's `features` contains `.push`.
+    func pushRegister(_ registration: PushRegistration) async throws
+    func pushUnregister(device: String) async throws
+    func pushList() async throws -> [PushDevice]
+    func pushTest(device: String) async throws
 }
 
 public extension SessionBackend {
@@ -276,6 +284,13 @@ public extension SessionBackend {
         throw BackendError(code: "unknown_method", message: "this backend can't send keys")
     }
 
+    func pushRegister(_ registration: PushRegistration) async throws { throw Self.noPush }
+    func pushUnregister(device: String) async throws { throw Self.noPush }
+    func pushList() async throws -> [PushDevice] { throw Self.noPush }
+    func pushTest(device: String) async throws { throw Self.noPush }
+
+    private static var noPush: BackendError { BackendError(code: "unknown_method", message: "this backend has no push alerts") }
+
     func createWorkspace(name: String? = nil) async throws -> CreatedWorkspace {
         try await createWorkspace(name: name, spawn: SpawnOptions())
     }
@@ -286,5 +301,51 @@ public extension SessionBackend {
 
     func split(_ pane: PaneID, direction: Direction, spawn: SpawnOptions = SpawnOptions()) async throws -> CreatedSplit {
         try await split(pane, direction: direction, ratio: nil, spawn: spawn)
+    }
+}
+
+/// A phone's registration for push alerts from this machine (`push.register`).
+public struct PushRegistration: Codable, Equatable, Sendable {
+    /// A stable id the phone chose.
+    public var device: String
+    /// The relay's opaque handle for the phone.
+    public var handle: String
+    /// The phone's X25519 public key, base64.
+    public var key: String
+    /// The app's own id for this machine, echoed back in payloads.
+    public var label: String
+    /// The relay's URL.
+    public var relay: String
+    /// "sandbox" or "production".
+    public var env: String
+
+    public init(device: String, handle: String, key: String, label: String, relay: String, env: String) {
+        self.device = device
+        self.handle = handle
+        self.key = key
+        self.label = label
+        self.relay = relay
+        self.env = env
+    }
+}
+
+/// A registered phone as `push.list` reports it (never its handle or key).
+public struct PushDevice: Codable, Equatable, Sendable {
+    public var device: String
+    public var label: String
+    public var relay: String
+    public var env: String
+    public var created: Double?
+    public var lastError: String?
+
+    enum CodingKeys: String, CodingKey { case device, label, relay, env, created, lastError = "last_error" }
+
+    public init(device: String, label: String, relay: String, env: String, created: Double? = nil, lastError: String? = nil) {
+        self.device = device
+        self.label = label
+        self.relay = relay
+        self.env = env
+        self.created = created
+        self.lastError = lastError
     }
 }

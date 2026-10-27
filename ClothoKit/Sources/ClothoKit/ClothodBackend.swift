@@ -341,6 +341,24 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("pane.keys", params)
     }
 
+    public func pushRegister(_ r: PushRegistration) async throws {
+        _ = try await request("push.register", ["device": r.device, "handle": r.handle, "key": r.key,
+                                                "label": r.label, "relay": r.relay, "env": r.env])
+    }
+
+    public func pushUnregister(device: String) async throws {
+        _ = try await request("push.unregister", ["device": device])
+    }
+
+    public func pushList() async throws -> [PushDevice] {
+        let result = try await request("push.list", nil) as? [String: Any]
+        return try Self.decode([PushDevice].self, from: result?["devices"] ?? [Any]())
+    }
+
+    public func pushTest(device: String) async throws {
+        _ = try await request("push.test", ["device": device])
+    }
+
     public func ackAgent(_ pane: PaneID) async throws {
         _ = try await request("agent.ack", ["pane": pane])
     }
