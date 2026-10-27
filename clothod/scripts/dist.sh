@@ -19,12 +19,20 @@ cd "$(dirname "$0")/.."
 # Releases (what reaches the user's machines) need a version newer than the last release: the
 # apps only offer upgrades to a higher version, since two builds of one version can't be
 # ordered. `--dev` builds a same-version dist for testing and doesn't record a release.
+#
+# Versions compare per numeric component (`sort -V`, GNU and Apple sort alike): 0.1.10 is newer
+# than 0.1.9. `dist.sh --check-newer A B` exits 0 if A is newer than B, and builds nothing
+# (tests/dist.rs).
+newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+if [ "${1:-}" = "--check-newer" ]; then
+    newer "$2" "$3"
+    exit $?
+fi
 dev=0
 [ "${1:-}" = "--dev" ] && dev=1
 version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 released=$(cat RELEASED 2>/dev/null || echo 0.0.0)
-newest=$(printf '%s\n%s\n' "$released" "$version" | sort -V | tail -1)
-if [ "$dev" = 0 ] && { [ "$version" = "$released" ] || [ "$newest" != "$version" ]; }; then
+if [ "$dev" = 0 ] && ! newer "$version" "$released"; then
     echo "dist: version $version is not newer than the last release ($released)." >&2
     echo "dist: bump [workspace.package] version in Cargo.toml for a release, or pass --dev for a test build." >&2
     exit 1
