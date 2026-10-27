@@ -204,3 +204,12 @@ is verified; this is a standing go for this round.
 - imac has Start at login installed; the user turned it on from Settings (confirmed 2026-10-27).
 - Machine group headers put the chevron on the left of the name, the same as the Agents "Quiet"
   header (user feedback).
+
+## clothod 0.1.9 (user decision, 2026-10-27)
+
+- The user said "ship it" for 0.1.9: release it, upgrade in place on macbook, devbox and imac, reinstall
+  the Mac app with 0.1.9 bundled, and prepare a TestFlight build, which the user uploads at the Mac.
+- New attention rule (user request): an agent leaves the top list only when it works again
+  (running or starting from a hook, or Claude's title spinner) or when the user resolves it
+  (agent.ack). Viewing, input, focus and mouse reports, and detection's output guesses never clear
+  it. Quick replies, Deny included, don't ack.
