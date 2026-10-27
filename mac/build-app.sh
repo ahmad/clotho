@@ -69,13 +69,18 @@ fi
 echo "Bundled clothod $(sed -n 's/.*"version": "\(.*\)".*/\1/p' "$DIST/manifest.json" | head -1) for $(ls "$DIST" | grep -v manifest | tr '\n' ' ')"
 cp -R Resources/Fonts "$APP/Contents/Resources/Fonts"
 
-# App icon: render the PNG, then build an .icns from it.
+# App icon ("Panes", Resources/AppIcon): every size drawn from the vector at its exact pixel size, the
+# 16 and 32 px ones from the hand-tuned small variant. Resources/icon-1024.png is the 1024 rendering.
 ICONSET="build/Clotho.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-swift scripts/make-icon.swift Resources/icon-1024.png
+swiftc -O -o build/make-icon scripts/make-icon.swift
+build/make-icon Resources/icon-1024.png 1024
 for s in 16 32 128 256 512; do
-  sips -z $s $s Resources/icon-1024.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-  sips -z $((s * 2)) $((s * 2)) Resources/icon-1024.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+  variant=(); (( s <= 32 )) && variant=(--small)
+  build/make-icon "$ICONSET/icon_${s}x${s}.png" $s "${variant[@]}"
+  # @2x of 16 is 32 px: still small. 32@2x (64 px) and up get the full drawing.
+  variant2=(); (( s * 2 <= 32 )) && variant2=(--small)
+  build/make-icon "$ICONSET/icon_${s}x${s}@2x.png" $((s * 2)) "${variant2[@]}"
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Clotho.icns"
 
