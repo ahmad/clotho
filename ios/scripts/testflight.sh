@@ -6,7 +6,8 @@ cd "$(dirname "$0")/.."
 BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 ARCHIVE="build/Clotho.xcarchive"
 
-xcodegen generate -q
+# Push alerts are set up in the developer account (Push capability, the extension id, the Keychain group).
+PUSH=YES xcodegen generate -q
 rm -rf "$ARCHIVE" build/export
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \

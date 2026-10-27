@@ -1,7 +1,10 @@
 # Push alerts: agent attention to the iPhone
 
-Status: **in progress** (2026-10-26). The relay (`ios/relay/`), the extension and the app side are built and tested in the simulator. The clothod side is implemented (feature `push`; `clothod/src/push.rs`, tested against a fake relay and the shared vector) and ships in the next clothod release. Deploying needs the user's accounts (below). Owners: the daemon hook is
-clothod's, the relay and the app side are iOS's.
+Status: **deployed** (2026-10-26). The relay runs at https://clotho-push.example.workers.dev
+(Cloudflare Worker `clotho-push`, APNs key KEYID00000, team-scoped, sandbox and production); a real
+sandbox push to the simulator, decrypted by the extension, passes. clothod's side is implemented
+(ee398a7) and ships in the next dist build. The `.p8` lives only in `~/.config/clotho/` and in the
+Worker's secrets.
 
 Today the phone learns about agent attention only while the app is open and connected. This
 design delivers the same signal when the app is closed or suspended, without showing anything from

@@ -10,9 +10,9 @@ import UIKit
 final class PushRegistrar: ObservableObject {
     static let shared = PushRegistrar()
 
-    /// The relay's address. Set once the Worker is deployed; `-PushRelay <url>` (a launch argument or
-    /// default) overrides it, and Debug simulator builds default to the local dev relay (relay/dev.js).
-    static let deployedRelay: URL? = nil
+    /// The relay's address: the Cloudflare Worker in ios/relay. `-PushRelay <url>` (a launch argument or
+    /// default) overrides it, for example with the local dev relay (relay/dev.js) at http://127.0.0.1:8787.
+    static let deployedRelay = URL(string: "https://clotho-push.example.workers.dev")
 
     /// The handle the relay gave for this launch's token; nil until registered, or if there's no relay.
     @Published private(set) var handle: String?
@@ -28,11 +28,7 @@ final class PushRegistrar: ObservableObject {
 
     var relay: URL? {
         if let override = UserDefaults.standard.string(forKey: "PushRelay") { return URL(string: override) }
-        #if DEBUG && targetEnvironment(simulator)
-        return URL(string: "http://127.0.0.1:8787")
-        #else
         return Self.deployedRelay
-        #endif
     }
 
     /// Debug builds are signed for APNs's sandbox, TestFlight and App Store builds for production.

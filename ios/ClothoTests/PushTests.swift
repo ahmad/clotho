@@ -25,6 +25,14 @@ final class PushTests: XCTestCase {
                                         msg: "Allow cargo test --release?", t: 1761512345.5))
     }
 
+    /// The same alert sealed by clothod's Rust sender (the `hpke` crate) to the vector's public key.
+    func testOpensClothodSealedVector() throws {
+        let rust = "8AFMCmofcTuxV5Vtxag5O0/ZpkzEakZW+KEDOwzj+yBosSKsDGq9YGQrJV0j1Pd0BKqSpr4ZC937n+jQ5qe92MHlz9qCPy48Wn53QIdt5Rarvgm0SnZr1E0p2ZQwSnYEFGG9Bh0AErDkGExGcVOqrOshq6YrVBPLo+9yv1U8hKru+m6z7p1RsTa/YCw0IA79QrFBCkWuR+0wneXZvyZmKlvM2xCEPy+0k8kyU1828f/bpErpbAaL/E3wQSSf45w="
+        let alert = try PushAlert.open(rust, collapseID: Self.vectorCollapse, key: try vectorPrivateKey())
+        XCTAssertEqual(alert, PushAlert(v: 1, m: Self.vectorLabel, p: 7, k: "claude", s: "waiting",
+                                        msg: "Allow cargo test --release?", t: 1761512345.5))
+    }
+
     func testWrongCollapseIDOrKeyFails() throws {
         XCTAssertThrowsError(try PushAlert.open(Self.vectorCiphertext, collapseID: "00000000000000000000000000000000",
                                                 key: try vectorPrivateKey()))
