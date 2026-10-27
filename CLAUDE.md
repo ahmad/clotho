@@ -54,7 +54,7 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
 
 - clothod:
   - `cd clothod && cargo test` runs the unit, snapshot and end-to-end tests.
-  - `scripts/test-all.sh` runs them on every platform, plus the cleanliness check.
+  - `clothod/scripts/test-all.sh` runs them on every platform, plus the cleanliness check.
   - `scripts/dist.sh` makes the release builds. The macOS builds need a Mac.
 - Mac:
   - `mac/build-app.sh --dev` builds `Clotho Dev.app` without installing it.
