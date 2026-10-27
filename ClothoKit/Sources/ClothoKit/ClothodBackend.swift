@@ -34,7 +34,7 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     static let maxFrame = 16 << 20
 
     enum FrameType: UInt8 {
-        case json = 1, output = 2, input = 3, snapshot = 4
+        case json = 1, output = 2, input = 3, snapshot = 4, fileData = 5
     }
 
     /// Where clothod listens: `$CLOTHOD_RUNTIME_DIR/clothod.sock`, else `$TMPDIR/clothod/clothod.sock`,
@@ -64,6 +64,14 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     private var subscriptions: [PaneID: (scrollback: Int?, viewport: Size?)] = [:]
     /// How far each subscribed pane's stream has been delivered.
     private var deliveredSeq: [PaneID: UInt64] = [:]
+
+    /// Open fs.read/fs.write streams by daemon stream id (ClothodFiles.swift).
+    var fileStreams: [UInt64: FileStream] = [:]
+    /// Run on the read thread with a request's result, before its caller resumes, so a stream is
+    /// registered before any of its frames are handled.
+    private var replyHooks: [Int: (Any) -> Void] = [:]
+    /// The latest hello, for `supportsFiles` and `homeDirectory`.
+    var lastHello: Hello?
 
     private let writeQueue = DispatchQueue(label: "clotho.clothod.write")
 
@@ -99,12 +107,14 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 self.connection = nil
                 pending.removeAll()
                 subscribeRequests.removeAll()
+                replyHooks.removeAll()
             }
             return (self.connection, Array(pending.values))
         }
         connection?.close()
         // Requests in flight would otherwise wait forever: the closed connection is no longer current.
         waiting.forEach { $0.resume(throwing: BackendError(code: "disconnected", message: "the backend was stopped")) }
+        failFileStreams(BackendError(code: "disconnected", message: "the backend was stopped"))
     }
 
     /// Drops the current connection and reconnects right away, skipping any backoff wait. For after
@@ -191,6 +201,7 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 deliveredSeq.removeAll()
             }
             instance = hello.instance
+            lastHello = hello
             continuation.yield(.connected(hello))
             return subscriptions.map { ($0.key, deliveredSeq[$0.key], $0.value.scrollback, $0.value.viewport) }
         }
@@ -210,10 +221,14 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         let failed: [CheckedContinuation<Any, Error>] = locked {
             guard connection === closed else { return [] }
             connection = nil
-            defer { pending.removeAll() }
+            defer {
+                pending.removeAll()
+                replyHooks.removeAll()
+            }
             return Array(pending.values)
         }
         failed.forEach { $0.resume(throwing: BackendError(code: "disconnected", message: reason)) }
+        failFileStreams(BackendError(code: "disconnected", message: reason))
         let shouldReconnect: Bool = locked {
             guard !stopped, !reconnecting else { return false }
             reconnecting = true
@@ -379,7 +394,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
 
     private var subscribeRequests: [Int: PaneID] = [:]
 
-    private func request(_ method: String, _ params: [String: Any]?, subscribing pane: PaneID? = nil) async throws -> Any {
+    func request(_ method: String, _ params: [String: Any]?, subscribing pane: PaneID? = nil,
+                 onReply: ((Any) -> Void)? = nil) async throws -> Any {
         try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Any, Error>) in
             let id: Int? = locked {
                 guard connection != nil else { return nil }
@@ -387,6 +403,7 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 nextRequestID += 1
                 pending[id] = waiter
                 if let pane { subscribeRequests[id] = pane }
+                if let onReply { replyHooks[id] = onReply }
                 return id
             }
             guard let id else {
@@ -402,7 +419,13 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
-    private func send(_ type: FrameType, _ body: Data) {
+    /// A message without an id: the daemon doesn't reply (`fs.ack`).
+    func notify(_ method: String, _ params: [String: Any]) {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["method": method, "params": params]) else { return }
+        send(.json, body)
+    }
+
+    func send(_ type: FrameType, _ body: Data) {
         guard let connection = locked({ connection }) else { return }
         var frame = Data(capacity: body.count + 5)
         frame.appendBigEndian(UInt32(body.count + 1))
@@ -441,6 +464,11 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 deliveredSeq[pane] = seq
                 continuation.yield(.snapshot(pane, seq: seq, cols: cols, rows: rows, bytes: bytes))
             }
+        case .fileData:
+            guard body.count >= 17 else { return }
+            let stream = body.readBigEndian(UInt64.self, at: 0), offset = body.readBigEndian(UInt64.self, at: 8)
+            let fin = body[body.startIndex + 16] & 1 != 0
+            handleFileData(stream: stream, offset: offset, fin: fin, bytes: body.subdata(in: body.startIndex + 17 ..< body.endIndex))
         case .input, nil:
             // Unknown frame types are ignored.
             break
@@ -448,8 +476,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     }
 
     private func handleReply(id: Int, _ object: [String: Any]) {
-        let (waiter, subscribing): (CheckedContinuation<Any, Error>?, PaneID?) = locked {
-            (pending.removeValue(forKey: id), subscribeRequests.removeValue(forKey: id))
+        let (waiter, subscribing, hook): (CheckedContinuation<Any, Error>?, PaneID?, ((Any) -> Void)?) = locked {
+            (pending.removeValue(forKey: id), subscribeRequests.removeValue(forKey: id), replyHooks.removeValue(forKey: id))
         }
         if let error = object["error"] as? [String: Any] {
             waiter?.resume(throwing: BackendError(code: error["code"] as? String ?? "internal",
@@ -457,6 +485,7 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             return
         }
         let result = object["result"] ?? [String: Any]()
+        hook?(result)
         if let pane = subscribing, let subscription = try? Self.decode(Subscription.self, from: result) {
             locked {
                 deliveredSeq[pane] = subscription.seq
@@ -484,6 +513,9 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             event = .resized(pane, cols: cols, rows: rows, seq: seq)
         case "pane.resync":
             event = pane.map { .resync($0) }
+        case "fs.ack", "fs.done", "fs.error":
+            handleFileEvent(name, data)
+            return
         case "agent":
             // {"pane", "agent": {...} | null}; the shape is a draft until protocol.md has it.
             let info = (data["agent"] as? [String: Any]).flatMap { try? Self.decode(AgentInfo.self, from: $0) }
@@ -497,7 +529,7 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
 
     // MARK: Helpers
 
-    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+    func locked<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
         return try body()

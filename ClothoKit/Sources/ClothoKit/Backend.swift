@@ -36,11 +36,14 @@ public struct Hello: Codable, Equatable, Sendable {
         public var hostname: String
         public var os: String
         public var arch: String
+        /// The expanded home directory (clothod 0.1.3+), for file browser breadcrumbs.
+        public var home: String?
 
-        public init(hostname: String, os: String, arch: String) {
+        public init(hostname: String, os: String, arch: String, home: String? = nil) {
             self.hostname = hostname
             self.os = os
             self.arch = arch
+            self.home = home
         }
     }
 
@@ -68,6 +71,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case splitSetRatio = "split.set_ratio"
         /// Push alerts to phones through a relay (docs/push.md).
         case push
+        /// File access: `fs.*` and FILE_DATA streams (protocol.md, "Files").
+        case fs
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
