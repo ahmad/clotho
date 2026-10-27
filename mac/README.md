@@ -45,6 +45,27 @@ open -g -n "build/Clotho Dev.app" --args -LaunchInBackground YES
 
 `Clotho Dev.app` stays in `build/` and is never installed. It has its own bundle id (`app.clotho.desktop.dev`), preferences, log (`~/Library/Logs/Clotho Dev.log`) and daemon (`$TMPDIR/clotho-dev`), so testing never touches the installed app or its shells. Use it for every scripted or automated run. `-LaunchInBackground YES` keeps it from taking keyboard focus, so it can't catch keystrokes meant for another app.
 
+### Notarized builds
+
+`./build-app.sh` signs ad hoc, which is fine on this Mac. `./build-app.sh --release` signs with Developer ID (hardened runtime, secure timestamp, [`Resources/Clotho.entitlements`](Resources/Clotho.entitlements)), notarizes with `notarytool`, staples the ticket, then installs. [`scripts/notarize.sh`](scripts/notarize.sh) does the signing and notarizing, and refuses a bundled clothod that isn't Developer ID signed: clothod's build ids hash the whole file, so its dist signs it (`CLOTHOD_SIGN_IDENTITY`), not the app.
+
+One-time setup, at the Mac itself (the login keychain is locked over SSH):
+
+1. Xcode › Settings › Accounts › the Apple ID in team TEAMID0000 › Manage Certificates… › + › **Developer ID Application**. Only the team's Account Holder can create one.
+2. Check it: `security find-identity -v -p codesigning | grep "Developer ID Application"`
+3. Make an app-specific password at [account.apple.com](https://account.apple.com) › Sign-In and Security › App-Specific Passwords, then store it for notarytool (it asks for the password):
+   `xcrun notarytool store-credentials clotho-notary --apple-id "YOUR_APPLE_ID_EMAIL" --team-id TEAMID0000`
+4. Check it: `xcrun notarytool history --keychain-profile clotho-notary`
+
+Each release, at the Mac:
+
+```sh
+CLOTHOD_SIGN_IDENTITY="Developer ID Application: YOUR NAME (TEAMID0000)" clothod/scripts/dist.sh
+mac/build-app.sh --release
+```
+
+`CLOTHO_SIGN_IDENTITY` and `CLOTHO_NOTARY_PROFILE` override the identity and the profile name (`clotho-notary`).
+
 ## Start using Clotho
 
 1. Open Clotho. The first launch starts the daemon and opens a workspace with one shell.
@@ -70,6 +91,7 @@ Read the [usage guide](docs/usage.md) for all shortcuts, file transfers, remote 
 | [`Sources/Clotho/Machines.swift`](Sources/Clotho/Machines.swift) | Saved machines: add, edit, remove, connection checks and the machine menu |
 | [`Sources/Clotho/Files.swift`](Sources/Clotho/Files.swift) | The saved machine list, SSH, the file browser and transfers |
 | [`../ClothoKit`](../ClothoKit) | Shared with the future iOS app: the model, the clothod protocol client, and a fake backend for UI work |
-| [`build-app.sh`](build-app.sh) | Build, bundle, sign and install |
+| [`build-app.sh`](build-app.sh) | Build, bundle, sign and install (`--dev`, `--release`) |
+| [`scripts/notarize.sh`](scripts/notarize.sh) | Developer ID signing, notarization and stapling |
 
 Bundled font licensing is documented in [`Resources/Fonts/LICENSE-Hack.md`](Resources/Fonts/LICENSE-Hack.md). The protocol between the app and the daemon is specified in [`../docs/protocol.md`](../docs/protocol.md).

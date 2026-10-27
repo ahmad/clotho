@@ -4,11 +4,21 @@
 # ./build-app.sh --dev builds "Clotho Dev.app" in build/ instead, for automated and manual testing. It has
 # its own bundle id, preferences, log and clothod runtime directory, and is never installed, so test runs
 # can't touch the installed app or its sessions.
+#
+# ./build-app.sh --release signs with Developer ID, notarizes and staples (scripts/notarize.sh) before
+# installing. It needs the Developer ID certificate, notarytool credentials and a clothod dist built with
+# CLOTHOD_SIGN_IDENTITY (README, "Notarized builds"). Without --release the app is signed ad hoc.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DEV=false
-[[ "${1:-}" == "--dev" ]] && DEV=true
+RELEASE=false
+case "${1:-}" in
+  --dev) DEV=true ;;
+  --release) RELEASE=true ;;
+  "") ;;
+  *) echo "usage: $0 [--dev | --release]" >&2; exit 2 ;;
+esac
 if $DEV; then
   NAME="Clotho Dev"
   BUNDLE_ID="app.clotho.desktop.dev"
@@ -94,6 +104,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 codesign --force --sign - "$APP"
+if $RELEASE; then
+  scripts/notarize.sh "$APP"
+fi
 if $DEV; then
   echo "Built $APP (not installed). Run it with: open -g -n \"$PWD/$APP\" --args -LaunchInBackground YES"
   exit 0

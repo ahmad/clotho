@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the Developer ID build (scripts/notarize.sh), signed with the hardened runtime.
+  Empty on purpose: Clotho isn't sandboxed, links SwiftTerm statically, loads no plug-ins, doesn't
+  JIT and sends no Apple Events, so it needs no runtime exceptions. The bundled clothod (signed by
+  clothod's dist) forks shells, opens PTYs and reads the user's own process info, which the hardened
+  runtime allows without entitlements. Add keys here only for a feature that needs one.
+-->
+<plist version="1.0">
+<dict/>
+</plist>
