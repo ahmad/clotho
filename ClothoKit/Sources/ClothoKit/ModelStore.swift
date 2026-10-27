@@ -11,6 +11,13 @@ public protocol PaneDataSink: AnyObject {
     func paneResync()
     /// The daemon's `instance` changed, so any seq the sink holds is meaningless.
     func paneReset()
+    /// The pane's application set the clipboard (OSC 52); see `SessionEvent.clipboard`. Only sinks
+    /// get it, so only panes a client shows can set the clipboard. Does nothing unless implemented.
+    func paneClipboard(text: String, selection: Bool)
+}
+
+public extension PaneDataSink {
+    func paneClipboard(text: String, selection: Bool) {}
 }
 
 /// Where a backend's connection stands, for showing next to a machine.
@@ -100,6 +107,8 @@ public final class ModelStore: ObservableObject {
             onChange?()
         case .bell(let pane):
             onBell?(pane)
+        case .clipboard(let pane, let text, let selection):
+            sinks[pane]?.sink?.paneClipboard(text: text, selection: selection)
         case .subscribed(let pane, let subscription):
             sinks[pane]?.sink?.paneSubscribed(subscription)
         case .output(let pane, let seq, let bytes):

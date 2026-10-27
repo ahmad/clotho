@@ -105,6 +105,28 @@ final class ClothodBackendTests: XCTestCase {
         try await waitFor("keys output") { collector.output(of: created.pane).contains("typed--by-keys") }
     }
 
+    /// pane.clipboard: an OSC 52 copy in a subscribed pane arrives as a clipboard event.
+    func testClipboardEvent() async throws {
+        let backend = makeBackend()
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        let hello = { collector.all.compactMap { e -> Hello? in if case .connected(let h) = e { return h }; return nil }.first }
+        try await waitFor("hello") { hello() != nil }
+        try XCTSkipUnless(hello()?.features.contains(.paneClipboard) == true, "this clothod predates pane.clipboard")
+        let created = try await backend.createWorkspace(name: "clip", spawn: SpawnOptions(command: ["/bin/sh"]))
+        _ = try await backend.subscribe(created.pane, haveSeq: nil, scrollback: 100, viewport: Size(cols: 80, rows: 20))
+        // "hello clip"; a read (?) must produce nothing.
+        backend.sendInput(created.pane, Data("printf '\\033]52;c;?\\007\\033]52;c;aGVsbG8gY2xpcA==\\007'\n".utf8))
+        let clips = { collector.all.compactMap { e -> String? in
+            if case let .clipboard(p, text, false) = e, p == created.pane { return text }
+            return nil
+        } }
+        try await waitFor("clipboard event") { !clips().isEmpty }
+        XCTAssertEqual(clips(), ["hello clip"])
+    }
+
     /// The process transport, with a stand-in "ssh" that pipes stdio to the local daemon's socket (what
     /// `clothod bridge` will do on a remote machine), through a full session and a logic-process restart.
     func testProcessTransport() async throws {

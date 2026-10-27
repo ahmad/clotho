@@ -260,6 +260,18 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         terminal.feedFromBackend(Data([0x1b, 0x63]))
     }
 
+    /// The pane's app copied something (OSC 52, as Claude Code and Codex do when you select with the
+    /// mouse in them). It goes on the clipboard only while the pane is in the window, so a pane on
+    /// another tab or workspace can't replace what the user copied. The primary selection (`p`) has
+    /// no Mac counterpart and is ignored. SwiftTerm's own OSC 52 handling (`clipboardCopy`) stays off,
+    /// so a copy isn't applied twice.
+    func paneClipboard(text: String, selection: Bool) {
+        guard !selection, window != nil, !isHiddenOrHasHiddenAncestor else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        log("pane \(paneID): copied \(text.count) characters to the clipboard (OSC 52)")
+    }
+
     private func flush() {
         flushScheduled = false
         guard !pending.isEmpty else { return }

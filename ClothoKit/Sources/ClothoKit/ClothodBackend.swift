@@ -507,6 +507,9 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             event = (try? Self.decode(Pane.self, from: data)).map { .pane($0, rev: rev) }
         case "bell":
             event = pane.map { .bell($0) }
+        case "pane.clipboard":
+            guard let pane, let text = data["text"] as? String else { return }
+            event = .clipboard(pane, text: text, selection: data["target"] as? String == "selection")
         case "pane.resized":
             guard let pane, let cols = (data["cols"] as? NSNumber)?.intValue, let rows = (data["rows"] as? NSNumber)?.intValue,
                   let seq = (data["seq"] as? NSNumber)?.uint64Value else { return }

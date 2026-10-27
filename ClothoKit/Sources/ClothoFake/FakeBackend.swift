@@ -357,6 +357,14 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
+    /// Like clothod: OSC 52 copies go only to a subscribed client, and never as reads.
+    fileprivate func paneClipboard(_ fake: FakePane, _ texts: [String]) {
+        locked {
+            guard panes[fake.id] === fake, fake.subscribed else { return }
+            for text in texts where !text.isEmpty { continuation.yield(.clipboard(fake.id, text: text, selection: false)) }
+        }
+    }
+
     fileprivate func paneExited(_ fake: FakePane, code: Int32?) {
         locked {
             guard panes[fake.id] === fake, let p = state.panes.firstIndex(where: { $0.id == fake.id }) else { return }
@@ -511,6 +519,7 @@ final class FakePane: TerminalDelegate, LocalProcessDelegate, @unchecked Sendabl
     private var pendingTitle: String?
     private var pendingCwd: String?
     private var pendingBell = false
+    private var pendingClipboard: [String] = []
 
     init(id: PaneID, backend: FakeBackend, cols: Int, rows: Int) {
         self.id = id
@@ -578,6 +587,10 @@ final class FakePane: TerminalDelegate, LocalProcessDelegate, @unchecked Sendabl
     func dataReceived(slice: ArraySlice<UInt8>) {
         terminal.terminalLock.withLock { terminal.feed(buffer: slice) }
         backend?.paneOutput(self, Data(slice))
+        if !pendingClipboard.isEmpty {
+            backend?.paneClipboard(self, pendingClipboard)
+            pendingClipboard = []
+        }
         if pendingTitle != nil || pendingCwd != nil || pendingBell {
             backend?.paneChanged(self, title: pendingTitle, cwd: pendingCwd, bell: pendingBell)
             pendingTitle = nil
@@ -609,6 +622,12 @@ final class FakePane: TerminalDelegate, LocalProcessDelegate, @unchecked Sendabl
         pendingCwd = URL(string: value)?.path ?? value
     }
     func bell(source: Terminal) { pendingBell = true }
+    /// OSC 52 writes. SwiftTerm doesn't pass on the target, so these count as the clipboard.
+    func clipboardCopy(source: Terminal, content: Data) {
+        if let text = String(data: content, encoding: .utf8) { pendingClipboard.append(text) }
+    }
+    /// OSC 52 reads get nothing, as from clothod.
+    func clipboardRead(source: Terminal) -> Data? { nil }
 }
 
 private extension Layout {

@@ -172,6 +172,27 @@ final class FakeBackendTests: XCTestCase {
         XCTAssertEqual(collector.lastState?.workspaces.first?.tabs.count, 0)
     }
 
+    /// OSC 52 copies become clipboard events for the subscribed client; reads get nothing.
+    func testClipboardFromOSC52() async throws {
+        let backend = FakeBackend()
+        let collector = Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+
+        try await backend.start()
+        // "hello clip" in base64, then a read, then a second copy with ST instead of BEL.
+        let script = "printf '\\033]52;c;aGVsbG8gY2xpcA==\\007'; printf '\\033]52;c;?\\007'; printf 'done-''-printing\\n'; sleep 5"
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh", "-c", script]))
+        _ = try await backend.subscribe(created.pane, haveSeq: nil, scrollback: nil, viewport: nil)
+        try await waitFor("output") { collector.output(of: created.pane).contains("done--printing") }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let clips = collector.all.compactMap { e -> String? in
+            if case let .clipboard(p, text, selection) = e, p == created.pane, !selection { return text }
+            return nil
+        }
+        XCTAssertEqual(clips, ["hello clip"])
+    }
+
     func testTerminalQueriesAreAnsweredByTheBackend() async throws {
         let backend = FakeBackend()
         let collector = Collector()
@@ -236,5 +257,45 @@ final class DisplayTitleTests: XCTestCase {
         XCTAssertEqual(Pane.displayTitle("ahmad@mac: ~", cwd: nil), "ahmad@mac: ~")
         XCTAssertNil(Pane.displayTitle("✳ ", cwd: nil))
         XCTAssertNil(Pane.displayTitle(nil, cwd: "/x"))
+    }
+}
+
+/// ModelStore hands clipboard events to the pane's sink, and only to it.
+@MainActor
+final class ClipboardRoutingTests: XCTestCase {
+    final class Sink: PaneDataSink {
+        var clips: [(String, Bool)] = []
+        func paneSubscribed(_ subscription: Subscription) {}
+        func paneOutput(seq: UInt64, bytes: Data) {}
+        func paneSnapshot(seq: UInt64, cols: Int, rows: Int, bytes: Data) {}
+        func paneResized(cols: Int, rows: Int, seq: UInt64) {}
+        func paneResync() {}
+        func paneReset() {}
+        func paneClipboard(text: String, selection: Bool) { clips.append((text, selection)) }
+    }
+
+    /// A sink written before paneClipboard existed still conforms.
+    final class OldSink: PaneDataSink {
+        func paneSubscribed(_ subscription: Subscription) {}
+        func paneOutput(seq: UInt64, bytes: Data) {}
+        func paneSnapshot(seq: UInt64, cols: Int, rows: Int, bytes: Data) {}
+        func paneResized(cols: Int, rows: Int, seq: UInt64) {}
+        func paneResync() {}
+        func paneReset() {}
+    }
+
+    func testRoutesToThePanesSink() {
+        let store = ModelStore(backend: FakeBackend())
+        let sink = Sink(), other = Sink(), old = OldSink()
+        store.register(sink, for: 1)
+        store.register(other, for: 2)
+        store.register(old, for: 3)
+        store.apply(.clipboard(1, text: "copied", selection: false))
+        store.apply(.clipboard(1, text: "primary", selection: true))
+        store.apply(.clipboard(3, text: "ignored", selection: false))
+        store.apply(.clipboard(4, text: "no sink", selection: false))
+        XCTAssertEqual(sink.clips.map(\.0), ["copied", "primary"])
+        XCTAssertEqual(sink.clips.map(\.1), [false, true])
+        XCTAssertTrue(other.clips.isEmpty)
     }
 }

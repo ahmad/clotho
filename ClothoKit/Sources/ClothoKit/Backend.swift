@@ -73,6 +73,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case push
         /// File access: `fs.*` and FILE_DATA streams (protocol.md, "Files").
         case fs
+        /// `pane.clipboard` events: OSC 52 copies from a pane's application.
+        case paneClipboard = "pane.clipboard"
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -194,6 +196,10 @@ public enum SessionEvent: Sendable {
     /// Replaces one pane.
     case pane(Pane, rev: UInt64)
     case bell(PaneID)
+    /// The pane's application set the clipboard (OSC 52), sent only to clients attached to the pane.
+    /// `selection` is true for the primary selection (`p`/`s` targets), false for the clipboard.
+    /// Applications can never read the clipboard.
+    case clipboard(PaneID, text: String, selection: Bool)
 
     // A pane's data stream (only for subscribed panes), in order.
     /// The `pane.subscribe` reply, delivered in stream order ahead of the pane's first frame.
