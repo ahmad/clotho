@@ -1,16 +1,20 @@
 //! `~/.config/clothod/config.toml` (or `$XDG_CONFIG_HOME/clothod/config.toml`, or
-//! `$CLOTHOD_CONFIG`), read when serve starts:
+//! `$CLOTHOD_CONFIG`), read when serve starts. `settings.set` writes it (keeping comments and
+//! other keys):
 //!
 //! ```toml
 //! # Lines of history each pane keeps in the daemon: what a reattaching or newly started app
-//! # gets back. Each 1000 lines cost cols × 24 bytes × 1000 (2.9 MB at 120 columns) once used.
+//! # gets back. Each 1000 lines cost cols × 24 bytes × 1000 (2.9 MB at 120 columns) once used:
+//! # measured, one full 120-column pane takes 8 MB of serve heap at 2000 lines, 142 MB at 50000.
 //! scrollback_lines = 2000
 //! ```
 
 use std::path::PathBuf;
 
 pub const DEFAULT_SCROLLBACK: usize = clotho_vt::DEFAULT_SCROLLBACK;
-pub const MAX_SCROLLBACK: usize = 100_000;
+/// Per pane. 50000 full lines at 120 columns are 142 MB of serve heap (measured), already a
+/// third of the 400 MB the soak allows serve; 100000 were 282 MB.
+pub const MAX_SCROLLBACK: usize = 50_000;
 
 pub fn path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CLOTHOD_CONFIG").filter(|p| !p.is_empty()) {
@@ -36,9 +40,41 @@ pub fn scrollback_lines() -> usize {
     match doc.get("scrollback_lines").map(|v| v.as_integer()) {
         None => DEFAULT_SCROLLBACK,
         Some(Some(n)) if (0..=MAX_SCROLLBACK as i64).contains(&n) => n as usize,
+        Some(Some(n)) if n > MAX_SCROLLBACK as i64 => {
+            eprintln!("clothod: {}: scrollback_lines {n} is over the limit; using {MAX_SCROLLBACK}", path.display());
+            MAX_SCROLLBACK
+        }
         Some(_) => {
             eprintln!("clothod: {}: scrollback_lines must be an integer 0..={MAX_SCROLLBACK}; using {DEFAULT_SCROLLBACK}", path.display());
             DEFAULT_SCROLLBACK
         }
     }
+}
+
+/// Store `scrollback_lines` in the config file (created if missing), keeping everything else in
+/// it. Refuses to touch a file it can't parse rather than lose what is in it.
+pub fn set_scrollback_lines(n: usize) -> Result<PathBuf, String> {
+    if n > MAX_SCROLLBACK {
+        return Err(format!("scrollback_lines must be 0..={MAX_SCROLLBACK}"));
+    }
+    let path = path().ok_or("no config path (HOME is not set)")?;
+    // A symlinked config (dotfiles) stays a symlink: write where it points.
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| format!("{} is not valid TOML, not changing it: {e}", path.display()))?;
+    doc["scrollback_lines"] = toml_edit::value(n as i64);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    // Atomic: a reader (or a crash) sees the old file or the new one.
+    let tmp = path.with_file_name(format!(".config.toml.{}", std::process::id()));
+    std::fs::write(&tmp, doc.to_string()).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", path.display())
+    })?;
+    Ok(path)
 }

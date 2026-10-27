@@ -87,7 +87,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
 ← {"id": 1, "result": {
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
-                  "pane.clipboard"],
+                  "pane.clipboard", "settings"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -103,8 +103,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
 
 - `features` lists what this build supports, as strings: currently `pane.keys`, `agents`,
   `agent.report.pid`, `ping`, `split.set_ratio`, `fs` (Files, below), `push` (`push.*`
-  requests, docs/push.md) and `pane.clipboard` (OSC 52 copies, see
-  [Clipboard](#clipboard-osc-52)). Builds share version numbers, so check
+  requests, docs/push.md), `pane.clipboard` (OSC 52 copies, see
+  [Clipboard](#clipboard-osc-52)) and `settings` (`settings.get` and `settings.set`, see
+  [Settings](#settings)). Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
   protocol_max]`, which a successful `hello` reports. If the
@@ -221,10 +222,11 @@ method that creates a pane:
 ```
 
 All spawn options are optional. The defaults are the user's `$SHELL` as a login shell, `cwd` in
-`$HOME`, and a size of 80×24. `scrollback_lines` (0 to 100,000) is how much history the daemon
-keeps for this pane, which is what a reattaching or newly started client can get back; the default
-is the machine's `scrollback_lines` in `~/.config/clothod/config.toml` (2000 if unset; see
-clothod/README.md, Limits). A pane keeps its value across daemon restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
+`$HOME`, and a size of 80×24. `scrollback_lines` (0 to 50,000) is how much history the daemon
+keeps for this pane, which is what a reattaching or newly started client can get back. Without
+it, the pane follows the machine's setting (see [Settings](#settings)), also when that changes
+later; with it, the pane keeps its own value. Either way a pane keeps its value across daemon
+restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 `TERM_PROGRAM=clotho`, `CLOTHO_PANE=<id>` and `CLOTHOD_SOCKET=<daemon socket>` (see
 [Agents](#agents)).
 
@@ -252,6 +254,8 @@ clothod/README.md, Limits). A pane keeps its value across daemon restarts. Child
 | `pane.input` | `pane`, `data` (UTF-8 string) | `{}`: same as an INPUT frame, for clients without binary framing |
 | `pane.keys` | `pane`, `text?`, `keys?` (list of key names) | `{}`: input encoded for the pane's current modes (see below). Counts as input like an INPUT frame |
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
+| `settings.get` | – | the settings object; see [Settings](#settings) |
+| `settings.set` | any settings to change, e.g. `scrollback_lines` | the settings object, plus `applied_panes`; see [Settings](#settings) |
 | `daemon.stop` | – | `{}`, then the logic process exits; shells keep running in the holder |
 | `daemon.shutdown` | – | `{}`, then all panes are hung up and the holder and daemon exit |
 
@@ -287,8 +291,9 @@ File access (`fs.*`) is described in [Files](#files).
 | `pane.resized` | `{"pane", "cols", "rows", "seq"}` | the pane's PTY size changed; see [Resize](#resize) |
 | `pane.resync` | `{"pane"}` | the client fell behind on this pane, and a SNAPSHOT follows; see [Output](#output) |
 | `pane.clipboard` | `{"pane", "target", "text"}` | the pane's application copied text with OSC 52; see [Clipboard](#clipboard-osc-52) |
+| `settings` | the settings object | a client changed a setting (`settings.set`); see [Settings](#settings) |
 
-`state`, `pane`, `bell` and `agent` go only to connections that called `events.subscribe`. `pane.resized`,
+`state`, `pane`, `bell`, `agent` and `settings` go only to connections that called `events.subscribe`. `pane.resized`,
 `pane.resync` and `pane.clipboard` are part of a pane's data stream: they go to every subscriber of that pane,
 whether or not it subscribed to events, in order with that pane's OUTPUT and SNAPSHOT frames.
 
@@ -298,6 +303,44 @@ the new `focus`. That is the only way they are delivered.
 A client keeps its model current by replacing everything on `state` and replacing one pane on
 `pane`. If `rev` jumps by more than one between events the client saw, it missed nothing that
 matters: a later `state` covers structure, and `pane` events always carry the whole pane.
+
+## Settings
+
+Feature flag: `settings` in `hello.features`. Per-machine settings of the daemon, stored in
+`~/.config/clothod/config.toml` (`$XDG_CONFIG_HOME/clothod/config.toml` if set). A client shows
+them per machine, like "Start at login".
+
+```json
+→ {"id": 7, "method": "settings.get"}
+← {"id": 7, "result": {
+     "scrollback_lines": 2000,
+     "limits": {"scrollback_lines": {"min": 0, "max": 50000, "default": 2000}},
+     "config": "/home/me/.config/clothod/config.toml"}}
+
+→ {"id": 8, "method": "settings.set", "params": {"scrollback_lines": 10000}}
+← {"id": 8, "result": {"scrollback_lines": 10000, "limits": {…}, "config": "…", "applied_panes": [3, 5]}}
+```
+
+- **`scrollback_lines`**: lines of history the daemon keeps per pane, which is what a
+  reattaching or newly started client can get back (not the client's own scrollback). Integer,
+  `limits.scrollback_lines.min`..`max`; clients take the limits from `settings.get` rather than
+  hard-coding them.
+  - It applies at once: to every new pane, and to every existing pane that follows the setting
+    (spawned without its own `scrollback_lines`). `applied_panes` lists the panes that changed;
+    each also gets a `pane` event with its new `scrollback_lines`. Lowering it drops those
+    panes' oldest history right away; raising it gives them room, but nothing dropped comes
+    back. Panes spawned with their own value keep it.
+  - **Memory:** history costs about 24 bytes per column per line once it is used. Measured, one
+    full 120-column pane takes 8 MB of daemon memory at 2000 lines, 31 MB at 10,000 and 142 MB at
+    50,000, and every pane that fills up costs that much. A client choosing large values should
+    say so to the user.
+- `settings.set` takes only the keys it changes. It checks all of them first, so a bad value
+  (`bad_request`: unknown key, wrong type, out of range) changes nothing. Then it writes the
+  config file atomically, keeping its comments and other keys, and applies the change. A config
+  file that isn't valid TOML is never overwritten: the answer is `config_failed`, and nothing
+  changes. The daemon reads the file again when it starts, so edits by hand still work.
+- Every connection that called `events.subscribe` gets a `settings` event with the new settings
+  object (including the client that made the change).
 
 ## Agents
 

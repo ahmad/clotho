@@ -125,12 +125,13 @@ user's agent configuration, so apps run it only after the user confirms.
 ## Configuration
 
 `~/.config/clothod/config.toml` (or `$XDG_CONFIG_HOME/clothod/config.toml`, or `$CLOTHOD_CONFIG`),
-read when the daemon starts:
+read when the daemon starts. Apps change it with `settings.set` (docs/protocol.md, "Settings"),
+which rewrites the file keeping its comments and applies the change at once:
 
 ```toml
-# Lines of history each pane keeps in the daemon: what a reattaching or newly started app gets
-# back (apps keep their own deeper history while connected). Applies to new panes; a pane can also
-# set its own with the `scrollback_lines` spawn option.
+# Lines of history each pane keeps in the daemon (0 to 50000): what a reattaching or newly
+# started app gets back (apps keep their own deeper history while connected). A pane can set its
+# own with the `scrollback_lines` spawn option; the others follow this setting.
 scrollback_lines = 2000
 ```
 

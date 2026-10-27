@@ -195,6 +195,9 @@ struct Pane {
     cols: u16,
     rows: u16,
     vt: Vt,
+    /// Its scrollback was asked for at spawn (`scrollback_lines`); otherwise it follows the
+    /// daemon's setting, also when that changes.
+    own_scrollback: bool,
     /// Output position the VT has consumed.
     vt_seq: u64,
     ring: Ring,
@@ -211,7 +214,7 @@ struct Pane {
 }
 
 impl Pane {
-    fn new(info: &PaneInfo, scrollback: usize) -> Pane {
+    fn new(info: &PaneInfo, scrollback: usize, own_scrollback: bool) -> Pane {
         Pane {
             id: info.pane,
             agent: None,
@@ -220,6 +223,7 @@ impl Pane {
             cols: info.cols,
             rows: info.rows,
             vt: Vt::with_scrollback(info.cols, info.rows, scrollback),
+            own_scrollback,
             vt_seq: info.seq_start,
             ring: {
                 // Only for replays to clients, which are capped at REPLAY_LIMIT (the holder
@@ -272,12 +276,14 @@ pub struct Daemon {
     model: Mutex<Model>,
     rev: AtomicU64,
     panes: Mutex<HashMap<u64, Arc<Mutex<Pane>>>>,
-    /// Spawns waiting for the holder, with the scrollback their pane gets.
-    spawns: Mutex<HashMap<u64, (oneshot::Sender<Result<PaneInfo, String>>, usize)>>,
-    /// Lines of history a pane keeps unless its spawn asked otherwise (config `scrollback_lines`).
-    scrollback: usize,
-    /// Per-pane settings from the stored state, for rebuilding those panes during recovery.
-    recovered_scrollback: HashMap<u64, usize>,
+    /// Spawns waiting for the holder, with the scrollback their pane asked for.
+    spawns: Mutex<HashMap<u64, (oneshot::Sender<Result<PaneInfo, String>>, Option<usize>)>>,
+    /// Lines of history a pane keeps unless its spawn asked otherwise (config `scrollback_lines`,
+    /// changed at runtime by `settings.set`).
+    scrollback: AtomicUsize,
+    /// Per-pane settings from the stored state, for rebuilding those panes during recovery:
+    /// (lines, asked for at spawn).
+    recovered_scrollback: HashMap<u64, (usize, bool)>,
     next_req: AtomicU64,
     clients: Mutex<HashMap<u64, Arc<Client>>>,
     next_client: AtomicU64,
@@ -483,6 +489,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         other => bail!("expected welcome from holder, got {other:?}"),
     };
 
+    let scrollback = crate::config::scrollback_lines();
     let d = Arc::new(Daemon {
         dir: dir.clone(),
         instance,
@@ -493,14 +500,20 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         rev: AtomicU64::new(1),
         panes: Mutex::new(HashMap::new()),
         spawns: Mutex::new(HashMap::new()),
-        scrollback: crate::config::scrollback_lines(),
+        scrollback: AtomicUsize::new(scrollback),
         recovered_scrollback: state
             .as_ref()
             .and_then(|s| s.get("meta"))
             .and_then(Value::as_object)
             .map(|m| {
                 m.iter()
-                    .filter_map(|(id, v)| Some((id.parse().ok()?, (v.get("scrollback_lines")?.as_u64()? as usize).min(crate::config::MAX_SCROLLBACK))))
+                    .filter_map(|(id, v)| {
+                        let n = (v.get("scrollback_lines")?.as_u64()? as usize).min(crate::config::MAX_SCROLLBACK);
+                        // State from before `scrollback_own`: a pane with another value than
+                        // the config's asked for it.
+                        let own = v.get("scrollback_own").and_then(Value::as_bool).unwrap_or(n != scrollback);
+                        Some((id.parse().ok()?, (n, own)))
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -760,7 +773,7 @@ impl Daemon {
             .iter()
             .map(|(id, p)| {
                 let p = p.lock().unwrap();
-                (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback()}))
+                (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback}))
             })
             .collect();
         let state = json!({"model": model, "meta": meta});
@@ -782,7 +795,9 @@ impl Daemon {
                 }
                 // Recovery built the VT with the default; a pane spawned with its own keeps it.
                 if let Some(n) = m.get("scrollback_lines").and_then(Value::as_u64) {
-                    p.vt.set_scrollback((n as usize).min(crate::config::MAX_SCROLLBACK));
+                    if p.own_scrollback {
+                        p.vt.set_scrollback((n as usize).min(crate::config::MAX_SCROLLBACK));
+                    }
                 }
             }
         }
@@ -853,8 +868,13 @@ impl Daemon {
             FromHolder::Pane(info) => {
                 // Recovery: the VT starts blank at the buffer start, at the size the buffer's
                 // oldest bytes were written at; a stored snapshot (next frame) replaces it.
-                let scrollback = self.recovered_scrollback.get(&info.pane).copied().unwrap_or(self.scrollback);
-                let mut p = Pane::new(&info, scrollback);
+                // A pane that follows the setting gets the current one, which may have changed
+                // since it was stored.
+                let (scrollback, own) = match self.recovered_scrollback.get(&info.pane) {
+                    Some(&(n, true)) => (n, true),
+                    _ => (self.scrollback.load(Ordering::Relaxed), false),
+                };
+                let mut p = Pane::new(&info, scrollback, own);
                 let start = info.seq_start;
                 let initial = info.resizes.iter().filter(|r| r.0 <= start).last().copied();
                 if let Some((_, c, r)) = initial {
@@ -866,7 +886,8 @@ impl Daemon {
             }
             FromHolder::Spawned { id, pane } => {
                 let waiter = self.spawns.lock().unwrap().remove(&id);
-                let p = Pane::new(&pane, waiter.as_ref().map_or(self.scrollback, |w| w.1));
+                let own = waiter.as_ref().and_then(|w| w.1);
+                let p = Pane::new(&pane, own.unwrap_or_else(|| self.scrollback.load(Ordering::Relaxed)), own.is_some());
                 self.panes.lock().unwrap().insert(pane.pane, Arc::new(Mutex::new(p)));
                 if let Some((tx, _)) = waiter {
                     let _ = tx.send(Ok(pane));
@@ -1413,7 +1434,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1641,6 +1662,8 @@ impl Daemon {
                 Ok(json!({"lines": pp.vt.screen_text(), "cursor": [col, row], "cols": pp.cols, "rows": pp.rows, "seq": pp.vt_seq,
                     "modes": {"kitty_flags": m.kitty, "bracketed_paste": m.bracketed_paste, "app_cursor": m.app_cursor, "app_keypad": m.app_keypad}}))
             }
+            "settings.get" => Ok(self.settings_json()),
+            "settings.set" => self.set_settings(p),
             "daemon.stop" => Ok(json!({})),
             "daemon.shutdown" => {
                 self.shutdown_all.store(true, Ordering::SeqCst);
@@ -1648,6 +1671,62 @@ impl Daemon {
             }
             _ => Err(err("unknown_method", format!("unknown method `{method}`"))),
         }
+    }
+
+    fn settings_json(&self) -> Value {
+        json!({
+            "scrollback_lines": self.scrollback.load(Ordering::Relaxed),
+            "limits": {"scrollback_lines": {"min": 0, "max": crate::config::MAX_SCROLLBACK, "default": crate::config::DEFAULT_SCROLLBACK}},
+            "config": crate::config::path().map(|p| p.to_string_lossy().into_owned()),
+        })
+    }
+
+    /// `settings.set`: validate everything, store it in config.toml, then apply it. Panes that
+    /// follow the setting change now (shrinking drops their oldest history), and so do panes
+    /// created from here on; panes spawned with their own `scrollback_lines` keep it.
+    fn set_settings(&self, p: &Value) -> RpcResult {
+        let Some(obj) = p.as_object() else { return Err(err("bad_request", "params must be an object")) };
+        if let Some(k) = obj.keys().find(|k| *k != "scrollback_lines") {
+            return Err(err("bad_request", format!("unknown setting `{k}`")));
+        }
+        let max = crate::config::MAX_SCROLLBACK;
+        let lines = match obj.get("scrollback_lines") {
+            None => None,
+            Some(v) => Some(
+                v.as_u64().filter(|n| *n as usize <= max).ok_or_else(|| err("bad_request", format!("scrollback_lines must be an integer 0..={max}")))?
+                    as usize,
+            ),
+        };
+        let mut changed = Vec::new();
+        if let Some(n) = lines {
+            crate::config::set_scrollback_lines(n).map_err(|e| err("config_failed", e))?;
+            let old = self.scrollback.swap(n, Ordering::Relaxed);
+            if old != n {
+                eprintln!("clothod: scrollback_lines {old} -> {n}");
+            }
+            let panes: Vec<_> = self.panes.lock().unwrap().values().cloned().collect();
+            for p in panes {
+                let mut p = p.lock().unwrap();
+                if !p.own_scrollback && p.vt.scrollback() != n {
+                    p.vt.set_scrollback(n);
+                    // set_options repeats the title; nothing else is pending here.
+                    let events = p.vt.take_events();
+                    self.on_vt_events(&mut p, events);
+                    changed.push(p.id);
+                    self.pane_event(&p);
+                }
+            }
+        }
+        if !changed.is_empty() {
+            // Stored snapshots are cut to the new length at the next push; the scrollback
+            // itself is part of the pane meta.
+            self.persist();
+        }
+        let v = self.settings_json();
+        self.broadcast("settings", v.clone());
+        let mut r = v;
+        r["applied_panes"] = json!(changed);
+        Ok(r)
     }
 
     fn subscribe(&self, client: &Arc<Client>, req_id: Value, p: &Value) -> std::result::Result<(), RpcError> {
@@ -1707,7 +1786,7 @@ impl Daemon {
     async fn spawn_pane(&self, opts: SpawnOpts) -> std::result::Result<u64, RpcError> {
         let id = self.next_req.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.spawns.lock().unwrap().insert(id, (tx, opts.scrollback.unwrap_or(self.scrollback)));
+        self.spawns.lock().unwrap().insert(id, (tx, opts.scrollback));
         self.to_holder(&ToHolder::Spawn {
             id,
             command: opts.command,

@@ -1991,6 +1991,139 @@ async fn scrollback_comes_from_the_config_and_can_be_set_per_pane() {
     assert!(e.to_string().contains("bad_request"), "{e}");
 }
 
+async fn pane_scrollback(c: &Client, pane: u64) -> Value {
+    let s = c.request("state.get", json!({})).await.unwrap();
+    s["panes"].as_array().unwrap().iter().find(|x| x["id"] == pane).unwrap()["scrollback_lines"].clone()
+}
+
+/// A shell-free pane that prints `n` numbered rows, then waits.
+fn rows_pane(n: u32) -> Value {
+    let mut p = sh();
+    p["command"] = json!(["/bin/sh", "-c", format!("i=0; while [ $i -lt {n} ]; do echo row-$i; i=$((i+1)); done; echo printed; exec cat")]);
+    p["rows"] = json!(10);
+    p
+}
+
+#[tokio::test]
+async fn scrollback_setting_changes_at_runtime_and_persists() {
+    let mut env = Env::empty();
+    let config = env.dir.path().join("config.toml");
+    std::fs::write(&config, "# mine, keep me\nscrollback_lines = 50 # old\nother = \"x\"\n").unwrap();
+    env.start();
+    let mut c = env.client().await;
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("settings")), "{}", c.hello);
+    let g = c.request("settings.get", json!({})).await.unwrap();
+    assert_eq!(g["scrollback_lines"], 50);
+    assert_eq!(g["limits"]["scrollback_lines"]["default"], 2000);
+    let max = g["limits"]["scrollback_lines"]["max"].as_u64().unwrap();
+    assert_eq!(g["config"], json!(config.to_string_lossy()));
+
+    let a = new_pane(&c, rows_pane(300)).await;
+    let mut own = rows_pane(300);
+    own["scrollback_lines"] = json!(120);
+    let b = new_pane(&c, own).await;
+    for p in [a, b] {
+        wait_for_text(&c, p, T, |l| has_line(l, "printed")).await.unwrap();
+    }
+    assert_eq!(history_lines(&mut c, a).await, 50);
+
+    let mut watcher = env.client().await;
+    watcher.request("events.subscribe", json!({})).await.unwrap();
+    while watcher.try_recv().is_some() {}
+
+    // Down: the pane that follows the setting loses its oldest rows now; the one spawned with
+    // its own value keeps it.
+    let r = c.request("settings.set", json!({"scrollback_lines": 30})).await.unwrap();
+    assert_eq!(r["scrollback_lines"], 30);
+    assert_eq!(r["applied_panes"], json!([a]));
+    assert_eq!((pane_scrollback(&c, a).await, pane_scrollback(&c, b).await), (json!(30), json!(120)));
+    assert_eq!(history_lines(&mut c, a).await, 30);
+    assert_eq!(history_lines(&mut c, b).await, 120);
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(text.contains("# mine, keep me") && text.contains("other = \"x\"") && text.contains("scrollback_lines = 30"), "{text}");
+    let deadline = Instant::now() + T;
+    let ev = loop {
+        match tokio::time::timeout(Duration::from_millis(200), watcher.recv()).await {
+            Ok(Some(Frame::Json(v))) if v["event"] == "settings" => break v["data"].clone(),
+            _ => assert!(Instant::now() < deadline, "no settings event"),
+        }
+    };
+    assert_eq!(ev["scrollback_lines"], 30);
+
+    // New panes get it.
+    let n = new_pane(&c, rows_pane(100)).await;
+    assert_eq!(pane_scrollback(&c, n).await, json!(30));
+    // Up again: room for more, nothing comes back.
+    let r = c.request("settings.set", json!({"scrollback_lines": 200})).await.unwrap();
+    assert_eq!(r["applied_panes"].as_array().unwrap().len(), 2);
+    assert_eq!(pane_scrollback(&c, a).await, json!(200));
+    assert_eq!(history_lines(&mut c, a).await, 30);
+
+    // Invalid values change nothing.
+    for bad in [json!({"scrollback_lines": -1}), json!({"scrollback_lines": max + 1}), json!({"scrollback_lines": "9"}), json!({"bogus": 1})] {
+        let e = c.request("settings.set", bad.clone()).await.unwrap_err();
+        assert!(e.to_string().contains("bad_request"), "{bad}: {e}");
+    }
+    assert_eq!(c.request("settings.get", json!({})).await.unwrap()["scrollback_lines"], 200);
+    assert!(std::fs::read_to_string(&config).unwrap().contains("scrollback_lines = 200"));
+
+    // A restart of the logic process reads it back; who follows the setting is kept.
+    drop(c);
+    drop(watcher);
+    env.kill();
+    env.start();
+    let c = env.client().await;
+    assert_eq!(c.request("settings.get", json!({})).await.unwrap()["scrollback_lines"], 200);
+    c.request("settings.set", json!({"scrollback_lines": 40})).await.unwrap();
+    assert_eq!((pane_scrollback(&c, a).await, pane_scrollback(&c, b).await), (json!(40), json!(120)));
+
+    // A config file it can't parse is never overwritten.
+    std::fs::write(&config, "scrollback_lines = [oops\n").unwrap();
+    let e = c.request("settings.set", json!({"scrollback_lines": 60})).await.unwrap_err();
+    assert!(e.to_string().contains("config_failed"), "{e}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "scrollback_lines = [oops\n");
+    assert_eq!(c.request("settings.get", json!({})).await.unwrap()["scrollback_lines"], 40);
+}
+
+/// Memory of one full pane at a given scrollback (not a test: `cargo test -p clothod --test
+/// e2e scrollback_memory -- --ignored --nocapture`, CLOTHOD_PROBE_LINES=50000).
+#[tokio::test]
+#[ignore]
+async fn scrollback_memory_probe() {
+    let lines: u64 = std::env::var("CLOTHOD_PROBE_LINES").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000);
+    let env = Env::new();
+    let c = env.client().await;
+    c.request("settings.set", json!({"scrollback_lines": lines})).await.unwrap();
+    let rss = |pid: u32| -> u64 {
+        let o = Command::new("ps").args(["-o", "rss=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+    };
+    let serve = c.hello["pid"].as_u64().unwrap() as u32;
+    let holder = holder_pid(&env);
+    let base = c.request("debug.stats", json!({})).await.unwrap()["heap"].as_u64().unwrap();
+    eprintln!("before: serve heap {} MB, rss {} MB, holder rss {} MB", base >> 20, rss(serve), rss(holder));
+    let mut p = sh();
+    // 120 columns of text per row, as many rows as the scrollback plus a screen.
+    p["command"] = json!(["/bin/sh", "-c", format!("i=0; while [ $i -lt {} ]; do printf '%0120d\\n' $i; i=$((i+1)); done; echo printed; exec cat", lines + 60)]);
+    p["cols"] = json!(120);
+    p["rows"] = json!(40);
+    let pane = new_pane(&c, p).await;
+    wait_for_text(&c, pane, Duration::from_secs(600), |l| has_line(l, "printed")).await.unwrap();
+    // Let the snapshot push to the holder happen.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let st = c.request("debug.stats", json!({})).await.unwrap();
+    let heap = st["heap"].as_u64().unwrap();
+    eprintln!(
+        "{lines} lines x 120 cols, full: serve heap {} MB (+{} MB), peak {} MB, rss {} MB; holder rss {} MB; history {}",
+        heap >> 20,
+        (heap - base) >> 20,
+        st["heap_peak"].as_u64().unwrap() >> 20,
+        rss(serve),
+        rss(holder),
+        st["panes"][0]["history"]
+    );
+}
+
 // ---- push --------------------------------------------------------------------------------
 
 /// A stand-in relay on 127.0.0.1: answers `POST /v1/push` with the next queued status (200 when
