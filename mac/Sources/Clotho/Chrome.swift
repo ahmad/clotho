@@ -480,6 +480,8 @@ final class SidebarView: NSView {
     static let groupSpacing: CGFloat = 18
 
     var onOpenAgent: ((MachineKey, PaneID) -> Void)?
+    /// The checkmark on an agent that needs attention.
+    var onResolveAgent: ((MachineKey, PaneID) -> Void)?
     var agentRowMenu: ((MachineKey, PaneID, Bool) -> NSMenu)?
     var agentsMenu: (() -> NSMenu)?
 
@@ -493,18 +495,42 @@ final class SidebarView: NSView {
         column.arrangedSubviews.forEach { $0.removeFromSuperview() }
         agentsColumn.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        // The agents panel: every agent on every machine, most urgent first.
-        let needing = agents.filter(\.info.needsAttention).count
-        let agentsHeader = MachineHeader(title: needing > 0 ? "Agents · \(needing)" : "Agents",
-                                         status: (needing > 0 ? AgentInfo.State.waiting.color : nil, nil), newWorkspaceTooltip: nil)
+        // The agents panel: agents that need the user on top, each with a checkmark to resolve it; every
+        // other agent (running, idle, resolved) in a section below, collapsed unless opened.
+        let (attention, others) = AgentEntry.split(agents)
+        let agentsHeader = MachineHeader(title: attention.isEmpty ? "Agents" : "Agents · \(attention.count)",
+                                         status: (attention.isEmpty ? nil : AgentInfo.State.waiting.color, nil), newWorkspaceTooltip: nil)
         agentsHeader.contextMenu = { [weak self] in self?.agentsMenu?() }
         add(agentsHeader, to: agentsColumn)
         agentsColumn.setCustomSpacing(4, after: agentsHeader)
-        for entry in agents {
-            let row = AgentRow(entry)
+        let addAgent = { [weak self] (entry: AgentEntry, resolvable: Bool) in
+            guard let self else { return }
+            let row = AgentRow(entry, onResolve: resolvable ? { [weak self] in self?.onResolveAgent?(entry.machine, entry.pane) } : nil)
             row.onClick = { [weak self] in self?.onOpenAgent?(entry.machine, entry.pane) }
             row.contextMenu = { [weak self] in self?.agentRowMenu?(entry.machine, entry.pane, entry.offersReplies) }
             add(row, height: 40, to: agentsColumn)
+        }
+        attention.forEach { addAgent($0, true) }
+        if attention.isEmpty, !others.isEmpty {
+            add(note("Nothing needs you", tooltip: "Agents show here when they finish, fail or wait for you.", color: Theme.dimText),
+                to: agentsColumn)
+        }
+        if !others.isEmpty {
+            let expanded = UserDefaults.standard.bool(forKey: "AgentsOthersExpanded")
+            let section = MachineHeader(title: "Running · \(others.count)", status: (nil, nil), newWorkspaceTooltip: nil, collapsed: !expanded)
+            section.toolTip = "Agents that don't need you: running, idle or resolved"
+            section.onToggle = { [weak self] in
+                UserDefaults.standard.set(!expanded, forKey: "AgentsOthersExpanded")
+                self?.latest?()
+            }
+            if let last = agentsColumn.arrangedSubviews.last { agentsColumn.setCustomSpacing(8, after: last) }
+            add(section, to: agentsColumn)
+            agentsColumn.setCustomSpacing(4, after: section)
+            if expanded { others.forEach { addAgent($0, false) } }
+        }
+        if UserDefaults.standard.bool(forKey: "LogSidebar") {
+            let names = { (list: [AgentEntry]) in list.map { "\($0.pane):\($0.info.state.rawValue)" }.joined(separator: " ") }
+            log("agents: attention [\(names(attention))] others [\(names(others))]")
         }
         for machine in unreachable {
             add(note("\(machine.name) is unreachable, so its agents aren't shown", tooltip: machine.reason, color: AgentInfo.State.error.color),

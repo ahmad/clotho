@@ -25,13 +25,34 @@ struct AgentEntry {
     /// Detected or idle agents aren't asking anything.
     var offersReplies: Bool { canReply && info.state == .waiting && info.needsAttention && info.isHookSourced }
 
-    /// Waiting first, then finished or failed ones nobody has looked at, then running, then the rest.
+    /// Needing the user first (waiting, then failed, then finished), then running, then the rest.
     var rank: Int {
-        if info.needsAttention { return info.state == .waiting ? 0 : 1 }
-        switch info.state {
-        case .running, .starting: return 2
-        default: return 3
+        if info.needsAttention {
+            switch info.state {
+            case .waiting: return 0
+            case .error: return 1
+            default: return 2
+            }
         }
+        switch info.state {
+        case .running, .starting: return 3
+        default: return 4
+        }
+    }
+
+    /// Most urgent first, and the most recent change first within a rank.
+    static func sorted(_ entries: [AgentEntry]) -> [AgentEntry] {
+        entries.sorted {
+            if $0.rank != $1.rank { return $0.rank < $1.rank }
+            return ($0.info.since ?? 0) > ($1.info.since ?? 0)
+        }
+    }
+
+    /// The Agents panel: agents whose `attention` the daemon raised (until resolved, on any device, or
+    /// until someone types into the pane) at the top; every other agent in the section below.
+    static func split(_ entries: [AgentEntry]) -> (attention: [AgentEntry], others: [AgentEntry]) {
+        let sorted = sorted(entries)
+        return (sorted.filter(\.info.needsAttention), sorted.filter { !$0.info.needsAttention })
     }
 
     var place: String {
@@ -120,10 +141,7 @@ extension AppDelegate {
                                           canReply: session.store.hello?.features.contains(.paneKeys) == true))
             }
         }
-        return entries.sorted {
-            if $0.rank != $1.rank { return $0.rank < $1.rank }
-            return ($0.info.since ?? 0) > ($1.info.since ?? 0)
-        }
+        return AgentEntry.sorted(entries)
     }
 
     /// Monitored machines that can't be reached, so their agents aren't silently missing.
@@ -146,16 +164,24 @@ extension AppDelegate {
 
     // MARK: Opening
 
-    /// Shows the agent's pane (its machine, workspace, tab and pane) and acknowledges its state.
+    /// Shows the agent's pane (its machine, workspace, tab and pane). Looking doesn't resolve it: the
+    /// checkmark does, or typing into the pane (the daemon clears attention on input).
     func openAgent(machine: MachineKey, pane: PaneID) {
         guard let session = connections[machine] else { return }
         focus(machine: machine)
         if NSApp.isHidden || !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         window.makeKeyAndOrderFront(nil)
         let backend = session.store.backend
+        Task { @MainActor in try? await backend.focus(.pane(pane)) }
+    }
+
+    /// The checkmark: clears the agent's attention in its daemon (`agent.ack`), so it's resolved on every
+    /// device. It comes back on its own when the agent needs the user again.
+    func resolveAgent(machine: MachineKey, pane: PaneID) {
+        guard let backend = connections[machine]?.store.backend else { return }
+        log("agent \(machine)/\(pane): resolved")
         Task { @MainActor in
-            try? await backend.focus(.pane(pane))
-            try? await backend.ackAgent(pane)
+            do { try await backend.ackAgent(pane) } catch { log("resolving \(machine)/\(pane) failed: \(error.localizedDescription)") }
         }
     }
 
@@ -212,6 +238,9 @@ extension AppDelegate {
     func agentMenu(machine: MachineKey, pane: PaneID, canReply: Bool) -> NSMenu {
         let menu = NSMenu()
         menu.addItem(ClosureMenuItem(title: "Open Pane") { [weak self] in self?.openAgent(machine: machine, pane: pane) })
+        if connections[machine]?.store.state.pane(pane)?.agent?.needsAttention == true {
+            menu.addItem(ClosureMenuItem(title: "Resolve") { [weak self] in self?.resolveAgent(machine: machine, pane: pane) })
+        }
         guard canReply else { return menu }
         menu.addItem(.separator())
         for reply in Self.quickReplies {
@@ -389,8 +418,10 @@ final class AgentRow: ChromeItem {
     private let icon = NSImageView()
     private let detail = NSTextField(labelWithString: "")
     private let elapsed = NSTextField(labelWithString: "")
+    private var resolve: ClosureButton?
 
-    init(_ entry: AgentEntry) {
+    /// With `onResolve`, the row has a checkmark that resolves the agent (agents needing attention).
+    init(_ entry: AgentEntry, onResolve: (() -> Void)? = nil) {
         super.init(closable: false)
         let info = entry.info
         let shown = info.shownState
@@ -441,6 +472,27 @@ final class AgentRow: ChromeItem {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
+        var trailing = trailingAnchor
+        var inset: CGFloat = -10
+        if let onResolve {
+            let button = ClosureButton(title: "", action: onResolve)
+            button.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Resolve")?
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+            button.isBordered = false
+            button.contentTintColor = Theme.dimText
+            button.toolTip = "Resolve: hide it until it needs you again (on every device)"
+            button.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(button)
+            NSLayoutConstraint.activate([
+                button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+                button.centerYAnchor.constraint(equalTo: centerYAnchor),
+                button.widthAnchor.constraint(equalToConstant: 20),
+                button.heightAnchor.constraint(equalToConstant: 20),
+            ])
+            resolve = button
+            trailing = button.leadingAnchor
+            inset = -4
+        }
         // The title moves right of the icon, and up to make room for the detail line.
         constraints.filter { $0.firstItem === label }.forEach { $0.isActive = false }
         NSLayoutConstraint.activate([
@@ -450,11 +502,11 @@ final class AgentRow: ChromeItem {
             label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
             label.topAnchor.constraint(equalTo: topAnchor, constant: 5),
             label.trailingAnchor.constraint(lessThanOrEqualTo: elapsed.leadingAnchor, constant: -6),
-            elapsed.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            elapsed.trailingAnchor.constraint(equalTo: trailing, constant: inset),
             elapsed.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
             detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 1),
-            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
+            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailing, constant: inset),
         ])
     }
 

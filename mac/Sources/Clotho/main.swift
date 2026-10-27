@@ -281,6 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
+        sidebar.onResolveAgent = { [weak self] machine, pane in self?.resolveAgent(machine: machine, pane: pane) }
         sidebar.agentRowMenu = { [weak self] machine, pane, canReply in
             self?.agentMenu(machine: machine, pane: pane, canReply: canReply) ?? NSMenu()
         }
@@ -443,7 +444,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // "click:600,300" clicks at that point of the window (from its bottom-left corner), "rclick:600,300"
     // right-clicks, and either takes modifiers after the point, as in "click:600,300,ctrl" or
     // "rclick:600,300,alt". "menu:Paste" picks that item of the focused pane's right-click menu, and
-    // "drop:/path/file" handles that file as if dropped on the focused pane.
+    // "drop:/path/file" handles that file as if dropped on the focused pane. "resolve:0" presses the
+    // Agents checkmark for the focused machine's first pane.
     func runTestScripts() {
         let decode = { (text: String) in text.replacingOccurrences(of: "\\r", with: "\r").replacingOccurrences(of: "\\e", with: "\u{1b}") }
         for (i, step) in (UserDefaults.standard.string(forKey: "TypeText")?.components(separatedBy: "|") ?? []).enumerated() {
@@ -455,6 +457,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
+                if step.hasPrefix("resolve:"), let index = Int(step.dropFirst(8)) {
+                    let panes = store.state.panes.map(\.id)
+                    return index < panes.count ? resolveAgent(machine: focusedMachine, pane: panes[index]) : log("TypeText: no pane \(index)")
+                }
                 if step.hasPrefix("drop:") {
                     return dropFiles([URL(fileURLWithPath: String(step.dropFirst(5)))], on: PaneKey(machine: focusedMachine, pane: pane))
                 }
