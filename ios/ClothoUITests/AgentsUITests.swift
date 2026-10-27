@@ -13,17 +13,18 @@ final class AgentsUITests: XCTestCase {
         newWorkspace.tap()
         let actions = app.buttons["Pane actions"]
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
-        actions.tap()
-        app.buttons["Split right"].tap()
-        sleep(1)
-        actions.tap()
-        app.buttons["Split down"].tap()
-        sleep(1)
+        // Five panes in a row: fake agent states cycle through five by pane id, so every state shows,
+        // whichever ids earlier tests used up.
+        for direction in ["Split right", "Split down", "Split right", "Split down"] {
+            actions.tap()
+            app.buttons[direction].tap()
+            sleep(1)
+        }
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.navigationBars.buttons.element(boundBy: 0).tap()
 
         XCTAssertTrue(app.staticTexts["Agents"].waitForExistence(timeout: 5))
-        // Three fake agents: waiting, running and done. Running has no attention, so it starts under Quiet.
+        // Waiting, done and error need the user; running and starting have no attention, so they start under Quiet.
         let waiting = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Waiting'")).firstMatch
         XCTAssertTrue(waiting.waitForExistence(timeout: 5))
         let quiet = app.descendants(matching: .any).matching(identifier: "quietAgents").firstMatch

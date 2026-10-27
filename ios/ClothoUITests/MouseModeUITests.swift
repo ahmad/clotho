@@ -61,6 +61,14 @@ final class MouseModeUITests: XCTestCase {
         XCTAssertFalse(received.contains("[<"), "mouse events reached the app: \(received.debugDescription)")
         attach(app, "pasted")
         app.typeText("\u{03}") // ^C ends cat
+        closeTab(app)
+    }
+
+    /// Closes what the test made, so later tests' rows stay on screen.
+    private func closeTab(_ app: XCUIApplication) {
+        sleep(1)
+        app.buttons["Pane actions"].tap()
+        app.buttons["Close tab"].tap()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

@@ -31,6 +31,8 @@ final class RenameUITests: XCTestCase {
         // Back on the machine screen: the tab row's context menu edits the row in place.
         bar.buttons.element(boundBy: 0).tap()
         let row = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "from-title")).firstMatch
+        // The new workspace is last; earlier tests' workspaces may push it below the screen.
+        for _ in 0..<8 where !row.waitForExistence(timeout: 2) || !row.isHittable { app.swipeUp() }
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.press(forDuration: 1.2)
         app.buttons["Rename"].tap()

@@ -49,6 +49,7 @@ final class AgentInputUITests: XCTestCase {
         app.typeText("b")
         waitFor("a^[^Mb", "the key bar's newline")
         app.typeText("\u{03}")
+        closeTab(app)
     }
 
     func testPastedImageArrivesAsAFile() throws {
@@ -76,6 +77,14 @@ final class AgentInputUITests: XCTestCase {
         let saved = try Data(contentsOf: URL(fileURLWithPath: path))
         XCTAssertEqual(saved, png, "the file on the machine is the clipboard's PNG")
         app.typeText("\u{03}")
+        closeTab(app)
+    }
+
+    /// Closes what the test made, so later tests' rows stay on screen.
+    private func closeTab(_ app: XCUIApplication) {
+        sleep(1)
+        app.buttons["Pane actions"].tap()
+        app.buttons["Close tab"].tap()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

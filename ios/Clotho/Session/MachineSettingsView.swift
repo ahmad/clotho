@@ -8,6 +8,8 @@ struct MachineSettingsView: View {
     @ObservedObject var connection: MachineConnection
     @ObservedObject private var store: ModelStore
     @State private var error: String?
+    /// Why the login item's status couldn't be read; shown in its own section instead of a spinner.
+    @State private var serviceError: String?
     @State private var busy = false
 
     init(connection: MachineConnection) {
@@ -39,9 +41,16 @@ struct MachineSettingsView: View {
         guard store.isConnected else { return }
         do {
             if features.contains(.settings) { try await store.loadSettings() }
-            if features.contains(.service) { try await store.loadService() }
         } catch {
             self.error = error.localizedDescription
+        }
+        // A test install is never a login item, and clothod refuses to describe one (it has no label of its own).
+        guard features.contains(.service), !connection.machine.isTestInstall else { return }
+        do {
+            try await store.loadService()
+            serviceError = nil
+        } catch {
+            serviceError = error.localizedDescription
         }
     }
 
@@ -90,9 +99,21 @@ struct MachineSettingsView: View {
     // MARK: Start at login
 
     @ViewBuilder private var loginSection: some View {
-        if features.contains(.service) {
+        if features.contains(.service) && connection.machine.isTestInstall {
             Section {
-                if let service = store.service {
+                Toggle("Start clothod at login", isOn: .constant(false))
+                    .disabled(true)
+                    .accessibilityIdentifier("startAtLogin")
+            } header: {
+                Text("Login")
+            } footer: {
+                Text("\(name) uses this app's test install of clothod, which never starts at login.")
+            }
+        } else if features.contains(.service) {
+            Section {
+                if let serviceError, store.service == nil {
+                    Text(serviceError).font(.callout).foregroundStyle(.secondary)
+                } else if let service = store.service {
                     Toggle("Start clothod at login", isOn: Binding(get: { service.installed }, set: { on in
                         perform { _ = try await store.setStartsAtLogin(on) }
                     }))
