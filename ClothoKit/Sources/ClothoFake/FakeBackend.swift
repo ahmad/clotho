@@ -288,13 +288,34 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
+    /// Mutes or unmutes the pane's agent, like clothod: a muted agent's attention is cleared and never raised.
+    public func muteAgent(_ pane: PaneID, muted: Bool) async throws {
+        try locked {
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].agent != nil else {
+                throw BackendError(code: "not_found", message: "no agent in pane \(pane)")
+            }
+            state.panes[p].agent?.muted = muted ? true : nil
+            if muted { state.panes[p].agent?.attention = false }
+            continuation.yield(.agent(pane, state.panes[p].agent))
+            publishPane(at: p)
+        }
+    }
+
     /// Puts a fake agent in a pane (nil removes it), for building the UI without clothod. A waiting,
-    /// done or error state starts out needing attention, as clothod's do.
+    /// done or error state starts out needing attention, as clothod's do, unless the agent is muted.
+    /// The same kind of agent keeps its mute; a different one (a new session) starts unmuted.
     public func setAgent(_ pane: PaneID, _ agent: AgentInfo?) {
         locked {
             guard let p = state.panes.firstIndex(where: { $0.id == pane }) else { return }
             var agent = agent
-            if let state = agent?.state, [.waiting, .done, .error].contains(state), agent?.attention == nil { agent?.attention = true }
+            if let previous = state.panes[p].agent, previous.isMuted, agent?.kind == previous.kind, agent?.muted == nil {
+                agent?.muted = true
+            }
+            if agent?.isMuted == true {
+                agent?.attention = false
+            } else if let state = agent?.state, [.waiting, .done, .error].contains(state), agent?.attention == nil {
+                agent?.attention = true
+            }
             if agent?.since == nil { agent?.since = Date().timeIntervalSince1970 }
             state.panes[p].agent = agent
             continuation.yield(.agent(pane, agent))

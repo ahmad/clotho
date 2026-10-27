@@ -114,9 +114,12 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     public var attention: Bool?
     /// The agent's own session id, if it has one.
     public var session: String?
+    /// Muted by the user (`agent.mute`): it stays quiet, whatever it does, until unmuted or until this
+    /// agent session ends. Absent means not muted.
+    public var muted: Bool?
 
     public init(kind: String, state: State, source: String? = nil, message: String? = nil, since: Double? = nil,
-                attention: Bool? = nil, session: String? = nil) {
+                attention: Bool? = nil, session: String? = nil, muted: Bool? = nil) {
         self.kind = kind
         self.state = state
         self.source = source
@@ -124,17 +127,21 @@ public struct AgentInfo: Codable, Equatable, Sendable {
         self.since = since
         self.attention = attention
         self.session = session
+        self.muted = muted
     }
+
+    public var isMuted: Bool { muted == true }
 
     public var isHookSourced: Bool { source == "hook" }
     public var sinceDate: Date? { since.map { Date(timeIntervalSince1970: $0) } }
     /// The daemon raises `attention` only on real signals (a hook-reported waiting, done or error, or a
     /// bell from a detected agent) and clears it on ack or input. A detected agent that has merely gone
     /// quiet can be "waiting" without it, and doesn't need the user.
-    public var needsAttention: Bool { attention == true }
+    /// A muted agent never needs the user, whatever its attention says.
+    public var needsAttention: Bool { attention == true && !isMuted }
 
     /// Waiting without attention: detected as quiet, which may only be a slow reply or a long build.
-    public var isQuiet: Bool { state == .waiting && attention != true }
+    public var isQuiet: Bool { state == .waiting && !needsAttention }
 }
 
 public struct Pane: Codable, Equatable, Sendable, Identifiable {

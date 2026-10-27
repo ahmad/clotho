@@ -75,6 +75,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case fs
         /// `pane.clipboard` events: OSC 52 copies from a pane's application.
         case paneClipboard = "pane.clipboard"
+        /// `agent.mute`: the user mutes an agent until unmuted or its session ends.
+        case agentMute = "agent.mute"
         /// `settings.get` / `settings.set` and `settings` events (clothod 0.1.7).
         case settings
         /// `service.status` / `install` / `uninstall` and `service` events: start clothod at login (0.1.7).
@@ -280,6 +282,9 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Acknowledges a pane's agent state (`agent.ack`), clearing its `attention`.
     func ackAgent(_ pane: PaneID) async throws
 
+    /// Mutes or unmutes a pane's agent (`agent.mute`), when hello's `features` contains `.agentMute`.
+    func muteAgent(_ pane: PaneID, muted: Bool) async throws
+
     /// Pastes `text` (bracketed if the app enabled it), then presses `keys` ("enter", "esc", "tab", "up",
     /// "ctrl+c", "shift+tab", "f5"…), encoded by the daemon for the pane's current modes (`pane.keys`).
     /// Only when hello's `features` contains `.paneKeys`; never fall back to raw bytes.
@@ -309,6 +314,10 @@ public extension SessionBackend {
     func reconnectNow() {}
 
     func ackAgent(_ pane: PaneID) async throws {}
+
+    func muteAgent(_ pane: PaneID, muted: Bool) async throws {
+        throw BackendError(code: "unknown_method", message: "this backend can't mute agents")
+    }
 
     func getSettings() async throws -> DaemonSettings {
         throw BackendError(code: "unknown_method", message: "this backend has no settings")

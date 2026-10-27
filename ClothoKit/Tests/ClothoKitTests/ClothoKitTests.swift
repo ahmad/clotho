@@ -222,6 +222,38 @@ final class FakeBackendTests: XCTestCase {
         XCTAssertNotEqual(now, true, "working again clears it")
     }
 
+    /// A muted agent stays quiet through new done/waiting/error until unmuted; a new agent starts unmuted.
+    func testMutedAgentsStayQuiet() async throws {
+        let backend = FakeBackend()
+        defer { backend.stop() }
+        try await backend.start()
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh"]))
+        let agent = { try await backend.getState().pane(created.pane)?.agent }
+
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .waiting, source: "hook"))
+        var now = try await agent()
+        XCTAssertEqual(now?.needsAttention, true)
+        try await backend.muteAgent(created.pane, muted: true)
+        now = try await agent()
+        XCTAssertEqual(now?.isMuted, true)
+        XCTAssertEqual(now?.needsAttention, false, "muting clears it")
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .done, source: "hook"))
+        now = try await agent()
+        XCTAssertEqual(now?.needsAttention, false, "a new done doesn't bring it back")
+        XCTAssertEqual(now?.isMuted, true)
+
+        try await backend.muteAgent(created.pane, muted: false)
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .error, source: "hook"))
+        now = try await agent()
+        XCTAssertEqual(now?.needsAttention, true, "unmuted, the next raise counts")
+
+        try await backend.muteAgent(created.pane, muted: true)
+        backend.setAgent(created.pane, AgentInfo(kind: "codex", state: .waiting))
+        now = try await agent()
+        XCTAssertEqual(now?.isMuted, false, "a new agent session starts unmuted")
+        XCTAssertEqual(now?.needsAttention, true)
+    }
+
     func testTerminalQueriesAreAnsweredByTheBackend() async throws {
         let backend = FakeBackend()
         let collector = Collector()
