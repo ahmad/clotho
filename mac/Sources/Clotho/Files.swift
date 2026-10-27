@@ -19,8 +19,11 @@ struct Machine: Equatable {
     /// The same machine, even if its name changed since.
     static func == (a: Machine, b: Machine) -> Bool { a.id == b.id && a.target == b.target }
 
+    /// Where the list lives (tests use their own suite).
+    nonisolated(unsafe) static var store = UserDefaults.standard
+
     static func all() -> [Machine] {
-        let saved = UserDefaults.standard.array(forKey: "Machines") as? [[String: String]] ?? []
+        let saved = store.array(forKey: "Machines") as? [[String: String]] ?? []
         return [.local] + saved.compactMap { entry in
             guard let id = entry["id"], let target = entry["target"] else { return nil }
             return Machine(id: id, label: entry["label"] ?? target, target: target)
@@ -43,18 +46,31 @@ struct Machine: Equatable {
 
     static func remove(_ id: String) {
         save(saved().filter { $0["id"] != id })
-        UserDefaults.standard.removeObject(forKey: "BrowserPath.\(id)")
+        store.removeObject(forKey: "BrowserPath.\(id)")
     }
+
+    /// Moves a saved machine to `index` among the saved machines (this Mac is always first, before
+    /// them). The sidebar lists machines in this order.
+    static func move(_ id: String, to index: Int) {
+        var list = saved()
+        guard let from = list.firstIndex(where: { $0["id"] == id }) else { return }
+        let entry = list.remove(at: from)
+        list.insert(entry, at: min(max(index, 0), list.count))
+        save(list)
+    }
+
+    /// This Mac can't be removed, moved or edited; saved machines can.
+    var isEditable: Bool { !isLocal }
 
     /// Posted whenever the saved machines change.
     static let didChange = Notification.Name("ClothoMachinesDidChange")
 
     private static func saved() -> [[String: String]] {
-        UserDefaults.standard.array(forKey: "Machines") as? [[String: String]] ?? []
+        store.array(forKey: "Machines") as? [[String: String]] ?? []
     }
 
     private static func save(_ machines: [[String: String]]) {
-        UserDefaults.standard.set(machines, forKey: "Machines")
+        store.set(machines, forKey: "Machines")
         NotificationCenter.default.post(name: didChange, object: nil)
     }
 

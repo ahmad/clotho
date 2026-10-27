@@ -65,6 +65,7 @@ extension AppDelegate {
             Shortcut(menu: "Clotho", title: "Quit Clotho", key: "q", action: #selector(NSApplication.terminate(_:))),
 
             Shortcut(menu: "File", title: "Upload Files…", key: "u", modifiers: [.command, .shift], action: #selector(chooseFilesToUpload(_:))),
+            Shortcut(menu: "File", title: "Manage Machines…", key: "", action: #selector(showMachineManager(_:)), listed: false),
             Shortcut(menu: "File", title: "Add Machine…", key: "", action: #selector(addMachine(_:)), listed: false),
 
             Shortcut(menu: "Edit", title: "Copy", key: "c", action: #selector(NSText.copy(_:))),

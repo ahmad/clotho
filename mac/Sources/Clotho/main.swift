@@ -155,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var fileBrowser: FileBrowserOverlay?
     var keyMonitor: Any?
     var settingsWindow: SettingsWindowController?
+    var machineManager: MachineManagerController?
     let transfers = TransferManager()
     var transferToast: TransferToast!
 
@@ -282,6 +283,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             connect(machine, show: true)
         }
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
+        sidebar.onCreateWorkspace = { [weak self] key in self?.createWorkspace(on: key) }
+        sidebar.onManageMachines = { [weak self] in self?.showMachineManager(nil) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
         sidebar.onResolveAgent = { [weak self] machine, pane in self?.resolveAgent(machine: machine, pane: pane) }
         sidebar.onMuteAgent = { [weak self] machine, pane in self?.muteAgent(machine: machine, pane: pane, muted: true) }

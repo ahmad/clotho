@@ -68,9 +68,12 @@ extension AppDelegate {
         promptForMachine(editing: nil) { _ in }
     }
 
-    /// Asks for a name and an SSH target, then saves the machine (new, or `editing`) and checks it.
-    func promptForMachine(editing existing: Machine?, then done: @escaping (Machine?) -> Void) {
-        guard window.attachedSheet == nil else { return done(nil) }
+    /// Asks for a name and an SSH target, then saves the machine (new, or `editing`) and checks it, as a
+    /// sheet on `parent` (the main window by default). A connected machine whose target changed is
+    /// reconnected to the new target; its workspaces stay on the old host, which keeps running them.
+    func promptForMachine(editing existing: Machine?, in parent: NSWindow? = nil, then done: @escaping (Machine?) -> Void) {
+        let host = parent ?? window!
+        guard host.attachedSheet == nil else { return done(nil) }
         let alert = NSAlert()
         alert.messageText = existing == nil ? "Add Machine" : "Edit \(existing!.label)"
         alert.informativeText = "Clotho connects with ssh using your ~/.ssh/config and keys, without prompts, "
@@ -89,26 +92,33 @@ extension AppDelegate {
         fields.addSubview(target)
         alert.accessoryView = fields
         alert.window.initialFirstResponder = name
-        alert.beginSheetModal(for: window) { [weak self] response in
-            let host = target.stringValue.trimmingCharacters(in: .whitespaces)
+        alert.beginSheetModal(for: host) { [weak self] response in
+            let sshTarget = target.stringValue.trimmingCharacters(in: .whitespaces)
             let label = name.stringValue.trimmingCharacters(in: .whitespaces)
-            guard let self, response == .alertFirstButtonReturn, !host.isEmpty else { return done(nil) }
-            let machine = existing?.id.map { Machine.update($0, label: label, target: host) }
-                ?? Machine.add(label: label, target: host)
+            guard let self, response == .alertFirstButtonReturn, !sshTarget.isEmpty else { return done(nil) }
+            let machine = existing?.id.map { Machine.update($0, label: label, target: sshTarget) }
+                ?? Machine.add(label: label, target: sshTarget)
             if let id = machine.id { machineStatus[id] = .unknown }
-            checkMachine(machine)
+            if let existing, existing.target != sshTarget, connections[existing.key] != nil {
+                log("\(machine.label): target changed to \(sshTarget), reconnecting")
+                disconnect(existing.key)
+                connect(machine)
+            } else {
+                checkMachine(machine)
+            }
             done(machine)
         }
     }
 
-    func removeMachine(_ machine: Machine) {
-        guard let id = machine.id, window.attachedSheet == nil else { return }
+    func removeMachine(_ machine: Machine, in parent: NSWindow? = nil) {
+        let host = parent ?? window!
+        guard machine.isEditable, let id = machine.id, host.attachedSheet == nil else { return }
         let alert = NSAlert()
         alert.messageText = "Remove \(machine.label)?"
-        alert.informativeText = "This only removes it from Clotho's list. Nothing on the machine changes, and its shells keep running there."
+        alert.informativeText = "This only removes it from Clotho's list. Nothing on the machine changes: its clothod and its shells keep running there, and adding it again shows them."
         alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { [weak self] response in
+        alert.beginSheetModal(for: host) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             // Its workspaces keep running on the machine; Clotho just stops showing them.
             self?.disconnect(machine.key)
@@ -152,6 +162,7 @@ extension AppDelegate {
         menu.addItem(.separator())
         add("Edit…") { [weak self] in self?.promptForMachine(editing: machine) { _ in } }
         add("Remove…") { [weak self] in self?.removeMachine(machine) }
+        add("Manage Machines…") { [weak self] in self?.showMachineManager(nil) }
         return menu
     }
 }

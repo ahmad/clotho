@@ -487,6 +487,12 @@ final class SidebarView: NSView {
     var onNewWorkspace: ((MachineKey) -> Void)?
     var onConnect: ((MachineKey) -> Void)?
     var onAddMachine: (() -> Void)?
+    /// A machine's Create Workspace button.
+    var onCreateWorkspace: ((MachineKey) -> Void)?
+    /// The footer's Manage Machines….
+    var onManageMachines: (() -> Void)?
+    /// The footer, pinned under the Agents panel (for tests).
+    private(set) var footer: SidebarFooter!
     var machineMenu: ((MachineKey) -> NSMenu)?
 
     // Two panels, as in herdr: on top, one column grouped by machine (this Mac, then each saved SSH
@@ -510,7 +516,10 @@ final class SidebarView: NSView {
             guard let self else { return }
             UserDefaults.standard.set(Double(agentsHeight.constant), forKey: "AgentsPanelHeight")
         }
-        for view in [scroll, divider, agentsScroll] {
+        footer = SidebarFooter(title: "Manage Machines…", symbol: "server.rack")
+        footer.onClick = { [weak self] in self?.onManageMachines?() }
+        footer.toolTip = "Add, edit, remove and reorder machines"
+        for view in [scroll, divider, agentsScroll, footer!] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
@@ -531,8 +540,12 @@ final class SidebarView: NSView {
             divider.bottomAnchor.constraint(equalTo: agentsScroll.topAnchor),
             agentsScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             agentsScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            agentsScroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            agentsScroll.bottomAnchor.constraint(equalTo: footer.topAnchor),
             agentsHeight,
+            // Always visible, outside the scrolling lists.
+            footer.leadingAnchor.constraint(equalTo: leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
         let handle = ResizeHandle()
@@ -550,6 +563,7 @@ final class SidebarView: NSView {
 
     /// Re-applies the app zoom to the columns, which are built once; their rows are rebuilt by update.
     func applyScale() {
+        footer.applyScale()
         for stack in [column, agentsColumn] {
             stack.spacing = Self.rowSpacing
             stack.edgeInsets = NSEdgeInsets(top: s(6), left: s(8), bottom: s(12), right: s(8))
@@ -671,7 +685,7 @@ final class SidebarView: NSView {
             // Every machine's group collapses, connected or not, so all names line up after the chevron.
             let isCollapsed = collapsed.contains(key)
             let header = MachineHeader(title: group.title, status: group.status,
-                                       newWorkspaceTooltip: group.isConnected ? (group.isLocal ? "New Workspace (⌘N)" : "New workspace on \(group.title)") : nil,
+                                       newWorkspaceTooltip: nil,
                                        collapsed: isCollapsed, count: group.isConnected ? group.workspaces.count : 0)
             header.onNewWorkspace = { [weak self] in self?.onNewWorkspace?(key) }
             header.onToggle = { [weak self, weak header] in
@@ -689,6 +703,7 @@ final class SidebarView: NSView {
                                  inset: MachineHeader.nameInset - 2) { [weak self] in
                     self?.onConnect?(key)
                 })
+                addCreateWorkspace(for: group)
                 continue
             }
             for workspace in group.workspaces {
@@ -706,18 +721,36 @@ final class SidebarView: NSView {
                 row.setBadge(group.badges[workspace.id])
                 add(row, height: Self.rowHeight)
             }
-            if group.workspaces.isEmpty {
-                add(actionButton("New Workspace", symbol: "plus", tooltip: header.toolTip ?? "New Workspace",
-                                 inset: MachineHeader.nameInset - 2) { [weak self] in
-                    self?.onNewWorkspace?(key)
-                })
-            }
+            addCreateWorkspace(for: group)
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
             log("sidebar: " + rows.values.map(\.name).sorted().joined(separator: ", "))
         }
-        if let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
-        add(actionButton("Add Machine", symbol: "plus", tooltip: "Save an SSH machine") { [weak self] in self?.onAddMachine?() })
+    }
+
+    /// The outline "Create Workspace" button at the end of a machine's list, in line with the workspace
+    /// titles. On a machine that isn't connected it connects first.
+    private func addCreateWorkspace(for group: SidebarGroup) {
+        let key = group.key
+        let button = OutlineButton(title: "Create Workspace", symbol: "plus")
+        button.toolTip = group.isConnected
+            ? (group.isLocal ? "Create a workspace on this Mac (⌘N)" : "Create a workspace on \(group.title)")
+            : "Connect to \(group.title) and create a workspace there"
+        button.onClick = { [weak self] in self?.onCreateWorkspace?(key) }
+        let wrapper = NSView()
+        button.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(button)
+        NSLayoutConstraint.activate([
+            // The plus lines up with the workspace titles; the border starts just before it.
+            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: MachineHeader.nameInset - OutlineButton.iconInset),
+            button.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: s(-4)),
+            button.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: s(4)),
+            button.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            button.heightAnchor.constraint(equalToConstant: OutlineButton.height),
+        ])
+        if let last = column.arrangedSubviews.last { column.setCustomSpacing(s(4), after: last) }
+        add(wrapper)
+        if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title): Create Workspace (\(group.isConnected ? "connected" : "connects first"))") }
     }
 
     private func runPending() {
@@ -1141,4 +1174,129 @@ final class DisclosureRow: ChromeItem {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+
+/// A subtle outline button in the sidebar ("Create Workspace"): a 1 pt low-contrast border, no fill,
+/// 12 pt secondary text after a small plus. Hover brightens the border and the text.
+final class OutlineButton: NSView {
+    static var height: CGFloat { s(26) }
+    /// The plus's distance from the button's leading edge.
+    static var iconInset: CGFloat { s(9) }
+    static let border = NSColor(hex: 0x3A4046)
+    static let borderHover = NSColor(hex: 0x58616A)
+    var onClick: (() -> Void)?
+    let label: NSTextField
+    private let icon = NSImageView()
+    private(set) var hovering = false { didSet { updateColors() } }
+
+    init(title: String, symbol: String) {
+        label = NSTextField(labelWithString: title)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.borderWidth = 1
+        layer?.cornerRadius = s(6)
+        label.font = NSFont.systemFont(ofSize: s(12))
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: s(10), weight: .semibold))
+        for view in [icon, label] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.iconInset),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: s(6)),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: s(-9)),
+        ])
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(title)
+        updateColors()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func updateColors() {
+        layer?.borderColor = (hovering ? Self.borderHover : Self.border).cgColor
+        label.textColor = hovering ? Theme.foreground : Theme.dimText
+        icon.contentTintColor = label.textColor
+    }
+
+    func setHovering(_ on: Bool) { hovering = on }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func accessibilityPerformPress() -> Bool { onClick?(); return true }
+}
+
+/// The sidebar's footer row (Manage Machines…): pinned under the lists, a thin separator on top, an icon
+/// and secondary text, highlighted on hover.
+final class SidebarFooter: NSView {
+    static var height: CGFloat { s(34) }
+    var onClick: (() -> Void)? {
+        get { item.onClick }
+        set { item.onClick = newValue }
+    }
+    private let item = ChromeItem(closable: false)
+    private let separator = NSView()
+    private let icon = NSImageView()
+    private let symbol: String
+    private var heightConstraint: NSLayoutConstraint!
+    private var scaled: [(NSLayoutConstraint, CGFloat)] = []
+
+    init(title: String, symbol: String) {
+        self.symbol = symbol
+        super.init(frame: .zero)
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = Theme.divider.cgColor
+        item.label.stringValue = title
+        item.setAccessibilityRole(.button)
+        item.setAccessibilityLabel(title)
+        icon.contentTintColor = Theme.dimText
+        for view in [separator, item, icon] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        // The title moves right of the icon.
+        item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.isActive = false }
+        scaled = [
+            (item.leadingAnchor.constraint(equalTo: leadingAnchor), 8),
+            (item.trailingAnchor.constraint(equalTo: trailingAnchor), -8),
+            (item.topAnchor.constraint(equalTo: separator.bottomAnchor), 4),
+            (item.bottomAnchor.constraint(equalTo: bottomAnchor), -4),
+            (icon.leadingAnchor.constraint(equalTo: item.leadingAnchor), 10),
+            (item.label.leadingAnchor.constraint(equalTo: icon.trailingAnchor), 6),
+        ]
+        NSLayoutConstraint.activate(scaled.map(\.0) + [
+            heightConstraint,
+            separator.topAnchor.constraint(equalTo: topAnchor),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+            icon.centerYAnchor.constraint(equalTo: item.centerYAnchor),
+        ])
+        applyScale()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Re-applies the app zoom (the footer is built once).
+    func applyScale() {
+        heightConstraint.constant = Self.height
+        for (constraint, points) in scaled { constraint.constant = s(points) }
+        item.label.font = NSFont.systemFont(ofSize: s(12))
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: s(11), weight: .regular))
+    }
 }
