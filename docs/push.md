@@ -49,10 +49,10 @@ TestFlight build.
 |---|---|---|
 | `push.register` | `device` (stable id chosen by the phone), `handle`, `key` (base64 X25519 public key), `label` (the app's id for this machine, echoed back in payloads), `relay` (URL), `env` (`sandbox` or `production`) | `{}`; replaces any earlier registration for the same `device` |
 | `push.unregister` | `device` | `{}` |
-| `push.list` | none | `{"devices": [{device, label, env, registered, last_sent, last_error}]}`, never the handle |
+| `push.list` | none | `{"devices": [{device, label, relay, env, created, last_error}]}`, never the handle or key |
 | `push.test` | `device` | `{}` once the relay accepted it; for a "Send test alert" button |
 
-clothod keeps registrations in its state directory, mode 0600, so they survive daemon restarts and
+clothod keeps registrations in `push.json` in its state directory (`~/Library/Application Support/clothod/` on macOS, `~/.local/state/clothod/` on Linux, or `$CLOTHOD_STATE_DIR`), mode 0600, so they survive daemon restarts and
 upgrades. Ephemeral test instances (`--ephemeral`) keep them in the runtime directory, so they go
 away with the instance.
 
@@ -171,6 +171,9 @@ same relay on devbox; the protocol and the app are identical, only the `relay` U
 
 - **clothod**: the `push` feature, `push.register/unregister/list/test`, registration storage, the
   sender with HPKE, coalescing, retry and 410 handling. It can be tested against a fake relay.
+  HTTPS from the static musl builds needs rustls with ring, whose C code needs a Linux cross C
+  compiler on the Mac. The plan is cargo-zigbuild (zig as the cross compiler), pending the user's OK
+  to install zig.
 - **iOS**: the relay (in `ios/relay/`), the extension target, the APNs entitlement, registration on
   connect, a per-machine "Alerts" toggle with "Send test alert", and clearing stale alerts on open.
   The simulator on Apple silicon receives real sandbox pushes, so the whole path can be tested
