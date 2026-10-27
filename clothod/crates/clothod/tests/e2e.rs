@@ -1826,3 +1826,26 @@ async fn fs_transfers_do_not_stall_terminals() {
     let waited = t0.elapsed();
     assert!(waited < Duration::from_millis(1500), "pane output waited {waited:?} behind file data");
 }
+
+/// A detected Claude Code reads its state from the title glyph: spinner = running, ✳ = idle.
+#[tokio::test]
+async fn detected_claude_state_follows_its_title_glyph() {
+    let env = Env::new();
+    let c = env.client().await;
+    let p = new_pane(&c, sh()).await;
+    let fake = env.dir.path().join("claude");
+    // Working (spinner) while silent for 4 s, then idle (✳).
+    std::fs::write(&fake, "#!/bin/sh\nprintf '\\033]0;\\342\\240\\213 Fixing tests\\007'\nsleep 4\nprintf '\\033]0;\\342\\234\\263 Fixing tests\\007'\nsleep 60\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    c.input(p, format!("{}\r", fake.display()).as_bytes());
+    wait_agent(&c, p, "detected", |a| a["kind"] == "claude").await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!(a["state"], "running", "spinner title means running, though nothing is printed: {a}");
+    wait_agent(&c, p, "idle after ✳", |a| a["state"] == "waiting").await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!(a["attention"], false, "a guess never raises attention");
+    let t = c.request("state.get", json!({})).await.unwrap()["panes"][0]["title"].clone();
+    assert_eq!(t, "✳ Fixing tests", "the raw title is kept");
+    c.input(p, b"\x03");
+}

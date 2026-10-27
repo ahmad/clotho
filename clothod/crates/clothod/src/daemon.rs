@@ -125,6 +125,17 @@ fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
+/// Claude Code's title glyph: Some(true) for a spinner (working), Some(false) for ✳ (idle),
+/// None if the title has neither.
+fn title_activity(title: Option<&str>) -> Option<bool> {
+    let c = title?.trim_start().chars().next()?;
+    match c {
+        '✳' => Some(false),
+        '\u{2800}'..='\u{28ff}' | '✶' | '✻' | '✽' | '✢' | '·' => Some(true),
+        _ => None,
+    }
+}
+
 fn agent_kind(names: &[String]) -> Option<&'static str> {
     for n in names {
         let n = n.to_ascii_lowercase();
@@ -1071,8 +1082,12 @@ impl Daemon {
                 });
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
-                    // Quiet after activity reads as waiting for the user; a BEL also sets it.
-                    let state = if busy { "running" } else { "waiting" };
+                    // Claude Code's title says it best: a spinner glyph while it works, ✳ when
+                    // idle. Otherwise quiet after activity reads as waiting (a BEL also sets it).
+                    let state = match (kind, title_activity(p.title.as_deref())) {
+                        ("claude", Some(working)) => if working { "running" } else { "waiting" },
+                        _ => if busy { "running" } else { "waiting" },
+                    };
                     if a.state != state {
                         a.state = state.into();
                         a.message = None;
