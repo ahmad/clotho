@@ -7,6 +7,8 @@ BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
 ARCHIVE="build/Clotho.xcarchive"
 
 # Push alerts are set up in the developer account (Push capability, the extension id, the Keychain group).
+# The packed clothod builds land here at build time; xcodegen needs the folder to exist (it is gitignored).
+mkdir -p build-resources/dist
 PUSH=YES xcodegen generate -q
 rm -rf "$ARCHIVE" build/export
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -configuration Release \

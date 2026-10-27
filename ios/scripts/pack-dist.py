@@ -9,6 +9,9 @@ import json, os, shutil, sys, zlib
 src, out = sys.argv[1], sys.argv[2]
 manifest_path = os.path.join(src, "manifest.json")
 stamp = os.path.join(out, ".packed-from")
+if not os.path.exists(manifest_path):
+    # A fresh clone: clothod/dist is gitignored and made by clothod/scripts/dist.sh.
+    sys.exit(f"error: {manifest_path} is missing; build the clothod releases first with clothod/scripts/dist.sh")
 key = open(manifest_path, "rb").read()
 if os.path.exists(stamp) and open(stamp, "rb").read() == key:
     sys.exit(0)

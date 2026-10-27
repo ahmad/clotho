@@ -7,6 +7,8 @@ cd "$(dirname "$0")"
 action=${1:-build}
 sim=${2:-$(xcrun simctl list devices booted | grep -m1 -o '[0-9A-F-]\{36\}')}
 # Simulator builds include push alerts (push.yml); see docs/push.md.
+# The packed clothod builds land here at build time; xcodegen needs the folder to exist (it is gitignored).
+mkdir -p build-resources/dist
 PUSH=YES xcodegen generate --quiet
 if [ "$action" = test ]; then
   trap 'scripts/cleanup-dev.sh' EXIT
