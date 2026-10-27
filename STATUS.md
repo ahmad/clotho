@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-27, updated after clothod 0.1.6)
+# Status and handoff (2026-10-27, updated after clothod 0.1.7)
 
 Development moved from this Mac's sessions to devbox. Everything from the old agents (clothod-80, mac-d8,
 ios-c2 and the orchestrator) is committed. CLAUDE.md has the rules. This file has where things stand and
@@ -6,30 +6,43 @@ what the old agents learned. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.6** runs on all three machines: this Mac (`macbook`), devbox and imac. It was
-  released and upgraded in place on 2026-10-27 at the user's request; the holders kept their pids.
-  - Each machine has one version dir (0.1.6), only the user's instance and the app's bridges, and no
-    /tmp/clt* dirs.
-  - New in 0.1.6: the `pane.clipboard` event forwards OSC 52 copies to clients. Panes can never read
-    the clipboard.
-- **The Mac app** in `~/Applications/Clotho.app` bundles clothod 0.1.6 and has the following:
-  - Shift+Return sends ESC CR (a newline in Claude Code and Codex).
-  - Cmd+Left, Cmd+Right and Cmd+Delete send ^A, ^E and ^U.
-  - Rename commits without flicker.
-  - Option-drag and Shift-drag select while mouse reporting is on.
-  - OSC 52 copies reach the clipboard.
-  The user hasn't yet tested these by hand.
-- **TestFlight:** a build with 0.1.6 and iOS clipboard support is ready to upload. The user runs
-  `~/Builds/clotho-clothod/ios/scripts/testflight.sh` at the Mac. 202610262314 (0.1.4) is the
-  latest uploaded build.
+- **clothod 0.1.7** runs on all three machines (macbook, devbox, imac). It was upgraded in place on
+  2026-10-27; the holders kept their pids, and 0.1.6 was pruned. It adds the following:
+  - `pane.clipboard`, which forwards OSC 52 copies (0.1.6)
+  - `settings.get`/`set`, a runtime scrollback setting (0..50000; about 3 MB per 1000 lines per full pane)
+  - `service.*`, start at login (launchd or systemd --user). It's installed nowhere yet; the user
+    turns it on in Settings. devbox needs `sudo loginctl enable-linger ahmad` first.
+  - hook reports that raise attention even after detection guessed the same state
+  - All four builds have been run, linux-aarch64 under qemu. test-all is all green from the Mac,
+    including imac.
+- **The Mac app** in `~/Applications/Clotho.app` bundles 0.1.7 and has the following:
+  - Shift+Return sends a newline; Cmd+Left/Right/Delete work.
+  - Rename doesn't flicker.
+  - Option/Shift-drag selects, right-click opens the pane menu in apps that take the mouse, and
+    OSC 52 copies reach the clipboard.
+  - Image paste and file drop into remote agents go to `~/.cache/clotho/paste/`.
+  - The Agents panel shows attention agents first, with Resolve; the rest are under "Quiet".
+  - Machine groups collapse.
+  - A Settings window: notifications, scrollback, start at login.
+  - Part-file cleanup.
+  - A Developer ID release path (`build-app.sh --release`), waiting for the user's certificate and
+    notary profile.
+- **iOS:** the same features as the Mac (image paste and Paste Photo, a newline key, the hardware
+  Cmd keys, the agents list with Quiet, Settings), plus the host-key deadlock fix. The full suite is
+  green against 0.1.7. The TestFlight upload is waiting for the user.
 - **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets, APNS_KEY and
   HANDLE_KEYS, exist in Cloudflare only.
-- **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes, and only when the
-  user asks. For the current round (see PLAN.md, "Next round"), the user asked for a push after each
-  verified piece.
+- **GitHub:** git@github.com:ahmad/clotho.git (private). For this round the user asked for a push
+  after each verified piece. The orchestrator pushes exact verified commits (`git push origin <sha>:main`).
 - **The Mac reaches imac under clotho-mac** through a `Host imac` entry in the Mac's ~/.ssh/config
-  (added 2026-10-27; the backup is ~/.ssh/config.bak-2026-10-27). test-all.sh reports unreachable
-  hosts as UNCHECKED and fails the run.
+  (the backup is ~/.ssh/config.bak-2026-10-27).
+- **Known issues:**
+  - On macbook, upgrades need one retry, because the app restarts the old serve mid-upgrade. clothod
+    is investigating.
+  - One interrupted upload hung for 10 minutes once and didn't reproduce.
+  - Resume after a cut is unproven against test daemons.
+  - Hook-less Claude Code never raises attention (TERM_PROGRAM=clotho), so the user is setting up
+    hooks.
 
 ## Waiting on the user
 
