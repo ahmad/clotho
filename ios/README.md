@@ -3,7 +3,7 @@
 The iPhone and iPad client for clothod. There is no daemon on the device, so every machine is remote:
 the app connects over SSH (SwiftNIO SSH), installs or upgrades clothod on the machine if needed, and
 speaks [docs/protocol.md](../docs/protocol.md) over `clothod bridge` ([docs/remote.md](../docs/remote.md)).
-Sessions live on the machine, so closing or backgrounding the app costs nothing. On return, each pane
+Workspaces, tabs and their shells live on the machine, so closing or backgrounding the app costs nothing. On return, each pane
 resubscribes from the seq it reached and resumes in live or replay mode.
 
 ## Build and test

@@ -26,7 +26,7 @@ final class RemoteUITests: XCTestCase {
         }
         app.staticTexts["\(user)@\(host)"].firstMatch.tap()
 
-        let newWorkspace = app.buttons["New workspace"]
+        let newWorkspace = app.buttons["New Workspace"]
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 60)
         attach(app, "connected")
         newWorkspace.tap()

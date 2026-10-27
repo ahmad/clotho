@@ -76,7 +76,7 @@ struct AgentRowView: View {
                 if let message = row.info.message, !message.isEmpty {
                     Text(message).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
-                Text("\(row.machineName) · \(row.workspace) · \(row.title)")
+                Text("\(row.machineName) · \(row.workspace) › \(row.title)")
                     .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
             }
         }

@@ -15,6 +15,64 @@ struct MachineView: View {
         store = connection.store
     }
 
+    private func workspaceSection(_ workspace: Workspace) -> some View {
+        Section {
+            ForEach(workspace.tabs) { tab in
+                Group {
+                    if renaming?.id == RenameTarget.tab(tab.id, "").id {
+                        InlineRename(initial: store.displayTitle(of: tab), placeholder: "Tab name") { name in
+                            renaming = nil
+                            if let name { connection.run("Rename tab") { try await $0.renameTab(tab.id, title: name.isEmpty ? nil : name) } }
+                        }
+                    } else {
+                        Button { openTab = tab.id } label: { TabRow(store: store, tab: tab) }
+                            .tint(.primary)
+                    }
+                }
+                    .swipeActions {
+                        Button(role: .destructive) {
+                            connection.run("Close tab") { try await $0.closeTab(tab.id) }
+                        } label: { Label("Close", systemImage: "xmark") }
+                    }
+                    .contextMenu {
+                        Button("Rename") { renaming = .tab(tab.id, store.displayTitle(of: tab)) }
+                        Button("Close", role: .destructive) {
+                            connection.run("Close tab") { try await $0.closeTab(tab.id) }
+                        }
+                    }
+            }
+            Button {
+                connection.run("New tab") { backend in
+                    let created = try await backend.createTab(in: workspace.id)
+                    await MainActor.run { openTab = created.tab }
+                }
+            } label: {
+                Label("New Tab", systemImage: "plus").font(.callout)
+            }
+        } header: {
+            HStack {
+                if renaming?.id == RenameTarget.workspace(workspace.id, "").id {
+                    InlineRename(initial: workspace.name, placeholder: "Workspace name") { name in
+                        renaming = nil
+                        if let name, !name.isEmpty { connection.run("Rename workspace") { try await $0.renameWorkspace(workspace.id, name: name) } }
+                    }
+                    .textCase(nil)
+                } else {
+                    Text(workspace.name)
+                }
+                Spacer()
+                Menu {
+                    Button("Rename") { renaming = .workspace(workspace.id, workspace.name) }
+                    Button("Close workspace", role: .destructive) {
+                        connection.run("Close workspace") { try await $0.closeWorkspace(workspace.id) }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
+    }
+
     var body: some View {
         List {
             Section {
@@ -23,7 +81,7 @@ struct MachineView: View {
                     Text(connection.connectionLabel).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     Spacer()
                     if let hello = store.hello {
-                        Text("\(hello.machine?.hostname ?? "") · clothod \(hello.version)")
+                        Text("clothod \(hello.version)")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
@@ -54,12 +112,12 @@ struct MachineView: View {
             }
             if connection.holderOutdated {
                 Section {
-                    Button(connection.restarting ? "Restarting sessions…" : "Restart sessions…", role: .destructive) {
+                    Button(connection.restarting ? "Restarting clothod…" : "Restart clothod…", role: .destructive) {
                         confirmingRestart = true
                     }
                     .disabled(connection.restarting)
                 } footer: {
-                    Text("The sessions on \(connection.machine.displayName) run under an older clothod that can't be updated in place. A one-time restart finishes the update, and it ends every shell there.")
+                    Text("\(connection.machine.displayName) runs an older clothod that can't be updated in place. Restarting it finishes the update and ends every shell on \(connection.machine.displayName).")
                 }
             }
             if connection.supportsPush, connection.alertsOn, PushRegistrar.shared.handle != nil {
@@ -73,65 +131,28 @@ struct MachineView: View {
             if store.state.workspaces.isEmpty {
                 Section {
                     if store.isConnected {
-                        ContentUnavailableView("No workspaces", systemImage: "rectangle.stack",
-                                               description: Text("Create one to start a shell."))
+                        ContentUnavailableView("No workspaces on \(connection.machine.displayName)", systemImage: "rectangle.stack",
+                                               description: Text("Tap the New Workspace button to start one."))
                     } else {
                         ProgressView(connection.connectionLabel).frame(maxWidth: .infinity)
                     }
                 }
                 .listRowBackground(Color.clear)
             }
-            ForEach(store.state.workspaces) { workspace in
-                Section {
-                    ForEach(workspace.tabs) { tab in
-                        Button { openTab = tab.id } label: { TabRow(store: store, tab: tab) }
-                            .tint(.primary)
-                            .swipeActions {
-                                Button(role: .destructive) {
-                                    connection.run("Close tab") { try await $0.closeTab(tab.id) }
-                                } label: { Label("Close", systemImage: "xmark") }
-                            }
-                            .contextMenu {
-                                Button("Rename") { renaming = .tab(tab.id, store.displayTitle(of: tab)) }
-                                Button("Close", role: .destructive) {
-                                    connection.run("Close tab") { try await $0.closeTab(tab.id) }
-                                }
-                            }
-                    }
-                    Button {
-                        connection.run("New tab") { backend in
-                            let created = try await backend.createTab(in: workspace.id)
-                            await MainActor.run { openTab = created.tab }
-                        }
-                    } label: {
-                        Label("New tab", systemImage: "plus").font(.callout)
-                    }
-                } header: {
-                    HStack {
-                        Text(workspace.name)
-                        Spacer()
-                        Menu {
-                            Button("Rename") { renaming = .workspace(workspace.id, workspace.name) }
-                            Button("Close workspace", role: .destructive) {
-                                connection.run("Close workspace") { try await $0.closeWorkspace(workspace.id) }
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                        }
-                    }
-                }
-            }
+            ForEach(store.state.workspaces) { workspace in workspaceSection(workspace) }
         }
         .navigationTitle(connection.machine.displayName)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
+                    // Named like the Mac's: "Workspace N".
+                    let name = "Workspace \(store.state.workspaces.count + 1)"
                     connection.run("New workspace") { backend in
-                        let created = try await backend.createWorkspace(name: nil)
+                        let created = try await backend.createWorkspace(name: name)
                         await MainActor.run { openTab = created.tab }
                     }
                 } label: {
-                    Label("New workspace", systemImage: "plus.rectangle.on.rectangle")
+                    Label("New Workspace", systemImage: "plus.rectangle.on.rectangle")
                 }
                 .disabled(!store.isConnected)
             }
@@ -145,14 +166,13 @@ struct MachineView: View {
         } message: {
             Text(connection.lastError ?? "")
         }
-        .renameAlert($renaming, connection: connection)
         .confirmationDialog("Update clothod on \(connection.machine.displayName)?", isPresented: $confirmingUpdate,
                             titleVisibility: .visible) {
             Button("Update") { connection.updateClothod() }
         } message: {
-            Text("Installs this app's clothod and switches to it. Sessions stay open; if anything fails, the machine keeps its current version.")
+            Text("Installs this app's clothod and switches to it. Shells keep running; if anything fails, the machine keeps its current version.")
         }
-        .confirmationDialog("Restart every session on \(connection.machine.displayName)?", isPresented: $confirmingRestart,
+        .confirmationDialog("Restart clothod on \(connection.machine.displayName)?", isPresented: $confirmingRestart,
                             titleVisibility: .visible) {
             Button("End all shells and restart", role: .destructive) { connection.restartSessions() }
         } message: {
@@ -209,38 +229,37 @@ enum RenameTarget: Identifiable {
     }
 }
 
-extension View {
-    func renameAlert(_ target: Binding<RenameTarget?>, connection: MachineConnection) -> some View {
-        modifier(RenameAlert(target: target, connection: connection))
-    }
-}
-
-private struct RenameAlert: ViewModifier {
-    @Binding var target: RenameTarget?
-    let connection: MachineConnection
+/// A name edited in place: Return saves (with the text), and leaving the field cancels (nil).
+struct InlineRename: View {
+    let initial: String
+    var placeholder = "Name"
+    let done: (String?) -> Void
     @State private var text = ""
+    @FocusState private var focused: Bool
+    @State private var finished = false
+    @State private var hadFocus = false
 
-    func body(content: Content) -> some View {
-        content
-            .alert("Rename", isPresented: Binding(get: { target != nil }, set: { if !$0 { target = nil } })) {
-                TextField("Name", text: $text)
-                Button("Cancel", role: .cancel) {}
-                Button("Rename") {
-                    let name = text.trimmingCharacters(in: .whitespaces)
-                    switch target {
-                    case .workspace(let id, _):
-                        connection.run("Rename workspace") { try await $0.renameWorkspace(id, name: name) }
-                    case .tab(let id, _):
-                        connection.run("Rename tab") { try await $0.renameTab(id, title: name.isEmpty ? nil : name) }
-                    case nil: break
-                    }
-                }
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .focused($focused)
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .submitLabel(.done)
+            .onSubmit { finish(text.trimmingCharacters(in: .whitespaces)) }
+            .onAppear {
+                text = initial
+                // After the swipe or context menu that opened it has gone, or that takes the focus back.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { focused = true }
             }
-            .onChange(of: target?.id) { _, _ in
-                switch target {
-                case .workspace(_, let name), .tab(_, let name): text = name
-                case nil: break
-                }
+            .onChange(of: focused) { _, isFocused in
+                if isFocused { hadFocus = true } else if hadFocus { finish(nil) }
             }
+            .accessibilityIdentifier("renameField")
+    }
+
+    private func finish(_ name: String?) {
+        guard !finished else { return }
+        finished = true
+        done(name == initial ? nil : name)
     }
 }

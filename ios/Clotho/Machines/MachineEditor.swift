@@ -61,7 +61,7 @@ struct MachineEditor: View {
                     Toggle("Test install directories", isOn: Binding(get: { machine.devDirs ?? false },
                                                                      set: { machine.devDirs = $0 }))
                 } footer: {
-                    Text("Installs clothod under ~/.local/share/clotho-ios-dev and runs it in its own runtime directory, separate from the machine's normal sessions.")
+                    Text("Installs clothod under ~/.local/share/clotho-ios-dev and runs it in its own runtime directory, separate from the machine's own clothod and its shells.")
                 }
 
                 if let hostKey {

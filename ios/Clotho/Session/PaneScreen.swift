@@ -10,7 +10,6 @@ struct PaneScreen: View {
     @State private var tabID: TabID
     @State private var paneID: PaneID?
     @State private var mode: Subscription.Mode?
-    @State private var renaming: RenameTarget?
     @State private var browsingFiles: String?
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
 
@@ -46,10 +45,12 @@ struct PaneScreen: View {
             }
         }
         .background(Color(Theme.background))
-        .navigationTitle(tab.map(store.displayTitle(of:)) ?? "")
+        // Tap the title for the other tabs, or Rename to edit this one's title in place.
+        .navigationTitle(titleBinding)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarRole(.editor)
+        .toolbarTitleMenu { tabMenu }
         .toolbar {
-            ToolbarItem(placement: .principal) { tabMenu }
             ToolbarItem(placement: .primaryAction) { actionsMenu }
         }
         .background { ShortcutButtons(screen: self) }
@@ -59,7 +60,6 @@ struct PaneScreen: View {
         .onChange(of: fontSize) { _, size in
             connection.setFont(UIFont.monospacedSystemFont(ofSize: size, weight: .regular))
         }
-        .renameAlert($renaming, connection: connection)
         .sheet(item: Binding(get: { browsingFiles.map(FilesStart.init) }, set: { browsingFiles = $0?.path })) { start in
             NavigationStack {
                 FileBrowserView(connection: connection, path: start.path)
@@ -120,41 +120,40 @@ struct PaneScreen: View {
         }
     }
 
-    private var tabMenu: some View {
-        Menu {
-            ForEach(store.state.workspaces) { workspace in
-                Section(workspace.name) {
-                    ForEach(workspace.tabs) { tab in
-                        Button {
-                            select(tab: tab.id)
-                        } label: {
-                            if tab.id == tabID {
-                                Label(store.displayTitle(of: tab), systemImage: "checkmark")
-                            } else {
-                                Text(store.displayTitle(of: tab))
-                            }
+    /// The tab's title; setting it (from the title's Rename) renames the tab on the machine.
+    private var titleBinding: Binding<String> {
+        Binding(get: { tab.map(store.displayTitle(of:)) ?? "" }, set: { name in
+            let name = name.trimmingCharacters(in: .whitespaces), id = tabID
+            guard name != tab.map(store.displayTitle(of:)) else { return }
+            connection.run("Rename tab") { try await $0.renameTab(id, title: name.isEmpty ? nil : name) }
+        })
+    }
+
+    @ViewBuilder private var tabMenu: some View {
+        RenameButton()
+        ForEach(store.state.workspaces) { workspace in
+            Section(workspace.name) {
+                ForEach(workspace.tabs) { tab in
+                    Button {
+                        select(tab: tab.id)
+                    } label: {
+                        if tab.id == tabID {
+                            Label(store.displayTitle(of: tab), systemImage: "checkmark")
+                        } else {
+                            Text(store.displayTitle(of: tab))
                         }
                     }
                 }
             }
-        } label: {
-            HStack(spacing: 4) {
-                Text(tab.map(store.displayTitle(of:)) ?? "").font(.headline).lineLimit(1)
-                Image(systemName: "chevron.down").font(.caption2.weight(.bold))
-            }
-            .foregroundStyle(.primary)
         }
     }
 
     private var actionsMenu: some View {
         Menu {
-            Button { newTab() } label: { Label("New tab", systemImage: "plus.square") }
+            Button { newTab() } label: { Label("New Tab", systemImage: "plus.square") }
             Button { split(.right) } label: { Label("Split right", systemImage: "rectangle.split.2x1") }
             Button { split(.down) } label: { Label("Split down", systemImage: "rectangle.split.1x2") }
             Divider()
-            Button { renaming = .tab(tabID, tab.map(store.displayTitle(of:)) ?? "") } label: {
-                Label("Rename tab", systemImage: "pencil")
-            }
             Menu("Text size") {
                 Button("Larger") { fontSize = min(fontSize + 1, 28) }
                 Button("Smaller") { fontSize = max(fontSize - 1, 7) }

@@ -195,7 +195,7 @@ final class MachineConnection: ObservableObject, Identifiable {
             var failure: String?
             do { try ssh.restartSessions() } catch { failure = error.localizedDescription }
             await MainActor.run {
-                if let failure { self.lastError = "Restarting sessions failed: \(failure)" }
+                if let failure { self.lastError = "Restarting clothod failed: \(failure)" }
                 self.restarting = false
                 self.started = false
                 self.connect()

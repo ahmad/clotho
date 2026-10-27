@@ -14,5 +14,6 @@ if [ "$action" = test ]; then
   scripts/ssh-test-server.sh
 fi
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -destination "platform=iOS Simulator,id=$sim" \
-  -derivedDataPath build -skipPackagePluginValidation -skipMacroValidation "$action" 2>&1 \
+  -derivedDataPath build -skipPackagePluginValidation -skipMacroValidation \
+  $([ "$action" = test ] && echo -test-timeouts-enabled YES -default-test-execution-time-allowance 180) "$action" 2>&1 \
   | grep -E "error:|warning: .*/ios/Clotho|\*\* |Test Case.*(passed|failed|skipped)|Executed" | grep -v SPMCustomBuildCommand

@@ -22,6 +22,10 @@ fi
 # Every running clothod (an executable named clothod, whose path may contain spaces).
 all() { ps -eo pid,args | grep -E '/clothod( |$)' | grep -v -E 'grep|sh -s'; }
 mine() { all | grep -E 'clotho-ios-dev|clothod-ios-dev|cki-ios'; }
+# An install into the dev dirs whose upload never finished (its connection dropped mid-transfer)
+# waits on stdin forever; end it.
+ps -eo pid,args | grep 'clothod-install' | grep 'clotho-ios-dev/bin' | grep -v -E 'grep|sh -s' \
+  | while read -r pid _; do kill "$pid" 2>/dev/null && echo "ended stuck dev install $pid"; done
 i=0
 while [ $i -lt 20 ] && mine >/dev/null; do sleep 0.5; i=$((i + 1)); done
 rm -rf "$HOME/.local/share/clotho-ios-dev" "$rt"

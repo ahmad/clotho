@@ -10,7 +10,7 @@ final class ResumeUITests: XCTestCase {
         app.launch()
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
 
-        let newWorkspace = app.buttons["New workspace"]
+        let newWorkspace = app.buttons["New Workspace"]
         XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
         let enabled = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)
         wait(for: [enabled], timeout: 10)

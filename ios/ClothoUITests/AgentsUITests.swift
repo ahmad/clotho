@@ -8,7 +8,7 @@ final class AgentsUITests: XCTestCase {
         app.launchArguments = ["-UITesting", "-FakeAgents", "YES"]
         app.launch()
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
-        let newWorkspace = app.buttons["New workspace"]
+        let newWorkspace = app.buttons["New Workspace"]
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
         newWorkspace.tap()
         let actions = app.buttons["Pane actions"]

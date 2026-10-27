@@ -7,7 +7,7 @@ final class PaneActionsUITests: XCTestCase {
         app.launchArguments = ["-UITesting"]
         app.launch()
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
-        let newWorkspace = app.buttons["New workspace"]
+        let newWorkspace = app.buttons["New Workspace"]
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
         newWorkspace.tap()
 
@@ -33,7 +33,8 @@ final class PaneActionsUITests: XCTestCase {
         XCTAssertTrue(second.waitForNonExistence(timeout: 10))
 
         actions.tap()
-        app.buttons["New tab"].tap()
+        // The open menu's item; the machine screen behind has a "New Tab" row too.
+        app.buttons.matching(identifier: "New Tab").allElementsBoundByIndex.last { $0.isHittable }?.tap()
         sleep(2)
         attach(app, "new tab")
         actions.tap()

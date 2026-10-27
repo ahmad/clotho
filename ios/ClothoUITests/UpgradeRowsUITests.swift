@@ -13,7 +13,7 @@ final class UpgradeRowsUITests: XCTestCase {
         attach(app, "update confirmation")
         dismissPopover(app)
 
-        app.buttons["Restart sessions…"].tap()
+        app.buttons["Restart clothod…"].tap()
         XCTAssertTrue(app.buttons["End all shells and restart"].waitForExistence(timeout: 5))
         attach(app, "restart confirmation")
         dismissPopover(app)

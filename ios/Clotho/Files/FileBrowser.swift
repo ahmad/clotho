@@ -161,11 +161,6 @@ struct FileBrowserView: View {
 
     private func dialogs<V: View>(_ view: V) -> some View {
         view
-            .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-                TextField("Name", text: $newName).autocorrectionDisabled().textInputAutocapitalization(.never)
-                Button("Rename") { rename() }
-                Button("Cancel", role: .cancel) {}
-            }
             .alert("New folder", isPresented: $creatingFolder) {
                 TextField("Name", text: $newName).autocorrectionDisabled().textInputAutocapitalization(.never)
                 Button("Create") { createFolder() }
@@ -205,13 +200,19 @@ struct FileBrowserView: View {
     @ViewBuilder private func row(_ entry: FileEntry) -> some View {
         let label = FileRow(entry: entry)
         Group {
-            if entry.isDirectory {
+            if renaming?.path == entry.path {
+                InlineRename(initial: entry.name) { name in
+                    renaming = nil
+                    if let name { rename(entry, to: name) }
+                }
+            } else if entry.isDirectory {
                 NavigationLink { FileBrowserView(connection: connection, path: entry.path) } label: { label }
+                    .accessibilityIdentifier("file:\(entry.name)")
             } else {
                 NavigationLink { FileViewer(connection: connection, entry: entry) } label: { label }
+                    .accessibilityIdentifier("file:\(entry.name)")
             }
         }
-        .accessibilityIdentifier("file:\(entry.name)")
         .swipeActions {
             Button(role: .destructive) { deleting = entry } label: { Label("Delete", systemImage: "trash") }
             Button { startRename(entry) } label: { Label("Rename", systemImage: "pencil") }.tint(.orange)
@@ -262,13 +263,12 @@ struct FileBrowserView: View {
     // MARK: Actions
 
     private func startRename(_ entry: FileEntry) {
-        newName = entry.name
         renaming = entry
     }
 
-    private func rename() {
-        guard let entry = renaming, !newName.isEmpty, newName != entry.name, !newName.contains("/") else { return }
-        let to = filePath((entry.path as NSString).deletingLastPathComponent, newName)
+    private func rename(_ entry: FileEntry, to name: String) {
+        guard !name.isEmpty, !name.contains("/") else { return }
+        let to = filePath((entry.path as NSString).deletingLastPathComponent, name)
         model.run("Rename") { _ = try await $0.rename(entry.path, to: to, overwrite: false) }
     }
 

@@ -61,9 +61,10 @@ final class FilesUITests: XCTestCase {
         // Rename and delete from the row's swipe actions.
         app.buttons["file:made-on-ios"].swipeLeft()
         app.buttons["Rename"].tap()
-        let name = app.textFields["Name"]
-        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20) + "renamed")
-        app.alerts.buttons["Rename"].tap()
+        // Edited in place in the row; Return saves.
+        let name = app.textFields["renameField"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 20) + "renamed\n")
         XCTAssertTrue(app.buttons["file:renamed"].waitForExistence(timeout: 10))
         XCTAssertTrue(fm.fileExists(atPath: root + "/renamed"))
 
