@@ -315,8 +315,8 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
             default: throw BackendError(code: "bad_request", message: "unknown key \(key)")
             }
         }
+        // Like clothod (0.1.9 on): input never clears attention; only agent.ack or the agent running does.
         sendInput(pane, bytes)
-        try await ackAgent(pane)
     }
 
     public func sendInput(_ pane: PaneID, _ bytes: Data) {

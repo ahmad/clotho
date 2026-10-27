@@ -188,7 +188,9 @@ extension AppDelegate {
     // MARK: Quick replies
 
     /// Answers an agent without switching to its pane: `text` (pasted) and then `keys`, encoded by the
-    /// machine's daemon for the agent's terminal modes (`pane.keys`). Answering also marks it seen.
+    /// machine's daemon for the agent's terminal modes (`pane.keys`). It doesn't resolve the agent: the
+    /// answer sets it running, which clears its attention in the daemon. Only the checkmark and Resolve
+    /// acknowledge (resolveAgent); viewing never does.
     func reply(machine: MachineKey, pane: PaneID, text: String? = nil, keys: [String]) {
         guard let session = connections[machine], session.store.hello?.features.contains(.paneKeys) == true else {
             return log("reply to \(machine)/\(pane): this clothod can't send keys")
@@ -198,7 +200,6 @@ extension AppDelegate {
         Task { @MainActor in
             do {
                 try await backend.sendKeys(pane, text: text, keys: keys)
-                try await backend.ackAgent(pane)
             } catch {
                 log("reply to \(machine)/\(pane) failed: \(error.localizedDescription)")
             }

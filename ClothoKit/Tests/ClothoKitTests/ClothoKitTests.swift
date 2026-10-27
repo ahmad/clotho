@@ -193,6 +193,35 @@ final class FakeBackendTests: XCTestCase {
         XCTAssertEqual(clips, ["hello clip"])
     }
 
+    /// Attention, as in clothod 0.1.9: input (keys, a reply) leaves it; only ack or running clears it.
+    func testAttentionClearsOnlyOnAckOrRunning() async throws {
+        let backend = FakeBackend()
+        let collector = Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh"]))
+        let attention = { try await backend.getState().pane(created.pane)?.agent?.attention }
+
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .waiting, source: "hook"))
+        var now = try await attention()
+        XCTAssertEqual(now, true)
+        try await backend.sendKeys(created.pane, text: "yes", keys: ["enter"])
+        backend.sendInput(created.pane, Data("\u{1b}[I".utf8))
+        now = try await attention()
+        XCTAssertEqual(now, true, "typing or replying doesn't resolve")
+        try await backend.ackAgent(created.pane)
+        now = try await attention()
+        XCTAssertEqual(now, false, "the checkmark does")
+
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .done, source: "hook"))
+        now = try await attention()
+        XCTAssertEqual(now, true)
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .running, source: "hook"))
+        now = try await attention()
+        XCTAssertNotEqual(now, true, "working again clears it")
+    }
+
     func testTerminalQueriesAreAnsweredByTheBackend() async throws {
         let backend = FakeBackend()
         let collector = Collector()
