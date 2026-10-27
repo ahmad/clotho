@@ -26,8 +26,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 20, right: 24)
+        stack.spacing = s(10)
+        stack.edgeInsets = NSEdgeInsets(top: s(20), left: s(24), bottom: s(20), right: s(24))
         stack.translatesAutoresizingMaskIntoConstraints = false
         let document = FlippedStackHost()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -125,7 +125,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let session = app.connections[key]
         let name = machine.isLocal ? ComputerName.current : machine.label
         let title = NSTextField(labelWithString: name + (machine.isLocal ? " (this Mac)" : ""))
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.font = .systemFont(ofSize: s(13), weight: .semibold)
         add(title, spacingBefore: 14)
 
         add(checkbox("Show its agents and notify", on: app.monitorsAgents(key)) { [weak app] on in
@@ -155,7 +155,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let field = NSTextField(string: "\(settings.scrollbackLines)")
         field.alignment = .right
         field.formatter = Self.lineFormatter(limits)
-        field.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        field.widthAnchor.constraint(equalToConstant: s(80)).isActive = true
         let stepper = NSStepper()
         stepper.minValue = Double(limits.min)
         stepper.maxValue = Double(limits.max)
@@ -179,7 +179,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         targets += [fieldTarget, stepperTarget]
         let row = NSStackView(views: [NSTextField(labelWithString: "Scrollback:"), field, stepper,
                                       NSTextField(labelWithString: "lines per pane")])
-        row.spacing = 6
+        row.spacing = s(6)
         add(row, indent: 12)
         note("""
         \(limits.min)–\(limits.max) lines (default \(limits.default)). About 3 MB of memory per 1000 lines for every pane \
@@ -199,7 +199,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             refresh.bezelStyle = .rounded
             refresh.controlSize = .small
             let row = NSStackView(views: [login, refresh])
-            row.spacing = 8
+            row.spacing = s(8)
             add(row, indent: 12)
             note("The installed login item is from another clothod build; Refresh rewrites it.", indent: 12)
         } else {
@@ -267,14 +267,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private func section(_ title: String) {
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 15, weight: .bold)
+        label.font = .systemFont(ofSize: s(15), weight: .bold)
         add(label, spacingBefore: stack.arrangedSubviews.isEmpty ? 0 : 22)
     }
 
     private func note(_ text: String, indent: CGFloat = 0, color: NSColor = .secondaryLabelColor) {
         if UserDefaults.standard.bool(forKey: "LogSettings") { log("settings window: \(text.prefix(140))") }
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 11)
+        label.font = .systemFont(ofSize: s(11))
         label.textColor = color
         label.preferredMaxLayoutWidth = 440
         add(label, indent: indent)

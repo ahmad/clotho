@@ -20,6 +20,8 @@ struct AgentEntry {
     let info: AgentInfo
     /// The machine's daemon can type for us (`pane.keys`), so quick replies are offered.
     let canReply: Bool
+    /// The machine's daemon can mute agents (`agent.mute`).
+    var canMute = false
 
     /// Quick replies only when the agent itself (through its hooks) says it's waiting for the user.
     /// Detected or idle agents aren't asking anything.
@@ -138,7 +140,8 @@ extension AppDelegate {
                 entries.append(AgentEntry(machine: key, machineName: session.title, pane: pane.id, workspace: location?.workspace,
                                           tab: location?.tab, paneTitle: pane.displayTitle,
                                           tabTitle: location.map { session.store.displayTitle(of: $0.tab) }, info: info,
-                                          canReply: session.store.hello?.features.contains(.paneKeys) == true))
+                                          canReply: session.store.hello?.features.contains(.paneKeys) == true,
+                                          canMute: session.store.hello?.features.contains(.agentMute) == true))
             }
         }
         return AgentEntry.sorted(entries)
@@ -173,6 +176,21 @@ extension AppDelegate {
         window.makeKeyAndOrderFront(nil)
         let backend = session.store.backend
         Task { @MainActor in try? await backend.focus(.pane(pane)) }
+    }
+
+    /// Whether the machine's clothod can mute agents.
+    func canMute(_ machine: MachineKey) -> Bool {
+        connections[machine]?.store.hello?.features.contains(.agentMute) == true
+    }
+
+    /// Mute (bell.slash) or Unmute: in the daemon, so on every device. A muted agent stays in Quiet,
+    /// never notifies and never counts in the dock badge, until unmuted or its session ends.
+    func muteAgent(machine: MachineKey, pane: PaneID, muted: Bool) {
+        guard let backend = connections[machine]?.store.backend else { return }
+        log("agent \(machine)/\(pane): \(muted ? "muted" : "unmuted")")
+        Task { @MainActor in
+            do { try await backend.muteAgent(pane, muted: muted) } catch { log("muting \(machine)/\(pane) failed: \(error.localizedDescription)") }
+        }
     }
 
     /// The checkmark: clears the agent's attention in its daemon (`agent.ack`), so it's resolved on every
@@ -215,7 +233,7 @@ extension AppDelegate {
         alert.informativeText = agent.message ?? "Sends your text, then Enter."
         alert.addButton(withTitle: "Send")
         alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: s(24)))
         field.placeholderString = "Your reply"
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
@@ -239,8 +257,15 @@ extension AppDelegate {
     func agentMenu(machine: MachineKey, pane: PaneID, canReply: Bool) -> NSMenu {
         let menu = NSMenu()
         menu.addItem(ClosureMenuItem(title: "Open Pane") { [weak self] in self?.openAgent(machine: machine, pane: pane) })
-        if connections[machine]?.store.state.pane(pane)?.agent?.needsAttention == true {
+        let agent = connections[machine]?.store.state.pane(pane)?.agent
+        if agent?.needsAttention == true {
             menu.addItem(ClosureMenuItem(title: "Resolve") { [weak self] in self?.resolveAgent(machine: machine, pane: pane) })
+        }
+        if let agent, canMute(machine) {
+            let muted = agent.isMuted
+            menu.addItem(ClosureMenuItem(title: muted ? "Unmute" : "Mute") { [weak self] in
+                self?.muteAgent(machine: machine, pane: pane, muted: !muted)
+            })
         }
         guard canReply else { return menu }
         menu.addItem(.separator())
@@ -424,19 +449,32 @@ final class AgentRow: ChromeItem {
     static let fade: TimeInterval = 0.12
 
     /// With `onResolve`, the row has a checkmark that resolves the agent (agents needing attention).
-    init(_ entry: AgentEntry, onResolve: (() -> Void)? = nil) {
+    /// The Mute button (bell.slash), left of Resolve and shown on hover the same way.
+    private(set) var mute: ClosureButton?
+    /// Mute and Resolve on their backing, floating over the row's right end on hover.
+    private(set) var actions: ActionsOverlay?
+    /// The time's distance from the row's right edge, with or without actions.
+    static var timeInset: CGFloat { s(8) }
+    /// The elapsed-time label, for layout tests.
+    var elapsedLabel: NSTextField { elapsed }
+    /// The small bell.slash a muted agent shows in the Quiet section.
+    private(set) var mutedMarker: NSImageView?
+
+    /// With `onResolve` (and `onMute`), the row has hover-only Resolve (and Mute) buttons: agents that need
+    /// attention.
+    init(_ entry: AgentEntry, onResolve: (() -> Void)? = nil, onMute: (() -> Void)? = nil) {
         super.init(closable: false)
         let info = entry.info
         let shown = info.shownState
         icon.image = NSImage(systemSymbolName: shown.symbol, accessibilityDescription: shown.label)?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+            .withSymbolConfiguration(.init(pointSize: s(11), weight: .semibold))
         icon.contentTintColor = shown.color
         // Where it is: machine · workspace (bold) › tab, as on iOS.
         let strong = info.needsAttention ? Theme.foreground : NSColor(hex: 0xA9B0B6)
-        let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: Theme.dimText]
+        let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s(12)), .foregroundColor: Theme.dimText]
         let title = NSMutableAttributedString(string: entry.machineName + " · ", attributes: quiet)
         title.append(NSAttributedString(string: entry.workspace?.name ?? "Workspace", attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: strong,
+            .font: NSFont.systemFont(ofSize: s(12), weight: .semibold), .foregroundColor: strong,
         ]))
         if let tab = entry.tabTitle, !tab.isEmpty {
             title.append(NSAttributedString(string: " › " + tab, attributes: quiet))
@@ -455,12 +493,12 @@ final class AgentRow: ChromeItem {
         detail.allowsExpansionToolTips = true
         // Which agent, then what it says.
         detail.stringValue = [info.kind, info.message ?? (shown.label == "Idle" ? "idle" : nil)].compactMap { $0 }.joined(separator: " · ")
-        detail.font = NSFont.systemFont(ofSize: 11)
+        detail.font = NSFont.systemFont(ofSize: s(11))
         detail.textColor = Theme.dimText
         detail.lineBreakMode = .byTruncatingTail
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         elapsed.stringValue = info.sinceDate.map(Self.elapsed) ?? ""
-        elapsed.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        elapsed.font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
         elapsed.textColor = Theme.dimText
         elapsed.setContentHuggingPriority(.required, for: .horizontal)
         elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -475,57 +513,86 @@ final class AgentRow: ChromeItem {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        var trailing = trailingAnchor
-        var inset: CGFloat = -10
-        if let onResolve {
-            let button = ClosureButton(title: "", action: onResolve)
-            button.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "Resolve")?
-                .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
-            button.isBordered = false
-            button.contentTintColor = Theme.dimText
-            button.toolTip = "Resolve: hide it until it needs you again (on every device)"
-            button.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(button)
+        // The time is pinned to the right edge whether or not the row has actions; a muted agent's
+        // bell.slash sits just before it. The title truncates before them, never under.
+        var timeLeading = elapsed.leadingAnchor
+        if info.isMuted {
+            let marker = NSImageView()
+            marker.image = NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Muted")?
+                .withSymbolConfiguration(.init(pointSize: s(10), weight: .regular))
+            marker.contentTintColor = Theme.dimText
+            marker.toolTip = "Muted: it won't come back until you unmute it (right-click)"
+            marker.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(marker)
             NSLayoutConstraint.activate([
-                button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-                button.centerYAnchor.constraint(equalTo: centerYAnchor),
-                button.widthAnchor.constraint(equalToConstant: 20),
-                button.heightAnchor.constraint(equalToConstant: 20),
+                marker.trailingAnchor.constraint(equalTo: elapsed.leadingAnchor, constant: s(-4)),
+                marker.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+                marker.widthAnchor.constraint(equalToConstant: s(12)),
             ])
-            resolve = button
-            button.alphaValue = 0
-            onHoverChanged = { [weak self] on in self?.showResolve(on, animated: true) }
-            trailing = button.leadingAnchor
-            inset = -4
+            mutedMarker = marker
+            timeLeading = marker.leadingAnchor
         }
         // The title moves right of the icon, and up to make room for the detail line.
         constraints.filter { $0.firstItem === label }.forEach { $0.isActive = false }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
             icon.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 14),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: elapsed.leadingAnchor, constant: -6),
-            elapsed.trailingAnchor.constraint(equalTo: trailing, constant: inset),
+            icon.widthAnchor.constraint(equalToConstant: s(14)),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: s(6)),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: s(5)),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: timeLeading, constant: s(-6)),
+            elapsed.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.timeInset),
             elapsed.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-            detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 1),
-            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailing, constant: inset),
+            detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: s(1)),
+            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.timeInset),
         ])
+
+        // Hover actions (Mute, then Resolve, right-aligned) float over the right end of the row, on a
+        // backing in the hover colour that fades in from its leading edge, so the time underneath is
+        // covered rather than pushed aside.
+        let makeButton = { (symbol: String, name: String, tip: String, action: @escaping () -> Void) -> ClosureButton in
+            let button = ClosureButton(title: "", action: action)
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)?
+                .withSymbolConfiguration(.init(pointSize: s(13), weight: .regular))
+            button.isBordered = false
+            button.contentTintColor = Theme.dimText
+            button.toolTip = tip
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: s(20)).isActive = true
+            button.heightAnchor.constraint(equalToConstant: s(20)).isActive = true
+            return button
+        }
+        if let onMute { mute = makeButton("bell.slash", "Mute", "Mute: don't bring this agent back until unmuted", onMute) }
+        if let onResolve {
+            resolve = makeButton("checkmark.circle", "Resolve", "Resolve: hide it until it needs you again (on every device)", onResolve)
+        }
+        let buttons = [mute, resolve].compactMap { $0 }
+        if !buttons.isEmpty {
+            let overlay = ActionsOverlay(buttons: buttons)
+            overlay.alphaValue = 0
+            overlay.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(overlay)
+            NSLayoutConstraint.activate([
+                overlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-4)),
+                overlay.centerYAnchor.constraint(equalTo: elapsed.centerYAnchor),
+            ])
+            actions = overlay
+            onHoverChanged = { [weak self] on in self?.showResolve(on, animated: true) }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Fades the checkmark in or out. Hidden only by alpha: it keeps its place and stays clickable and
-    /// reachable to accessibility (and the row's menu has Resolve too).
+    /// Fades the hover actions (Mute and Resolve, with their backing) in or out together. Hidden only by
+    /// alpha: they keep their place and stay reachable to accessibility (the row's menu has both too).
     func showResolve(_ visible: Bool, animated: Bool) {
-        guard let resolve else { return }
+        guard let actions else { return }
         let alpha: CGFloat = visible ? 1 : 0
-        guard animated, window != nil else { return resolve.alphaValue = alpha }
+        guard animated, window != nil else { return actions.alphaValue = alpha }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Self.fade
-            resolve.animator().alphaValue = alpha
+            actions.animator().alphaValue = alpha
         }
     }
 
@@ -539,5 +606,53 @@ final class AgentRow: ChromeItem {
         case ..<86400: return "\(seconds / 3600)h"
         default: return "\(seconds / 86400)d"
         }
+    }
+}
+
+
+/// The hover actions on an agent row: buttons on a backing in the row's hover colour, whose leading edge
+/// fades in over a few points so whatever it covers (the time) disappears smoothly.
+final class ActionsOverlay: NSView {
+    static var fadeWidth: CGFloat { s(12) }
+    private let fade = CAGradientLayer()
+
+    init(buttons: [NSView]) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        let stack = NSStackView(views: buttons)
+        stack.orientation = .horizontal
+        stack.spacing = s(2)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let solid = NSView()
+        solid.wantsLayer = true
+        solid.layer?.backgroundColor = Theme.hover.cgColor
+        solid.layer?.cornerRadius = s(4)
+        solid.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(solid)
+        addSubview(stack)
+        fade.colors = [Theme.hover.withAlphaComponent(0).cgColor, Theme.hover.cgColor]
+        fade.startPoint = CGPoint(x: 0, y: 0.5)
+        fade.endPoint = CGPoint(x: 1, y: 0.5)
+        layer?.addSublayer(fade)
+        NSLayoutConstraint.activate([
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-2)),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: s(2)),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: s(-2)),
+            solid.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: s(-2)),
+            solid.trailingAnchor.constraint(equalTo: trailingAnchor),
+            solid.topAnchor.constraint(equalTo: topAnchor),
+            solid.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.fadeWidth + 2),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fade.frame = CGRect(x: 0, y: 0, width: Self.fadeWidth, height: bounds.height)
+        CATransaction.commit()
     }
 }

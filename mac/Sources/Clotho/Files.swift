@@ -301,22 +301,22 @@ final class TransferManager {
 final class TransferToast: NSView {
     let manager: TransferManager
     let stack = NSStackView()
-    static let width: CGFloat = 340
+    static var width: CGFloat { s(340) }
 
     init(manager: TransferManager) {
         self.manager = manager
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: 10))
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: s(10)))
         wantsLayer = true
         layer?.backgroundColor = NSColor(hex: 0x23282C).cgColor
-        layer?.cornerRadius = 10
+        layer?.cornerRadius = s(10)
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
         layer?.borderColor = NSColor(hex: 0x343A3F).cgColor
         appearance = NSAppearance(named: .darkAqua)
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        stack.spacing = s(10)
+        stack.edgeInsets = NSEdgeInsets(top: s(12), left: s(14), bottom: s(12), right: s(14))
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -373,7 +373,7 @@ final class TransferToast: NSView {
         let column = NSStackView(views: [top, bar, detail])
         column.orientation = .vertical
         column.alignment = .leading
-        column.spacing = 4
+        column.spacing = s(4)
         let width = Self.width - 28
         for view in [top, bar, detail] { view.widthAnchor.constraint(equalToConstant: width).isActive = true }
         return column
@@ -593,22 +593,22 @@ final class FileBrowserOverlay: NSView {
                                           size: 12, weight: .regular, color: NSColor(hex: 0x7F888F))
         let top = NSStackView(views: [title, NSView(), hint])
         top.orientation = .horizontal
-        top.edgeInsets = NSEdgeInsets(top: 0, left: 18, bottom: 0, right: 18)
+        top.edgeInsets = NSEdgeInsets(top: s(0), left: s(18), bottom: s(0), right: s(18))
 
         let divider = NSBox()
         divider.boxType = .custom
         divider.fillColor = NSColor(hex: 0x343A3F)
         divider.borderWidth = 0
-        divider.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        divider.widthAnchor.constraint(equalToConstant: s(1)).isActive = true
         let panes = NSStackView(views: [left, divider, right])
         panes.orientation = .horizontal
-        panes.spacing = 0
+        panes.spacing = s(0)
         panes.distribution = .fill
         left.widthAnchor.constraint(equalTo: right.widthAnchor).isActive = true
 
         card.wantsLayer = true
         card.layer?.backgroundColor = Theme.background.cgColor
-        card.layer?.cornerRadius = 12
+        card.layer?.cornerRadius = s(12)
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 1
         card.layer?.borderColor = NSColor(hex: 0x343A3F).cgColor
@@ -616,8 +616,8 @@ final class FileBrowserOverlay: NSView {
 
         let stack = NSStackView(views: [top, panes])
         stack.orientation = .vertical
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 0, bottom: 0, right: 0)
+        stack.spacing = s(12)
+        stack.edgeInsets = NSEdgeInsets(top: s(14), left: s(0), bottom: s(0), right: s(0))
         for view in [stack, card, top, panes] { view.translatesAutoresizingMaskIntoConstraints = false }
         card.addSubview(stack)
         addSubview(card)
@@ -633,8 +633,8 @@ final class FileBrowserOverlay: NSView {
             card.centerYAnchor.constraint(equalTo: centerYAnchor),
             card.widthAnchor.constraint(lessThanOrEqualToConstant: 960),
             card.heightAnchor.constraint(lessThanOrEqualToConstant: 600),
-            card.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -64),
-            card.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor, constant: -64),
+            card.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: s(-64)),
+            card.heightAnchor.constraint(lessThanOrEqualTo: heightAnchor, constant: s(-64)),
         ])
         for (dimension, other) in [(card.widthAnchor, widthAnchor), (card.heightAnchor, heightAnchor)] {
             let fill = dimension.constraint(equalTo: other)
@@ -680,15 +680,15 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.backgroundColor = NSColor(hex: 0x23282C).cgColor
-        layer?.cornerRadius = 5
+        layer?.cornerRadius = s(5)
         layer?.masksToBounds = true
 
         crumbs.orientation = .horizontal
-        crumbs.spacing = 0
+        crumbs.spacing = s(0)
         crumbs.translatesAutoresizingMaskIntoConstraints = false
         addSubview(crumbs)
 
-        field.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        field.font = NSFont.monospacedSystemFont(ofSize: s(12), weight: .regular)
         field.textColor = Theme.foreground
         field.drawsBackground = false
         field.isBordered = false
@@ -701,16 +701,16 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
         addSubview(field)
 
         // Pinned to the right, so a long path drops its leading folders off the left edge first.
-        let leading = crumbs.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4)
+        let leading = crumbs.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(4))
         leading.priority = .defaultLow
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 24),
+            heightAnchor.constraint(equalToConstant: s(24)),
             leading,
-            crumbs.leadingAnchor.constraint(lessThanOrEqualTo: leadingAnchor, constant: 4),
-            crumbs.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            crumbs.leadingAnchor.constraint(lessThanOrEqualTo: leadingAnchor, constant: s(4)),
+            crumbs.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: s(-4)),
             crumbs.centerYAnchor.constraint(equalTo: centerYAnchor),
-            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(8)),
+            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -740,7 +740,7 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
         for (i, segment) in segments.enumerated() {
             if i > 0 {
                 let separator = NSTextField(labelWithString: "›")
-                separator.font = NSFont.systemFont(ofSize: 13)
+                separator.font = NSFont.systemFont(ofSize: s(13))
                 separator.textColor = NSColor(hex: 0x5C656C)
                 crumbs.addArrangedSubview(separator)
             }
@@ -750,7 +750,7 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
             button.showsBorderOnlyWhileMouseInside = true
             button.controlSize = .small
             button.attributedTitle = NSAttributedString(string: segment.title, attributes: [
-                .font: NSFont.systemFont(ofSize: 12, weight: isLast ? .semibold : .regular),
+                .font: NSFont.systemFont(ofSize: s(12), weight: isLast ? .semibold : .regular),
                 .foregroundColor: isLast ? Theme.foreground : NSColor(hex: 0x9AA3AA),
             ])
             button.toolTip = segment.path
@@ -852,7 +852,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         super.init(frame: .zero)
 
         machineMenu.isBordered = false
-        machineMenu.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        machineMenu.font = NSFont.systemFont(ofSize: s(13), weight: .semibold)
         machineMenu.target = self
         machineMenu.action = #selector(machineChosen(_:))
         machineMenu.isEnabled = choosable
@@ -869,7 +869,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
 
         let header = NSStackView(views: [machineMenu, NSView(), hiddenButton, refresh, up])
         header.orientation = .horizontal
-        header.spacing = 10
+        header.spacing = s(10)
 
         pathBar.onNavigate = { [weak self] target in
             self?.load(target)
@@ -887,8 +887,8 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let stack = NSStackView(views: [header, pathBar, scroll, status])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 16, bottom: 12, right: 16)
+        stack.spacing = s(8)
+        stack.edgeInsets = NSEdgeInsets(top: s(4), left: s(16), bottom: s(12), right: s(16))
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -896,9 +896,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            pathBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32),
+            header.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: s(-32)),
+            pathBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: s(-32)),
+            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: s(-32)),
         ])
     }
 
@@ -952,7 +952,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         table.usesAlternatingRowBackgroundColors = false
         table.gridStyleMask = []
         table.rowHeight = 22
-        table.intercellSpacing = NSSize(width: 6, height: 2)
+        table.intercellSpacing = NSSize(width: 6, height: s(2))
         table.allowsMultipleSelection = true
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         table.dataSource = self
@@ -1104,7 +1104,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let cell = NSTableCellView()
         let text = NSTextField(labelWithString: "")
         text.lineBreakMode = .byTruncatingMiddle
-        text.font = NSFont.systemFont(ofSize: 12)
+        text.font = NSFont.systemFont(ofSize: s(12))
         text.textColor = id == "name" ? Theme.foreground : NSColor(hex: 0x9AA3AA)
         switch id {
         case "name": text.stringValue = entry.name
@@ -1114,23 +1114,23 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         text.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(text)
         cell.textField = text
-        var leading = text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2)
+        var leading = text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: s(2))
         if id == "name" {
             let image = NSImageView(image: icon(for: entry))
             image.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(image)
             cell.imageView = image
             NSLayoutConstraint.activate([
-                image.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                image.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: s(2)),
                 image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                image.widthAnchor.constraint(equalToConstant: 16),
-                image.heightAnchor.constraint(equalToConstant: 16),
+                image.widthAnchor.constraint(equalToConstant: s(16)),
+                image.heightAnchor.constraint(equalToConstant: s(16)),
             ])
-            leading = text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6)
+            leading = text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: s(6))
         }
         NSLayoutConstraint.activate([
             leading,
-            text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -2),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: s(-2)),
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell

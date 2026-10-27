@@ -92,7 +92,7 @@ extension AppDelegate {
 
     private func makeHost(for pane: Pane, on session: MachineConnection) -> PaneHostView {
         let key = PaneKey(machine: session.key, pane: pane.id)
-        let host = PaneHostView(pane: pane, store: session.store, font: Self.terminalFont(size: fontSize))
+        let host = PaneHostView(pane: pane, store: session.store, font: Self.terminalFont(size: terminalFontSize))
         host.terminal.machine = session.key
         host.terminal.onDropFiles = { [weak self] urls in self?.dropFiles(urls, on: key) }
         host.terminal.onPaste = { [weak self] terminal in self?.pasteImage(into: terminal, key: .command) ?? false }

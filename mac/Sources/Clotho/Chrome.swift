@@ -42,15 +42,15 @@ class ChromeItem: NSView {
     init(closable: Bool) {
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 6
-        label.font = NSFont.systemFont(ofSize: 12)
+        layer?.cornerRadius = s(6)
+        label.font = NSFont.systemFont(ofSize: s(12))
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(label)
 
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            .withSymbolConfiguration(.init(pointSize: s(9), weight: .semibold))
         closeButton.isBordered = false
         closeButton.contentTintColor = Theme.dimText
         closeButton.target = self
@@ -60,19 +60,19 @@ class ChromeItem: NSView {
         if closable { addSubview(closeButton) }
 
         var constraints = [
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ]
         if closable {
             constraints += [
-                closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+                closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-6)),
                 closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-                closeButton.widthAnchor.constraint(equalToConstant: 16),
-                closeButton.heightAnchor.constraint(equalToConstant: 16),
-                label.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: -4),
+                closeButton.widthAnchor.constraint(equalToConstant: s(16)),
+                closeButton.heightAnchor.constraint(equalToConstant: s(16)),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: closeButton.leadingAnchor, constant: s(-4)),
             ]
         } else {
-            constraints.append(label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10))
+            constraints.append(label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: s(-10)))
         }
         NSLayoutConstraint.activate(constraints)
         updateColors()
@@ -137,14 +137,14 @@ class ChromeItem: NSView {
         field.cell?.isScrollable = true
         field.delegate = self
         field.wantsLayer = true
-        field.layer?.cornerRadius = 3
+        field.layer?.cornerRadius = s(3)
         field.layer?.borderWidth = 1
         field.layer?.borderColor = Theme.accent.cgColor
         field.translatesAutoresizingMaskIntoConstraints = false
         addSubview(field)
         NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -3),
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            field.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: s(-3)),
+            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-6)),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         label.isHidden = true
@@ -210,20 +210,20 @@ class ChromeItem: NSView {
         switch selectionStyle {
         case .row:
             // A 3 pt bar on the leading edge, inside the rounded highlight.
-            marker.layer?.cornerRadius = 1.5
+            marker.layer?.cornerRadius = s(1.5)
             NSLayoutConstraint.activate([
-                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
-                marker.widthAnchor.constraint(equalToConstant: 3),
-                marker.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-                marker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(3)),
+                marker.widthAnchor.constraint(equalToConstant: s(3)),
+                marker.topAnchor.constraint(equalTo: topAnchor, constant: s(6)),
+                marker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: s(-6)),
             ])
         case .tab:
             // A 2 pt underline along the bottom edge.
-            marker.layer?.cornerRadius = 1
+            marker.layer?.cornerRadius = s(1)
             NSLayoutConstraint.activate([
-                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-                marker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-                marker.heightAnchor.constraint(equalToConstant: 2),
+                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(8)),
+                marker.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
+                marker.heightAnchor.constraint(equalToConstant: s(2)),
                 marker.bottomAnchor.constraint(equalTo: bottomAnchor),
             ])
         case .plain:
@@ -289,7 +289,7 @@ struct HeldTitles<Key: Hashable> {
 }
 
 final class TabBarView: NSView {
-    static let height: CGFloat = 34
+    static var height: CGFloat { s(40) }
 
     var onSelect: ((TabID) -> Void)?
     var onClose: ((TabID) -> Void)?
@@ -307,19 +307,29 @@ final class TabBarView: NSView {
     private var latest: (() -> Void)?
     private var heldTitles = HeldTitles<TabID>()
     private let addButton = NSButton()
+    /// The bar's own constraints, with their sizes at 100%.
+    private var scaled: [(NSLayoutConstraint, CGFloat)] = []
+
+    /// Re-applies the app zoom to what's built once; the tabs themselves are rebuilt by update.
+    func applyScale() {
+        for (constraint, points) in scaled { constraint.constant = s(points) }
+        stack.spacing = s(4)
+        addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
+            .withSymbolConfiguration(.init(pointSize: s(12), weight: .medium))
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = Theme.sidebar.cgColor
         stack.orientation = .horizontal
-        stack.spacing = 4
+        stack.spacing = s(4)
         stack.distribution = .fillEqually
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: s(11), weight: .medium))
         addButton.isBordered = false
         addButton.contentTintColor = Theme.dimText
         addButton.target = self
@@ -328,15 +338,19 @@ final class TabBarView: NSView {
         addButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(addButton)
 
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            addButton.leadingAnchor.constraint(equalTo: stack.trailingAnchor, constant: 6),
+        // Built once, so kept with their sizes at 100% for applyScale. Tabs are 32 pt in the 40 pt bar.
+        scaled = [
+            (stack.leadingAnchor.constraint(equalTo: leadingAnchor), 6),
+            (stack.topAnchor.constraint(equalTo: topAnchor), 4),
+            (stack.bottomAnchor.constraint(equalTo: bottomAnchor), -4),
+            (addButton.leadingAnchor.constraint(equalTo: stack.trailingAnchor), 6),
+            (addButton.widthAnchor.constraint(equalToConstant: 0), 24),
+            (addButton.heightAnchor.constraint(equalToConstant: 0), 24),
+            (addButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor), -8),
+        ]
+        applyScale()
+        NSLayoutConstraint.activate(scaled.map(\.0) + [
             addButton.centerYAnchor.constraint(equalTo: stack.centerYAnchor),
-            addButton.widthAnchor.constraint(equalToConstant: 24),
-            addButton.heightAnchor.constraint(equalToConstant: 24),
-            addButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
         ])
     }
 
@@ -357,6 +371,9 @@ final class TabBarView: NSView {
             items[tab.id] = (item, tab.title, tab.custom)
             item.label.stringValue = (tab.maximized ? "⤢ " : "") + tab.title
             item.label.alignment = .center
+            item.label.font = NSFont.systemFont(ofSize: s(13))
+            // A little more room around the title than other rows.
+            item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = s(14) }
             item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
             item.isSelected = tab.id == selected
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
@@ -367,22 +384,22 @@ final class TabBarView: NSView {
                 // An agent in this tab: a dot at the tab's leading edge.
                 let dot = NSView()
                 dot.wantsLayer = true
-                dot.layer?.cornerRadius = 3
+                dot.layer?.cornerRadius = s(3)
                 dot.layer?.backgroundColor = badge.cgColor
                 dot.translatesAutoresizingMaskIntoConstraints = false
                 item.addSubview(dot)
                 // The title moves over to make room for the dot at the tab's leading edge.
-                item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = 20 }
+                item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = s(22) }
                 NSLayoutConstraint.activate([
-                    dot.leadingAnchor.constraint(equalTo: item.leadingAnchor, constant: 9),
+                    dot.leadingAnchor.constraint(equalTo: item.leadingAnchor, constant: s(9)),
                     dot.centerYAnchor.constraint(equalTo: item.centerYAnchor),
-                    dot.widthAnchor.constraint(equalToConstant: 6),
-                    dot.heightAnchor.constraint(equalToConstant: 6),
+                    dot.widthAnchor.constraint(equalToConstant: s(6)),
+                    dot.heightAnchor.constraint(equalToConstant: s(6)),
                 ])
             }
             stack.addArrangedSubview(item)
-            item.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
-            item.widthAnchor.constraint(greaterThanOrEqualToConstant: 60).isActive = true
+            item.widthAnchor.constraint(lessThanOrEqualToConstant: s(240)).isActive = true
+            item.widthAnchor.constraint(greaterThanOrEqualToConstant: s(72)).isActive = true
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
             log("tabs: " + stack.arrangedSubviews.compactMap { ($0 as? ChromeItem)?.label.stringValue }.joined(separator: ", "))
@@ -531,12 +548,20 @@ final class SidebarView: NSView {
         ])
     }
 
+    /// Re-applies the app zoom to the columns, which are built once; their rows are rebuilt by update.
+    func applyScale() {
+        for stack in [column, agentsColumn] {
+            stack.spacing = Self.rowSpacing
+            stack.edgeInsets = NSEdgeInsets(top: s(6), left: s(8), bottom: s(12), right: s(8))
+        }
+    }
+
     /// A vertical stack in a scroll view that hides its scroller when idle.
     private static func scrollingColumn(_ column: NSStackView) -> NSScrollView {
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = rowSpacing
-        column.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 12, right: 8)
+        column.edgeInsets = NSEdgeInsets(top: s(6), left: s(8), bottom: s(12), right: s(8))
         let document = FlippedView()
         document.addSubview(column)
         column.translatesAutoresizingMaskIntoConstraints = false
@@ -569,13 +594,15 @@ final class SidebarView: NSView {
 
     // Vertical rhythm: rows sit close together, a machine's header a little apart from its rows,
     // and machines clearly apart from each other.
-    static let rowHeight: CGFloat = 28
-    static let rowSpacing: CGFloat = 2
-    static let groupSpacing: CGFloat = 18
+    static var rowHeight: CGFloat { s(28) }
+    static var rowSpacing: CGFloat { s(2) }
+    static var groupSpacing: CGFloat { s(18) }
 
     var onOpenAgent: ((MachineKey, PaneID) -> Void)?
     /// The checkmark on an agent that needs attention.
     var onResolveAgent: ((MachineKey, PaneID) -> Void)?
+    /// The bell.slash next to it.
+    var onMuteAgent: ((MachineKey, PaneID) -> Void)?
     var agentRowMenu: ((MachineKey, PaneID, Bool) -> NSMenu)?
     var agentsMenu: (() -> NSMenu)?
 
@@ -596,13 +623,14 @@ final class SidebarView: NSView {
                                          status: (attention.isEmpty ? nil : AgentInfo.State.waiting.color, nil), newWorkspaceTooltip: nil)
         agentsHeader.contextMenu = { [weak self] in self?.agentsMenu?() }
         add(agentsHeader, to: agentsColumn)
-        agentsColumn.setCustomSpacing(4, after: agentsHeader)
+        agentsColumn.setCustomSpacing(s(4), after: agentsHeader)
         let addAgent = { [weak self] (entry: AgentEntry, resolvable: Bool) in
             guard let self else { return }
-            let row = AgentRow(entry, onResolve: resolvable ? { [weak self] in self?.onResolveAgent?(entry.machine, entry.pane) } : nil)
+            let row = AgentRow(entry, onResolve: resolvable ? { [weak self] in self?.onResolveAgent?(entry.machine, entry.pane) } : nil,
+                               onMute: resolvable && entry.canMute ? { [weak self] in self?.onMuteAgent?(entry.machine, entry.pane) } : nil)
             row.onClick = { [weak self] in self?.onOpenAgent?(entry.machine, entry.pane) }
             row.contextMenu = { [weak self] in self?.agentRowMenu?(entry.machine, entry.pane, entry.offersReplies) }
-            add(row, height: 40, to: agentsColumn)
+            add(row, height: s(40), to: agentsColumn)
         }
         attention.forEach { addAgent($0, true) }
         if attention.isEmpty, !others.isEmpty {
@@ -619,9 +647,9 @@ final class SidebarView: NSView {
                     self?.latest?()
                 }
             }
-            if let last = agentsColumn.arrangedSubviews.last { agentsColumn.setCustomSpacing(6, after: last) }
-            add(section, height: 26, to: agentsColumn)
-            agentsColumn.setCustomSpacing(2, after: section)
+            if let last = agentsColumn.arrangedSubviews.last { agentsColumn.setCustomSpacing(s(6), after: last) }
+            add(section, height: s(26), to: agentsColumn)
+            agentsColumn.setCustomSpacing(s(2), after: section)
             if expanded { others.forEach { addAgent($0, false) } }
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
@@ -651,7 +679,7 @@ final class SidebarView: NSView {
             }
             header.contextMenu = { [weak self] in self?.machineMenu?(key) }
             add(header)
-            column.setCustomSpacing(4, after: header)
+            column.setCustomSpacing(s(4), after: header)
             if isCollapsed {
                 if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title) collapsed (\(group.workspaces.count))") }
                 continue
@@ -726,24 +754,24 @@ final class SidebarView: NSView {
         let column = target ?? self.column
         column.addArrangedSubview(view)
         // Everything spans the column, so it follows the sidebar's width.
-        view.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -16).isActive = true
+        view.widthAnchor.constraint(equalTo: column.widthAnchor, constant: s(-16)).isActive = true
         if let height { view.heightAnchor.constraint(equalToConstant: height).isActive = true }
     }
 
     /// A line of dim text, aligned with row titles.
     private func note(_ text: String, tooltip: String?, color: NSColor) -> NSView {
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = NSFont.systemFont(ofSize: 12)
+        label.font = NSFont.systemFont(ofSize: s(12))
         label.textColor = color
         label.toolTip = tooltip
         let wrapper = NSView()
         label.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: -10),
-            label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: 4),
-            label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -4),
+            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: s(10)),
+            label.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: s(-10)),
+            label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: s(4)),
+            label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: s(-4)),
         ])
         return wrapper
     }
@@ -754,11 +782,11 @@ final class SidebarView: NSView {
                               action: @escaping () -> Void) -> NSView {
         let button = ClosureButton(title: title, action: action)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: s(10), weight: .medium))
         button.imagePosition = .imageLeading
         button.isBordered = false
         button.contentTintColor = Theme.dimText
-        button.attributedTitle = NSAttributedString(string: " " + title, attributes: [.foregroundColor: Theme.dimText, .font: NSFont.systemFont(ofSize: 12)])
+        button.attributedTitle = NSAttributedString(string: " " + title, attributes: [.foregroundColor: Theme.dimText, .font: NSFont.systemFont(ofSize: s(12))])
         button.toolTip = tooltip
         let wrapper = NSView()
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -790,7 +818,7 @@ final class MachineHeader: NSView {
     private(set) var chevron: DisclosureChevron?
     /// Where a machine's name starts: after its chevron (10 pt in, 14 pt wide) and 6 pt of space. Its
     /// workspace rows and buttons line up with it.
-    static let nameInset: CGFloat = 30
+    static var nameInset: CGFloat { s(30) }
 
     /// `collapsed` nil: no disclosure chevron (the Agents header). `count` shows after the title while
     /// collapsed, so a closed group still says how many workspaces it holds.
@@ -799,24 +827,24 @@ final class MachineHeader: NSView {
         super.init(frame: .zero)
         let shownTitle = title.uppercased() + (collapsed == true && count > 0 ? "  \(count)" : "")
         let label = NSTextField(labelWithString: shownTitle)
-        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.font = NSFont.systemFont(ofSize: s(11), weight: .semibold)
         label.textColor = Theme.accent
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let dot = NSView()
         dot.wantsLayer = true
-        dot.layer?.cornerRadius = 3
+        dot.layer?.cornerRadius = s(3)
         dot.layer?.backgroundColor = status.color?.cgColor
         dot.isHidden = status.color == nil
         let detail = NSTextField(wrappingLabelWithString: status.text ?? "")
-        detail.font = NSFont.systemFont(ofSize: 11)
+        detail.font = NSFont.systemFont(ofSize: s(11))
         detail.textColor = Theme.dimText
         detail.maximumNumberOfLines = 3
         detail.isHidden = status.text == nil
         detail.toolTip = status.text
         let add = ClosureButton(title: "") { [weak self] in self?.onNewWorkspace?() }
         add.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Workspace")?
-            .withSymbolConfiguration(.init(pointSize: 11, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: s(11), weight: .medium))
         add.isBordered = false
         add.contentTintColor = Theme.dimText
         add.toolTip = newWorkspaceTooltip
@@ -833,25 +861,25 @@ final class MachineHeader: NSView {
             addSubview(view)
         }
         NSLayoutConstraint.activate([
-            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
             chevron.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             chevron.widthAnchor.constraint(equalToConstant: DisclosureChevron.size),
             chevron.heightAnchor.constraint(equalToConstant: DisclosureChevron.size),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: collapsed == nil ? 10 : Self.nameInset),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            dot.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: s(6)),
+            dot.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: s(6)),
             dot.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            dot.widthAnchor.constraint(equalToConstant: 6),
-            dot.heightAnchor.constraint(equalToConstant: 6),
-            dot.trailingAnchor.constraint(lessThanOrEqualTo: add.leadingAnchor, constant: -6),
-            add.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            dot.widthAnchor.constraint(equalToConstant: s(6)),
+            dot.heightAnchor.constraint(equalToConstant: s(6)),
+            dot.trailingAnchor.constraint(lessThanOrEqualTo: add.leadingAnchor, constant: s(-6)),
+            add.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-6)),
             add.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            add.widthAnchor.constraint(equalToConstant: 18),
-            add.heightAnchor.constraint(equalToConstant: 18),
+            add.widthAnchor.constraint(equalToConstant: s(18)),
+            add.heightAnchor.constraint(equalToConstant: s(18)),
             detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 3),
-            (status.text == nil ? label.bottomAnchor : detail.bottomAnchor).constraint(equalTo: bottomAnchor, constant: -2),
+            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-10)),
+            detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: s(3)),
+            (status.text == nil ? label.bottomAnchor : detail.bottomAnchor).constraint(equalTo: bottomAnchor, constant: s(-2)),
         ])
     }
 
@@ -872,7 +900,7 @@ final class AgentsDivider: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         Theme.divider.setFill()
-        NSRect(x: 0, y: (bounds.height / 2).rounded(), width: bounds.width, height: 1).fill()
+        NSRect(x: 0, y: (bounds.height / 2).rounded(), width: bounds.width, height: s(1)).fill()
     }
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeUpDown) }
@@ -927,16 +955,16 @@ final class WorkspaceRow: ChromeItem {
 
     override init(closable: Bool = true) {
         super.init(closable: closable)
-        label.font = NSFont.systemFont(ofSize: 13)
+        label.font = NSFont.systemFont(ofSize: s(13))
         selectionStyle = .row
-        detail.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        detail.font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
         detail.textColor = Theme.dimText
         detail.setContentHuggingPriority(.required, for: .horizontal)
         detail.setContentCompressionResistancePriority(.required, for: .horizontal)
         detail.translatesAutoresizingMaskIntoConstraints = false
         addSubview(detail)
         badge.wantsLayer = true
-        badge.layer?.cornerRadius = 3
+        badge.layer?.cornerRadius = s(3)
         badge.isHidden = true
         badge.translatesAutoresizingMaskIntoConstraints = false
         addSubview(badge)
@@ -946,13 +974,13 @@ final class WorkspaceRow: ChromeItem {
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
         let end = closeButton.superview == nil ? trailingAnchor : closeButton.leadingAnchor
         NSLayoutConstraint.activate([
-            badge.widthAnchor.constraint(equalToConstant: 6),
-            badge.heightAnchor.constraint(equalToConstant: 6),
+            badge.widthAnchor.constraint(equalToConstant: s(6)),
+            badge.heightAnchor.constraint(equalToConstant: s(6)),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.trailingAnchor.constraint(equalTo: end, constant: closeButton.superview == nil ? -10 : -4),
-            detail.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: -4),
+            detail.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: s(-4)),
             detail.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: detail.leadingAnchor, constant: -6),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: detail.leadingAnchor, constant: s(-6)),
         ])
     }
 
@@ -975,7 +1003,7 @@ final class NoticeBar: NSView {
         let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.circle", accessibilityDescription: nil)!)
         icon.contentTintColor = NSColor(hex: 0xC8A35A)
         let label = NSTextField(wrappingLabelWithString: message)
-        label.font = NSFont.systemFont(ofSize: 12)
+        label.font = NSFont.systemFont(ofSize: s(12))
         label.textColor = Theme.foreground
         label.toolTip = detail
         var views: [NSView] = [icon, label]
@@ -988,14 +1016,14 @@ final class NoticeBar: NSView {
         }
         let close = ClosureButton(title: "", action: onDismiss)
         close.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            .withSymbolConfiguration(.init(pointSize: s(9), weight: .semibold))
         close.isBordered = false
         close.contentTintColor = Theme.dimText
         views.append(close)
         let stack = NSStackView(views: views)
         stack.orientation = .horizontal
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
+        stack.spacing = s(10)
+        stack.edgeInsets = NSEdgeInsets(top: s(6), left: s(12), bottom: s(6), right: s(12))
         stack.translatesAutoresizingMaskIntoConstraints = false
         label.setContentHuggingPriority(.defaultLow, for: .horizontal)
         addSubview(stack)
@@ -1013,7 +1041,7 @@ final class NoticeBar: NSView {
 /// A disclosure chevron: SF Symbols chevron.right, turned down when expanded (animated). It's drawn in its
 /// own layer, so the rotation animates around its centre without disturbing Auto Layout.
 final class DisclosureChevron: NSView {
-    static let size: CGFloat = 14
+    static var size: CGFloat { s(14) }
     private let glyph = CALayer()
     private(set) var isExpanded: Bool
 
@@ -1021,7 +1049,7 @@ final class DisclosureChevron: NSView {
         isExpanded = expanded
         super.init(frame: NSRect(x: 0, y: 0, width: Self.size, height: Self.size))
         wantsLayer = true
-        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        let config = NSImage.SymbolConfiguration(pointSize: s(9), weight: .semibold)
             .applying(NSImage.SymbolConfiguration(paletteColors: [Theme.dimText]))
         glyph.contents = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?.withSymbolConfiguration(config)
         glyph.contentsGravity = .center
@@ -1078,15 +1106,15 @@ final class DisclosureRow: ChromeItem {
         super.init(closable: false)
         colorsOwnTitle = true
         label.stringValue = title
-        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        label.font = NSFont.systemFont(ofSize: s(12), weight: .medium)
         label.textColor = Theme.dimText
         badge.stringValue = "\(count)"
-        badge.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        badge.font = NSFont.monospacedDigitSystemFont(ofSize: s(10), weight: .medium)
         badge.textColor = NSColor(hex: 0x5F676D)
         badge.alignment = .center
         pill.wantsLayer = true
         pill.layer?.backgroundColor = NSColor(hex: 0x2B3034).cgColor
-        pill.layer?.cornerRadius = 7
+        pill.layer?.cornerRadius = s(7)
         pill.isHidden = count == 0
         setAccessibilityLabel("\(title), \(count) agents")
         for view in [chevron, pill, badge] {
@@ -1096,19 +1124,19 @@ final class DisclosureRow: ChromeItem {
         // The title follows the chevron, which sits where the agent rows show their status icons.
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.isActive = false }
         NSLayoutConstraint.activate([
-            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
             chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
             chevron.widthAnchor.constraint(equalToConstant: DisclosureChevron.size),
             chevron.heightAnchor.constraint(equalToConstant: DisclosureChevron.size),
-            label.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: 6),
-            pill.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.leadingAnchor.constraint(equalTo: chevron.trailingAnchor, constant: s(6)),
+            pill.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
             pill.centerYAnchor.constraint(equalTo: centerYAnchor),
-            pill.heightAnchor.constraint(equalToConstant: 14),
+            pill.heightAnchor.constraint(equalToConstant: s(14)),
             pill.widthAnchor.constraint(greaterThanOrEqualToConstant: 20),
-            badge.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 5),
-            badge.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -5),
+            badge.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: s(5)),
+            badge.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: s(-5)),
             badge.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: pill.leadingAnchor, constant: -6),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: pill.leadingAnchor, constant: s(-6)),
         ])
     }
 

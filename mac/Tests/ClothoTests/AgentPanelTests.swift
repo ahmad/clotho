@@ -43,16 +43,19 @@ final class AgentPanelTests: XCTestCase {
     }
 }
 
-/// The Resolve checkmark shows only while its row is hovered, and never moves anything.
+/// The hover actions (Mute, Resolve) float over the row's right end only while it's hovered; the time
+/// stays pinned to the right edge and nothing reflows.
 @MainActor
 final class ResolveHoverTests: XCTestCase {
     override func setUp() { _ = NSApplication.shared }
 
-    private func row(resolvable: Bool) -> AgentRow {
-        let entry = AgentEntry(machine: "local", machineName: "Mac", pane: 1, workspace: nil, tab: nil, paneTitle: nil,
-                               tabTitle: "A long tab title that will be cut off",
-                               info: AgentInfo(kind: "claude", state: .done, since: 1, attention: true), canReply: false)
-        let row = AgentRow(entry, onResolve: resolvable ? {} : nil)
+    private func row(resolvable: Bool, muted: Bool = false) -> AgentRow {
+        var entry = AgentEntry(machine: "local", machineName: "Mac", pane: 1, workspace: nil, tab: nil, paneTitle: nil,
+                               tabTitle: "A long tab title that will certainly be cut off before the time",
+                               info: AgentInfo(kind: "claude", state: .done, since: Date().timeIntervalSince1970 - 600,
+                                               attention: !muted, muted: muted ? true : nil), canReply: false)
+        entry.canMute = true
+        let row = AgentRow(entry, onResolve: resolvable ? {} : nil, onMute: resolvable ? {} : nil)
         row.frame = NSRect(x: 0, y: 0, width: 260, height: 40)
         row.layoutSubtreeIfNeeded()
         return row
@@ -60,33 +63,76 @@ final class ResolveHoverTests: XCTestCase {
 
     func testHiddenUntilHovered() throws {
         let row = row(resolvable: true)
-        let button = try XCTUnwrap(row.resolve)
-        XCTAssertEqual(button.alphaValue, 0, "hidden by default")
-        XCTAssertFalse(button.isHidden, "only transparent, so it keeps its place and stays clickable")
+        let actions = try XCTUnwrap(row.actions)
+        XCTAssertNotNil(row.resolve)
+        XCTAssertNotNil(row.mute)
+        XCTAssertEqual(actions.alphaValue, 0, "hidden by default")
+        XCTAssertFalse(actions.isHidden, "only transparent, so it stays reachable")
         row.setHovering(true)
-        XCTAssertEqual(button.alphaValue, 1)
+        XCTAssertEqual(actions.alphaValue, 1, "Mute and Resolve fade in together")
         row.setHovering(false)
-        XCTAssertEqual(button.alphaValue, 0)
+        XCTAssertEqual(actions.alphaValue, 0)
     }
 
-    func testHoverMovesNothing() throws {
+    func testTimeIsPinnedRightWithOrWithoutActions() {
+        let with = row(resolvable: true), without = row(resolvable: false)
+        XCTAssertEqual(with.elapsedLabel.frame.maxX, without.elapsedLabel.frame.maxX)
+        // Constraints place the label's alignment rect; its frame adds the text field's own padding.
+        let time = with.elapsedLabel
+        XCTAssertEqual(time.alignmentRect(forFrame: time.frame).maxX, 260 - AgentRow.timeInset)
+        XCTAssertLessThanOrEqual(with.label.frame.maxX, with.elapsedLabel.frame.minX, "the title stops before the time")
+    }
+
+    func testActionsCoverTheTimeOnHover() throws {
         let row = row(resolvable: true)
-        let button = try XCTUnwrap(row.resolve)
-        let before = (button.frame, row.label.frame)
         row.setHovering(true)
         row.layoutSubtreeIfNeeded()
-        XCTAssertEqual(button.frame, before.0)
-        XCTAssertEqual(row.label.frame, before.1)
+        let actions = try XCTUnwrap(row.actions)
+        XCTAssertTrue(actions.frame.intersects(row.elapsedLabel.frame), "the actions float over the time")
+        XCTAssertLessThan(try XCTUnwrap(row.mute).convert(NSPoint.zero, to: row).x,
+                          try XCTUnwrap(row.resolve).convert(NSPoint.zero, to: row).x, "Mute is left of Resolve")
     }
 
-    func testRowsWithoutResolveHaveNoCheckmark() {
-        let row = row(resolvable: false)
-        XCTAssertNil(row.resolve)
+    func testHoverMovesNothing() {
+        let row = row(resolvable: true)
+        let before = (row.elapsedLabel.frame, row.label.frame, row.actions?.frame)
         row.setHovering(true)
-        XCTAssertNil(row.resolve)
+        row.layoutSubtreeIfNeeded()
+        XCTAssertEqual(row.elapsedLabel.frame, before.0)
+        XCTAssertEqual(row.label.frame, before.1)
+        XCTAssertEqual(row.actions?.frame, before.2)
+    }
+
+    func testQuietRowsHaveNoActionsAndMutedOnesAMarker() {
+        let quiet = row(resolvable: false)
+        XCTAssertNil(quiet.actions)
+        XCTAssertNil(quiet.mutedMarker)
+        let muted = row(resolvable: false, muted: true)
+        XCTAssertNotNil(muted.mutedMarker)
+        XCTAssertLessThanOrEqual(muted.mutedMarker!.frame.maxX, muted.elapsedLabel.frame.minX)
+        XCTAssertLessThanOrEqual(muted.label.frame.maxX, muted.mutedMarker!.frame.minX, "the title stops before the marker")
     }
 
     func testNoPointerOutsideAWindow() {
         XCTAssertFalse(row(resolvable: true).pointerIsOver())
+    }
+}
+
+final class MutedAgentTests: XCTestCase {
+    func testMutedAgentsNeverNeedAttention() {
+        let info = AgentInfo(kind: "claude", state: .waiting, source: "hook", attention: true, muted: true)
+        XCTAssertFalse(info.needsAttention, "a muted agent never needs the user, whatever attention says")
+        let entry = AgentEntry(machine: "m", machineName: "M", pane: 1, workspace: nil, tab: nil, paneTitle: nil, tabTitle: nil,
+                               info: info, canReply: false)
+        let (attention, others) = AgentEntry.split([entry])
+        XCTAssertTrue(attention.isEmpty)
+        XCTAssertEqual(others.map(\.pane), [1])
+    }
+
+    func testDecodesMuted() throws {
+        let info = try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"kind":"claude","state":"done","attention":false,"muted":true}"#.utf8))
+        XCTAssertTrue(info.isMuted)
+        let plain = try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"kind":"claude","state":"done"}"#.utf8))
+        XCTAssertFalse(plain.isMuted)
     }
 }

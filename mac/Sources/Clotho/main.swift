@@ -183,6 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var noticeBar: NoticeBar?
     /// Moves the panes down while a notice shows, so it never covers them.
     var splitTop: NSLayoutConstraint!
+    var tabBarHeight: NSLayoutConstraint!
     var termSource: DispatchSourceSignal?
     var lastRemoteReconnect = Date.distantPast
     var paneHosts: [PaneKey: PaneHostView] = [:]
@@ -283,6 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
         sidebar.onResolveAgent = { [weak self] machine, pane in self?.resolveAgent(machine: machine, pane: pane) }
+        sidebar.onMuteAgent = { [weak self] machine, pane in self?.muteAgent(machine: machine, pane: pane, muted: true) }
         sidebar.agentRowMenu = { [weak self] machine, pane, canReply in
             self?.agentMenu(machine: machine, pane: pane, canReply: canReply) ?? NSMenu()
         }
@@ -340,6 +342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         container.addSubview(corner)
 
         splitTop = splitView.topAnchor.constraint(equalTo: tabBar.bottomAnchor)
+        tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: TabBarView.height)
         NSLayoutConstraint.activate([
             notchExtension.topAnchor.constraint(equalTo: container.topAnchor),
             notchExtension.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -352,7 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             tabBar.topAnchor.constraint(equalTo: notchExtension.bottomAnchor),
             tabBarLeading,
             tabBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            tabBar.heightAnchor.constraint(equalToConstant: TabBarView.height),
+            tabBarHeight,
             splitTop,
             splitView.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             splitView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -473,6 +476,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
+                if step.hasPrefix("zoom:"), let factor = Double(step.dropFirst(5)) {
+                    setUIScale(CGFloat(factor))
+                    if UserDefaults.standard.bool(forKey: "LogSidebar") { logChromeFrames() }
+                    return
+                }
                 if step.hasPrefix("login:") {
                     showSettings(nil)
                     return settingsWindow?.setStartsAtLogin(step.hasSuffix("on"), on: focusedMachine) ?? ()
@@ -900,17 +908,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         tabBarLeading.constant = sidebarWidth.constant > 0 ? 0 : 80
     }
 
-    @objc func zoomIn(_ sender: Any?) { setFontSize(fontSize + 1) }
-    @objc func zoomOut(_ sender: Any?) { setFontSize(fontSize - 1) }
-    @objc func resetZoom(_ sender: Any?) { setFontSize(Self.defaultFontSize) }
+    // View › Zoom In / Zoom Out / Actual Size: the whole app, chrome and terminal together.
+    @objc func zoomIn(_ sender: Any?) { setUIScale(UIScale.next(UIScale.factor, steps: 1)) }
+    @objc func zoomOut(_ sender: Any?) { setUIScale(UIScale.next(UIScale.factor, steps: -1)) }
+    @objc func resetZoom(_ sender: Any?) { setUIScale(1) }
 
-    // Every pane re-measures, and sends its new viewport to the backend.
+    // ⌥⌘= / ⌥⌘- / ⌥⌘0: only the terminal text, as a base size the app zoom then scales.
+    @objc func terminalZoomIn(_ sender: Any?) { setFontSize(fontSize + 1) }
+    @objc func terminalZoomOut(_ sender: Any?) { setFontSize(fontSize - 1) }
+    @objc func terminalActualSize(_ sender: Any?) { setFontSize(Self.defaultFontSize) }
+
+    /// The terminal font size shown: the user's base size at the app zoom, on a half-point grid.
+    var terminalFontSize: CGFloat { (fontSize * UIScale.factor * 2).rounded() / 2 }
+
+    /// Sets the terminal's base size (8–32 pt at 100%).
     func setFontSize(_ size: CGFloat) {
-        let clamped = min(max(size, 8), 32)
-        guard clamped != fontSize || paneHosts.values.contains(where: { $0.terminal.font.pointSize != clamped }) else { return }
-        fontSize = clamped
-        let font = Self.terminalFont(size: clamped)
-        paneHosts.values.forEach { $0.fontChanged(font) }
+        fontSize = min(max(size, 8), 32)
+        applyTerminalFont()
+    }
+
+    // Each pane whose font differs re-measures once and sends its new viewport to the backend.
+    func applyTerminalFont() {
+        let size = terminalFontSize
+        let font = Self.terminalFont(size: size)
+        paneHosts.values.filter { $0.terminal.font.pointSize != size }.forEach { $0.fontChanged(font) }
+    }
+
+    /// Changes the app zoom: the chrome is rebuilt at the new size, then the terminal font follows.
+    func setUIScale(_ factor: CGFloat) {
+        let factor = UIScale.clamp(factor)
+        guard factor != UIScale.factor else { return }
+        UIScale.factor = factor
+        UIScale.save(factor)
+        tabBarHeight.constant = TabBarView.height
+        tabBar.applyScale()
+        sidebar.applyScale()
+        if let noticeBar { splitTop.constant = noticeBar.fittingSize.height }
+        sync()
+        transferToast.refresh()
+        settingsWindow?.reload()
+        applyTerminalFont()
+        NotificationCenter.default.post(name: UIScale.didChange, object: nil)
+        log("zoom: \(Int((factor * 100).rounded()))%, terminal \(terminalFontSize) pt")
+        if UserDefaults.standard.bool(forKey: "LogSidebar") { logChromeFrames() }
+    }
+
+    /// Testing aid (LogSidebar): the sizes the zoom produced, laid out.
+    func logChromeFrames() {
+        window.contentView?.layoutSubtreeIfNeeded()
+        func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
+            view.subviews.flatMap { ($0 as? T).map { [$0] } ?? [] } + view.subviews.flatMap { all(type, in: $0) }
+        }
+        let header = all(MachineHeader.self, in: sidebar).first
+        let row = all(WorkspaceRow.self, in: sidebar).first
+        let tab = all(ChromeItem.self, in: tabBar).first
+        let fmt = { (v: CGFloat) in String(format: "%.1f", v) }
+        log("frames at \(Int((UIScale.factor * 100).rounded()))%: tab bar h \(fmt(tabBar.frame.height)), tab h \(fmt(tab?.frame.height ?? 0)) "
+            + "font \(fmt(tab?.label.font?.pointSize ?? 0)), header h \(fmt(header?.frame.height ?? 0)), "
+            + "workspace row h \(fmt(row?.frame.height ?? 0)) font \(fmt(row?.label.font?.pointSize ?? 0)) x \(fmt(row?.label.frame.minX ?? 0)), "
+            + "terminal \(fmt(terminalFontSize)) pt")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

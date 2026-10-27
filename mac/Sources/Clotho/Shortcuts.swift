@@ -84,6 +84,9 @@ extension AppDelegate {
             // ⌘= is the unshifted ⌘+ on most keyboards.
             Shortcut(menu: "View", title: "Zoom In", key: "=", action: #selector(zoomIn(_:)), hiddenInMenu: true, listed: false),
             Shortcut(menu: "View", title: "Zoom Out", key: "-", action: #selector(zoomOut(_:))),
+            Shortcut(menu: "View", title: "Bigger Terminal Text", key: "=", modifiers: [.command, .option], action: #selector(terminalZoomIn(_:))),
+            Shortcut(menu: "View", title: "Smaller Terminal Text", key: "-", modifiers: [.command, .option], action: #selector(terminalZoomOut(_:))),
+            Shortcut(menu: "View", title: "Actual Terminal Text Size", key: "0", modifiers: [.command, .option], action: #selector(terminalActualSize(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:))),
 
             Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
@@ -386,25 +389,25 @@ final class ShortcutsOverlay: NSView {
         let columns = NSStackView(views: Self.columns.map { Self.column($0, shortcuts: shortcuts) })
         columns.orientation = .horizontal
         columns.alignment = .top
-        columns.spacing = 40
+        columns.spacing = s(40)
 
         let stack = NSStackView(views: [top, columns])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 18
-        stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 24, right: 28)
+        stack.spacing = s(18)
+        stack.edgeInsets = NSEdgeInsets(top: s(24), left: s(28), bottom: s(24), right: s(28))
         top.widthAnchor.constraint(equalTo: columns.widthAnchor).isActive = true
 
         card.wantsLayer = true
         card.layer?.backgroundColor = Theme.background.cgColor
-        card.layer?.cornerRadius = 12
+        card.layer?.cornerRadius = s(12)
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 1
         card.layer?.borderColor = NSColor(hex: 0x343A3F).cgColor
         card.layer?.shadowColor = NSColor.black.cgColor
         card.layer?.shadowOpacity = 0.5
         card.layer?.shadowRadius = 24
-        card.layer?.shadowOffset = CGSize(width: 0, height: -8)
+        card.layer?.shadowOffset = CGSize(width: 0, height: s(-8))
         card.translatesAutoresizingMaskIntoConstraints = false
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
@@ -444,19 +447,19 @@ final class ShortcutsOverlay: NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 2
+        stack.spacing = s(2)
         for menu in menus {
             let rows = shortcuts.filter { $0.menu == menu && $0.listed }
             guard !rows.isEmpty else { continue }
             let header = label((menu == "Clotho" ? "App" : menu).uppercased(), size: 11, weight: .semibold, color: Theme.accent)
             stack.addArrangedSubview(header)
-            stack.setCustomSpacing(6, after: header)
+            stack.setCustomSpacing(s(6), after: header)
             for shortcut in rows {
                 let row = Self.row(title: shortcut.listTitle ?? shortcut.title, keys: shortcut.displayKeys)
                 stack.addArrangedSubview(row)
                 row.widthAnchor.constraint(equalToConstant: columnWidth).isActive = true
             }
-            if let last = stack.arrangedSubviews.last { stack.setCustomSpacing(18, after: last) }
+            if let last = stack.arrangedSubviews.last { stack.setCustomSpacing(s(18), after: last) }
         }
         return stack
     }
@@ -464,23 +467,23 @@ final class ShortcutsOverlay: NSView {
     static func row(title: String, keys: String) -> NSView {
         let name = label(title, size: 13, weight: .regular, color: Theme.foreground)
         let key = label(keys, size: 12, weight: .medium, color: Theme.foreground)
-        key.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+        key.font = NSFont.monospacedSystemFont(ofSize: s(12), weight: .medium)
         let cap = NSView()
         cap.wantsLayer = true
         cap.layer?.backgroundColor = NSColor(hex: 0x2A3035).cgColor
-        cap.layer?.cornerRadius = 5
+        cap.layer?.cornerRadius = s(5)
         cap.addSubview(key)
         key.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            key.leadingAnchor.constraint(equalTo: cap.leadingAnchor, constant: 7),
-            key.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: -7),
-            key.topAnchor.constraint(equalTo: cap.topAnchor, constant: 2),
-            key.bottomAnchor.constraint(equalTo: cap.bottomAnchor, constant: -2),
+            key.leadingAnchor.constraint(equalTo: cap.leadingAnchor, constant: s(7)),
+            key.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: s(-7)),
+            key.topAnchor.constraint(equalTo: cap.topAnchor, constant: s(2)),
+            key.bottomAnchor.constraint(equalTo: cap.bottomAnchor, constant: s(-2)),
         ])
         let row = NSStackView(views: [name, NSView(), cap])
         row.orientation = .horizontal
         row.distribution = .fill
-        row.edgeInsets = NSEdgeInsets(top: 3, left: 0, bottom: 3, right: 0)
+        row.edgeInsets = NSEdgeInsets(top: s(3), left: s(0), bottom: s(3), right: s(0))
         name.setContentHuggingPriority(.required, for: .horizontal)
         cap.setContentHuggingPriority(.required, for: .horizontal)
         return row
