@@ -85,12 +85,14 @@ struct MachineListView: View {
         }
     }
 
-    /// Opening an agent doesn't resolve it (as on the Mac): Resolve, typing or a reply does.
+    /// Opening an agent never resolves it: it leaves the top of the list only when it starts working again or
+    /// the user taps Resolve.
     private func open(_ row: AgentRow) {
         path = [.pane(row.machineID, row.tab, row.pane)]
     }
 
-    /// From a notification: the machine may not be connected yet, so wait for its model.
+    /// From a notification: the machine may not be connected yet, so wait for its model. Opening doesn't
+    /// resolve the agent either.
     private func openPane(machine id: UUID, pane: PaneID) {
         guard let machine = machines.machine(id) else { return }
         let connection = connections.connection(for: machine)
@@ -98,7 +100,6 @@ struct MachineListView: View {
         Task {
             for _ in 0..<50 {
                 if let tab = connection.store.state.location(of: pane)?.tab {
-                    connection.ackAgent(pane)
                     path = [.pane(id, tab.id, pane)]
                     return
                 }

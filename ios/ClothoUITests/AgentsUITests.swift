@@ -48,10 +48,17 @@ final class AgentsUITests: XCTestCase {
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS 'Running'")).firstMatch.exists)
         attach(app, "resolved")
 
-        let first = waiting
-        first.tap()
+        // Opening an agent never resolves it: back on the list it's still on top with its Resolve.
+        let stillOnTop = resolveButtons.count
+        waiting.tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         attach(app, "opened")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(waiting.waitForExistence(timeout: 5), "the opened agent left the top")
+        sleep(1)
+        XCTAssertEqual(resolveButtons.count, stillOnTop, "opening an agent resolved it")
+        waiting.tap()
+        XCTAssertTrue(actions.waitForExistence(timeout: 10))
         actions.tap()
         app.buttons["Close tab"].tap()
     }

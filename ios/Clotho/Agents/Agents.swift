@@ -20,8 +20,9 @@ struct AgentRow: Identifiable, Hashable {
     /// yet, takes a quick reply. Idle, detected (quiet output read as waiting) or acknowledged agents don't.
     var acceptsReply: Bool { info.state == .waiting && info.isHookSourced && wantsAttention }
 
-    /// The daemon's `attention`: set when an agent reports it needs the user (or rings the bell), cleared by
-    /// input or agent.ack on any device. A detected agent that just went quiet is waiting without it.
+    /// The daemon's `attention`: set when an agent reports it needs the user (or rings the bell), cleared when
+    /// the agent starts working again or the user resolves it (agent.ack, on any device). Viewing, opening or
+    /// typing doesn't clear it. A detected agent that just went quiet is waiting without it.
     var wantsAttention: Bool { info.attention == true }
 
     /// Anything wanting attention first (waiting, then errors, then finished), then the rest; newest first within each.
@@ -74,7 +75,7 @@ extension MachineConnection {
         return rows
     }
 
-    /// `agent.ack`: the user has seen this agent's state.
+    /// `agent.ack`: the user resolved this agent. The only place the app clears attention (Resolve).
     func ackAgent(_ pane: PaneID) {
         if store.state.pane(pane)?.agent == nil {
             fakeAcked.insert(pane)
@@ -90,7 +91,8 @@ extension MachineConnection {
     var canReply: Bool { store.hello?.features.contains(.paneKeys) ?? false }
 
     /// Answers a waiting agent: `text` (pasted, bracketed if the app asked) and then `keys` such as ["enter"],
-    /// encoded by the daemon for the pane's modes. Counts as input, so the daemon clears attention.
+    /// encoded by the daemon for the pane's modes. The agent leaves the top of the list when it starts working
+    /// on the reply (its state changes), not because of the input itself.
     func reply(to pane: PaneID, text: String?, keys: [String]) {
         guard canReply else { return }
         run("Reply") { try await $0.sendKeys(pane, text: text?.isEmpty == true ? nil : text, keys: keys) }
