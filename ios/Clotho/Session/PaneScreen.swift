@@ -11,6 +11,7 @@ struct PaneScreen: View {
     @State private var paneID: PaneID?
     @State private var mode: Subscription.Mode?
     @State private var renaming: RenameTarget?
+    @State private var browsingFiles: String?
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
 
     init(connection: MachineConnection, initialTab: TabID, initialPane: PaneID? = nil) {
@@ -59,6 +60,12 @@ struct PaneScreen: View {
             connection.setFont(UIFont.monospacedSystemFont(ofSize: size, weight: .regular))
         }
         .renameAlert($renaming, connection: connection)
+        .sheet(item: Binding(get: { browsingFiles.map(FilesStart.init) }, set: { browsingFiles = $0?.path })) { start in
+            NavigationStack {
+                FileBrowserView(connection: connection, path: start.path)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { browsingFiles = nil } } }
+            }
+        }
     }
 
     // MARK: Pieces
@@ -152,6 +159,7 @@ struct PaneScreen: View {
                 Button("Larger") { fontSize = min(fontSize + 1, 28) }
                 Button("Smaller") { fontSize = max(fontSize - 1, 7) }
             }
+            Button { browsingFiles = pane?.cwd ?? "~" } label: { Label("Files here", systemImage: "folder") }
             Divider()
             Button(role: .destructive) { closePane() } label: { Label("Close pane", systemImage: "xmark.square") }
             Button(role: .destructive) { closeTab() } label: { Label("Close tab", systemImage: "xmark.rectangle") }
@@ -284,4 +292,9 @@ struct TerminalContainer: UIViewRepresentable {
         container.addSubview(host)
         DispatchQueue.main.async { _ = host.terminal.becomeFirstResponder() }
     }
+}
+
+private struct FilesStart: Identifiable {
+    var path: String
+    var id: String { path }
 }

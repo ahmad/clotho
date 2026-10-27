@@ -360,8 +360,23 @@ final class Connections: ObservableObject {
         scheduleRecompute()
     }
 
-    func suspendAll() { connections.values.forEach { $0.suspend() } }
-    func resumeAll() { connections.values.forEach { $0.resume() } }
+    private var inBackground = false
+
+    /// Connections with file transfers in flight stay open on the background time those get, and close
+    /// when they finish or the time runs out.
+    func suspendAll() {
+        inBackground = true
+        connections.values.filter { !TransferCenter.shared.isActive(on: $0.id) }.forEach { $0.suspend() }
+        TransferCenter.shared.onIdle = { [weak self] id in
+            guard let self, self.inBackground else { return }
+            self.connections[id]?.suspend()
+        }
+    }
+
+    func resumeAll() {
+        inBackground = false
+        connections.values.forEach { $0.resume() }
+    }
 
     static func transport(for machine: Machine) -> ClothodTransport {
         switch machine.kind {

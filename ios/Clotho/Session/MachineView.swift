@@ -28,6 +28,13 @@ struct MachineView: View {
                     }
                 }
             }
+            Section {
+                NavigationLink {
+                    FileBrowserView(connection: connection, path: FileBrowserView.startPath(connection))
+                } label: {
+                    Label("Files", systemImage: "folder")
+                }
+            }
             if connection.updateAvailable {
                 Section {
                     Button(connection.updating ? "Updating clothod…" : "Update clothod on \(connection.machine.displayName)") {
