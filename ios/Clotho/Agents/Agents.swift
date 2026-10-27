@@ -16,8 +16,9 @@ struct AgentRow: Identifiable, Hashable {
 
     var id: String { "\(machineID.uuidString)/\(pane)" }
 
-    /// A waiting agent takes a typed answer (quick reply, next).
-    var acceptsReply: Bool { info.state == .waiting }
+    /// Only an agent that reported through its hook that it's waiting on the user, and hasn't been answered
+    /// yet, takes a quick reply. Idle, detected (quiet output read as waiting) or acknowledged agents don't.
+    var acceptsReply: Bool { info.state == .waiting && info.isHookSourced && wantsAttention }
 
     /// The daemon's `attention`: set when an agent reports it needs the user (or rings the bell), cleared by
     /// input or agent.ack on any device. A detected agent that just went quiet is waiting without it.
@@ -95,7 +96,7 @@ extension MachineConnection {
             .waiting: "Allow `cargo test --release`?", .running: "Editing src/protocol.rs",
             .done: "Finished: 3 files changed", .error: "API error: overloaded", .starting: "Starting",
         ]
-        return AgentInfo(kind: pane.id % 2 == 0 ? "codex" : "claude", state: state, source: "fake", message: messages[state],
+        return AgentInfo(kind: pane.id % 2 == 0 ? "codex" : "claude", state: state, source: "hook", message: messages[state],
                          since: Date().timeIntervalSince1970 - Double(pane.id) * 90,
                          attention: state != .running && state != .starting && !fakeAcked.contains(pane.id))
     }
