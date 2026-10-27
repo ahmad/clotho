@@ -138,10 +138,11 @@ class ChromeItem: NSView {
         let done = commitEdit
         commitEdit = nil
         field.delegate = nil
+        // The commit runs first, so the label comes back already showing the new title.
+        if commit { done?(text) }
         field.removeFromSuperview()
         label.isHidden = false
         updateColors()
-        if commit { done?(text) }
         onEditingEnded?()
     }
 
@@ -171,6 +172,29 @@ extension ChromeItem: NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) { endEditing(commit: true) }
 }
 
+/// Titles the user just committed in place. The rename takes a round trip to the daemon, and the
+/// views redraw from the model meanwhile, so each shows its held title until the model has the new
+/// one. A rename that never arrives (it failed) lets go after a few seconds.
+struct HeldTitles<Key: Hashable> {
+    static var lifetime: TimeInterval { 3 }
+    private var held: [Key: (from: String?, to: String, until: Date)] = [:]
+
+    /// `from` is the title the model has. Renaming again before it caught up keeps the first one.
+    mutating func hold(_ key: Key, from: String?, to: String) {
+        var from = from
+        if let earlier = held[key], Date() < earlier.until { from = earlier.from }
+        held[key] = (from, to, Date().addingTimeInterval(Self.lifetime))
+    }
+
+    /// The title to show instead of the model's, while the model still has the old one.
+    mutating func title(for key: Key, model: String?) -> String? {
+        guard let entry = held[key] else { return nil }
+        if model == entry.from, Date() < entry.until { return entry.to }
+        held[key] = nil
+        return nil
+    }
+}
+
 final class TabBarView: NSView {
     static let height: CGFloat = 34
 
@@ -186,6 +210,9 @@ final class TabBarView: NSView {
     private var items: [TabID: (item: ChromeItem, title: String, custom: String?)] = [:]
     /// The latest update, held back while a title is being edited so the field isn't rebuilt away.
     private var pending: (() -> Void)?
+    /// The latest update, to redraw once a held title lets go.
+    private var latest: (() -> Void)?
+    private var heldTitles = HeldTitles<TabID>()
     private let addButton = NSButton()
 
     override init(frame: NSRect) {
@@ -223,13 +250,15 @@ final class TabBarView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?) {
+        latest = { [weak self] in self?.update(tabs: tabs, selected: selected) }
         if items.values.contains(where: { $0.item.isEditing }) {
-            pending = { [weak self] in self?.update(tabs: tabs, selected: selected) }
+            pending = latest
             return
         }
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         items = [:]
-        for (index, tab) in tabs.enumerated() {
+        for (index, var tab) in tabs.enumerated() {
+            if let held = heldTitles.title(for: tab.id, model: tab.custom) { (tab.title, tab.custom) = (held, held) }
             let item = ChromeItem(closable: true)
             items[tab.id] = (item, tab.title, tab.custom)
             item.label.stringValue = (tab.maximized ? "⤢ " : "") + tab.title
@@ -261,6 +290,9 @@ final class TabBarView: NSView {
             item.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
             item.widthAnchor.constraint(greaterThanOrEqualToConstant: 60).isActive = true
         }
+        if UserDefaults.standard.bool(forKey: "LogSidebar") {
+            log("tabs: " + stack.arrangedSubviews.compactMap { ($0 as? ChromeItem)?.label.stringValue }.joined(separator: ", "))
+        }
     }
 
     private func runPending() {
@@ -276,10 +308,24 @@ final class TabBarView: NSView {
             self?.onEditingEnded?()
             self?.runPending()
         }
+        let prefix = item.label.stringValue.hasPrefix("⤢ ") ? "⤢ " : ""
         item.beginEditing(custom ?? shown) { [weak self] text in
             // Committing the pane's own title unchanged leaves the tab following it.
-            guard text != (custom ?? shown) else { return }
-            self?.onRename?(id, text)
+            guard let self, text != (custom ?? shown) else { return }
+            // An empty title goes back to the pane's, which only the model knows.
+            if !text.isEmpty {
+                item.label.stringValue = prefix + text
+                heldTitles.hold(id, from: custom, to: text)
+                redrawWhenHeldTitlesExpire()
+            }
+            onRename?(id, text)
+        }
+    }
+
+    private func redrawWhenHeldTitlesExpire() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + HeldTitles<TabID>.lifetime + 0.1) { [weak self] in
+            guard let self, !items.values.contains(where: { $0.item.isEditing }) else { return }
+            latest?()
         }
     }
 
@@ -306,6 +352,9 @@ final class SidebarView: NSView {
     /// After an inline edit ends, so the terminal can take focus back.
     var onEditingEnded: (() -> Void)?
     private var rows: [String: (row: WorkspaceRow, name: String)] = [:]
+    /// The latest update, to redraw once a held title lets go.
+    private var latest: (() -> Void)?
+    private var heldNames = HeldTitles<String>()
     /// The latest update, held back while a name is being edited so the field isn't rebuilt away.
     private var pending: (() -> Void)?
     var onClose: ((MachineKey, WorkspaceID) -> Void)?
@@ -420,8 +469,9 @@ final class SidebarView: NSView {
     var agentsMenu: (() -> NSMenu)?
 
     func update(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) {
+        latest = { [weak self] in self?.update(agents: agents, unreachable: unreachable, groups: groups) }
         if rows.values.contains(where: { $0.row.isEditing }) {
-            pending = { [weak self] in self?.update(agents: agents, unreachable: unreachable, groups: groups) }
+            pending = latest
             return
         }
         rows = [:]
@@ -467,13 +517,14 @@ final class SidebarView: NSView {
             }
             for workspace in group.workspaces {
                 let row = WorkspaceRow()
-                row.label.stringValue = workspace.name
+                let name = heldNames.title(for: Self.rowKey(key, workspace.id), model: workspace.name) ?? workspace.name
+                row.label.stringValue = name
                 // The tab count only when there's more than one.
                 row.detail.stringValue = workspace.tabs.count > 1 ? "\(workspace.tabs.count)" : ""
                 row.toolTip = workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
                 row.onClick = { [weak self] in self?.onSelect?(key, workspace.id) }
                 row.onDoubleClick = { [weak self] in self?.beginRename(key, workspace.id) }
-                rows[Self.rowKey(key, workspace.id)] = (row, workspace.name)
+                rows[Self.rowKey(key, workspace.id)] = (row, name)
                 row.onClose = { [weak self] in self?.onClose?(key, workspace.id) }
                 row.isSelected = workspace.id == group.selected
                 row.setBadge(group.badges[workspace.id])
@@ -484,6 +535,9 @@ final class SidebarView: NSView {
                     self?.onNewWorkspace?(key)
                 })
             }
+        }
+        if UserDefaults.standard.bool(forKey: "LogSidebar") {
+            log("sidebar: " + rows.values.map(\.name).sorted().joined(separator: ", "))
         }
         if let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
         add(actionButton("Add Machine", symbol: "plus", tooltip: "Save an SSH machine") { [weak self] in self?.onAddMachine?() })
@@ -501,12 +555,20 @@ final class SidebarView: NSView {
     func beginRename(_ machine: MachineKey, _ id: WorkspaceID) {
         guard let (row, name) = rows[Self.rowKey(machine, id)] else { return }
         row.onEditingEnded = { [weak self] in
+            if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: editing ended, showing \(row.label.stringValue)") }
             self?.onEditingEnded?()
             self?.runPending()
         }
         row.beginEditing(name) { [weak self] text in
-            guard !text.isEmpty, text != name else { return }
-            self?.onRename?(machine, id, text)
+            guard let self, !text.isEmpty, text != name else { return }
+            row.label.stringValue = text
+            if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: committed \(text), shown at once") }
+            heldNames.hold(Self.rowKey(machine, id), from: name, to: text)
+            DispatchQueue.main.asyncAfter(deadline: .now() + HeldTitles<String>.lifetime + 0.1) { [weak self] in
+                guard let self, !rows.values.contains(where: { $0.row.isEditing }) else { return }
+                latest?()
+            }
+            onRename?(machine, id, text)
         }
     }
 

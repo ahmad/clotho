@@ -16,6 +16,7 @@ let package = Package(
                 .product(name: "ClothoKit", package: "ClothoKit"),
                 .product(name: "ClothoFake", package: "ClothoKit"),
             ]
-        )
+        ),
+        .testTarget(name: "ClothoTests", dependencies: ["Clotho", "SwiftTerm"]),
     ]
 )

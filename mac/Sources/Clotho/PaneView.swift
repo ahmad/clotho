@@ -39,6 +39,26 @@ final class PaneTerminalView: TerminalView {
         isFeeding = false
     }
 
+    /// Shift-Return, the newline key in agent prompts such as Claude Code's and Codex's. SwiftTerm sends
+    /// it as a plain CR unless the app turned on kitty keyboard reporting, so in legacy mode it goes out
+    /// the way iTerm2, Ghostty and kitty send it: ESC CR. With kitty flags set, SwiftTerm already sends
+    /// `CSI 13;2u`, so the key goes to it. Returns whether it sent the key.
+    func sendShiftReturn(_ event: NSEvent) -> Bool {
+        guard let bytes = Self.legacyShiftReturn(keyCode: event.keyCode, modifiers: event.modifierFlags,
+                                                 kittyFlags: keyboardEnhancementFlags.rawValue, composing: hasMarkedText())
+        else { return false }
+        send(bytes)
+        return true
+    }
+
+    /// The bytes for Return (36) or keypad Enter (76) with exactly Shift held, in legacy keyboard mode.
+    static func legacyShiftReturn(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, kittyFlags: some BinaryInteger,
+                                  composing: Bool) -> [UInt8]? {
+        guard [36, 76].contains(keyCode), kittyFlags == 0, !composing,
+              modifiers.intersection([.shift, .control, .option, .command]) == .shift else { return nil }
+        return [0x1b, 0x0d]
+    }
+
     func enableFileDrops() { registerForDraggedTypes([.fileURL]) }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }

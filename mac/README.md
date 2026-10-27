@@ -34,7 +34,7 @@ open ~/Applications/Clotho.app
 
 The script builds the app in release mode, runs `../clothod/scripts/dist.sh` and bundles its builds (macOS and Linux, x86_64 and ARM; the Linux ones go to remote machines), generates the icon, signs everything ad hoc, and installs `~/Applications/Clotho.app` (bundle id `app.clotho.desktop`). Running it again replaces the installed copy. Set `CLOTHOD_DIST` to bundle an existing `dist/` directory instead of building one.
 
-For a compile-only check, run `swift build`. The shared package's tests run with `swift test` in `../ClothoKit`.
+For a compile-only check, run `swift build`. `swift test` here runs the app's own tests (key encoding, inline rename); the shared package's tests run with `swift test` in `../ClothoKit`.
 
 ### Dev build
 

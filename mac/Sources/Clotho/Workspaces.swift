@@ -142,12 +142,14 @@ extension AppDelegate {
         window.makeFirstResponder(activeTerminal)
     }
 
-    /// Ctrl-Return renames the current workspace in place (Finder's rename is Return on a selected
-    /// item; the terminal needs plain Return, so the sidebar takes it with Control).
-    func installRenameShortcut() {
-        renameMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, event.window === window, [36, 76].contains(event.keyCode),
-                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
+    /// Return with modifiers, before the terminal sees it. Ctrl-Return renames the current workspace in
+    /// place (Finder's rename is Return on a selected item; the terminal needs plain Return, so the
+    /// sidebar takes it with Control). Shift-Return in a pane is a newline for agent prompts.
+    func installReturnKeys() {
+        returnKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === window, [36, 76].contains(event.keyCode) else { return event }
+            if let terminal = window.firstResponder as? PaneTerminalView, terminal.sendShiftReturn(event) { return nil }
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control,
                   !(window.firstResponder is NSText) else { return event }
             renameActiveWorkspace(nil)
             return nil

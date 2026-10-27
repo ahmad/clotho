@@ -153,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var emptyLabel: NSTextField!
     var shortcutsOverlay: ShortcutsOverlay?
     var fileBrowser: FileBrowserOverlay?
-    var renameMonitor: Any?
+    var returnKeyMonitor: Any?
     let transfers = TransferManager()
     var transferToast: TransferToast!
 
@@ -313,7 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         tabBar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
         tabBar.onNewTab = { [weak self] in self?.newTab(nil) }
-        installRenameShortcut()
+        installReturnKeys()
         container.addSubview(tabBar)
         tabBarLeading = tabBar.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor)
 
@@ -436,12 +436,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // Testing aids: TypeText="vim\\r|:q\\r" sends each step to the focused pane (\\r is Return, \\e is Esc),
     // and ResizeWindow="900x600|1400x900" sets the window size; both start after 3 seconds, 2 seconds apart.
+    // A TypeText step "key:shift+return" instead posts that key as a key event, which goes through the
+    // window's key handling like a real press (modifiers shift, cmd, ctrl, alt; keys return, tab, esc),
+    // "type:new name" posts those characters as key events, for typing into whatever has focus, and
+    // "click:600,300" clicks at that point of the window (from its bottom-left corner).
     func runTestScripts() {
         let decode = { (text: String) in text.replacingOccurrences(of: "\\r", with: "\r").replacingOccurrences(of: "\\e", with: "\u{1b}") }
         for (i, step) in (UserDefaults.standard.string(forKey: "TypeText")?.components(separatedBy: "|") ?? []).enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3 + Double(i) * 2) { [self] in
                 guard !step.isEmpty, let pane = store.focusedPane?.id else { return }
                 log("TypeText: \(step)")
+                if step.hasPrefix("key:") { return postTestKey(String(step.dropFirst(4))) }
+                if step.hasPrefix("type:") { return postTestText(String(step.dropFirst(5))) }
+                if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 backend.sendInput(pane, Data(decode(step).utf8))
             }
         }
@@ -538,6 +545,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 log("ResizeWindow: \(step)")
                 window.setFrame(NSRect(x: window.frame.minX, y: window.frame.maxY - parts[1], width: parts[0], height: parts[1]), display: true)
             }
+        }
+    }
+
+    /// Posts a left click, for TypeText's "click:" steps.
+    func postTestClick(_ spec: String) {
+        let numbers = spec.split(separator: ",").compactMap { Double($0) }
+        guard numbers.count == 2 else { return log("TypeText: bad click \(spec)") }
+        window.makeKey()
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: NSPoint(x: numbers[0], y: numbers[1]), modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                 context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { continue }
+            NSApp.postEvent(event, atStart: false)
+        }
+    }
+
+    /// Posts each character as a key press, for TypeText's "type:" steps.
+    func postTestText(_ text: String) {
+        window.makeKey()
+        for character in text.map(String.init) {
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
+                                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                   context: nil, characters: character, charactersIgnoringModifiers: character,
+                                                   isARepeat: false, keyCode: 0) else { continue }
+                NSApp.postEvent(event, atStart: false)
+            }
+        }
+    }
+
+    /// Posts a key event to the window, for TypeText's "key:" steps. The window becomes key without the
+    /// app activating, so the real keyboard still goes to the app in front.
+    func postTestKey(_ spec: String) {
+        var parts = spec.lowercased().split(separator: "+").map(String.init)
+        let name = parts.popLast() ?? ""
+        let keys: [String: (code: UInt16, char: String)] = ["return": (36, "\r"), "enter": (76, "\u{3}"), "tab": (48, "\t"), "esc": (53, "\u{1b}")]
+        let flags: [String: NSEvent.ModifierFlags] = ["shift": .shift, "cmd": .command, "ctrl": .control, "alt": .option]
+        guard let key = keys[name], parts.allSatisfy({ flags[$0] != nil }) else { return log("TypeText: unknown key \(spec)") }
+        let modifiers = parts.reduce(into: NSEvent.ModifierFlags()) { $0.formUnion(flags[$1]!) }
+        window.makeKey()
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
+                                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                               context: nil, characters: key.char, charactersIgnoringModifiers: key.char,
+                                               isARepeat: false, keyCode: key.code) else { continue }
+            NSApp.postEvent(event, atStart: false)
         }
     }
 
