@@ -1,4 +1,5 @@
 import ClothoKit
+import PhotosUI
 import SwiftUI
 
 /// One pane full screen. A strip above it switches between the tab's panes (tap or swipe), the title menu
@@ -13,6 +14,8 @@ struct PaneScreen: View {
     @State private var browsingFiles: String?
     /// Bumped each time the pane copies to the clipboard, which shows "Copied" briefly.
     @State private var copies = 0
+    @State private var pickingPhoto = false
+    @State private var photo: PhotosPickerItem?
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
 
     init(connection: MachineConnection, initialTab: TabID, initialPane: PaneID? = nil) {
@@ -46,6 +49,8 @@ struct PaneScreen: View {
                 statusBadge
             }
             .overlay(alignment: .bottom) { copiedBadge }
+            // Uploads for pasted images and photos: progress, and any failure (nothing is pasted then).
+            TransferBar(machine: connection.machine.id)
         }
         .background(Color(Theme.background))
         // Tap the title for the other tabs, or Rename to edit this one's title in place.
@@ -62,6 +67,12 @@ struct PaneScreen: View {
         }
         .onChange(of: fontSize) { _, size in
             connection.setFont(UIFont.monospacedSystemFont(ofSize: size, weight: .regular))
+        }
+        .photosPicker(isPresented: $pickingPhoto, selection: $photo, matching: .any(of: [.images, .screenshots]))
+        .onChange(of: photo) { _, item in
+            guard let item else { return }
+            photo = nil
+            pastePhoto(item)
         }
         .sheet(item: Binding(get: { browsingFiles.map(FilesStart.init) }, set: { browsingFiles = $0?.path })) { start in
             NavigationStack {
@@ -180,6 +191,7 @@ struct PaneScreen: View {
                 Button("Smaller") { fontSize = max(fontSize - 1, 7) }
             }
             Button { browsingFiles = pane?.cwd ?? "~" } label: { Label("Files here", systemImage: "folder") }
+            Button { pickingPhoto = true } label: { Label("Paste Photo…", systemImage: "photo.on.rectangle") }
             Divider()
             Button(role: .destructive) { closePane() } label: { Label("Close pane", systemImage: "xmark.square") }
             Button(role: .destructive) { closeTab() } label: { Label("Close tab", systemImage: "xmark.rectangle") }
@@ -241,6 +253,19 @@ struct PaneScreen: View {
             let created = try await backend.split(current, direction: direction,
                                                   spawn: SpawnOptions(cwd: nil, cols: size.cols, rows: size.rows))
             await MainActor.run { paneID = created.pane }
+        }
+    }
+
+    /// Saves a photo or screenshot on the machine and pastes its path into the pane, for an agent to attach.
+    private func pastePhoto(_ item: PhotosPickerItem) {
+        guard let pane else { return }
+        let host = connection.terminal(for: pane)
+        Task {
+            guard let data = try? await item.loadTransferable(type: Data.self), let png = ImagePaste.png(data) else {
+                TransferCenter.shared.fail("Paste photo", on: connection, "The photo couldn't be read.")
+                return
+            }
+            connection.pasteImage(png, into: host)
         }
     }
 

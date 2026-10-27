@@ -41,4 +41,43 @@ final class ClothoTests: XCTestCase {
         XCTAssertFalse(PaneClipboard.copy("", selection: false, visible: true, to: pasteboard), "empty copy")
         XCTAssertEqual(written, ["hi"])
     }
+
+    /// Hardware keys sent as the Mac app sends them, only in legacy keyboard mode.
+    func testEditingKeys() {
+        func keys(_ code: UIKeyboardHIDUsage, _ mods: UIKeyModifierFlags, kitty: Bool = false) -> [UInt8]? {
+            EditingKeys.bytes(keyCode: code, modifiers: mods, kitty: kitty)
+        }
+        XCTAssertEqual(keys(.keyboardReturnOrEnter, .shift), [0x1b, 0x0d])
+        XCTAssertEqual(keys(.keypadEnter, [.shift, .numericPad]), [0x1b, 0x0d], "keypad Enter carries numericPad")
+        XCTAssertEqual(keys(.keyboardLeftArrow, .command), [0x01])
+        XCTAssertEqual(keys(.keyboardRightArrow, .command), [0x05])
+        XCTAssertEqual(keys(.keyboardDeleteOrBackspace, .command), [0x15])
+        XCTAssertNil(keys(.keyboardReturnOrEnter, []), "plain Return submits")
+        XCTAssertNil(keys(.keyboardReturnOrEnter, [.shift, .command]))
+        XCTAssertNil(keys(.keyboardLeftArrow, [.command, .shift]), "⌘⇧← is left to SwiftTerm")
+        XCTAssertNil(keys(.keyboardReturnOrEnter, .shift, kitty: true), "kitty mode: SwiftTerm sends CSI 13;2u")
+        XCTAssertNil(keys(.keyboardLeftArrow, .command, kitty: true))
+        XCTAssertEqual(EditingKeys.newline(kitty: false), [0x1b, 0x0d])
+        XCTAssertEqual(EditingKeys.newline(kitty: true), Array("\u{1b}[13;2u".utf8))
+    }
+
+    func testImagePasteNamesFoldersAndExpiry() {
+        XCTAssertTrue(ImagePaste.shouldPasteImage(hasText: false, hasImage: true))
+        XCTAssertFalse(ImagePaste.shouldPasteImage(hasText: true, hasImage: true), "text wins")
+        XCTAssertFalse(ImagePaste.shouldPasteImage(hasText: false, hasImage: false))
+        let date = Date(timeIntervalSince1970: 1_793_115_662) // 2026-10-27 15:41:02 UTC
+        XCTAssertEqual(ImagePaste.imageName(date, id: "a1b2c3"), "20261027-154102-a1b2c3.png")
+        XCTAssertEqual(ImagePaste.newID().count, 6)
+        XCTAssertEqual(ImagePaste.remoteFolder(home: "/home/me"), "/home/me/.cache/clotho/paste")
+        XCTAssertEqual(ImagePaste.remoteFolder(home: "/Users/me/"), "/Users/me/.cache/clotho/paste")
+        XCTAssertEqual(ImagePaste.typed("/Users/a b/(x).png"), "/Users/a\\ b/\\(x\\).png")
+        let now = Date()
+        func entry(_ name: String, age: TimeInterval) -> FileEntry {
+            FileEntry(name: name, path: "/p/" + name, type: .file, size: 1, mtime: now.timeIntervalSince1970 - age,
+                      mtimeNs: "0", mode: 0o644, hidden: false)
+        }
+        XCTAssertEqual(ImagePaste.expired([entry("old", age: 8 * 86400), entry("new", age: 86400)], now: now), ["/p/old"])
+        let pixel = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).jpegData(withCompressionQuality: 1) { _ in }
+        XCTAssertEqual(ImagePaste.png(pixel)?.prefix(4), Data([0x89, 0x50, 0x4e, 0x47]), "JPEG becomes PNG")
+    }
 }

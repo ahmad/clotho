@@ -106,16 +106,26 @@ final class TransferCenter: ObservableObject {
     }
 
     /// Uploads local files (from the document picker or Photos) into `directory` on the machine.
-    /// `release` runs when it's over, to end security-scoped access or delete temporary copies.
+    /// `release` runs when it's over, to end security-scoped access or delete temporary copies; `finished`
+    /// then says whether everything arrived.
     func upload(_ urls: [URL], into directory: String, on connection: MachineConnection, conflict: FileTransfer.Conflict,
-                release: @escaping () -> Void = {}) {
-        guard !urls.isEmpty else { return release() }
-        let transfer = Transfer(machine: connection.machine.id, direction: .upload, title: Self.title(urls.map(\.lastPathComponent)))
-        start(transfer, connection: connection, release: release) { remote in
+                title: String? = nil, release: @escaping () -> Void = {}, finished: ((Bool) -> Void)? = nil) {
+        guard !urls.isEmpty else { release(); finished?(false); return }
+        let transfer = Transfer(machine: connection.machine.id, direction: .upload, title: title ?? Self.title(urls.map(\.lastPathComponent)))
+        start(transfer, connection: connection, release: { release(); finished?(transfer.state == .done) }) { remote in
             FileTransfer(from: LocalFileBackend(), to: remote).configured(constrained: self.constrained)
         } copy: { transfer, progress in
             try await transfer.copy(urls.map(\.path), into: directory, conflict: conflict, progress: progress)
         }
+    }
+
+    /// A transfer that failed before it could start, shown like any other failure.
+    func fail(_ title: String, on connection: MachineConnection, _ message: String) {
+        log("\(title) on \(connection.machine.displayName) failed: \(message)")
+        let transfer = Transfer(machine: connection.machine.id, direction: .upload, title: title)
+        transfer.state = .failed(message)
+        transfers.removeAll { $0.state == .done }
+        transfers.append(transfer)
     }
 
     func cancel(_ transfer: Transfer) {

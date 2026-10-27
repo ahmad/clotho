@@ -21,6 +21,37 @@ final class PaneTerminalView: TerminalView {
         super.send(source: source, data: data)
     }
 
+    /// Paste with an image and no text on the clipboard; the host uploads it and pastes its path.
+    var onImagePaste: ((Data) -> Void)?
+
+    var kittyKeyboard: Bool { !keyboardEnhancementFlags.isEmpty }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        let kitty = kittyKeyboard
+        var rest = Set<UIPress>()
+        for press in presses {
+            if let key = press.key, let bytes = EditingKeys.bytes(keyCode: key.keyCode, modifiers: key.modifierFlags, kitty: kitty) {
+                // SwiftTerm never sees the press; its pressesEnded only reports releases of presses it reported.
+                send(bytes)
+            } else {
+                rest.insert(press)
+            }
+        }
+        if !rest.isEmpty { super.pressesBegan(rest, with: event) }
+    }
+
+    /// An image alone on the clipboard can't go through a terminal paste, and the agent reading it runs on
+    /// another machine; the host saves it there and pastes the path (ImagePaste). Text still wins.
+    override func paste(_ sender: Any?) {
+        let board = UIPasteboard.general
+        if let onImagePaste, ImagePaste.shouldPasteImage(hasText: board.hasStrings, hasImage: board.hasImages) {
+            guard let png = ImagePaste.png(from: board) else { return }
+            onImagePaste(png)
+            return
+        }
+        super.paste(sender)
+    }
+
     func feedFromBackend(_ bytes: Data) {
         isFeeding = true
         bytes.withUnsafeBytes { raw in feed(byteArray: ArraySlice(raw.bindMemory(to: UInt8.self))) }

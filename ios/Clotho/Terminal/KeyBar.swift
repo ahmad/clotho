@@ -1,7 +1,7 @@
 import SwiftTerm
 import UIKit
 
-/// The row above the software keyboard: esc, a sticky ctrl, tab, arrows, | ~ / and paste. Keys go through
+/// The row above the software keyboard: esc, a sticky ctrl, tab, arrows, | ~ / -, a newline and paste. Keys go through
 /// the terminal's own send path, so they reach the pane like typed keys and respect cursor-key mode.
 final class KeyBar: UIInputView {
     static let height: CGFloat = 44
@@ -15,7 +15,7 @@ final class KeyBar: UIInputView {
     private var resetObserver: NSObjectProtocol?
 
     private enum Key {
-        case esc, ctrl, tab, up, down, left, right, text(String), paste, hideKeyboard
+        case esc, ctrl, tab, up, down, left, right, text(String), newline, paste, hideKeyboard
     }
 
     override init(frame: CGRect, inputViewStyle: UIInputView.Style) {
@@ -63,7 +63,7 @@ final class KeyBar: UIInputView {
             ("esc", .esc), ("ctrl", .ctrl), ("tab", .tab),
             ("arrow.left", .left), ("arrow.down", .down), ("arrow.up", .up), ("arrow.right", .right),
             ("|", .text("|")), ("~", .text("~")), ("/", .text("/")), ("-", .text("-")),
-            ("doc.on.clipboard", .paste), ("keyboard.chevron.compact.down", .hideKeyboard),
+            ("return", .newline), ("doc.on.clipboard", .paste), ("keyboard.chevron.compact.down", .hideKeyboard),
         ]
         for (label, key) in keys {
             let button = makeButton(label, key)
@@ -87,7 +87,11 @@ final class KeyBar: UIInputView {
             config.attributedTitle = title
         }
         let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in self?.press(key) })
-        button.accessibilityLabel = label
+        button.accessibilityLabel = switch key {
+        case .newline: "Newline"
+        case .paste: "Paste"
+        default: label
+        }
         button.widthAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
         return button
     }
@@ -107,6 +111,9 @@ final class KeyBar: UIInputView {
             // Sticky: applies to the next key typed on the software keyboard, then resets itself.
             terminal.controlModifier.toggle()
             updateCtrl()
+        case .newline:
+            // A newline in an agent's prompt, as Shift-Return sends it; Return submits.
+            terminal.send(EditingKeys.newline(kitty: (terminal as? PaneTerminalView)?.kittyKeyboard ?? false))
         case .paste:
             terminal.paste(nil)
         case .hideKeyboard:

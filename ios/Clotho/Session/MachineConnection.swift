@@ -261,6 +261,10 @@ final class MachineConnection: ObservableObject, Identifiable {
     func terminal(for pane: Pane) -> PaneHostView {
         if let host = panes[pane.id] { return host }
         let host = PaneHostView(pane: pane, store: store)
+        host.terminal.onImagePaste = { [weak self, weak host] png in
+            guard let self, let host else { return }
+            self.pasteImage(png, into: host)
+        }
         panes[pane.id] = host
         return host
     }
