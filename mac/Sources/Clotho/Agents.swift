@@ -21,9 +21,9 @@ struct AgentEntry {
     /// The machine's daemon can type for us (`pane.keys`), so quick replies are offered.
     let canReply: Bool
 
-    /// Quick replies make sense while the agent waits for the user, or has finished and not been seen
-    /// (it often ends by asking something).
-    var offersReplies: Bool { canReply && (info.state == .waiting || info.needsAttention) }
+    /// Quick replies only when the agent itself (through its hooks) says it's waiting for the user.
+    /// Detected or idle agents aren't asking anything.
+    var offersReplies: Bool { canReply && info.state == .waiting && info.needsAttention && info.isHookSourced }
 
     /// Waiting first, then finished or failed ones nobody has looked at, then running, then the rest.
     var rank: Int {
@@ -450,33 +450,6 @@ final class AgentRow: ChromeItem {
             detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
             detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 1),
             detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -10),
-        ])
-    }
-
-    /// Reply buttons on a third line: the keys a prompt takes for a waiting agent, and a typed reply for
-    /// one that finished (which often ends with a question).
-    func addReplyButtons(keys: Bool, onReply: @escaping ([String]) -> Void, onText: @escaping () -> Void) {
-        var buttons: [NSView] = (keys ? AppDelegate.quickReplies : []).map { reply in
-            let button = ClosureButton(title: reply.title) { onReply(reply.keys) }
-            button.toolTip = reply.help
-            return button
-        }
-        let text = ClosureButton(title: "Reply…", action: onText)
-        text.toolTip = "Type a reply and send it with Return"
-        buttons.append(text)
-        for case let button as NSButton in buttons {
-            button.bezelStyle = .recessed
-            button.controlSize = .small
-            button.font = NSFont.systemFont(ofSize: 11)
-        }
-        let strip = NSStackView(views: buttons)
-        strip.spacing = 3
-        strip.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(strip)
-        NSLayoutConstraint.activate([
-            strip.leadingAnchor.constraint(equalTo: label.leadingAnchor, constant: -2),
-            strip.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 4),
-            strip.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
         ])
     }
 

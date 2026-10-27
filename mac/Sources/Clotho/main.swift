@@ -279,8 +279,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
-        sidebar.onAgentReply = { [weak self] machine, pane, keys in self?.reply(machine: machine, pane: pane, keys: keys) }
-        sidebar.onAgentTextReply = { [weak self] machine, pane in self?.promptReply(machine: machine, pane: pane) }
         sidebar.agentRowMenu = { [weak self] machine, pane, canReply in
             self?.agentMenu(machine: machine, pane: pane, canReply: canReply) ?? NSMenu()
         }
