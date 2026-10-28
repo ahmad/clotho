@@ -19,6 +19,11 @@ failed=""
 step() { printf '\n=== %s\n' "$*"; }
 fail() { failed="$failed\n  - $*"; printf 'FAILED: %s\n' "$*"; }
 
+# The Mac's disk is small: check there's room first, and clean target/ when done, pass or fail
+# (scripts/build-space.sh). The dist.sh this runs leaves target/ alone (CLOTHOD_KEEP_BUILD).
+scripts/build-space.sh check || exit 1
+trap 'scripts/build-space.sh clean' EXIT
+
 step "macOS: cargo test"
 if cargo test 2>&1 | tee target/test-all-macos.log | grep -E "^test result|panicked|^error" ; then :; fi
 grep -q "FAILED\|panicked\|^error" target/test-all-macos.log && fail "macOS tests (target/test-all-macos.log)"
@@ -42,7 +47,7 @@ else
 fi
 
 step "dev dist for the remote suite"
-DIST_DIR=target/dist-dev ./scripts/dist.sh --dev > target/test-all-dist.log 2>&1 || fail "dev dist (target/test-all-dist.log)"
+CLOTHOD_KEEP_BUILD=1 DIST_DIR=target/dist-dev ./scripts/dist.sh --dev > target/test-all-dist.log 2>&1 || fail "dev dist (target/test-all-dist.log)"
 
 for h in $REMOTE_HOSTS; do
     step "remote: $h"

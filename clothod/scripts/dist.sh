@@ -45,6 +45,11 @@ if [ "$dev" = 0 ] && ! newer "$version" "$released"; then
     exit 1
 fi
 
+# The Mac's disk is small: check there's room, and clean target/ when done, pass or fail
+# (scripts/build-space.sh; dist/ is never touched).
+scripts/build-space.sh check
+trap 'scripts/build-space.sh clean' EXIT
+
 builds="macos-aarch64:aarch64-apple-darwin macos-x86_64:x86_64-apple-darwin linux-x86_64:x86_64-unknown-linux-musl linux-aarch64:aarch64-unknown-linux-musl"
 
 # Linux builds link statically against musl; ring (TLS for push alerts) has C code, so they go
