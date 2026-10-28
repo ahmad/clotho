@@ -113,6 +113,17 @@ invalidates every handle; phones get new ones on their next launch.
 In clothod, per registration:
 - One push per attention false-to-true transition. Detection guesses never raise attention, so
   quiet output doesn't push.
+- Except a rise into `done` while the user is at the pane: a client that shows the pane
+  (subscribed) sent it input within the last 60 s. The user sees that turn end, so attention is
+  raised (badges and the Agents list show it) but no push is sent. `waiting` and `error` always
+  push.
+- Reports from an agent that the pane's agent runs (an SDK app under test, `claude -p` from a tool,
+  `codex exec`) are ignored: `agent.report` answers `{"ignored": "nested"}`, and the pane's agent,
+  its attention and pushes are untouched.
+- Hook events that say nothing new leave the state and attention alone, so they never push: Claude
+  Code's `Notification` with `notification_type` `idle_prompt` (the "waiting for your input"
+  reminder a minute after a turn ends) or `auth_success`, and `SessionStart` with `source`
+  `"compact"`. See docs/protocol.md, Agents, for the full hook mapping.
 - At most one push per pane every 30 s (a newer one waits and is sent with the latest state), and at
   most 60 per device per hour. Past that, pushes are dropped and `last_error` says so.
 - When the relay is unreachable or answers 429 or 5xx: retry with backoff (2 s doubling to 60 s) for
