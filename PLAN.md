@@ -296,3 +296,17 @@ clothod release, app install or TestFlight upload still needs the user's go when
   for agents that need the user.
 - Onboarding: much simpler and easy to follow.
 - Terms stay Workspace, Tab and Pane.
+- The phased plan was approved by the user. Phases in order:
+  1. saved state
+  2. the one-screen Home, which replaces the iPhone machine screen; machine settings and files move
+     into a menu on the machine header
+  3. three-step onboarding
+  4. Allow/Deny/Reply
+  5. the terminal screen
+  6. the widget, then the Live Activity
+- Allow/Deny: clothod starts now, in parallel. It uses Claude's PermissionRequest hook and an
+  `agent.decide` bound to the request id, and runs a spike first. Installing the new hook on the
+  user's machines needs the user's OK.
+- The Live Activity shows generic content only: agent kind, state and elapsed time.
+- Notifications carry more detail: workspace, project, duration, and the result or the command
+  waiting for permission. This ships in 0.1.13.
