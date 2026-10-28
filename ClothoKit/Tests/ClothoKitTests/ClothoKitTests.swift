@@ -561,6 +561,59 @@ final class SavedStateTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(CachedMachineState.self, from: data), snapshot)
     }
 
+    /// Regression (44d9daf): `case .pane, .agent where phase == .saved` applied the `where` to `.agent`
+    /// only, so every live `.pane` event was dropped. Live pane events must update the model and report
+    /// agent changes.
+    func testLivePaneEventsApply() throws {
+        let store = ModelStore(backend: FakeBackend())
+        store.apply(.connected(hello("live")))
+        store.apply(.state(model("Live")))
+        var changes: [(PaneID, AgentInfo?, AgentInfo?)] = []
+        var notified = 0
+        store.onAgentChange = { changes.append(($0, $1, $2)) }
+        store.onChange = { notified += 1 }
+
+        var pane = try XCTUnwrap(store.state.pane(3))
+        pane.title = "vim"
+        pane.cwd = "/srv/web"
+        let waiting = AgentInfo(kind: "claude", state: .waiting, attention: true)
+        pane.agent = waiting
+        store.apply(.pane(pane, rev: 8))
+        XCTAssertEqual(store.state.pane(3)?.title, "vim")
+        XCTAssertEqual(store.state.pane(3)?.cwd, "/srv/web")
+        XCTAssertEqual(store.state.rev, 8)
+        XCTAssertEqual(changes.count, 1)
+        XCTAssertEqual(changes.first?.0, 3)
+        XCTAssertNil(changes.first?.1)
+        XCTAssertEqual(changes.first?.2, waiting)
+        XCTAssertEqual(notified, 1)
+
+        // A pane the model doesn't have yet is added.
+        store.apply(.pane(Pane(id: 4, cols: 80, rows: 24), rev: 9))
+        XCTAssertNotNil(store.state.pane(4))
+        // And .agent events apply live too.
+        store.apply(.agent(3, nil))
+        XCTAssertNil(store.state.pane(3)?.agent)
+        XCTAssertEqual(changes.count, 2)
+    }
+
+    func testPaneEventsWhileSavedAreIgnored() throws {
+        let store = ModelStore(backend: FakeBackend())
+        store.restore(CachedMachineState(state: model("Saved"), lastSeen: Date()))
+        var changes = 0
+        store.onAgentChange = { _, _, _ in changes += 1 }
+        var pane = try XCTUnwrap(store.state.pane(3))
+        pane.title = "live title"
+        pane.agent = AgentInfo(kind: "claude", state: .done, attention: true)
+        store.apply(.pane(pane, rev: 50))
+        store.apply(.pane(Pane(id: 9, cols: 80, rows: 24), rev: 51))
+        XCTAssertNil(store.state.pane(3)?.title, "the saved model is untouched")
+        XCTAssertNil(store.state.pane(9))
+        XCTAssertEqual(store.state.rev, 7)
+        XCTAssertEqual(changes, 0)
+        XCTAssertEqual(store.phase, .saved)
+    }
+
     func testOtherFormatsAreIgnored() {
         let store = ModelStore(backend: FakeBackend())
         store.restore(CachedMachineState(state: model("Old"), lastSeen: Date(), format: 99))

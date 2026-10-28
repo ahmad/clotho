@@ -175,10 +175,10 @@ public final class ModelStore: ObservableObject {
                 saved = nil
             }
             onChange?()
-        case .pane, .agent where phase == .saved:
-            // Changes to a model this client doesn't have yet; the daemon's whole state follows.
-            return
         case .pane(let pane, let rev):
+            // While a saved model shows, changes to the live one it doesn't have yet are dropped: the
+            // daemon's whole state follows.
+            guard phase == .live else { return }
             if let index = state.panes.firstIndex(where: { $0.id == pane.id }) {
                 let before = state.panes[index].agent
                 state.panes[index] = pane
@@ -209,6 +209,7 @@ public final class ModelStore: ObservableObject {
         case .resync(let pane):
             sinks[pane]?.sink?.paneResync()
         case .agent(let pane, let agent):
+            guard phase == .live else { return }
             guard let index = state.panes.firstIndex(where: { $0.id == pane }), state.panes[index].agent != agent else { return }
             let before = state.panes[index].agent
             state.panes[index].agent = agent

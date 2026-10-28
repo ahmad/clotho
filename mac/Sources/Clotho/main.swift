@@ -564,8 +564,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
                 // "quick:bb api" opens quick open with that query and logs the results; "quick:" + "open" picks the top one.
                 if step.hasPrefix("quick:") {
-                    if quickOpen == nil { showQuickOpen(nil) }
                     let query = String(step.dropFirst(6))
+                    // "quick:close" dismisses it, so the next "quick:" lists the model as it is then.
+                    if query == "close" { return quickOpen?.dismiss() ?? () }
+                    if quickOpen == nil { showQuickOpen(nil) }
                     if query == "\r" || query == "open" { return quickOpen?.open() ?? () }
                     quickOpen?.setQuery(query)
                     return log("quick open \"\(query)\": " + (quickOpen?.results.map { "\($0.item.kind) \($0.item.title) [\($0.item.subtitle)]" }.joined(separator: " | ") ?? ""))
