@@ -96,6 +96,11 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     var onScroll: (() -> Void)?
     /// When the pane leaves the screen, so its last screen can be saved first.
     var onLeave: ((PaneHostView) -> Void)?
+    /// A two-finger swipe across the pane: +1 for the next tab (swiped left), -1 for the previous.
+    var onSwipeTab: ((Int) -> Void)?
+    /// A pinch ended: the font size it asks for (the pane is resized once, then).
+    var onZoom: ((CGFloat) -> Void)?
+    private var pinchStartSize: CGFloat = Theme.fontSize
     /// Read-only while the machine shows its saved model.
     var readOnly = false {
         didSet {
@@ -140,6 +145,57 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
             TerminalPalette.current(self.traitCollection).apply(to: self.terminal)
         }
         store.register(self, for: pane.id)
+        addGestures()
+    }
+
+    // MARK: Gestures
+
+    /// Two-finger swipes switch tabs and a pinch zooms the text. Two fingers, so the terminal's own one-finger
+    /// drags (scrolling, selecting, mouse mode) and the screen-edge back swipe keep working.
+    private func addGestures() {
+        for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
+            swipe.direction = direction
+            swipe.numberOfTouchesRequired = 2
+            swipe.delegate = self
+            addGestureRecognizer(swipe)
+        }
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+    }
+
+    @objc private func swiped(_ swipe: UISwipeGestureRecognizer) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        onSwipeTab?(swipe.direction == .left ? 1 : -1)
+    }
+
+    /// While pinching, the text scales as a preview; at the end the font changes once (so the PTY resizes once).
+    @objc private func pinched(_ pinch: UIPinchGestureRecognizer) {
+        switch pinch.state {
+        case .began:
+            pinchStartSize = terminal.font.pointSize
+        case .changed:
+            let scale = min(max(pinch.scale, Self.minFont / pinchStartSize), Self.maxFont / pinchStartSize)
+            terminal.transform = CGAffineTransform(scaleX: scale, y: scale)
+        case .ended:
+            let size = Self.zoomedSize(from: pinchStartSize, scale: pinch.scale)
+            setNeedsLayout()
+            if size != pinchStartSize {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onZoom?(size)
+            }
+        default:
+            setNeedsLayout()
+        }
+    }
+
+    static let minFont: CGFloat = 7
+    static let maxFont: CGFloat = 28
+
+    /// The font a pinch asks for: the start size times the pinch, in whole points, within 7–28.
+    static func zoomedSize(from start: CGFloat, scale: CGFloat) -> CGFloat {
+        min(max((start * scale).rounded(), minFont), maxFont)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -416,4 +472,10 @@ extension PaneHostView: UIPointerInteractionDelegate {
     func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
         UIPointerStyle(shape: .verticalBeam(length: terminal.font.lineHeight))
     }
+}
+
+extension PaneHostView: UIGestureRecognizerDelegate {
+    /// Alongside the terminal's own recognizers (its scroll view's pan, selection).
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }

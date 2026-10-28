@@ -4,7 +4,8 @@ import UIKit
 /// The row above the software keyboard: esc, a sticky ctrl, tab, arrows, | ~ / -, a newline and paste. Keys go through
 /// the terminal's own send path, so they reach the pane like typed keys and respect cursor-key mode.
 final class KeyBar: UIInputView {
-    static let height: CGFloat = 44
+    /// Taller than the 44 pt minimum: the keys are used all the time, often one-handed.
+    static let height: CGFloat = 52
     /// Keys in dark, and the Mac's light hover grey (#E1E3E1) with the light terminal's text in light.
     static let keyBackground = UIColor { $0.userInterfaceStyle == .light ? UIColor(hex: 0xE1E3E1) : UIColor(white: 0.32, alpha: 1) }
     static let keyForeground = UIColor { $0.userInterfaceStyle == .light ? UIColor(hex: 0x2B3035) : .white }
@@ -83,10 +84,10 @@ final class KeyBar: UIInputView {
         config.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 10, bottom: 0, trailing: 10)
         let isSymbol = label.contains(".") && UIImage(systemName: label) != nil
         if isSymbol {
-            config.image = UIImage(systemName: label, withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .medium))
+            config.image = UIImage(systemName: label, withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .medium))
         } else {
             var title = AttributedString(label)
-            title.font = .monospacedSystemFont(ofSize: 15, weight: .medium)
+            title.font = .monospacedSystemFont(ofSize: 17, weight: .medium)
             config.attributedTitle = title
         }
         let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in self?.press(key) })
@@ -96,13 +97,14 @@ final class KeyBar: UIInputView {
         case .paste: "Paste"
         default: label
         }
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
         return button
     }
 
     private func press(_ key: Key) {
         guard let terminal else { return }
         UIDevice.current.playInputClick()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         switch key {
         case .esc: terminal.send([0x1b])
         case .tab: terminal.send([0x09])

@@ -60,7 +60,8 @@ struct PaneScreen: View {
             statusBar
             ZStack(alignment: .topTrailing) {
                 if let pane {
-                    TerminalContainer(host: connection.terminal(for: pane), onMode: { [notes] in notes.mode = $0 }, onCopy: { [notes] in notes.copies += 1 })
+                    TerminalContainer(host: connection.terminal(for: pane), onMode: { [notes] in notes.mode = $0 }, onCopy: { [notes] in notes.copies += 1 },
+                                      onSwipeTab: { step(tab: $0) }, onZoom: { fontSize = Double($0) })
                         .id(pane.id)
                         // Zero-size: the notes draw nothing over the pane (see PaneNotesView).
                         .background(PaneNotesView(notes: notes))
@@ -211,7 +212,8 @@ struct PaneScreen: View {
             Button { split(.right) } label: { Label("Split right", systemImage: "rectangle.split.2x1") }
             Button { split(.down) } label: { Label("Split down", systemImage: "rectangle.split.1x2") }
             Divider()
-            Menu("Text size") {
+            // The size shows in the title, so a pinch's result can be read here too.
+            Menu("Text size · \(Int(fontSize)) pt") {
                 Button("Larger") { fontSize = min(fontSize + 1, 28) }
                 Button("Smaller") { fontSize = max(fontSize - 1, 7) }
             }
@@ -370,6 +372,8 @@ struct TerminalContainer: UIViewRepresentable {
     let host: PaneHostView
     var onMode: (Subscription.Mode) -> Void
     var onCopy: () -> Void = {}
+    var onSwipeTab: (Int) -> Void = { _ in }
+    var onZoom: (CGFloat) -> Void = { _ in }
 
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
@@ -384,6 +388,8 @@ struct TerminalContainer: UIViewRepresentable {
         if host.superview !== container, host.window == nil || host.window === container.window { install(in: container) }
         host.onModeChange = onMode
         host.onCopy = onCopy
+        host.onSwipeTab = onSwipeTab
+        host.onZoom = onZoom
     }
 
     private func install(in container: UIView) {
@@ -392,6 +398,8 @@ struct TerminalContainer: UIViewRepresentable {
         host.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         host.onModeChange = onMode
         host.onCopy = onCopy
+        host.onSwipeTab = onSwipeTab
+        host.onZoom = onZoom
         container.addSubview(host)
         DispatchQueue.main.async { _ = host.terminal.becomeFirstResponder() }
     }

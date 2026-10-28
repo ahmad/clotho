@@ -104,6 +104,13 @@ final class SavedStateTests: XCTestCase {
         XCTAssertNotNil(SavedState(root: root, defaults: defaults).load(other))
     }
 
+    func testPinchZoomSizes() {
+        XCTAssertEqual(PaneHostView.zoomedSize(from: 13, scale: 1.5), 20)
+        XCTAssertEqual(PaneHostView.zoomedSize(from: 13, scale: 0.5), 7, "no smaller than 7 pt")
+        XCTAssertEqual(PaneHostView.zoomedSize(from: 13, scale: 3), 28, "no bigger than 28 pt")
+        XCTAssertEqual(PaneHostView.zoomedSize(from: 13, scale: 1.02), 13, "a tiny pinch changes nothing")
+    }
+
     func testAgentAgeIsCompact() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(-31), now: now), "now")
