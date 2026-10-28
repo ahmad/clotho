@@ -41,6 +41,21 @@ echo "== Mac"
 [ -f $T/sshd.pid ] && "$(dirname "$0")/ssh-test-server.sh" stop
 print -r -- "$CLEANUP" | CKI=1 sh -s
 
+# Keep ~/Builds small (CLAUDE.md): the code index, the old in-tree archive, and every test result but the
+# newest (kept so a failure can still be looked at). Paths are under this checkout's ios/build only; the
+# build cache (Build/, SourcePackages/) stays for the next run.
+build="$(cd "$(dirname "$0")/.." && pwd)/build"
+if [ -d "$build" ]; then
+  rm -rf "$build/Index.noindex" "$build/Clotho.xcarchive" "$build/export"
+  if [ -d "$build/Logs/Test" ]; then
+    ls -1t "$build/Logs/Test" | grep '\.xcresult$' | tail -n +2 | while read -r r; do rm -rf "$build/Logs/Test/$r"; done
+  fi
+fi
+free=$(df -g "$HOME" 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "$free" ]; then
+  if [ "$free" -lt 20 ]; then echo "!! only ${free} GiB free on this Mac (keep at least 20)"; else echo "${free} GiB free"; fi
+fi
+
 hosts=()
 [ -f $T/ui-host ] && hosts+=("$(cat $T/ui-host)")
 if [ -f $T/host ] && [ "$(cat $T/host)" != 127.0.0.1 ]; then hosts+=("$(cat $T/user 2>/dev/null)@$(cat $T/host)"); fi
