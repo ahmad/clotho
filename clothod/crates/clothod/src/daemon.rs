@@ -88,9 +88,22 @@ pub(crate) struct Client {
     dropped: AtomicBool,
     kill: tokio::sync::Notify,
     control_max: usize,
+    /// The `client` string from `hello` and the connecting process, for the log.
+    name: Mutex<String>,
+    peer_pid: Option<u32>,
 }
 
 impl Client {
+    /// How the log names this connection: `client 12 (clotho-ios/1.2, pid 4242)`.
+    fn label(&self) -> String {
+        let name = self.name.lock().unwrap().clone();
+        let name = if name.is_empty() { "no hello".into() } else { name };
+        match self.peer_pid {
+            Some(pid) => format!("client {} ({name}, pid {pid})", self.id),
+            None => format!("client {} ({name})", self.id),
+        }
+    }
+
     fn control(&self, frame: Vec<u8>) {
         if self.dropped.load(Ordering::Relaxed) {
             return;
@@ -220,6 +233,25 @@ const AGENT_STATES: [&str; 5] = ["starting", "running", "waiting", "done", "erro
 
 /// Detected agents count as running while output arrived this recently.
 const AGENT_ACTIVE: Duration = Duration::from_millis(1500);
+
+/// A line in clothod.log, with the time (UTC): what closed panes and answered requests, which
+/// clients don't log anywhere else.
+fn log(msg: impl std::fmt::Display) {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let (secs, ms) = (t.as_secs() as i64, t.subsec_millis());
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = secs.div_euclid(86400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let sod = secs.rem_euclid(86400);
+    eprintln!("clothod: {y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z {msg}", sod / 3600, sod / 60 % 60, sod % 60);
+}
 
 fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -1287,6 +1319,15 @@ impl Daemon {
 
     fn on_exit(&self, pane: u64, status: ExitStatus) {
         let Some(p) = self.pane(pane) else { return };
+        let place = self.model.lock().unwrap().locate(pane);
+        let how = match status {
+            ExitStatus::Code(c) => format!("exit status {c}"),
+            ExitStatus::Signal(s) => format!("signal {s}"),
+        };
+        match place {
+            Some((ws, tab)) => log(format_args!("pane {pane} ended ({how}); its tab {tab} in workspace {ws} loses it")),
+            None => log(format_args!("pane {pane} ended ({how})")),
+        }
         {
             let mut p = p.lock().unwrap();
             p.exited = Some(status);
@@ -1747,6 +1788,7 @@ impl Daemon {
 
     async fn serve_client(self: Arc<Self>, stream: UnixStream) {
         let id = self.next_client.fetch_add(1, Ordering::Relaxed);
+        let peer_pid = stream.peer_cred().ok().and_then(|c| c.pid()).and_then(|p| u32::try_from(p).ok());
         let (mut rd, mut wr) = stream.into_split();
         let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
         let (file_tx, mut file_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -1763,6 +1805,8 @@ impl Daemon {
             dropped: AtomicBool::new(false),
             kill: tokio::sync::Notify::new(),
             control_max: control_max(),
+            name: Mutex::new(String::new()),
+            peer_pid,
         });
         self.clients.lock().unwrap().insert(id, client.clone());
 
@@ -1845,6 +1889,7 @@ impl Daemon {
                         if method == "hello" && r.is_ok() {
                             hello = true;
                             let name = params.get("client").and_then(Value::as_str).unwrap_or("");
+                            *client.name.lock().unwrap() = clotho_vt::printable(name, 64);
                             if !name.starts_with("clothod-") {
                                 client.real.store(true, Ordering::SeqCst);
                                 self.had_real_client.store(true, Ordering::SeqCst);
@@ -1940,7 +1985,15 @@ impl Daemon {
             m if m.starts_with("fs.") => crate::fs::request(&self.fs_ctx(), client, m, p).await.map_err(|e| err(e.code, e.message)),
             m if m.starts_with("push.") => self.push.request(m, p).await.map_err(|e| err(e.code, e.message)),
             "agent.report" => self.agent_report(p),
-            "agent.decide" => self.agent_decide(p),
+            "agent.decide" => {
+                let r = self.agent_decide(p);
+                let what = format!("pane {} request {} {}", p["pane"], p["request"], p["decision"]);
+                match &r {
+                    Ok(_) => log(format_args!("{} answered {what}", client.label())),
+                    Err(e) => log(format_args!("{} could not answer {what}: {}", client.label(), e.code)),
+                }
+                r
+            }
             "agent.ack" => {
                 let pane = param_u64(p, "pane")?;
                 let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
@@ -2000,6 +2053,7 @@ impl Daemon {
             "workspace.close" => {
                 let ws = param_u64(p, "workspace")?;
                 let panes = self.model.lock().unwrap().close_workspace(ws).ok_or_else(|| err("not_found", format!("no workspace {ws}")))?;
+                log(format_args!("{} closed workspace {ws} (panes {panes:?})", client.label()));
                 self.hang_up(&panes);
                 self.model_changed();
                 Ok(json!({}))
@@ -2030,6 +2084,7 @@ impl Daemon {
             "tab.close" => {
                 let tab = param_u64(p, "tab")?;
                 let panes = self.model.lock().unwrap().close_tab(tab).ok_or_else(|| err("not_found", format!("no tab {tab}")))?;
+                log(format_args!("{} closed tab {tab} (panes {panes:?})", client.label()));
                 self.hang_up(&panes);
                 self.model_changed();
                 Ok(json!({}))
@@ -2067,6 +2122,7 @@ impl Daemon {
                 if !self.model.lock().unwrap().remove_pane(pane) {
                     return Err(err("not_found", format!("no pane {pane}")));
                 }
+                log(format_args!("{} closed pane {pane}", client.label()));
                 self.hang_up(&[pane]);
                 self.model_changed();
                 Ok(json!({}))

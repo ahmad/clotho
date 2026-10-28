@@ -47,6 +47,11 @@ Socket: `$CLOTHOD_RUNTIME_DIR/clothod.sock`. If that variable is unset, the defa
 Logs (`clothod.log`, `holder.log`) go to `$CLOTHOD_STATE_DIR` if set. Otherwise they go into the
 runtime dir when it isn't the default, so isolated instances keep separate logs, and else to
 `~/Library/Application Support/clothod/` on macOS or `~/.local/state/clothod/` on Linux.
+Since 0.1.15, `clothod.log` also records, with a UTC time, who closed what (`client 12
+(clotho-ios/1.2, pid 4242) closed workspace 28 (panes [22])`), how each pane ended (`pane 22 ended
+(signal 1)`: 1 is SIGHUP, which a close sends) and who answered a permission request, or why it
+couldn't (`stale`). The pid is the connecting process's own; for a remote client that's the
+`clothod bridge` on this machine.
 
 ## Install and upgrade
 

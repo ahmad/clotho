@@ -165,6 +165,14 @@ fn output(line: &str) -> &str {
     line.strip_prefix("$ ").unwrap_or(line)
 }
 
+/// Spawn options plus a request's own params.
+fn with(mut opts: Value, params: Value) -> Value {
+    for (k, v) in params.as_object().unwrap() {
+        opts[k] = v.clone();
+    }
+    opts
+}
+
 fn sh() -> Value {
     json!({"command": ["/bin/sh"], "env": {"PS1": "$ ", "ENV": ""}, "cols": 80, "rows": 24})
 }
@@ -1325,6 +1333,47 @@ async fn permission_requests_are_answered_once_and_only_by_id() {
     wait_file(&dir.join("a.end")).await;
     assert_eq!(std::fs::read_to_string(dir.join("b.out")).unwrap().lines().count(), 1, "one answer per request");
     assert!(pane_agent(&c, p).await["requests"].as_array().unwrap().is_empty());
+}
+
+/// clothod.log says who closed what, how panes ended and who answered which request: clients
+/// keep no record, so this is the only way to tell after the fact.
+#[tokio::test]
+async fn the_log_names_who_closed_and_answered() {
+    let env = Env::new();
+    let c = env.client().await;
+    let me = std::process::id();
+    let ws = c.request("workspace.create", sh()).await.unwrap();
+    let (w, p1) = (ws["workspace"].as_u64().unwrap(), ws["pane"].as_u64().unwrap());
+    let t2 = c.request("tab.create", with(sh(), json!({"workspace": w}))).await.unwrap();
+    let p2 = t2["pane"].as_u64().unwrap();
+    let p3 = c.request("pane.split", with(sh(), json!({"pane": p1}))).await.unwrap()["pane"].as_u64().unwrap();
+    c.request("pane.close", json!({"pane": p3})).await.unwrap();
+    c.request("tab.close", json!({"tab": t2["tab"]})).await.unwrap();
+    c.input(p1, b"exit 3\r");
+    let ws2 = c.request("workspace.create", sh()).await.unwrap();
+    let e = c.request("agent.decide", json!({"pane": ws2["pane"], "request": "0123", "decision": "allow"})).await.unwrap_err();
+    assert!(e.to_string().contains("stale"), "{e}");
+    c.request("workspace.close", json!({"workspace": ws2["workspace"]})).await.unwrap();
+    let who = format!("(clotho-cli/{}, pid {me})", env!("CARGO_PKG_VERSION"));
+    let want = [
+        format!("{who} closed pane {p3}"),
+        format!("{who} closed tab {} (panes [{p2}])", t2["tab"]),
+        format!("pane {p1} ended (exit status 3); its tab {} in workspace {w} loses it", ws["tab"]),
+        format!("{who} could not answer pane {} request \"0123\" \"allow\": stale", ws2["pane"]),
+        format!("{who} closed workspace {} (panes [{}])", ws2["workspace"], ws2["pane"]),
+        format!("pane {} ended (signal 1)", ws2["pane"]),
+    ];
+    let deadline = Instant::now() + T;
+    loop {
+        let log = env.log();
+        let missing: Vec<_> = want.iter().filter(|w| !log.contains(w.as_str())).collect();
+        if missing.is_empty() {
+            assert!(log.lines().filter(|l| l.contains(" closed ") || l.contains(" ended ")).all(|l| l.contains("Z ")), "timestamped:\n{log}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "missing {missing:?} in:\n{log}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// The user answers in the terminal (Claude's own dialog shows all along): the call's
