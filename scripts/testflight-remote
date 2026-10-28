@@ -1,0 +1,36 @@
+#!/bin/bash
+# Uploads the iOS app at the current commit to TestFlight, from devbox, over SSH on the Mac.
+#
+# Usage: scripts/testflight-remote [--dry-run]
+#
+# 1. Hashes the app's sources at HEAD (from git, so stray files don't count) with ios/scripts/sources-sha.sh.
+# 2. Syncs the working tree to the Mac's mirror (clotho-mac).
+# 3. Runs ios/scripts/testflight.sh there with EXPECT_SOURCES_SHA, so the Mac refuses to build anything but HEAD.
+#
+# The App Store Connect key ids come from ~/.config/clotho/asc.env (mode 600, never in the repo); the key itself
+# and the keychain password stay on the Mac. Don't run clotho-mac from anywhere else while this runs.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+case "${1:-}" in "" | --dry-run) ;; *) echo "usage: scripts/testflight-remote [--dry-run]" >&2; exit 64 ;; esac
+
+env_file=$HOME/.config/clotho/asc.env
+[ -r "$env_file" ] || { echo "testflight-remote: missing $env_file" >&2; exit 2; }
+# shellcheck disable=SC1090
+. "$env_file"
+: "${ASC_KEY_ID:?not set in $env_file}" "${ASC_ISSUER_ID:?not set in $env_file}"
+
+paths=(ios/Clotho ios/ClothoNotify ClothoKit/Sources ios/project.yml ios/push.yml ClothoKit/Package.swift clothod/RELEASED)
+if ! git diff --quiet HEAD -- "${paths[@]}" || [ -n "$(git ls-files --others --exclude-standard -- "${paths[@]}")" ]; then
+  echo "testflight-remote: the working tree differs from HEAD in the app's sources; commit or stash first" >&2
+  exit 2
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+git archive HEAD "${paths[@]}" | tar -x -C "$tmp"
+sha=$(ios/scripts/sources-sha.sh "$tmp")
+echo "==> $(git log --oneline -1 HEAD) | sources $sha | clothod $(cat clothod/RELEASED)"
+
+clotho-mac true
+exec ssh ahmad@macbook "cd ~/Builds/clotho-clothod && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
