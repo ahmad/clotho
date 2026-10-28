@@ -597,6 +597,33 @@ mod tests {
     }
 
     /// FULL sealed to PK (by clothod), for iOS to open with SK: a record with every detail.
+    /// A permission wait with its request id (`rq`), for iOS's Allow/Deny actions.
+    fn permission() -> Alert {
+        Alert {
+            state: "waiting".into(),
+            message: Some("Claude needs your permission to use Bash".into()),
+            prompt: Some("run the phone test".into()),
+            tool: Some("Bash".into()),
+            tool_input: Some("date > /tmp/clotho-phone-test.txt".into()),
+            request: Some("87b99bd3910be450".into()),
+            duration: None,
+            ..full()
+        }
+    }
+
+    /// The permission vector iOS pins: its notification gets the Allow/Deny category and the
+    /// request id from `rq`.
+    const PERMISSION: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Claude needs your permission to use Bash","t":1761512345.5,"q":"run the phone test","cmd":"date > /tmp/clotho-phone-test.txt","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"tool":"Bash","rq":"87b99bd3910be450","pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                "}"#;
+    const CT_PERMISSION: &str = "Dsqpft9hJJTBD35nK1YON/fVtbJtptM3zZyUgxK7oml/myC4D7uWlwKzOMz+re6cuJr7sh+J3AVM9PpyoY1HYy5al79dy7tx8I+vzuTRNVBRu2P/YrYl0Q3HVSI74wRZtpL4Mw/70cFax41RKh7WxaU65zaBkybJQ5wJ7hlPHIfR7fylsZabQVzNqJKAXdl9IbCcoOy12lz+M7ofd3GQueaV3qpq7YwGkZQ45eg7u8yEcjkp4lEuADb6b7NKlaRH8DH1pgTBi3+/r73UWmTN4E1z969bGPsT1SGXohSgv01XURUgR+gw16adaaGfETT65lKd/n17Qlt9hOfLG4qlw7llWVHfYtLYGuw02ZAWmaOAnEqpz7dSBpv9lyesF10JKWg76EEJcnkcsaxqVwJilZVPZzuxx72xXzyd6jLzDgtpzyufo0KU9lbt/o/aEJtU9hcnxI95+UTrBG19+cOSqgibXViL6sLy2QIl/C92oYKrr85ZiKxzITv28XUG1UpDKyvCtWDdkXS3u4n2bkJq5YNP4eQMuducPV09/ew5iXbk5CzvKcyn+opBt2Va/LBecH8V4n+nplYvQqJVZPuL+ttUg19dMrHA5Hr8uePHCz9pWLxvwIVw3aAEd/aGbWcPdgAkeZV7SVJ4AeEZIEa+HqLq1Gyq5XhF7I6GX2gHvQT94J73SohuuHLoSMBhpD4+X/iiGuCRC1tU8GhBOa2pqsp3Zic5iBlUFpMrIl52Og508pBUY6VXlzShkpQhmzlkptiZgDe3u8OSt9mWEK1lXb8RDHWdSIm0QgHzjs5CQhn9Ina8zfcAXpTKBNq+AcIdmZvMfChlelmwNyzB78ArWp03psmwsmSAdPYZHi36Zz4bCVRUbnlUJZLXKdRcqhACiyWYlLxrGbyrVtCB43DAi7opBRfi9Nf+WeQkK5Sw80rj+UHY4MN6IUu6q9bQ+/bAORwhKlQYttTYiLADk0Sp4kk3qfBOAZ37SKJrpBdqatbtQ5rnOPJj6TaO7/gV1tb+IZGsW/9rwBXWL5XNFs8ixR096Nl0BzGb5x3jUAG2bu/Tj8Kywq87XXVJAzsO0LPQWJObYLcMHIPwKKq4SZtN7E+mm7bH/JrV4GUCUIrrV1bhH+oR9YHAGCuJHb0R4hb56QSKKHBKhGZwJYsHbJ3DxAJ+LOB+sFmP3Ux67jDgZjat/BpFGowIlhntfz3eUZ3zkK0Oxx8X0/XPBnk5eWlNjaLPk2Zp53LNd8Y/wIsotVQkJ1UiGG2ueZaiRktasoiow0vGjnZVApG7dH9cyuLv1yPNvQXLhRoR26LGxcitb0ofdkMQUqDx5RpRXadnnz+crfoNZ8E5jXElC3U235Hs8sYEnZBT0ktEZuqkuk4VpaguDXgkHHXwBHk4yUJWj48sd9L890tMCsgAJR4SSgwU1A==";
+
+    #[test]
+    fn the_permission_vector_opens() {
+        assert_eq!(std::str::from_utf8(&plaintext(LABEL, 7, &permission())).unwrap(), PERMISSION);
+        assert_eq!(open(SK, CT_PERMISSION, collapse_id(LABEL, 7).as_bytes()).unwrap(), PERMISSION.as_bytes());
+        let v: Value = serde_json::from_str(PERMISSION).unwrap();
+        assert_eq!((v["s"].clone(), v["rq"].clone(), v["tool"].clone()), (json!("waiting"), json!("87b99bd3910be450"), json!("Bash")));
+    }
+
     #[test]
     fn the_full_vector_opens() {
         assert_eq!(std::str::from_utf8(&plaintext(LABEL, 7, &full())).unwrap(), FULL);
