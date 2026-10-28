@@ -55,6 +55,8 @@ struct PaneScreen: View {
             if finding {
                 FindBar(find: find, machine: connection.machine.displayName) { stopFinding() }
             }
+            // Saved or not connected: a slim bar of its own, never over the pane's text.
+            statusBar
             ZStack(alignment: .topTrailing) {
                 if let pane {
                     TerminalContainer(host: connection.terminal(for: pane), onMode: { mode = $0 }, onCopy: { copies += 1 })
@@ -71,9 +73,7 @@ struct PaneScreen: View {
                 } else {
                     Color(Theme.background)
                 }
-                statusBadge
             }
-            .overlay(alignment: .bottom) { copiedBadge }
             // Uploads for pasted images and photos: progress, and any failure (nothing is pasted then).
             TransferBar(machine: connection.machine.id)
         }
@@ -85,6 +85,9 @@ struct PaneScreen: View {
         .toolbarTitleMenu { tabMenu }
         .toolbar {
             ToolbarItem(placement: .primaryAction) { actionsMenu.disabled(store.isSaved) }
+            // In the navigation bar, so it doesn't resize the pane for the two seconds it shows.
+            ToolbarItem(placement: .primaryAction) { copiedBadge }
+            ToolbarItem(placement: .primaryAction) { resumeBadge }
         }
         .background { ShortcutButtons(screen: self) }
         // The find bar follows the pane on screen.
@@ -150,30 +153,32 @@ struct PaneScreen: View {
         })
     }
 
-    @ViewBuilder private var statusBadge: some View {
-        if store.isSaved {
-            Text(connection.savedLabel)
-                .font(.caption2)
-                .lineLimit(1)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.thinMaterial, in: Capsule())
-                .padding(8)
-                .accessibilityIdentifier("savedBadge")
-        } else if connection.suspended || !store.isConnected {
-            Text(connection.connectionLabel)
-                .font(.caption2)
-                .lineLimit(1)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.orange.opacity(0.85), in: Capsule())
-                .padding(8)
-        } else if let mode {
-            // How the last (re)subscribe resumed, briefly: live or replay means no reload happened.
+    /// The pane's connection when it isn't live. Rare changes, so its own room in the layout is fine.
+    @ViewBuilder private var statusBar: some View {
+        if store.isSaved || connection.suspended || !store.isConnected {
+            let saved = store.isSaved
+            HStack(spacing: 6) {
+                Image(systemName: saved ? "clock.arrow.circlepath" : "bolt.horizontal.circle").accessibilityHidden(true)
+                Text(saved ? connection.savedLabel : connection.connectionLabel).lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .font(.caption)
+            .foregroundStyle(saved ? Color.secondary : Color.primary)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+            .background(saved ? AnyShapeStyle(.bar) : AnyShapeStyle(Color.orange.opacity(0.25)))
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier(saved ? "savedBadge" : "connectionBar")
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    /// How the last (re)subscribe resumed, briefly: live or replay means no reload happened.
+    @ViewBuilder private var resumeBadge: some View {
+        if let mode {
             Text(mode.rawValue)
                 .font(.caption2.monospaced())
-                .padding(.horizontal, 6).padding(.vertical, 2)
-                .background(.thinMaterial, in: Capsule())
                 .foregroundStyle(.secondary)
-                .padding(6)
                 .accessibilityIdentifier("resumeMode")
                 .task(id: mode) {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -185,11 +190,11 @@ struct PaneScreen: View {
     /// A short "Copied" after the pane (Claude Code, Codex, any OSC 52 app) put text on the clipboard.
     @ViewBuilder private var copiedBadge: some View {
         if copies > 0 {
+            // In the navigation bar, like the other short notes, so it never covers the pane's text.
             Label("Copied", systemImage: "doc.on.clipboard")
+                .labelStyle(.titleAndIcon)
                 .font(.caption)
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(.thinMaterial, in: Capsule())
-                .padding(.bottom, 12)
+                .foregroundStyle(.secondary)
                 .transition(.opacity)
                 .accessibilityIdentifier("copiedBadge")
                 .allowsHitTesting(false)

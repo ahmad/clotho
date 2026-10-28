@@ -18,6 +18,7 @@ final class PaneEventsUITests: XCTestCase {
         let dir = "clotho-pane-event-\(Int.random(in: 1000...9999))"
         app.typeText("mkdir -p /tmp/\(dir) && cd /tmp/\(dir)\n")
         sleep(1)
+        attach(app, "typed")
 
         // Back on the machine screen, the tab's row shows the new cwd.
         app.navigationBars.buttons.element(boundBy: 0).tap()
@@ -27,6 +28,7 @@ final class PaneEventsUITests: XCTestCase {
             if row.waitForExistence(timeout: 2) { found = true; break }
             app.swipeUp()
         }
+        attach(app, "machine screen")
         XCTAssertTrue(found, "the tab row never showed the pane's new cwd: live pane events aren't applied")
 
         // Close what the test made.
@@ -39,5 +41,12 @@ final class PaneEventsUITests: XCTestCase {
         let close = app.buttons["Close tab"]
         XCTAssertTrue(close.waitForExistence(timeout: 3))
         close.tap()
+    }
+
+    private func attach(_ app: XCUIApplication, _ name: String) {
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = name
+        shot.lifetime = .keepAlways
+        add(shot)
     }
 }

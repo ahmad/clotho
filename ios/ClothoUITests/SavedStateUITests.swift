@@ -20,8 +20,17 @@ final class SavedStateUITests: XCTestCase {
         app.typeText("mkdir -p /tmp/saved-state-test && cd /tmp/saved-state-test && clear; printf '\\033[1;32msaved screen\\033[0m %s\\n' $((6*7))\n")
         sleep(2)
         attach(app, "live before quitting")
-        // Leaving the pane saves its screen; the model is saved a moment after it changes.
+        // Leaving the pane saves its screen; the model is saved a moment after it changes. The cwd reaches the
+        // model only when the daemon notices it (it polls when the shell doesn't report it), so wait for the
+        // live row to show it before quitting.
         app.navigationBars.buttons.element(boundBy: 0).tap()
+        let liveRow = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "saved-state-test")).firstMatch
+        var shown = false
+        for _ in 0..<6 {
+            if liveRow.waitForExistence(timeout: 2) { shown = true; break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(shown, "the tab never showed its new cwd live")
         sleep(3)
         app.terminate()
 
@@ -37,7 +46,7 @@ final class SavedStateUITests: XCTestCase {
         XCTAssertFalse(app.buttons["New Workspace"].isEnabled, "still the saved model")
         row.tap()
 
-        let badge = app.staticTexts["savedBadge"]
+        let badge = app.descendants(matching: .any)["savedBadge"]
         XCTAssertTrue(badge.waitForExistence(timeout: 3), "the pane opens at once, marked as saved")
         XCTAssertTrue(badge.label.hasPrefix("Last seen"), badge.label)
         XCTAssertFalse(app.staticTexts["noPreview"].exists, "its last screen was saved")

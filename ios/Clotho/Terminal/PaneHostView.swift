@@ -103,6 +103,7 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
             terminal.readOnly = readOnly
             // Live again on screen: the keyboard comes back, as when the pane opens.
             if readOnly { _ = terminal.resignFirstResponder() } else if window != nil { _ = terminal.becomeFirstResponder() }
+            setNeedsLayout()
         }
     }
     /// Where pane copies go; tests swap in their own.
@@ -183,7 +184,9 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         }
         wantsSubscription = false
         subscribed = true
-        let id = paneID, have = haveSeq, viewport = fittedSize()
+        // Read-only (a saved model) has no keyboard, so its room is taller than the live pane's will be: the
+        // pane keeps its size until it's live, instead of growing now and shrinking when the keyboard comes.
+        let id = paneID, have = haveSeq, viewport: Size? = readOnly ? nil : fittedSize()
         sentViewport = viewport
         Task { [backend] in
             do {
@@ -319,7 +322,7 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     }
 
     private func sendViewportIfNeeded() {
-        guard subscribed, bounds.width > 0, bounds.height > 0 else { return }
+        guard subscribed, !readOnly, bounds.width > 0, bounds.height > 0 else { return }
         let viewport = fittedSize()
         guard viewport != sentViewport else { return }
         sentViewport = viewport
