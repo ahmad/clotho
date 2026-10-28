@@ -104,6 +104,16 @@ final class SavedStateTests: XCTestCase {
         XCTAssertNotNil(SavedState(root: root, defaults: defaults).load(other))
     }
 
+    func testAgentAgeIsCompact() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(-31), now: now), "now")
+        XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(-91), now: now), "1m")
+        XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(-361), now: now), "6m")
+        XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(-7300), now: now), "2h")
+        XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(-3 * 86400), now: now), "3d")
+        XCTAssertEqual(AgentRowView.age(now.addingTimeInterval(30), now: now), "now", "a clock a little ahead")
+    }
+
     func testLastSeenText() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertEqual(MachineConnection.ago(now.addingTimeInterval(-20), now: now), "just now")

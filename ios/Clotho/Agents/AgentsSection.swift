@@ -145,7 +145,11 @@ struct AgentRowView: View {
                     }
                     Spacer()
                     if let since = row.info.sinceDate {
-                        Text(since, style: .relative).font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
+                        // Compact, as on the Mac ("1m", "2h"), updated each minute.
+                        TimelineView(.everyMinute) { context in
+                            Text(AgentRowView.age(since, now: context.date))
+                        }
+                        .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
                     }
                 }
                 if let message = row.info.message, !message.isEmpty {
@@ -190,6 +194,19 @@ extension AgentInfo.State {
         case .waiting: return .orange
         case .done: return .green
         case .error: return .red
+        }
+    }
+}
+
+extension AgentRowView {
+    /// How long an agent has been in its state, compact as on the Mac: "now", "1m", "6m", "2h", "3d".
+    static func age(_ since: Date, now: Date = Date()) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(since)))
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86400)d"
         }
     }
 }
