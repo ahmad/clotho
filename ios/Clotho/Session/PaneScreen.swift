@@ -10,10 +10,10 @@ struct PaneScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var tabID: TabID
     @State private var paneID: PaneID?
-    @State private var mode: Subscription.Mode?
     @State private var browsingFiles: String?
-    /// Bumped each time the pane copies to the clipboard, which shows "Copied" briefly.
-    @State private var copies = 0
+    /// The short "Copied" and resume notes. Not observed here: a note coming or going must not redraw this
+    /// view's toolbar, which would close an open Pane actions menu.
+    @State private var notes = PaneNotes()
     @State private var pickingPhoto = false
     @State private var photo: PhotosPickerItem?
     @AppStorage("FontSize") private var fontSize: Double = Double(Theme.fontSize)
@@ -59,7 +59,7 @@ struct PaneScreen: View {
             statusBar
             ZStack(alignment: .topTrailing) {
                 if let pane {
-                    TerminalContainer(host: connection.terminal(for: pane), onMode: { mode = $0 }, onCopy: { copies += 1 })
+                    TerminalContainer(host: connection.terminal(for: pane), onMode: { [notes] in notes.mode = $0 }, onCopy: { [notes] in notes.copies += 1 })
                         .id(pane.id)
                         // The saved screen, dimmed until the machine is live; it then draws over in place.
                         .opacity(store.isSaved ? 0.5 : 1)
@@ -87,8 +87,7 @@ struct PaneScreen: View {
             ToolbarItem(placement: .primaryAction) { actionsMenu.disabled(store.isSaved) }
             // In the navigation bar, so it doesn't resize the pane for the two seconds it shows.
             // Short notes on the leading side, so the actions button never moves while they come and go.
-            ToolbarItem(placement: .topBarLeading) { copiedBadge }
-            ToolbarItem(placement: .topBarLeading) { resumeBadge }
+            ToolbarItem(placement: .topBarLeading) { PaneNotesView(notes: notes) }
         }
         .background { ShortcutButtons(screen: self) }
         // The find bar follows the pane on screen.
@@ -175,39 +174,6 @@ struct PaneScreen: View {
     }
 
     /// How the last (re)subscribe resumed, briefly: live or replay means no reload happened.
-    // Both notes stay in the toolbar and only fade: adding or removing a toolbar item rebuilds the toolbar,
-    // which closes the Pane actions menu if it's open.
-    private var resumeBadge: some View {
-        Text(mode?.rawValue ?? "live")
-            .font(.caption2.monospaced())
-            .foregroundStyle(.secondary)
-            .opacity(mode == nil ? 0 : 1)
-            .accessibilityHidden(mode == nil)
-            .accessibilityIdentifier("resumeMode")
-            .task(id: mode) {
-                guard mode != nil else { return }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                self.mode = nil
-            }
-    }
-
-    /// A short "Copied" after the pane (Claude Code, Codex, any OSC 52 app) put text on the clipboard.
-    private var copiedBadge: some View {
-        // In the navigation bar, like the other short notes, so it never covers the pane's text.
-        Label("Copied", systemImage: "doc.on.clipboard")
-            .labelStyle(.titleAndIcon)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .opacity(copies > 0 ? 1 : 0)
-            .accessibilityHidden(copies == 0)
-            .accessibilityIdentifier("copiedBadge")
-            .allowsHitTesting(false)
-            .task(id: copies) {
-                guard copies > 0 else { return }
-                try? await Task.sleep(nanoseconds: 1_200_000_000)
-                withAnimation { copies = 0 }
-            }
-    }
 
     /// The tab's title; setting it (from the title's Rename) renames the tab on the machine.
     private var titleBinding: Binding<String> {
@@ -437,4 +403,47 @@ private struct HistoryTarget: Identifiable {
 private struct FilesStart: Identifiable {
     var path: String
     var id: String { path }
+}
+
+/// What PaneNotesView shows; set by the pane, read only by that view.
+@MainActor
+final class PaneNotes: ObservableObject {
+    /// How the last (re)subscribe resumed, shown for two seconds: live or replay means no reload happened.
+    @Published var mode: Subscription.Mode?
+    /// Bumped each time the pane copies to the clipboard, which shows "Copied" briefly.
+    @Published var copies = 0
+}
+
+/// The pane's short notes, in the navigation bar so they never cover its text. They only fade, so the
+/// toolbar never changes shape.
+struct PaneNotesView: View {
+    @ObservedObject var notes: PaneNotes
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Label("Copied", systemImage: "doc.on.clipboard")
+                .labelStyle(.titleAndIcon)
+                .font(.caption)
+                .opacity(notes.copies > 0 ? 1 : 0)
+                .accessibilityHidden(notes.copies == 0)
+                .accessibilityIdentifier("copiedBadge")
+                .task(id: notes.copies) {
+                    guard notes.copies > 0 else { return }
+                    try? await Task.sleep(nanoseconds: 1_200_000_000)
+                    withAnimation { notes.copies = 0 }
+                }
+            Text(notes.mode?.rawValue ?? "live")
+                .font(.caption2.monospaced())
+                .opacity(notes.mode == nil ? 0 : 1)
+                .accessibilityHidden(notes.mode == nil)
+                .accessibilityIdentifier("resumeMode")
+                .task(id: notes.mode) {
+                    guard notes.mode != nil else { return }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    notes.mode = nil
+                }
+        }
+        .foregroundStyle(.secondary)
+        .allowsHitTesting(false)
+    }
 }
