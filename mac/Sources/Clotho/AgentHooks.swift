@@ -5,7 +5,7 @@ import ClothoKit
 // exactly when they're waiting, done or failing instead of being detected from the terminal. Nothing is
 // installed until the user has seen what will change (`clothod hooks print`) and confirmed.
 extension AppDelegate {
-    static let hookedAgents = ["claude", "codex"]
+    nonisolated static let hookedAgents = ["claude", "codex"]
 
     /// Runs `clothod <arguments>` on a machine, off the main thread.
     func runClothod(on key: MachineKey, _ arguments: [String]) async throws -> RemoteCommandResult {
@@ -78,20 +78,29 @@ extension AppDelegate {
     func refreshHookStatus(_ key: MachineKey) {
         Task { @MainActor in
             guard let result = try? await runClothod(on: key, ["hooks", "status"]), result.status == 0 else { return }
-            var status: [String: Bool] = [:]
-            var outdated: Set<String> = []
-            for line in result.stdout.split(separator: "\n") {
-                let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-                // "outdated" (clothod 0.1.11+): an older clothod's hooks, which `hooks install` replaces in place.
-                if parts.count == 2, Self.hookedAgents.contains(parts[0]) {
-                    status[parts[0]] = parts[1] == "installed"
-                    if parts[1] == "outdated" { outdated.insert(parts[0]) }
-                }
-            }
+            let (status, outdated) = Self.parseHookStatus(result.stdout)
             hookStatus[key] = status
             if outdated.isEmpty { outdatedHooks.removeValue(forKey: key) } else { outdatedHooks[key] = outdated }
             onboarding?.refreshHooks()
         }
+    }
+
+    /// `hooks status` output: whether each agent's hooks are installed, and which are outdated.
+    /// "outdated" (clothod 0.1.11+) is an older clothod's hooks, which `hooks install` replaces in place.
+    /// A qualifier after the status counts as that status: "installed (chained)" (0.1.17+) is clotho's
+    /// Codex hook called by another `notify` program (Codex Computer Use), and it still runs.
+    nonisolated static func parseHookStatus(_ output: String) -> (installed: [String: Bool], outdated: Set<String>) {
+        var status: [String: Bool] = [:]
+        var outdated: Set<String> = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2, hookedAgents.contains(parts[0]) else { continue }
+            let value = parts[1].split(separator: " ", maxSplits: 1).first.map(String.init) ?? ""
+            // "not installed" reads as "not", so it's neither.
+            status[parts[0]] = value == "installed"
+            if value == "outdated" { outdated.insert(parts[0]) }
+        }
+        return (status, outdated)
     }
 
     /// Whether every agent needing hooks on the machine has older ones, to update rather than set up.
