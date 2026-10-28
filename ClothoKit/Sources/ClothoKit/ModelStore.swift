@@ -54,6 +54,15 @@ public final class ModelStore: ObservableObject {
     /// An agent changed state: the pane, its previous info and its new one.
     public var onAgentChange: ((PaneID, AgentInfo?, AgentInfo?) -> Void)?
 
+    /// Whether `state` is the live model, or a saved one shown until the daemon sends its own.
+    public enum Phase: Equatable, Sendable { case saved, live }
+    @Published public private(set) var phase = Phase.live
+    public var isSaved: Bool { phase == .saved }
+    /// What `restore` loaded, while `phase` is `.saved`.
+    public private(set) var saved: CachedMachineState?
+    /// When the connection last dropped; nil while it's up or before it ever was.
+    private var lostAt: Date?
+
     private var sinks: [PaneID: WeakSink] = [:]
     private var task: Task<Void, Never>?
 
@@ -112,20 +121,48 @@ public final class ModelStore: ObservableObject {
         backend.stop()
     }
 
+    // MARK: Saved state
+
+    /// Shows a saved model until the daemon's arrives: `state` becomes the saved one and `phase`
+    /// `.saved`. The first `state` from the daemon replaces it whole (no merge) and makes it `.live`,
+    /// without `onAgentChange` calls, as on any first load. Ignored once live data has arrived, and for
+    /// caches of another format.
+    public func restore(_ cached: CachedMachineState) {
+        guard cached.format == CachedMachineState.currentFormat, phase == .saved || state.rev == 0 && state.workspaces.isEmpty else { return }
+        saved = cached
+        state = cached.state
+        phase = .saved
+        onChange?()
+    }
+
+    /// The model to save: the live one with `lastSeen` now (or when the connection dropped), or, while
+    /// still showing a saved one, that one unchanged.
+    public func cacheSnapshot(now: Date = Date()) -> CachedMachineState {
+        if phase == .saved, let saved { return saved }
+        return CachedMachineState(state: state, lastSeen: isConnected ? now : (lostAt ?? now), daemonVersion: hello?.version,
+                                  instance: hello?.instance, featureNames: hello?.featureNames ?? [])
+    }
+
+    /// The daemon's features: live once connected, else those saved with the model.
+    public var features: Set<Hello.Feature> { hello?.features ?? saved?.features ?? [] }
+
     public func register(_ sink: PaneDataSink, for pane: PaneID) { sinks[pane] = WeakSink(sink) }
     public func unregister(_ pane: PaneID) { sinks[pane] = nil }
 
     func apply(_ event: SessionEvent) {
         switch event {
         case .connected(let newHello):
-            // A new holder means new shells; pane IDs may be reused, so every sink starts over.
-            if let hello, hello.instance != newHello.instance {
+            // A new holder means new shells; pane IDs may be reused, so every sink starts over. That
+            // includes panes shown from a saved model of another instance.
+            if let previous = hello?.instance ?? (phase == .saved ? saved?.instance : nil), previous != newHello.instance {
                 sinks.values.forEach { $0.sink?.paneReset() }
             }
             hello = newHello
             connection = .connected
+            lostAt = nil
             onChange?()
         case .disconnected(let reason):
+            if connection.isConnected { lostAt = Date() }
             connection = .reconnecting(reason)
             onChange?()
         case .progress(let step):
@@ -133,7 +170,14 @@ public final class ModelStore: ObservableObject {
             onChange?()
         case .state(let newState):
             state = newState
+            if phase == .saved {
+                phase = .live
+                saved = nil
+            }
             onChange?()
+        case .pane, .agent where phase == .saved:
+            // Changes to a model this client doesn't have yet; the daemon's whole state follows.
+            return
         case .pane(let pane, let rev):
             if let index = state.panes.firstIndex(where: { $0.id == pane.id }) {
                 let before = state.panes[index].agent

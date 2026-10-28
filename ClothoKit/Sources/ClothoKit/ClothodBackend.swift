@@ -392,6 +392,12 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("agent.mute", ["pane": pane, "muted": muted])
     }
 
+    public func decide(pane: PaneID, request: String, decision: PermissionDecision, message: String?) async throws {
+        var params: [String: Any] = ["pane": pane, "request": request, "decision": decision.rawValue]
+        if decision == .deny, let message, !message.isEmpty { params["message"] = String(message.prefix(300)) }
+        _ = try await self.request("agent.decide", params)
+    }
+
     public func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult {
         var params: [String: Any] = ["pane": pane, "query": query, "regex": options.regex, "case_sensitive": options.caseSensitive]
         params["limit"] = options.limit

@@ -81,6 +81,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case paneSearch = "pane.search"
         /// `agent.history`: an agent's recorded transitions and messages (0.1.11).
         case agentHistory = "agent.history"
+        /// `agent.decide` and the agent's `requests`: answer Claude's permission requests (0.1.13).
+        case agentDecide = "agent.decide"
         /// `settings.get` / `settings.set` and `settings` events (clothod 0.1.7).
         case settings
         /// `service.status` / `install` / `uninstall` and `service` events: start clothod at login (0.1.7).
@@ -241,6 +243,10 @@ public struct BackendError: Error, LocalizedError, Equatable, Sendable {
         self.message = message
     }
 
+    /// `agent.decide`'s "already answered": the request was answered (here or in the terminal),
+    /// retired or never existed. Don't retry; say so.
+    public var isStale: Bool { code == "stale" }
+
     public var errorDescription: String? { message }
 }
 
@@ -289,6 +295,11 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Mutes or unmutes a pane's agent (`agent.mute`), when hello's `features` contains `.agentMute`.
     func muteAgent(_ pane: PaneID, muted: Bool) async throws
 
+    /// Answers one of an agent's permission `requests` (`agent.decide`), when hello's `features` contains
+    /// `.agentDecide`. `message` (deny only, at most 300 characters) is told to the agent. Fails with a
+    /// `BackendError` whose `isStale` is true when the request was already answered or retired.
+    func decide(pane: PaneID, request: String, decision: PermissionDecision, message: String?) async throws
+
     /// Searches the scrollback the daemon keeps for a pane (`pane.search`), newest match first, when hello's
     /// `features` contains `.paneSearch`. A bad regex or an empty query fails with `bad_request`.
     func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult
@@ -333,6 +344,10 @@ public extension SessionBackend {
 
     func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult {
         throw BackendError(code: "unknown_method", message: "this backend can't search scrollback")
+    }
+
+    func decide(pane: PaneID, request: String, decision: PermissionDecision, message: String?) async throws {
+        throw BackendError(code: "unknown_method", message: "this backend can't answer permission requests")
     }
 
     func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory {

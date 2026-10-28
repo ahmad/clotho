@@ -360,3 +360,267 @@ final class ClipboardRoutingTests: XCTestCase {
         XCTAssertTrue(other.clips.isEmpty)
     }
 }
+
+/// `quiet` (agent.quiet): a rise of attention while the user was at the pane is badged but not announced.
+final class QuietRiseTests: XCTestCase {
+    private func decode(_ json: String) throws -> AgentInfo {
+        try JSONDecoder().decode(AgentInfo.self, from: Data(json.utf8))
+    }
+
+    func testDecodesQuietAndTreatsMissingAsFalse() throws {
+        let quiet = try decode(#"{"kind":"claude","state":"done","attention":true,"quiet":true}"#)
+        XCTAssertEqual(quiet.quietRise, true)
+        XCTAssertTrue(quiet.isQuietRise)
+        XCTAssertTrue(quiet.needsAttention, "still attention: badged and shown")
+        let older = try decode(#"{"kind":"claude","state":"done","attention":true}"#)
+        XCTAssertNil(older.quietRise)
+        XCTAssertFalse(older.isQuietRise)
+        let loud = try decode(#"{"kind":"claude","state":"done","attention":true,"quiet":false}"#)
+        XCTAssertFalse(loud.isQuietRise)
+    }
+
+    func testEncodesAsQuiet() throws {
+        let info = AgentInfo(kind: "claude", state: .done, attention: true, quietRise: true)
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(info), encoding: .utf8))
+        XCTAssertTrue(json.contains(#""quiet":true"#), json)
+        XCTAssertEqual(try decode(json), info)
+    }
+
+    func testNotifiesOnlyOnLoudRises() {
+        let running = AgentInfo(kind: "claude", state: .running, attention: false)
+        let done = AgentInfo(kind: "claude", state: .done, attention: true)
+        XCTAssertTrue(done.notifiesRise(from: running))
+        XCTAssertTrue(done.notifiesRise(from: nil))
+        var quiet = done
+        quiet.quietRise = true
+        XCTAssertFalse(quiet.notifiesRise(from: running), "the user was at the pane")
+        XCTAssertFalse(done.notifiesRise(from: done), "no rise: attention was already up")
+        var muted = done
+        muted.muted = true
+        XCTAssertFalse(muted.notifiesRise(from: running))
+        XCTAssertFalse(AgentInfo(kind: "claude", state: .running, attention: true).notifiesRise(from: nil))
+        XCTAssertTrue(AgentInfo(kind: "claude", state: .waiting, attention: true, quietRise: false).notifiesRise(from: running))
+    }
+}
+
+/// Notification text, shared by the Mac and iOS: "Platform · Claude finished" / "devbox · api-server · 4m" / result.
+final class AgentNoticeTests: XCTestCase {
+    func testDecodesTheDetailFields() throws {
+        let json = #"{"kind":"claude","state":"waiting","attention":true,"message":"Claude needs your permission to use Bash","#
+            + #""prompt":"run the tests","tool":"Bash","tool_input":"npm test","turn_started":1000.5,"since":1240.5}"#
+        let info = try JSONDecoder().decode(AgentInfo.self, from: Data(json.utf8))
+        XCTAssertEqual(info.prompt, "run the tests")
+        XCTAssertEqual(info.tool, "Bash")
+        XCTAssertEqual(info.toolInput, "npm test")
+        XCTAssertEqual(info.turnStarted, 1000.5)
+        XCTAssertEqual(try JSONDecoder().decode(AgentInfo.self, from: JSONEncoder().encode(info)), info, "round trip")
+        let old = try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"kind":"claude","state":"done"}"#.utf8))
+        XCTAssertNil(old.prompt)
+        XCTAssertNil(old.tool)
+        XCTAssertNil(old.turnDuration)
+    }
+
+    func testFinished() {
+        let info = AgentInfo(kind: "claude", state: .done, message: "All 42 tests pass. I also fixed the flaky retry test.",
+                             since: 1240, attention: true, turnStarted: 1000)
+        let notice = AgentNotice(info: info, machine: "devbox", workspace: "Platform", cwd: "/home/ahmad/api-server/")
+        XCTAssertEqual(notice.title, "Platform · Claude finished")
+        XCTAssertEqual(notice.subtitle, "devbox · api-server · 4m")
+        XCTAssertEqual(notice.body, "All 42 tests pass. I also fixed the flaky retry test.")
+    }
+
+    func testPermissionWait() {
+        let info = AgentInfo(kind: "claude", state: .waiting, message: "Claude needs your permission to use Bash",
+                             since: 1240, attention: true, tool: "Bash", toolInput: "npm test", turnStarted: 1000)
+        let notice = AgentNotice(info: info, machine: "devbox", workspace: "Platform", cwd: "/srv/api-server")
+        XCTAssertEqual(notice.title, "Platform · Claude is waiting")
+        XCTAssertEqual(notice.subtitle, "devbox · api-server", "no time while the turn is still going")
+        XCTAssertEqual(notice.body, "Allow Bash: npm test?")
+        // Waiting for an answer, not a permission: the agent's own words.
+        var question = info
+        question.message = "Claude is waiting for your input"
+        XCTAssertEqual(AgentNotice(info: question, machine: "m").body, "Claude is waiting for your input")
+    }
+
+    func testOlderDaemonKeepsTodaysTitle() {
+        let info = AgentInfo(kind: "codex", state: .error, message: "rate limited", attention: true)
+        let notice = AgentNotice(info: info, machine: "imac")
+        XCTAssertEqual(notice.title, "Codex hit an error on imac")
+        XCTAssertEqual(notice.subtitle, "")
+        XCTAssertEqual(notice.body, "rate limited")
+        let finished = AgentNotice(info: AgentInfo(kind: "claude", state: .done), machine: "devbox", cwd: "/srv/api")
+        XCTAssertEqual(finished.title, "Claude finished on devbox")
+        XCTAssertEqual(finished.subtitle, "api", "no machine in the subtitle when it's in the title")
+    }
+
+    func testPermissionOnlyForPermissionWaits() {
+        func body(_ state: String, _ message: String?, _ tool: String? = "Bash", _ input: String? = "ls -la") -> String {
+            AgentNotice(kind: "claude", state: state, machine: "m", workspace: "W", project: nil, duration: nil,
+                        result: message, tool: tool, toolInput: input).body
+        }
+        XCTAssertEqual(body("waiting", "Claude needs your permission to use Bash"), "Allow Bash: ls -la?")
+        XCTAssertEqual(body("waiting", nil), "Allow Bash: ls -la?", "no message: a permission wait")
+        XCTAssertEqual(body("waiting", "", "Bash", nil), "Allow Bash?")
+        XCTAssertEqual(body("waiting", nil, "Bash", "npm\n  test"), "Allow Bash: npm test?", "input on one line")
+        XCTAssertEqual(body("waiting", "Which database should I use?"), "Which database should I use?",
+                       "a question, though the turn's last tool was Bash")
+        XCTAssertEqual(body("waiting", "Claude is waiting for your input", nil, nil), "Claude is waiting for your input")
+        XCTAssertEqual(body("done", nil), "", "a done turn never says Allow")
+        XCTAssertEqual(body("done", "Shipped it."), "Shipped it.")
+    }
+
+    func testFieldInitMatchesInfoInit() {
+        let info = AgentInfo(kind: "claude", state: .done, message: "Done.", since: 1240, attention: true,
+                             prompt: "fix it", turnStarted: 1000)
+        let fromInfo = AgentNotice(info: info, machine: "devbox", workspace: "Platform", cwd: "/x/api-server")
+        let fromRecord = AgentNotice(kind: "claude", state: "done", machine: "devbox", workspace: "Platform", project: "api-server",
+                                     duration: 240, result: "Done.", tool: nil, toolInput: nil)
+        XCTAssertEqual(fromInfo, fromRecord)
+        XCTAssertEqual(AgentNotice(kind: "claude", state: "napping", machine: "", workspace: nil, project: nil, duration: nil,
+                                   result: nil, tool: nil, toolInput: nil, fallback: "Tab 2").title, "Claude changed")
+        // No result: the prompt.
+        var quietTurn = info
+        quietTurn.message = nil
+        XCTAssertEqual(AgentNotice(info: quietTurn, machine: "b").body, "fix it")
+    }
+
+    func testPartsAndLimits() {
+        XCTAssertEqual(AgentNotice.duration(0.4), nil)
+        XCTAssertEqual(AgentNotice.duration(12), "12s")
+        XCTAssertEqual(AgentNotice.duration(3600), "1h")
+        XCTAssertEqual(AgentNotice.duration(3900), "1h 5m")
+        XCTAssertEqual(AgentNotice.project("/"), nil)
+        XCTAssertEqual(AgentNotice.project("~"), nil)
+        XCTAssertEqual(AgentNotice.project("~/code/web"), "web")
+        let long = String(repeating: "word ", count: 100)
+        let clipped = AgentNotice.clip(long, to: 40)
+        XCTAssertLessThanOrEqual(clipped.count, 40)
+        XCTAssertTrue(clipped.hasSuffix("word…"), clipped)
+        XCTAssertEqual(AgentNotice.clip("two\n  lines", to: 40), "two lines")
+    }
+}
+
+/// A saved model shows until the daemon's arrives, which replaces it whole.
+@MainActor
+final class SavedStateTests: XCTestCase {
+    private func model(_ name: String, agent: AgentInfo? = nil) -> ModelState {
+        ModelState(rev: 7, focus: Focus(), workspaces: [Workspace(id: 1, name: name, tabs: [Tab(id: 2, activePane: 3, layout: .pane(3))])],
+                   panes: [Pane(id: 3, cols: 80, rows: 24, cwd: "/srv/api", agent: agent)])
+    }
+
+    private func hello(_ instance: String, features: [String] = []) -> Hello {
+        var hello = Hello(protocol: 1, daemon: "clothod", version: "0.1.13", instance: instance)
+        hello.featureNames = features
+        return hello
+    }
+
+    func testRestoreThenLiveReplacesWhole() throws {
+        let store = ModelStore(backend: FakeBackend())
+        let waiting = AgentInfo(kind: "claude", state: .waiting, attention: true)
+        let cached = CachedMachineState(state: model("Saved", agent: waiting), lastSeen: Date(timeIntervalSince1970: 100),
+                                        daemonVersion: "0.1.12", instance: "a", featureNames: ["pane.keys", "agent.mute"])
+        store.restore(cached)
+        XCTAssertEqual(store.phase, .saved)
+        XCTAssertEqual(store.state.workspaces.first?.name, "Saved")
+        XCTAssertTrue(store.features.contains(.paneKeys), "saved features gate the UI before hello")
+        XCTAssertEqual(store.cacheSnapshot(), cached, "a saved model saves back unchanged")
+
+        var changes: [PaneID] = []
+        store.onAgentChange = { pane, _, _ in changes.append(pane) }
+        store.apply(.agent(3, AgentInfo(kind: "claude", state: .done, attention: true)))
+        XCTAssertEqual(store.state.pane(3)?.agent, waiting, "events for the saved model are ignored")
+        store.apply(.connected(hello("a")))
+        XCTAssertEqual(store.phase, .saved, "still saved until the state arrives")
+        XCTAssertTrue(store.features.isEmpty, "live features once connected")
+
+        store.apply(.state(ModelState(rev: 9, focus: Focus(), workspaces: [], panes: [])))
+        XCTAssertEqual(store.phase, .live)
+        XCTAssertNil(store.saved)
+        XCTAssertTrue(store.state.workspaces.isEmpty, "replaced, not merged")
+        XCTAssertTrue(changes.isEmpty, "no agent callbacks for the swap")
+        store.restore(cached)
+        XCTAssertEqual(store.phase, .live, "a cache never replaces live data")
+    }
+
+    func testSnapshotOfLiveModel() throws {
+        let store = ModelStore(backend: FakeBackend())
+        store.apply(.connected(hello("b", features: ["agent.history"])))
+        store.apply(.state(model("Live")))
+        let now = Date(timeIntervalSince1970: 500)
+        let snapshot = store.cacheSnapshot(now: now)
+        XCTAssertEqual(snapshot.lastSeen, now)
+        XCTAssertEqual(snapshot.instance, "b")
+        XCTAssertEqual(snapshot.daemonVersion, "0.1.13")
+        XCTAssertEqual(snapshot.features, [.agentHistory])
+        XCTAssertEqual(snapshot.state, store.state)
+        // Disconnected: lastSeen is when it dropped, not now.
+        store.apply(.disconnected("gone"))
+        XCTAssertLessThan(store.cacheSnapshot(now: Date().addingTimeInterval(3600)).lastSeen, Date().addingTimeInterval(60))
+        // Round trip through JSON, as the app stores it.
+        let data = try JSONEncoder().encode(snapshot)
+        XCTAssertEqual(try JSONDecoder().decode(CachedMachineState.self, from: data), snapshot)
+    }
+
+    func testOtherFormatsAreIgnored() {
+        let store = ModelStore(backend: FakeBackend())
+        store.restore(CachedMachineState(state: model("Old"), lastSeen: Date(), format: 99))
+        XCTAssertEqual(store.phase, .live)
+        XCTAssertTrue(store.state.workspaces.isEmpty)
+    }
+
+    func testNewInstanceResetsSavedPanes() {
+        final class Sink: PaneDataSink {
+            var resets = 0
+            func paneSubscribed(_ subscription: Subscription) {}
+            func paneOutput(seq: UInt64, bytes: Data) {}
+            func paneSnapshot(seq: UInt64, cols: Int, rows: Int, bytes: Data) {}
+            func paneResized(cols: Int, rows: Int, seq: UInt64) {}
+            func paneResync() {}
+            func paneReset() { resets += 1 }
+        }
+        let store = ModelStore(backend: FakeBackend())
+        store.restore(CachedMachineState(state: model("S"), lastSeen: Date(), instance: "old"))
+        let sink = Sink()
+        store.register(sink, for: 3)
+        store.apply(.connected(hello("new")))
+        XCTAssertEqual(sink.resets, 1, "the saved panes belonged to another holder")
+    }
+}
+
+/// Permission requests (`requests`, `agent.decide`): each answered once, then stale.
+final class PermissionRequestTests: XCTestCase {
+    func testDecodes() throws {
+        let json = #"{"kind":"claude","state":"waiting","requests":[{"id":"r1","tool":"Bash","summary":"npm  test"},{"id":"r2","tool":"Edit","summary":null}]}"#
+        let info = try JSONDecoder().decode(AgentInfo.self, from: Data(json.utf8))
+        XCTAssertEqual(info.pendingRequests.map(\.id), ["r1", "r2"])
+        XCTAssertEqual(info.pendingRequests[0].question, "Allow Bash: npm test?")
+        XCTAssertEqual(info.pendingRequests[1].question, "Allow Edit?")
+        XCTAssertEqual(try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"kind":"codex","state":"done"}"#.utf8)).pendingRequests, [])
+        XCTAssertEqual(Hello.Feature(rawValue: "agent.decide"), .agentDecide)
+        XCTAssertTrue(BackendError(code: "stale", message: "").isStale)
+        // The notification asks about the oldest request.
+        let notice = AgentNotice(info: AgentInfo(kind: "claude", state: .waiting, message: "Claude needs your permission to use Bash",
+                                                 tool: "Read", toolInput: "x", requests: info.requests), machine: "m", workspace: "W")
+        XCTAssertEqual(notice.body, "Allow Bash: npm test?")
+    }
+
+    func testDecideOnceThenStale() async throws {
+        let backend = FakeBackend()
+        defer { backend.stop() }
+        try await backend.start()
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh"]))
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .waiting, source: "hook", attention: true,
+                                                 requests: [PermissionRequest(id: "r1", tool: "Bash", summary: "ls")]))
+        try await backend.decide(pane: created.pane, request: "r1", decision: .allow, message: nil)
+        let agent = try await backend.getState().pane(created.pane)?.agent
+        XCTAssertEqual(agent?.pendingRequests, [])
+        XCTAssertEqual(agent?.state, .running)
+        do {
+            try await backend.decide(pane: created.pane, request: "r1", decision: .deny, message: "no")
+            XCTFail("a second answer is stale")
+        } catch let error as BackendError {
+            XCTAssertTrue(error.isStale)
+        }
+        XCTAssertEqual(backend.decisions.count, 1)
+    }
+}

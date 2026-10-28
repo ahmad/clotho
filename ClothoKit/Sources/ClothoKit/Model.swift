@@ -117,9 +117,35 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     /// Muted by the user (`agent.mute`): it stays quiet, whatever it does, until unmuted or until this
     /// agent session ends. Absent means not muted.
     public var muted: Bool?
+    /// The wire's `quiet`: the last rise of `attention` happened while the user was at the pane (a turn
+    /// ending into `done` within 60 s of their input there). It still counts as attention (badge, Agents
+    /// panel), but no notification goes out for it. Kept until the next rise. Absent (older daemons)
+    /// means false. Not `isQuiet`, which is about a detected agent going quiet.
+    public var quietRise: Bool?
+    /// The first line of what the user typed to start this turn (at most 120 characters); nil for turns
+    /// nobody typed (a peer's message, a task waking it). For done, `message` is the agent's last reply.
+    public var prompt: String?
+    /// The last tool the agent used this turn ("Bash"), and its key input ("npm test", a file path, a
+    /// pattern; at most 160 characters). For a permission wait, what it asks to run.
+    public var tool: String?
+    public var toolInput: String?
+    /// When this turn began, in seconds since 1970.
+    public var turnStarted: Double?
+    /// Permission requests the agent waits on, oldest first (`agent.decide` answers one). Absent (older
+    /// daemons, Codex) means none; see `pendingRequests`.
+    public var requests: [PermissionRequest]?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, state, source, message, since, attention, session, muted, prompt, tool, requests
+        case quietRise = "quiet"
+        case toolInput = "tool_input"
+        case turnStarted = "turn_started"
+    }
 
     public init(kind: String, state: State, source: String? = nil, message: String? = nil, since: Double? = nil,
-                attention: Bool? = nil, session: String? = nil, muted: Bool? = nil) {
+                attention: Bool? = nil, session: String? = nil, muted: Bool? = nil, quietRise: Bool? = nil,
+                prompt: String? = nil, tool: String? = nil, toolInput: String? = nil, turnStarted: Double? = nil,
+                requests: [PermissionRequest]? = nil) {
         self.kind = kind
         self.state = state
         self.source = source
@@ -128,9 +154,33 @@ public struct AgentInfo: Codable, Equatable, Sendable {
         self.attention = attention
         self.session = session
         self.muted = muted
+        self.quietRise = quietRise
+        self.prompt = prompt
+        self.tool = tool
+        self.toolInput = toolInput
+        self.turnStarted = turnStarted
+        self.requests = requests
+    }
+
+    /// The permission requests waiting for an answer; empty when none.
+    public var pendingRequests: [PermissionRequest] { requests ?? [] }
+
+    /// How long the turn took, once it ended (done or error): `since` minus `turnStarted`.
+    public var turnDuration: TimeInterval? {
+        guard state == .done || state == .error, let since, let turnStarted, since >= turnStarted else { return nil }
+        return since - turnStarted
     }
 
     public var isMuted: Bool { muted == true }
+    /// Whether this attention rise was quiet (see `quietRise`).
+    public var isQuietRise: Bool { quietRise == true }
+
+    /// Whether going from `before` to this calls for a notification: attention rose (false to true) into
+    /// waiting, done or error, the agent isn't muted, and the rise wasn't quiet. Banners, pushes and the
+    /// Mac's notifications all follow this; badges and the Agents panel follow `needsAttention`.
+    public func notifiesRise(from before: AgentInfo?) -> Bool {
+        needsAttention && before?.needsAttention != true && [.waiting, .done, .error].contains(state) && !isQuietRise
+    }
 
     public var isHookSourced: Bool { source == "hook" }
     public var sinceDate: Date? { since.map { Date(timeIntervalSince1970: $0) } }
@@ -142,6 +192,33 @@ public struct AgentInfo: Codable, Equatable, Sendable {
 
     /// Waiting without attention: detected as quiet, which may only be a slow reply or a long build.
     public var isQuiet: Bool { state == .waiting && !needsAttention }
+}
+
+/// A tool call an agent asks permission for (an entry of `AgentInfo.requests`).
+public struct PermissionRequest: Codable, Equatable, Sendable, Identifiable {
+    /// The daemon's id for this request; it only ever names this one.
+    public var id: String
+    /// "Bash", "Edit", …
+    public var tool: String
+    /// Its key input ("npm test", a file path), or nil.
+    public var summary: String?
+
+    public init(id: String, tool: String, summary: String? = nil) {
+        self.id = id
+        self.tool = tool
+        self.summary = summary
+    }
+
+    /// "Allow Bash: npm test?"
+    public var question: String {
+        let input = summary.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }.flatMap { $0.isEmpty ? nil : $0 }
+        return "Allow \(tool)" + (input.map { ": \($0)" } ?? "") + "?"
+    }
+}
+
+/// An answer to a permission request (`agent.decide`).
+public enum PermissionDecision: String, Codable, Sendable {
+    case allow, deny
 }
 
 public struct Pane: Codable, Equatable, Sendable, Identifiable {

@@ -289,6 +289,28 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     }
 
     /// Mutes or unmutes the pane's agent, like clothod: a muted agent's attention is cleared and never raised.
+    /// Like clothod: answers one request once; anything else is `stale`. Allow sends the agent back to
+    /// work once nothing else waits; deny leaves it waiting on whatever is left (or done).
+    public func decide(pane: PaneID, request: String, decision: PermissionDecision, message: String?) async throws {
+        try locked {
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }),
+                  let index = state.panes[p].agent?.requests?.firstIndex(where: { $0.id == request }) else {
+                throw BackendError(code: "stale", message: "request \(request) was already answered or retired")
+            }
+            state.panes[p].agent?.requests?.remove(at: index)
+            decisions.append((pane, request, decision, message))
+            if state.panes[p].agent?.requests?.isEmpty == true, decision == .allow {
+                state.panes[p].agent?.state = .running
+                state.panes[p].agent?.attention = false
+            }
+            continuation.yield(.agent(pane, state.panes[p].agent))
+            publishPane(at: p)
+        }
+    }
+
+    /// What `decide` was told, in order (tests).
+    public private(set) var decisions: [(pane: PaneID, request: String, decision: PermissionDecision, message: String?)] = []
+
     public func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         try locked {
             guard let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].agent != nil else {
