@@ -23,7 +23,11 @@ extension MachineConnection {
         guard canFollow, !isFollowing(pane), let agent = store.state.pane(pane)?.agent else { return }
         let state = Self.activityState(agent)
         do {
-            let activity = try Activity.request(attributes: AgentActivityAttributes(machine: machine.id, pane: pane),
+            let location = store.state.location(of: pane)
+            let attributes = AgentActivityAttributes(
+                machine: machine.id, pane: pane, machineName: machine.displayName, workspace: location?.workspace.name,
+                tab: location.map { store.displayTitle(of: $0.tab) }, prompt: agent.prompt.flatMap { AgentActivityAttributes.line($0) })
+            let activity = try Activity.request(attributes: attributes,
                                                 content: AgentActivityAttributes.content(state), pushType: .token)
             let backend = store.backend, device = PushRegistrar.shared.device, env = PushRegistrar.shared.environment
             let name = machine.displayName
@@ -52,7 +56,7 @@ extension MachineConnection {
         Task { try? await backend.pushActivityEnd(pane: pane, device: device) }
     }
 
-    /// The first content, before the machine's first update: the same mapping clothod uses.
+    /// The first content, before the machine's first update: the same mapping clothod uses (docs/push.md).
     static func activityState(_ agent: AgentInfo, now: Date = Date()) -> AgentActivityAttributes.ContentState {
         let state: String
         switch agent.state {
@@ -64,7 +68,20 @@ extension MachineConnection {
         let since = Int(agent.since ?? now.timeIntervalSince1970)
         let started = agent.turnStarted.map { Int($0) } ?? since
         let kind = agent.kind.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        return AgentActivityAttributes.ContentState(state: state, kind: kind.isEmpty ? "other" : kind, since: since, started: started)
+        let request = agent.pendingRequests.first
+        let inTool = state == "running" || state == "waiting"
+        let tool = inTool ? (request?.tool ?? agent.tool) : nil
+        let message: String?
+        switch state {
+        case "waiting": message = request?.question ?? agent.message
+        case "done", "error": message = agent.message
+        default: message = nil
+        }
+        return AgentActivityAttributes.ContentState(
+            state: state, kind: kind.isEmpty ? "other" : kind, since: since, started: started,
+            tool: tool.flatMap { AgentActivityAttributes.line($0, max: 64) },
+            detail: tool == nil ? nil : (request.map { $0.summary } ?? agent.toolInput).flatMap { AgentActivityAttributes.line($0, max: 200) },
+            msg: message.flatMap { AgentActivityAttributes.line($0, max: 300) })
     }
 }
 #endif

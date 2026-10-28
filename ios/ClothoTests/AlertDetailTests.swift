@@ -233,5 +233,84 @@ final class AgentActivityTests: XCTestCase {
         let waiting = AgentInfo(kind: "codex", state: .waiting, since: 200, turnStarted: 150)
         XCTAssertEqual(MachineConnection.activityState(waiting), .init(state: "waiting", kind: "codex", since: 200, started: 150))
     }
+
+    // "Live Activity detail" (2026-10-28): the tool, the command or file, and the message.
+    func testDecodesOldAndNewContentState() throws {
+        let decoder = JSONDecoder()
+        let old = try decoder.decode(AgentActivityAttributes.ContentState.self,
+                                     from: Data(#"{"state":"done","kind":"claude","since":300,"started":200}"#.utf8))
+        XCTAssertNil(old.tool); XCTAssertNil(old.detail); XCTAssertNil(old.msg)
+        XCTAssertEqual(old.headline, "Claude finished")
+        XCTAssertNil(old.messageLine)
+
+        // As relay.test.js passes it through.
+        let json = #"{"state":"waiting","kind":"claude","since":1761512300,"started":1761512200,"tool":"Bash","detail":"rm -rf build — ünïcødé 🚀","msg":"Claude needs your permission to use Bash"}"#
+        let new = try decoder.decode(AgentActivityAttributes.ContentState.self, from: Data(json.utf8))
+        XCTAssertEqual(new, .init(state: "waiting", kind: "claude", since: 1761512300, started: 1761512200, tool: "Bash",
+                                  detail: "rm -rf build — ünïcødé 🚀", msg: "Claude needs your permission to use Bash"))
+        XCTAssertEqual(new.headline, "Claude wants to use Bash")
+        XCTAssertEqual(new.detailLine, "rm -rf build — ünïcødé 🚀")
+        XCTAssertEqual(new.messageLine, "Claude needs your permission to use Bash")
+        // Unknown keys from a later clothod don't break it.
+        let later = try decoder.decode(AgentActivityAttributes.ContentState.self,
+                                       from: Data(#"{"state":"running","kind":"codex","since":1,"started":1,"tool":"Edit","future":1}"#.utf8))
+        XCTAssertEqual(later.headline, "Codex is running Edit")
+        XCTAssertEqual(later.compactTool, "Edit")
+        XCTAssertEqual(AgentActivityAttributes.ContentState(state: "running", kind: "claude", since: 1, started: 1,
+                                                            tool: "mcp__github__create_pr").compactTool, "create_pr")
+        XCTAssertNil(old.compactTool)
+    }
+
+    func testTextShowsOnlyWhereItApplies() {
+        var state = AgentActivityAttributes.ContentState(state: "running", kind: "claude", since: 1, started: 1,
+                                                          tool: "Bash", detail: "cargo test\n  --all", msg: "stale")
+        XCTAssertEqual(state.detailLine, "cargo test --all", "one line")
+        XCTAssertNil(state.messageLine, "no message while running")
+        state.state = "done"
+        XCTAssertNil(state.detailLine, "no command once it's over")
+        XCTAssertEqual(state.messageLine, "stale")
+        XCTAssertEqual(state.headline, "Claude finished")
+    }
+
+    func testAttributesFromAnEarlierBuildDecode() throws {
+        let id = UUID()
+        let old = try JSONDecoder().decode(AgentActivityAttributes.self, from: Data(#"{"machine":"\#(id.uuidString)","pane":7}"#.utf8))
+        XCTAssertEqual(old.machine, id)
+        XCTAssertEqual(old.pane, 7)
+        XCTAssertNil(old.place)
+        XCTAssertNil(old.prompt)
+
+        let new = AgentActivityAttributes(machine: id, pane: 7, machineName: "devbox", workspace: "Clotho", tab: "orchestrator",
+                                          prompt: "Fix the timer")
+        XCTAssertEqual(new.place, "devbox · Clotho / orchestrator")
+        XCTAssertEqual(AgentActivityAttributes(machine: id, pane: 7, machineName: "devbox").place, "devbox")
+        let back = try JSONDecoder().decode(AgentActivityAttributes.self, from: JSONEncoder().encode(new))
+        XCTAssertEqual(back.place, new.place)
+        XCTAssertEqual(back.prompt, "Fix the timer")
+    }
+
+    func testLineTruncates() {
+        XCTAssertNil(AgentActivityAttributes.line("  \n "))
+        XCTAssertEqual(AgentActivityAttributes.line("a\tb\n\nc"), "a b c")
+        let cut = AgentActivityAttributes.line(String(repeating: "x", count: 200), max: 120)
+        XCTAssertEqual(cut?.count, 120)
+        XCTAssertEqual(cut?.last, "…")
+    }
+
+    @MainActor
+    func testFirstContentCarriesTheDetail() {
+        let running = AgentInfo(kind: "claude", state: .running, message: "earlier", since: 100, tool: "Bash", toolInput: "make\ntest")
+        XCTAssertEqual(MachineConnection.activityState(running),
+                       .init(state: "running", kind: "claude", since: 100, started: 100, tool: "Bash", detail: "make test"))
+        let asking = AgentInfo(kind: "claude", state: .waiting, since: 200, tool: "Read", toolInput: "x",
+                               requests: [PermissionRequest(id: "r1", tool: "Bash", summary: "rm -rf build")])
+        let state = MachineConnection.activityState(asking)
+        XCTAssertEqual(state.tool, "Bash", "the request's tool, as the alert shows")
+        XCTAssertEqual(state.detail, "rm -rf build")
+        XCTAssertEqual(state.msg, PermissionRequest(id: "r1", tool: "Bash", summary: "rm -rf build").question)
+        let done = AgentInfo(kind: "claude", state: .done, message: "All tests pass.", since: 300, tool: "Bash")
+        XCTAssertEqual(MachineConnection.activityState(done),
+                       .init(state: "done", kind: "claude", since: 300, started: 300, msg: "All tests pass."))
+    }
 }
 #endif

@@ -177,12 +177,15 @@ Clearing: APNs can't delete a delivered notification. When the app opens, it rem
 alerts whose pane no longer has attention. Doing it in the background would take silent pushes,
 which iOS throttles heavily; that is left for later.
 
-## Live Activities (phase 6; built, not deployed)
+## Live Activities
 
-A Live Activity follows one agent on the lock screen and in the Dynamic Island while it runs: its kind,
-its state and how long the turn has taken. Unlike alerts, Live Activity content can't be encrypted for the
-phone (iOS shows it without an extension), so it carries no text at all: the user's decision 3
-(docs/ios-redesign.md). Apple and the relay see the agent kind, the state and the times, nothing else.
+A Live Activity follows one agent on the lock screen and in the Dynamic Island while it runs: where it is,
+what it was asked, its state, the tool it's using and on what, its last message or question, and how long
+the turn has taken. Unlike alerts, Live Activity content can't be encrypted for the phone (iOS shows it
+without an extension). The first design carried no text at all (decision 3, docs/ios-redesign.md); after
+seeing only "Claude is working", the user chose full detail and accepted that Apple and the relay see the
+tool, the command or file, and the message unencrypted (PLAN.md, "Live Activity detail", 2026-10-28).
+The machine, workspace, tab and prompt never leave the phone.
 
 ### The app
 
@@ -190,13 +193,28 @@ The app starts the activity (ActivityKit, `pushType: .token`) when the user foll
 push token to the machine with `push.activity`, and ends it itself when it's no longer wanted
 (`push.activity_end` then only tells clothod to forget the token).
 
+The activity's attributes are set on the phone at Follow and never sent anywhere: the machine's name, the
+workspace and tab names, and the turn's prompt (one line, at most 120 characters). They're optional, so an
+activity an earlier build started still decodes. The first content is built on the phone from the pane's
+agent with the same mapping clothod uses; after that the machine's updates replace it.
+
+The lock screen shows "devbox · Clotho / orchestrator", the state line ("Claude is running Bash", "Claude
+wants to use Bash", "Claude finished"), the command or file in mono while it's in a tool, then the last
+message or question (or, while running with no tool, the prompt), and the timer on the right. The compact
+Dynamic Island shows the state's icon and the tool (an MCP tool by its last part) on the left, the timer on
+the right.
+
 ### The relay
 
-`POST /v1/activity {handle, token, env?, event: "update"|"end", content: {state, kind, since, started},
-timestamp, stale?, dismiss?}`, authorised by the same push handle as alerts:
+`POST /v1/activity {handle, token, env?, event: "update"|"end", content: {state, kind, since, started,
+tool?, detail?, msg?}, timestamp, stale?, dismiss?}`, authorised by the same push handle as alerts:
 - `token`: the activity's push token, 64–200 hex characters. `env` defaults to the handle's.
-- `content` must have exactly those four keys. `state` and `kind` match `^[a-z][a-z0-9_-]{0,31}$`; the
-  times are positive integers (unix seconds). Anything else is a 400, so no text can pass even by mistake.
+- `content` must have `state`, `kind`, `since` and `started`, and may have `tool`, `detail` and `msg`;
+  any other key is a 400. `state` and `kind` match `^[a-z][a-z0-9_-]{0,31}$`; the times are positive
+  integers (unix seconds). `tool` matches `^[A-Za-z0-9_.:-]{1,64}$`. `detail` and `msg` are non-empty
+  strings of one line (no control characters, U+2028 or U+2029) of at most 200 and 300 Unicode scalars.
+  The content's JSON is at most 3072 bytes (a backstop; the caps keep it near 2 KB at most). Anything
+  else is a 400. The content goes to APNs unchanged.
 - It goes to APNs with `apns-push-type: liveactivity`, topic `nyc.amin.clotho.push-type.liveactivity`,
   priority 5 for an update and 10 for an end, and ActivityKit's body
   `{aps: {timestamp, event, content-state, stale-date?, dismissal-date?}}`.
@@ -214,13 +232,22 @@ timestamp, stale?, dismiss?}`, authorised by the same push handle as alerts:
 
 ### clothod: what it sends
 
-`POST {relay}/v1/activity` with `{handle, token, env, event, content: {state, kind, since, started}, timestamp, stale | dismiss}`:
+`POST {relay}/v1/activity` with `{handle, token, env, event, content: {state, kind, since, started, tool?, detail?, msg?}, timestamp, stale | dismiss}`:
 - `state`: `running` (also while the agent is starting), `waiting`, `done` or `error`. `kind`: the agent
   kind, made to fit `^[a-z][a-z0-9_-]{0,31}$` ("other" if it can't). `since`: unix seconds when the
   current state began. `started`: unix seconds when the turn began, else `since`. That is the elapsed timer,
-  so running → waiting → running doesn't reset it. Never any text: no message, prompt, tool, title or path.
+  so running → waiting → running doesn't reset it.
+- `tool` (at most 64, ASCII, `^[A-Za-z0-9_.:-]{1,64}$`, else left out) and `detail` (the tool input's
+  summary: the command, file path or pattern; at most 200): with `running` and `waiting` only. While
+  waiting on a permission request they are the request's tool and summary, as in the alert.
+- `msg` (at most 300): `done`, the last message; `error`, the error; `waiting`, the text the alert shows.
+  Never while running.
+- Each is left out when it doesn't apply, never `""` or null. The caps count UTF-8 bytes of the
+  JSON-escaped string, which is never less than the relay's count; a cut string ends with "…", counted
+  inside the cap. Control characters, U+2028 and U+2029 become spaces, runs of spaces fold to one, and
+  the ends are trimmed. Never the prompt, title or workspace: those stay on the phone.
 - `update`: right after `push.activity` if the pane's agent is running or waiting. With no agent, or one
-  whose turn already ended, it waits for the next change. Then on every change of state, kind or times, at
+  whose turn already ended, it waits for the next change. Then on every change of state, kind, times, tool, detail or msg, at
   most one per activity every 10 s; the latest state is sent at the end of the window.
   `stale` = `timestamp` + 15 min.
 - `end`: at once, outside the window, when the agent reaches `done` or `error`, goes away, or its pane
@@ -233,9 +260,9 @@ timestamp, stale?, dismiss?}`, authorised by the same push handle as alerts:
   An `end` is retried with the same backoff as alerts. Other failures show as the activity's `last_error`
   in `push.list`.
 
-Shipping it needs the user's go twice: deploying the relay (`npx wrangler deploy`, which also creates the
-`ACTIVITY_LIMITER` binding) and releasing clothod with `push.activity`. Until then the app keeps the Live
-Activity out of TestFlight builds.
+Live Activities shipped with the relay's `/v1/activity`, clothod 0.1.16 and TestFlight builds made with
+`LIVE_ACTIVITY=YES`. The detail fields need the relay deployed with them before a clothod sends them,
+because the relay as first deployed rejects any key beyond the four.
 
 ## Hosting the relay
 

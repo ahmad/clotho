@@ -2,63 +2,117 @@
 import ActivityKit
 import SwiftUI
 import WidgetKit
+// Compiled into the tests too, to render the lock screen (where the attributes come from the app).
+#if WIDGET_PREVIEW_TEST
+@testable import Clotho
+#endif
 
-/// The Live Activity for a followed agent: lock screen and Dynamic Island. State, kind and elapsed time only.
+/// The Live Activity for a followed agent: lock screen and Dynamic Island. Where the agent is and what it was
+/// asked come from the phone (the attributes); what it's doing comes from the machine (the content state).
 struct AgentActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AgentActivityAttributes.self) { context in
-            AgentActivityLockScreen(state: context.state)
-                .widgetURL(URL(string: "clotho://pane/\(context.attributes.machine.uuidString)/\(context.attributes.pane)"))
+            AgentActivityLockScreen(attributes: context.attributes, state: context.state)
+                .widgetURL(Self.url(context.attributes))
         } dynamicIsland: { context in
-            let state = context.state
+            let state = context.state, attributes = context.attributes
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label(state.name, systemImage: state.symbol).font(.headline)
+                    Image(systemName: state.symbol).font(.title2).foregroundStyle(activityTint(state))
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    activityElapsed(state).font(.headline.monospacedDigit())
+                    ActivityTimer(state: state).font(.headline.monospacedDigit()).frame(width: 72, alignment: .trailing)
+                }
+                DynamicIslandExpandedRegion(.center) {
+                    Text(state.headline).font(.headline).lineLimit(1)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text("\(state.name) \(state.verb)").font(.callout).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let place = attributes.place {
+                            Text(place).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        ActivityDetail(attributes: attributes, state: state, lines: 2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } compactLeading: {
-                Image(systemName: state.symbol).foregroundStyle(activityTint(state))
+                HStack(spacing: 4) {
+                    Image(systemName: state.symbol).foregroundStyle(activityTint(state))
+                    if let tool = state.compactTool {
+                        Text(tool).font(.caption2.weight(.semibold)).lineLimit(1).frame(maxWidth: 44, alignment: .leading)
+                    }
+                }
             } compactTrailing: {
-                activityElapsed(state).monospacedDigit().frame(maxWidth: 52)
+                ActivityTimer(state: state).monospacedDigit().frame(width: 44, alignment: .trailing)
             } minimal: {
                 Image(systemName: state.symbol).foregroundStyle(activityTint(state))
             }
-            .widgetURL(URL(string: "clotho://pane/\(context.attributes.machine.uuidString)/\(context.attributes.pane)"))
+            .widgetURL(Self.url(attributes))
         }
+    }
+
+    static func url(_ attributes: AgentActivityAttributes) -> URL? {
+        URL(string: "clotho://pane/\(attributes.machine.uuidString)/\(attributes.pane)")
     }
 }
 
-/// The lock-screen banner: what the agent is doing and for how long.
+/// The lock-screen banner: where, what the agent is doing (and on what), its last word, and for how long.
 struct AgentActivityLockScreen: View {
+    var attributes: AgentActivityAttributes
     var state: AgentActivityAttributes.ContentState
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: state.symbol).font(.title2).foregroundStyle(activityTint(state))
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(state.name) \(state.verb)").font(.headline)
-                Text("Clotho").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: state.symbol).foregroundStyle(activityTint(state))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(state.headline).font(.headline).lineLimit(1)
+                    Text(attributes.place ?? "Clotho").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                ActivityTimer(state: state).font(.title3.monospacedDigit()).frame(width: 84, alignment: .trailing)
             }
-            Spacer()
-            activityElapsed(state).font(.title3.monospacedDigit())
+            ActivityDetail(attributes: attributes, state: state, lines: 3)
         }
         .padding()
     }
 }
 
-/// A running clock while the turn goes on; the final length once it's over.
-@ViewBuilder
-func activityElapsed(_ state: AgentActivityAttributes.ContentState) -> some View {
-    if state.isOver {
-        let seconds = max(0, state.since - state.started)
-        Text(Duration.seconds(seconds), format: .time(pattern: seconds >= 3600 ? .hourMinuteSecond : .minuteSecond))
-    } else {
-        Text(timerInterval: state.startedDate...Date.distantFuture, countsDown: false)
+/// The command or file in mono, then the last message or question, or else the prompt the turn began with.
+struct ActivityDetail: View {
+    var attributes: AgentActivityAttributes
+    var state: AgentActivityAttributes.ContentState
+    var lines: Int
+
+    var body: some View {
+        if let detail = state.detailLine {
+            Text(detail).font(.caption.monospaced()).lineLimit(2).truncationMode(.middle)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+        }
+        if let message = state.messageLine {
+            Text(message).font(.callout).lineLimit(lines)
+        } else if state.detailLine == nil, let prompt = attributes.prompt {
+            Text("“\(prompt)”").font(.callout).foregroundStyle(.secondary).lineLimit(lines)
+        }
+    }
+}
+
+/// A running clock while the turn goes on; the final length once it's over. A timer Text takes all the width
+/// it's offered and centres in it, so it's right-aligned here and given a fixed width by the caller.
+struct ActivityTimer: View {
+    var state: AgentActivityAttributes.ContentState
+
+    var body: some View {
+        Group {
+            if state.isOver {
+                let seconds = max(0, state.since - state.started)
+                Text(Duration.seconds(seconds), format: .time(pattern: seconds >= 3600 ? .hourMinuteSecond : .minuteSecond))
+            } else {
+                Text(timerInterval: state.startedDate...Date.distantFuture, countsDown: false)
+            }
+        }
+        .multilineTextAlignment(.trailing)
     }
 }
 

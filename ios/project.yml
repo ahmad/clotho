@@ -79,6 +79,7 @@ targets:
       - ClothoTests
       # The widget's views, rendered by WidgetPreviewTests.
       - ClothoWidget/NeedsYouView.swift
+      - ClothoWidget/AgentActivityView.swift
     dependencies:
       - target: Clotho
     settings:
