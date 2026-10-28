@@ -64,6 +64,10 @@ u=$tmp/unreleased; fake $u 0.1.12 -; dist $u/dist 0.1.12
 expect fail "no RELEASED is refused" $u
 m=$tmp/mixed; fake $m 0.1.12 0.1.12; dist $m/dist 0.1.12 0.1.11
 expect fail "build ids of another version are refused" $m
+a=$tmp/appended; fake $a 0.1.12 "$(printf '0.1.11\n0.1.12')"; dist $a/dist 0.1.12
+expect fail "a RELEASED of two lines is refused" $a
+grep -q "should hold one version" "$tmp/err" && { passed=$((passed + 1)); echo "ok   it says why"; } \
+  || { failed=$((failed + 1)); echo "FAIL it says why"; }
 g=$tmp/gap; fake $g 0.1.12 0.1.12; dist $g/dist 0.1.12; rm $g/dist/linux-x86_64/clothod
 expect fail "a missing build is refused" $g
 

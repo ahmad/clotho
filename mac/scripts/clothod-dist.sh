@@ -37,6 +37,7 @@ fi
 [[ -z "$mode" || "$mode" == "--check" ]] || fail "usage: $0 [--dev | --check]"
 
 [[ -n "$released" ]] || fail "no clothod/RELEASED: there is no released clothod to bundle."
+[[ "$released" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "clothod/RELEASED should hold one version (as clothod/scripts/dist.sh writes it), but holds: $(tr '\n' ' ' <<<"$released")"
 dist=${CLOTHOD_DIST:-$root/dist}
 [[ -d "$dist" ]] || fail "no dist at $dist. The app bundles only a released clothod ($released): build it with clothod/scripts/dist.sh on the Mac, or use --dev for a test build."
 dist=$(cd "$dist" && pwd -P)
