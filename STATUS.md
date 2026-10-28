@@ -1,73 +1,53 @@
-# Status and handoff (2026-10-27, updated after clothod 0.1.10)
+# Status and handoff (2026-10-28, updated after clothod 0.1.12)
 
-Development moved from this Mac's sessions to devbox. Everything from the old agents (clothod-80, mac-d8,
-ios-c2 and the orchestrator) is committed. CLAUDE.md has the rules. This file has where things stand and
-what the old agents learned. The orchestrator keeps it current.
+Development moved from this Mac's sessions to devbox. CLAUDE.md has the rules. This file has where
+things stand and what the old agents learned. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.10** runs on macbook, devbox and imac, upgraded in place (holders 9573, 1799611 and
-  27331 kept their pids through 0.1.6 to 0.1.10). Since 0.1.8, upgrades win on attempt 1 (an upgrade
-  lock, `current` moved first, and the app no longer runs `install` when `current` exists). It
-  has the following:
-  - pane.clipboard (OSC 52)
-  - the settings (scrollback) and service (start at login) requests
-  - attention that clears only on agent.ack or real work, never on input or viewing
-  - agent.mute
-  - numeric version ordering pinned by a test
-- **Start at login:** on for imac (the user turned it on). Off on macbook; off on devbox, which needs
-  `sudo loginctl enable-linger ahmad` first.
-- **Agent hooks** (Claude Code and Codex) are installed on all three machines. The backups are
-  `*.bak-2026-10-27-clotho-hooks`.
-- **The Mac app** bundles 0.1.10 and has the following:
-  - Shift+Return, the Cmd editing keys, rename without flicker
-  - Option/Shift-drag selection and the right-click pane menu in agent TUIs, OSC 52 copies
-  - image paste and drop into remote agents
-  - the Agents panel: attention first, hover-only Mute and Resolve over a pinned time, a Quiet
-    subsection
-  - left chevrons, accent-blue selection, thicker tabs, whole-app zoom (with a separate terminal
-    zoom on Option+Cmd)
-  - a Settings window
-  - Create Workspace outline buttons, and a Manage Machines footer and panel (add, edit, remove,
-    reorder)
-  - the Panes icon
-  - Developer ID notarization, waiting for the user's certificate
-- **iOS:** TestFlight build 202610271602 (clothod 0.1.10), uploaded by the user. It has parity with
-  the Mac: image paste, Paste Photo, the Newline key, the Cmd keys, the long-press menu in agent
-  TUIs, the agents list with Resolve, Mute and Quiet, Settings, accent selection, the Panes icon, and
-  the host-key deadlock fix.
+- **clothod 0.1.12** runs on macbook, devbox and imac, upgraded in place. The holders (9573, 1799611
+  and 27331) kept their pids through 0.1.6 to 0.1.12, and every upgrade since 0.1.9 won on attempt 1.
+  - Round 3 added docs/security.md (10 findings, all fixed), resume after a cut, pane.search,
+    agent.history, push records padded to 1024 bytes and capped at 2048, and agent.report caps.
+  - Earlier: pane.clipboard (OSC 52), settings and service requests, attention that clears only on
+    agent.ack or real work, agent.mute, numeric version ordering.
+  - Each machine's bin/ holds only 0.1.12. An unreleased 0.1.11 build briefly reached all three
+    through the app's "Update clothod"; 0.1.12 replaced it.
+- **Agent hooks** were refreshed with 0.1.12: Claude on all three machines, Codex on devbox and imac.
+  Codex on macbook is the user's Computer Use notifier and is left alone. The backups are
+  `settings.json.clotho-backup-*`. Check with `grep -c 'CLOTHOD_REPORT:-/'`, which should be 0.
+- **Start at login:** on for imac only. devbox needs `sudo loginctl enable-linger ahmad` first.
+- **The Mac app** (1.0.0, build 202610280257) bundles the released 0.1.12. Round 3 added:
+  - onboarding
+  - the transfer stall watchdog with retry and resume
+  - Sparkle, off until the user generates the EdDSA key
+  - Cmd+P quick open, Cmd+F find in scrollback, agent history, light mode
+  - workspace rows laid out like machine rows: the dot after the name, the count pinned right,
+    close on hover only
+  - `mac/build-app.sh` without `--dev` bundles only a released dist (bf85cc5)
+- **iOS:** TestFlight build 202610272305 (clothod 0.1.12), uploaded by the user. Round 3 added find,
+  agent history, quick open and the palette, the iPad split view, and onboarding. The iPhone suite
+  had 53 passed, 8 skipped and 0 failed, and the iPad test passed. The workspace row restyle is Mac
+  only.
 - **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets exist in
   Cloudflare only.
 - **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes exact verified
-  commits (`git push origin <sha>:main`).
-- **The Mac reaches imac under clotho-mac** through a `Host imac` entry in the Mac's ~/.ssh/config.
-- **The website** (clotho.app, waitlist CTA) is built by a separate session in ~/Projects/clotho.app.
-- **Known issues:**
-  - One interrupted upload hung for 10 minutes once and didn't reproduce.
-  - Resume after a cut is unproven against test daemons.
-  - linux-aarch64 has run only under qemu.
+  commits after checking every commit in `origin/main..<sha>`.
+- **The website** (clotho.app, waitlist on Upstash) is built by a separate session in
+  ~/Projects/clotho.app.
 
 ## Waiting on the user
 
-- **iPhone pass (never done).** Install TestFlight 202610262314 and allow notifications. Connect to
-  devbox and imac, then tap "Send test alert". Check that:
-  - the lock screen shows the decrypted message ("Claude is waiting on <machine>")
-  - tapping the alert opens the pane
-  - file download and upload work over cellular, and a transfer survives backgrounding the app
-- **About 10 minutes of real-mouse testing on the Mac.** All UI tests so far used synthetic key events.
-  Unverified:
-  - click and double-click rename, in the sidebar and the tab bar
-  - dragging the sidebar width and the Agents panel splitter
-  - the right-click pane menu
-  - file drag and drop onto panes and in the browser
-  - mouse selection, copy and scroll in panes
-  - the notice-bar buttons, such as the update and restart offers
-  - quick reply from a real notification
-  - the file browser between two remotes, through the UI
-- **Product calls:** scrollback in the app (today it's only in `~/.config/clothod/config.toml`, read
-  at daemon start), launchd/systemd login units, a Developer ID for notarized Mac builds.
-- **Optional:** "Set Up Agent Status…" hooks on each machine. Removing the old clotho-ios-dev-test key
-  from devbox's authorized_keys. Note that the iOS SSH tests use that key.
+- **Optional:**
+  - a Developer ID certificate and notary profile
+  - Sparkle `generate_keys`, then commit mac/Resources/SparklePublicKey and host appcast.xml on
+    the site
+- **Website leftovers:** remove orchestrator-test@example.com from Upstash; optionally set
+  WAITLIST_ADMIN_TOKEN.
+- **Untested by agents:**
+  - real-mouse use on the Mac
+  - iPad hardware-keyboard shortcuts, Slide Over and Split View sizes
+  - a real-device push pass
 
 ## Open work by area
 
