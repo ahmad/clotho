@@ -32,7 +32,10 @@ final class RenameUITests: XCTestCase {
         bar.buttons.element(boundBy: 0).tap()
         let row = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "from-title")).firstMatch
         // The new workspace is last; earlier tests' workspaces may push it below the screen.
-        for _ in 0..<8 where !row.waitForExistence(timeout: 2) || !row.isHittable { app.swipeUp() }
+        // Hittable isn't enough: a row clipped by the bottom edge takes the press near the home indicator,
+        // which opens no menu. Scroll until the whole row is well inside the window.
+        let bottom = app.windows.firstMatch.frame.maxY - 60
+        for _ in 0..<8 where !row.waitForExistence(timeout: 2) || !row.isHittable || row.frame.maxY > bottom { app.swipeUp() }
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.press(forDuration: 1.2)
         app.buttons["Rename"].tap()
