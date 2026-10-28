@@ -83,7 +83,8 @@ struct AppearanceMenu: View {
             // Until Home has a settings menu (phase 2).
             Section { KeepPreviewsToggle() }
         } label: {
-            Label("Appearance", systemImage: "circle.lefthalf.filled")
+            // "Display": the appearance and Keep Pane Previews (and distinct from the pane menu's Appearance).
+            Label("Display", systemImage: "circle.lefthalf.filled")
         }
         .onChange(of: choice) { AppearanceChoice.applyToAllWindows() }
     }

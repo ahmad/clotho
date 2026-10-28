@@ -7,8 +7,8 @@ final class AppearanceUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting"]
         app.launch()
-        // Through the menu, as the user would (a launch argument would pin the value for the whole run).
-        app.buttons["Appearance"].tap()
+        // Through Home's Display menu, as the user would (a launch argument would pin the value for the whole run).
+        app.buttons["Display"].tap()
         app.buttons["Light"].tap()
         attach(app, "machines light")
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
