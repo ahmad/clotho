@@ -279,3 +279,20 @@ clothod release, app install or TestFlight upload still needs the user's go when
   always push.
 - Turns the user didn't type (peer messages, background tasks) still push when they end. The
   user chose this; it avoids depending on Claude Code's prompt wrapper.
+
+## iOS redesign (user decision, 2026-10-28)
+
+- Home: one screen. Agents that need the user are pinned on top, with inline actions (Allow,
+  Deny, Open). Every machine's workspaces sit below, each machine showing "last seen" or
+  "connecting".
+- Saved state: workspaces, tabs, panes, agent states and each pane's last screen are shown at
+  once from the phone's saved copy, dimmed and read-only until live.
+  - Terminal text is stored encrypted by iOS and excluded from backups.
+  - It's on by default, and Settings has "Keep pane previews" to turn it off and clear it.
+- Agent inbox actions: Allow/Deny and quick reply from the list and from the notification.
+- A better terminal screen: swipe between tabs, a key bar (Esc, Tab, Ctrl, arrows, Newline),
+  bigger tap targets, haptics, pinch to zoom.
+- Lock screen and widgets: a Live Activity or Dynamic Island for a running agent, and a widget
+  for agents that need the user.
+- Onboarding: much simpler and easy to follow.
+- Terms stay Workspace, Tab and Pane.
