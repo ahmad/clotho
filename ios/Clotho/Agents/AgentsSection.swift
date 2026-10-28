@@ -234,13 +234,14 @@ struct PermissionButtons: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(request.question).font(.callout.weight(.medium)).lineLimit(3)
                 HStack(spacing: 10) {
+                    // The icons take their label's colour: white on the green Allow, red on Deny.
                     Button { answer(request, .allow) } label: {
-                        Label("Allow", systemImage: "checkmark").frame(maxWidth: .infinity)
+                        Label("Allow", systemImage: "checkmark").foregroundStyle(.white).frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent).tint(.green)
                     .accessibilityIdentifier("allowRequest")
                     Button(role: .destructive) { answer(request, .deny) } label: {
-                        Label("Deny", systemImage: "xmark").frame(maxWidth: .infinity)
+                        Label("Deny", systemImage: "xmark").foregroundStyle(.red).frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
                     .accessibilityIdentifier("denyRequest")
