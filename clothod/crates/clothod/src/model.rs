@@ -303,6 +303,9 @@ impl Model {
         self.workspaces.iter_mut().flat_map(|w| w.tabs.iter_mut()).any(|t| t.layout.set_ratio(split, ratio))
     }
 
+    // The apps mirror focus_pane, focus_tab, focus_workspace and fix_focus's fallbacks
+    // (ClothoKit/Sources/ClothoKit/LocalFocus.swift) to show a click's focus at once;
+    // testLocalFocusMatchesTheDaemon compares the two. Tell the mac agent before changing them.
     pub fn focus_pane(&mut self, pane: u64) -> bool {
         let Some((ws, tab)) = self.locate(pane) else { return false };
         if let Some(t) = self.tab_mut(tab) {
