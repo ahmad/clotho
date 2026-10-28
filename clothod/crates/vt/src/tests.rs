@@ -435,3 +435,13 @@ fn search_latency_probe() {
         eprintln!("{q:?} over {} lines: {} matches in {:?}", vt.history_len() + 40, r.matches.len(), t.elapsed());
     }
 }
+
+#[test]
+fn a_cleared_screen_keeps_its_scrollback_out_of_view() {
+    // A command line that wraps to 3 rows, then `clear` as ncurses sends it (with and without
+    // E3), then a line and a prompt: the screen holds only what came after the clear.
+    let cmd = format!("$ {}\r\n", "x".repeat(70));
+    for clear in ["\x1b[H\x1b[2J", "\x1b[H\x1b[2J\x1b[3J"] {
+        roundtrip(30, 10, format!("{cmd}{clear}saved screen 42\r\n$ ").as_bytes());
+    }
+}

@@ -236,6 +236,28 @@ async fn assert_matches_daemon(c: &Client, s: &Screen) {
 
 const FULLSCREEN_APP: &str = r#"printf '\033[?1049h\033[H\033[2J\033[1;37;44m TOP \033[0m\n\033[31mred\033[0m and \033[1mbold\033[0m\n\033[5;10H\033[7mplaced\033[0m\033[3;1H'; cat"#;
 
+/// `clear` after a command line that wrapped: a fresh subscribe's snapshot shows only what
+/// followed the clear, as the daemon's screen does (the cleared rows are scrollback).
+#[tokio::test]
+async fn a_snapshot_after_clear_shows_only_the_screen() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    let mut params = sh();
+    params["cols"] = json!(30);
+    params["rows"] = json!(10);
+    let p = new_pane(&c, params).await;
+    c.input(p, format!("mkdir -p /tmp/{0} && cd /tmp/{0} && clear; printf 'saved screen 42\\n'; cd /\r", "x".repeat(40)).as_bytes());
+    wait_for_text(&c, p, T, |l| l.iter().any(|x| x == "saved screen 42")).await.unwrap();
+    let (lines, _) = daemon_text(&c, p).await;
+    assert_eq!(lines[0], "saved screen 42", "clear left the command line on screen: {lines:?}");
+    let mut fresh = env.client().await;
+    let (_, mut s) = subscribe(&mut fresh, p, None).await;
+    sync(&mut fresh, &mut s).await.unwrap();
+    assert_matches_daemon(&fresh, &s).await;
+    drop(c);
+    let _ = std::fs::remove_dir(format!("/tmp/{}", "x".repeat(40)));
+}
+
 #[tokio::test]
 async fn detach_reattach_gets_the_exact_screen() {
     let env = Env::new();
