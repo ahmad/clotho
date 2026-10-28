@@ -85,7 +85,8 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.tests
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_PREVIEW_TEST
+        # CLOTHO_LIVE_ACTIVITIES is set by liveactivity.yml (LIVE_ACTIVITY=YES), else empty.
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_PREVIEW_TEST $(CLOTHO_LIVE_ACTIVITIES)
         BUNDLE_LOADER: $(TEST_HOST)
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/Clotho.app/Clotho
   ClothoUITests:

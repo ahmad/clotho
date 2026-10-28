@@ -14,4 +14,5 @@ targets:
   ClothoTests:
     settings:
       base:
-        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_PREVIEW_TEST LIVE_ACTIVITIES
+        # project.yml's own conditions for the tests win over an include's, so it reads this one.
+        CLOTHO_LIVE_ACTIVITIES: LIVE_ACTIVITIES
