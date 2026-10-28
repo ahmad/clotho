@@ -266,6 +266,32 @@ async fn a_snapshot_after_clear_shows_only_the_screen() {
     let _ = std::fs::remove_dir(format!("/tmp/{}", "x".repeat(40)));
 }
 
+/// A shell that doesn't report its directory (no OSC 7, like macOS zsh): a `cd` alone, with no
+/// other activity in the pane, still reaches clients as a `pane` event with the new cwd.
+#[tokio::test]
+async fn a_cd_shows_up_without_osc7() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    let dir = env.dir.path().join("somewhere").canonicalize().unwrap_or_else(|_| {
+        std::fs::create_dir_all(env.dir.path().join("somewhere")).unwrap();
+        env.dir.path().join("somewhere").canonicalize().unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    while c.try_recv().is_some() {}
+    c.input(p, format!("cd '{}'\r", dir.display()).as_bytes());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), c.recv()).await {
+            Ok(Some(Frame::Json(v))) if v["event"] == "pane" && v["data"]["id"] == p && v["data"]["cwd"] == json!(dir.display().to_string()) => break,
+            Ok(None) => panic!("disconnected"),
+            _ => {}
+        }
+        assert!(Instant::now() < deadline, "no pane event with cwd {}", dir.display());
+    }
+}
+
 #[tokio::test]
 async fn detach_reattach_gets_the_exact_screen() {
     let env = Env::new();

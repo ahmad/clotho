@@ -319,6 +319,9 @@ struct Pane {
     snap_seq: u64,
     snap_at: Instant,
     last_output: Instant,
+    /// The shell's working directory as last told to clients, when it doesn't report one
+    /// itself (OSC 7): polled once a second so a `cd` shows up without other activity.
+    polled_cwd: Option<String>,
     /// What its agents did, oldest first (`agent.history`), at most HISTORY_MAX entries; kept
     /// across serve restarts in the pane meta.
     history: VecDeque<Value>,
@@ -439,6 +442,7 @@ impl Pane {
             snap_seq: 0,
             snap_at: Instant::now(),
             last_output: Instant::now(),
+            polled_cwd: None,
             history: VecDeque::new(),
         }
     }
@@ -1713,6 +1717,18 @@ impl Daemon {
             }
             if snapshot_check && self.live.load(Ordering::Relaxed) {
                 self.detect_agent(&mut p);
+                // Shells that don't report their directory (OSC 7; macOS zsh by default): a
+                // `cd` changes nothing else the daemon sees, so look.
+                if p.cwd.is_none() && p.exited.is_none() {
+                    let now = platform::process_cwd(p.pid).map(|c| c.to_string_lossy().into_owned());
+                    if now.is_some() && now != p.polled_cwd {
+                        let first = p.polled_cwd.is_none();
+                        p.polled_cwd = now;
+                        if !first {
+                            self.pane_event(&p);
+                        }
+                    }
+                }
             }
             if snapshot_check {
                 let behind = p.vt_seq - p.snap_seq;

@@ -226,7 +226,9 @@ the life of the object and never reused within an `instance`.
     unparsed, so endless output can't grow the daemon. Clients get the raw OUTPUT bytes regardless
     and should apply their own limits.
   - `cwd` comes from OSC 7, with a fallback to the process's cwd (`/proc` on Linux, `proc_pidinfo`
-    on macOS); it is `null` if unknown.
+    on macOS); it is `null` if unknown. Without OSC 7 (macOS zsh by default) the daemon checks the
+    shell's cwd once a second and sends a `pane` event when it changed, so a `cd` shows up within
+    about a second with nothing else happening in the pane.
   - `exited` is `null` while the pane runs, then `{"code": 0}` or `{"signal": 9}`.
   - `scrollback_lines` is the history the daemon keeps for the pane (spawn options).
 - When a tab's active pane closes or exits, the new `active_pane` is the first pane of the
