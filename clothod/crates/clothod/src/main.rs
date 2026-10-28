@@ -206,10 +206,16 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
         }
     }
     // Running, but its socket was deleted (temp cleaner): have it rebind instead of starting a
-    // second daemon.
+    // second daemon. Or it is on its way out (told to stop: its socket goes first, its live file
+    // a moment later): then wait for it to exit and start. An upgrade's own start knows the
+    // daemon it finds was just stopped, so it doesn't ask that one to rebind.
     if let Some(pid) = clotho_proto::listen::live_instance(&platform::log_dir(&dir).join("clothod.live")) {
-        clotho_proto::listen::poke(pid);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let upgrading = std::env::var_os(UPGRADING_ENV).is_some();
+        if !upgrading {
+            clotho_proto::listen::poke(pid);
+        }
+        let deadline = Instant::now() + Duration::from_secs(if upgrading { 30 } else { 5 });
+        let mut exited = false;
         while Instant::now() < deadline {
             if connect(&dir).await.is_ok() {
                 if !quiet {
@@ -217,9 +223,16 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
                 }
                 return Ok(());
             }
+            // Gone, or its live file is (it removes that last, on its way out).
+            if clotho_proto::listen::live_instance(&platform::log_dir(&dir).join("clothod.live")) != Some(pid) {
+                exited = true;
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        bail!("clothod (pid {pid}) is running but its socket {} did not come back", clothod::daemon::socket_path(&dir).display());
+        if !exited {
+            bail!("clothod (pid {pid}) is running but its socket {} did not come back", clothod::daemon::socket_path(&dir).display());
+        }
     }
     if let Some(warning) = platform::session_survival_warning() {
         eprintln!("clothod: warning: {warning}");

@@ -1968,6 +1968,32 @@ async fn upgrade_moves_serve_and_holder_in_place_and_keeps_one_version() {
     assert_eq!(versions(&env), vec![id3, "current".to_string()]);
 }
 
+/// The old serve can take a while to exit after its socket is gone (snapshots of many panes,
+/// a loaded machine). The upgrade's start waits for it rather than ask it to rebind its socket
+/// (it is leaving), so the upgrade neither stalls nor reports a socket that "did not come back".
+#[tokio::test]
+async fn upgrade_waits_for_a_slow_exit_without_false_alarms() {
+    let mut env = Env::empty();
+    env.start_with(&test_bin(), &[("CLOTHOD_TEST_SLOW_EXIT_MS", "2000")]);
+    let c = env.client().await;
+    let (p, shell) = live_shell(&c).await;
+    let holder = holder_pid(&env);
+    drop(c);
+    env.daemon.take();
+    let (v2, id2) = other_build(&env, "v2");
+    let t = Instant::now();
+    let out = clothod_cmd(&env, &v2, &["upgrade"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("did not come back"), "a false alarm: {stderr}");
+    assert_eq!(stderr.matches("attempt").count(), 1, "{stderr}");
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+    let c = env.client().await;
+    assert_eq!(c.hello["build"], id2);
+    assert_eq!(holder_pid(&env), holder, "same holder");
+    assert_shell_alive(&c, p, &shell).await;
+}
+
 #[tokio::test]
 async fn holder_refuses_an_incompatible_target_and_survives_exec_failure() {
     let mut env = Env::new();
@@ -3650,3 +3676,4 @@ fn hooks_from_an_older_build_are_outdated_and_reinstall_replaces_them() {
     assert_eq!(&notify[3..], ["clotho-notify", "echo", "user-notify"], "still chains the user's program once");
     assert!(!notify[2].contains(r#"c="${CLOTHOD_REPORT"#));
 }
+

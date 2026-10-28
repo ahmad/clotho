@@ -815,6 +815,12 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         }
     }
 
+    if let Some(ms) = std::env::var("CLOTHOD_TEST_SLOW_EXIT_MS").ok().and_then(|v| v.parse().ok()) {
+        // Tests: a daemon that is slow to go away after its socket is gone (many panes to
+        // snapshot, a loaded machine), as an upgrade's start can find it.
+        let _ = std::fs::remove_file(&sock);
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
     listener.close();
     reader.abort();
     if d.shutdown_all.load(Ordering::SeqCst) {
