@@ -661,7 +661,7 @@ async fn incompatible_holder_is_refused_and_left_alone() {
     let p = new_pane(&c, sh()).await;
     c.input(p, b"Y=still-$((40+2)); echo y-$((1+1))\r");
     // The command was run and the next prompt is drawn.
-    wait_for_text(&c, p, T, |l| l.iter().any(|x| x == "y-2")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "y-2")).await.unwrap();
     let before = daemon_text(&c, p).await;
     drop(c);
     env.kill();
@@ -729,7 +729,7 @@ async fn deleted_runtime_dir_heals_without_a_second_daemon() {
     let p = new_pane(&c, sh()).await;
     // Wait on printed output, not prompt layout (typeahead echo varies under load).
     c.input(p, b"Z=survived-$((1+1)); echo z-$((2+3))\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|x| x == "z-5")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "z-5")).await.unwrap();
     drop(c);
 
     std::fs::remove_dir_all(env.path()).unwrap();
@@ -1582,7 +1582,7 @@ async fn upgrade_switches_builds_despite_an_old_restarter() {
     let instance = c.hello["instance"].clone();
     let p = new_pane(&c, sh()).await;
     c.input(p, b"U=kept-$((3*3)); echo u-$((1+1))\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|x| x == "u-2")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "u-2")).await.unwrap();
     drop(c);
     env.daemon.take(); // from here the daemon is replaced; don't kill by handle in Drop
 
