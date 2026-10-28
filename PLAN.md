@@ -368,3 +368,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
   TestFlight build bundling 0.1.17 after the full iPhone suite and the iPad test. In-place upgrades
   on all three machines.
 - Updating macbook's outdated chained Codex hook still needs the user's OK.
+
+## Shipping without asking (user decision, 2026-10-28)
+
+- "Can you stop asking me to ship things and just do it." The orchestrator ships verified work
+  without asking: clothod releases and in-place upgrades, Mac app installs, TestFlight uploads,
+  relay deploys, and refreshes of Clotho's own hooks. It reports afterwards. It still asks for new
+  kinds of hooks or other changes to the user's config files, deleting user data, and new things
+  in the Apple or Cloudflare accounts. CLAUDE.md has the rule.
