@@ -329,3 +329,12 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - Uploads run over SSH, the way the user's ~/.local/bin/deploy-testflight does: unlock the
   keychain from the Mac's ~/.keychain_pw, and use the App Store Connect API key. The key ids are in
   devbox's ~/.config/clotho/asc.env, outside the repo.
+
+## clothod 0.1.14 (user decision, 2026-10-28)
+
+- The user said "release everything you can now". The batch:
+  1. clothod 0.1.14: the upgrade start waits for the old serve to exit (a5f35b1), and a `cd` shows
+     up without OSC 7 (c0c137f). In-place upgrades on all three machines.
+  2. The Mac app reinstalled, bundling 0.1.14.
+  3. A TestFlight build of main bundling 0.1.14, after the full iPhone suite and the iPad test.
+     The redesign branch isn't included.
