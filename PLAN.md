@@ -353,3 +353,10 @@ clothod release, app install or TestFlight upload still needs the user's go when
   capability. It never shows terminal text.
 - Live Activity (generic content only): the relay endpoint and the clothod change may be built and
   tested. Deploying the relay and releasing clothod for it each need the user's go.
+
+## Live Activity on (user decision, 2026-10-28)
+
+- Ship all three: deploy the relay's /v1/activity (ios, wrangler), release clothod 0.1.16 with
+  push.activity (in-place upgrades on all three machines, after test-all), then upload a TestFlight
+  build with LIVE_ACTIVITY=YES after the full iPhone suite and the iPad test. The Mac app is
+  reinstalled with 0.1.16.
