@@ -2857,8 +2857,11 @@ async fn attention_pushes_a_sealed_alert_at_most_once_per_interval() {
 
     report("running", "").await.unwrap();
     relay.none_for(Duration::from_millis(300));
+    // The first push is sent during this report: the pane's interval counts from no earlier than
+    // here (its arrival at the relay can be later, by however long that delivery took).
+    let asked = Instant::now();
     report("waiting", "Allow cargo test --release?").await.unwrap();
-    let (first, body) = relay.next();
+    let (_, body) = relay.next();
     let label = "00000000-0000-0000-0000-00000000C10D phone";
     assert_eq!(body["handle"], "handle-phone");
     assert_eq!(body["collapse_id"], clothod::push::collapse_id(label, p));
@@ -2877,7 +2880,7 @@ async fn attention_pushes_a_sealed_alert_at_most_once_per_interval() {
     report("running", "").await.unwrap();
     report("error", "it broke").await.unwrap();
     let (second, body) = relay.next();
-    assert!(second - first >= Duration::from_millis(900), "{:?}", second - first);
+    assert!(second - asked >= Duration::from_millis(1000), "{:?}", second - asked);
     assert_eq!(opened(&body)["s"], "error");
 
     // Cleared before the delayed push was due: nothing goes out.
