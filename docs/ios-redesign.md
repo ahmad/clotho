@@ -226,26 +226,55 @@ tab, pinch changes columns once, key bar keys reach the pane), unit (font size b
 
 ## Phase 6: Widget, then Live Activity
 
-Widget ("Needs you"): a WidgetKit extension reading the agents summary from the App Group (Phase 1's
-small, after-first-unlock file). The app updates it when connected; the notification extension also
-writes the decrypted alert into it and reloads the widget, so it updates from pushes while the app is
-closed. Shows agent kind, workspace, state and age; tapping opens the pane. Stale entries are cleared
-the next time the app connects (and an entry older than N hours shows as such).
+### Widget: "Needs you"
 
-Live Activity / Dynamic Island for a running agent: started from the app (user taps "Follow" on a
-running agent, or automatically while an agent the user just prompted runs). Updates while the app is
-closed need ActivityKit pushes:
-- Relay: a new push type (`apns-push-type: liveactivity`, topic `<bundle>.push-type.liveactivity`,
-  per-activity tokens), a `/v1/activity` endpoint, and its own rate limit. Deploy on the user's go.
-- clothod: the phone registers the activity's push token for a pane; clothod sends state changes
-  (running → waiting/done) through the relay.
-- Privacy limit: Live Activity content is not end-to-end encrypted (no service extension for it), so
-  updates can carry only non-identifying fields (agent kind, state, elapsed time), never titles or
-  messages, unless the user opts in. Without the push part, a Live Activity only updates while the app
-  runs, which is of little use; so the widget ships first and the Live Activity is its own step.
-Risks: Apple's update budgets, the privacy limit, a third extension's signing/provisioning (user's go
-for App ID changes). Tests: unit (summary file, timeline entries), relay `npm test` for the new type,
-manual device test (Live Activities don't push to the simulator reliably).
+- Shows the agents that need the user (the same rows as Home's top section): agent kind and state,
+  workspace › machine, and how long ago. Small: the count and the newest one; medium: up to three; lock
+  screen (accessoryRectangular/Circular): the count and the newest one. Tapping a row opens its pane
+  (`clotho://pane/<machine>/<pane>`); tapping elsewhere opens Home.
+- Target: a widget extension, ClothoWidget (`nyc.amin.clotho.widget`), built only with `WIDGET=YES` in
+  xcodegen (like push.yml's `PUSH=YES`) until the user approves the new App ID (it's registered by the first
+  archive that includes it).
+- Data: a small summary, `AgentsSummary {updated, agents: [{machine, machineName, pane, workspace, kind,
+  state, since}]}`, with no terminal text and no agent messages. The app and the notification extension
+  write it to the Keychain access group they already share (`TEAMID0000.nyc.amin.clotho.shared`,
+  `AfterFirstUnlock`); the widget reads it. That needs no App Group, so no new capability. An App Group
+  would be the more usual path, at the cost of a new capability on all three App IDs.
+- Freshness: the app writes the summary whenever its agent rows change, and reloads the widget timelines.
+  The notification extension adds the agent from each alert it decrypts and reloads too, so the widget
+  updates while the app is closed. An entry older than 12 hours shows as "earlier"; the app replaces the
+  whole summary on every connect, which clears agents that were answered elsewhere.
+- Tests: unit (summary encode, merge an alert into it, the age text); the widget's view rendered in a test
+  through WidgetKit's preview isn't available in XCUITest, so a screenshot from the simulator's widget
+  gallery is the visual check.
+
+### Live Activity (design; nothing deploys without the user's go)
+
+What it is: while an agent the user just prompted is running, a Live Activity on the lock screen and in
+the Dynamic Island shows its kind, state and elapsed time, and ends when the turn ends (a "finished" or
+"needs you" final state stays for a few minutes). Content is generic only (user decision 3): no titles,
+prompts, messages or paths, because Live Activity updates aren't end-to-end encrypted.
+
+Pieces:
+1. App: `ActivityKit` in the widget extension (no new App ID beyond the widget's; Info key
+   `NSSupportsLiveActivities`). The app starts an activity when the user sends a prompt from the phone
+   (or taps "Follow" on a running agent), with `pushType: .token`, and gets its push token.
+2. clothod: a new request `push.activity {pane, device, token, env}` registers the activity's token for
+   that pane, and `push.activity_end {pane, device}` removes it. On the pane's agent state changes it sends
+   an update through the relay: `{state, kind, since}` (no text). It sends `end` when the agent is done,
+   errors or goes away, and drops the token after 8 hours (Apple's limit) or on 410.
+3. Relay: `POST /v1/activity {handle, token, env, event: "update"|"end", content: {state, kind, since},
+   stale?, dismiss?}`. It sends APNs with `apns-push-type: liveactivity`, topic
+   `nyc.amin.clotho.push-type.liveactivity`, priority 5 for updates and 10 for end, and the aps payload
+   `{timestamp, event, content-state, stale-date?, dismissal-date?}`. It's authorised by the same push
+   handle as alerts; the activity token is per activity and short-lived. Its own rate limit is 60 updates
+   an hour per handle (Apple budgets frequent high-priority updates).
+4. Privacy: Apple and the relay see only the agent kind, state and timestamps for the activity, never what
+   it's doing. This is the documented trade-off for a live, updating lock-screen item.
+
+Steps that need the user's go: the widget App ID (first archive), the relay change and its deploy, and
+clothod's new requests (its release). Tests: relay `npm test` for /v1/activity, clothod e2e for
+push.activity, iOS unit tests for the activity attributes; the lock-screen behaviour is a device check.
 
 ## Decisions (user, 2026-10-28; PLAN.md ade4c3b)
 
