@@ -1067,20 +1067,26 @@ async fn a_turn_that_ends_while_the_user_is_at_the_pane_does_not_push() {
     report("running").await.unwrap();
     c.request("pane.input", json!({"pane": p, "data": "\x1b[I"})).await.unwrap();
     report("done").await.unwrap();
-    assert_eq!(pane_agent(&c, p).await["attention"], true, "still raised for the app");
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["attention"].clone(), a["quiet"].clone()), (json!(true), json!(true)), "raised for the app to show, quietly: {a}");
     relay.none_for(Duration::from_millis(1200));
+    // `quiet` describes the last rise: it stays through an ack until attention rises again.
+    c.request("agent.ack", json!({"pane": p})).await.unwrap();
+    assert_eq!(pane_agent(&c, p).await["quiet"], true);
 
     // Asked something while the user is there: pushed (they may have just stepped away).
     report("running").await.unwrap();
     c.request("pane.input", json!({"pane": p, "data": "y"})).await.unwrap();
     report("waiting").await.unwrap();
     assert_eq!(opened(&relay.next().1)["s"], "waiting");
+    assert_eq!(pane_agent(&c, p).await["quiet"], false, "waiting is never quiet");
 
     // Quiet for longer than the presence window: the turn's end pushes.
     report("running").await.unwrap();
     tokio::time::sleep(Duration::from_millis(1600)).await;
     report("done").await.unwrap();
     assert_eq!(opened(&relay.next().1)["s"], "done");
+    assert_eq!(pane_agent(&c, p).await["quiet"], false);
 
     // Input from a client that isn't showing the pane says nothing about the user.
     report("running").await.unwrap();

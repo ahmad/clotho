@@ -167,6 +167,9 @@ struct Agent {
     /// The user muted this agent (`agent.mute`): nothing raises its attention (or pushes)
     /// until they unmute it. Lasts for this agent; a new agent in the pane starts unmuted.
     muted: bool,
+    /// The last rise of `attention` was quiet: a turn ended (`done`) while the user was at the
+    /// pane, so no push went out and clients don't notify either. Kept until the next rise.
+    quiet: bool,
 }
 
 impl Agent {
@@ -246,6 +249,7 @@ impl Agent {
             "since": self.since,
             "attention": self.attention,
             "muted": self.muted,
+            "quiet": self.quiet,
             "session": self.session,
         })
     }
@@ -1319,6 +1323,12 @@ impl Daemon {
                 // Nothing raises a muted agent's attention (hooks, BEL), so it never pushes.
                 a.attention = false;
             }
+            // A turn that ends while the user is at the pane needs no push or notification:
+            // they see it end. Waiting (a permission prompt, a question) and errors always do:
+            // the user may have stepped away right after typing, and the agent is stuck until
+            // they answer.
+            let rose = a.attention && !old.as_ref().is_some_and(|o| o.attention);
+            a.quiet = if rose { a.state == "done" && p.user_present() } else { old.as_ref().is_some_and(|o| o.quiet) };
             a.since = match &old {
                 Some(o) if !changed => o.since,
                 _ => unix_now(),
@@ -1348,10 +1358,7 @@ impl Daemon {
         let attention = |a: &Option<Agent>| a.as_ref().is_some_and(|a| a.attention);
         if attention(&old) != attention(&p.agent) {
             let alert = p.agent.as_ref().map(|a| crate::push::Alert { kind: a.kind.clone(), state: a.state.clone(), message: a.message.clone(), since: a.since });
-            // A turn that ends while the user is at the pane needs no push: they see it end.
-            // Waiting (a permission prompt, a question) and errors still push: the user may
-            // have stepped away right after typing, and the agent is stuck until they answer.
-            let quiet = p.agent.as_ref().is_some_and(|a| a.state == "done") && p.user_present();
+            let quiet = p.agent.as_ref().is_some_and(|a| a.quiet);
             self.push.attention(p.id, attention(&p.agent), alert, quiet);
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
@@ -1412,6 +1419,7 @@ impl Daemon {
                     pid: fg.as_ref().map(|f| f.pgrp),
                     guess: false,
                     muted: false,
+                    quiet: false,
                 });
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
@@ -1474,6 +1482,7 @@ impl Daemon {
             pid,
             guess: false,
             muted: false,
+            quiet: false,
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))
