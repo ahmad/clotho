@@ -94,7 +94,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
-                  "pane.search", "agent.history", "agent.decide"],
+                  "pane.search", "agent.history", "agent.decide", "push.activity"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -116,7 +116,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `agent.mute` (the agent's `muted` field and the `agent.mute` request, see [Agents](#agents)),
   `pane.search` ([Searching scrollback](#searching-scrollback), since 0.1.11) and
   `agent.history` ([Agent history](#agent-history), since 0.1.11), `agent.decide`
-  ([Permission requests](#permission-requests), the agent's `requests`, since 0.1.13).
+  ([Permission requests](#permission-requests), the agent's `requests`, since 0.1.13),
+  `push.activity` (Live Activities: `push.activity`, `push.activity_end` and `push.list`'s
+  `activities`, see docs/push.md, Live Activity; not yet released).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,

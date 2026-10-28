@@ -3126,7 +3126,8 @@ impl FakeRelay {
                 let mut r = BufReader::new(s.try_clone().unwrap());
                 let (mut line, mut len) = (String::new(), 0usize);
                 r.read_line(&mut line).unwrap();
-                assert!(line.starts_with("POST /v1/push "), "{line}");
+                let activity = line.starts_with("POST /v1/activity ");
+                assert!(line.starts_with("POST /v1/push ") || activity, "{line}");
                 loop {
                     line.clear();
                     r.read_line(&mut line).unwrap();
@@ -3140,7 +3141,11 @@ impl FakeRelay {
                 let mut body = vec![0; len];
                 r.read_exact(&mut body).unwrap();
                 let status = st.lock().unwrap().pop_front().unwrap_or(200);
-                let _ = tx.send((Instant::now(), serde_json::from_slice(&body).unwrap()));
+                let mut body: Value = serde_json::from_slice(&body).unwrap();
+                if activity {
+                    body["_path"] = json!("/v1/activity");
+                }
+                let _ = tx.send((Instant::now(), body));
                 let _ = write!(s, "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}");
             }
         });
@@ -3153,6 +3158,25 @@ impl FakeRelay {
 
     fn next(&self) -> (Instant, Value) {
         self.bodies.recv_timeout(T).expect("a push reached the relay")
+    }
+
+    /// The next Live Activity post, skipping alerts.
+    fn next_activity(&self) -> (Instant, Value) {
+        let deadline = Instant::now() + T;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let b = self.bodies.recv_timeout(left).expect("an activity update reached the relay");
+            if b.1["_path"] == "/v1/activity" {
+                return b;
+            }
+        }
+    }
+
+    fn no_activity_for(&self, d: Duration) {
+        let deadline = Instant::now() + d;
+        while let Ok(b) = self.bodies.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            assert!(b.1["_path"] != "/v1/activity", "unexpected activity post {b:?}");
+        }
     }
 
     fn none_for(&self, d: Duration) {
@@ -3184,6 +3208,190 @@ async fn push_devices(c: &Client) -> Vec<Value> {
 fn opened(body: &Value) -> Value {
     let plain = clothod::push::open(PUSH_SK, body["ciphertext"].as_str().unwrap(), body["collapse_id"].as_str().unwrap().as_bytes()).expect("sealed to the phone's key");
     serde_json::from_slice(&plain).unwrap()
+}
+
+/// An activity push token: 64 hex characters.
+fn tok(seed: &str) -> String {
+    seed.repeat(64).chars().take(64).collect()
+}
+
+async fn activities(c: &Client) -> Vec<Value> {
+    c.request("push.list", json!({})).await.unwrap()["activities"].as_array().unwrap().clone()
+}
+
+/// A Live Activity body: the relay's contract (ios/relay, /v1/activity), and nothing but kind,
+/// state and times in it.
+fn activity_body(b: &Value, event: &str, state: &str) -> Value {
+    assert_eq!(b["_path"], "/v1/activity", "{b}");
+    assert_eq!((b["event"].as_str(), b["content"]["state"].as_str(), b["env"].as_str()), (Some(event), Some(state), Some("sandbox")), "{b}");
+    let mut keys: Vec<&str> = b.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    let want: &[&str] = if event == "end" { &["_path", "content", "dismiss", "env", "event", "handle", "timestamp", "token"] } else { &["_path", "content", "env", "event", "handle", "stale", "timestamp", "token"] };
+    assert_eq!(keys, want, "{b}");
+    let content = b["content"].as_object().unwrap();
+    let mut ck: Vec<&str> = content.keys().map(String::as_str).collect();
+    ck.sort();
+    assert_eq!(ck, ["kind", "since", "started", "state"]);
+    for k in ["since", "started"] {
+        assert!(content[k].is_u64(), "{k} is unix seconds: {b}");
+    }
+    let ts = b["timestamp"].as_u64().unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    assert!(ts + 5 >= now && ts <= now + 5, "{b}");
+    let until = if event == "end" { b["dismiss"].as_u64().unwrap() } else { b["stale"].as_u64().unwrap() };
+    assert_eq!(until - ts, if event == "end" { 300 } else { 900 }, "{b}");
+    b["content"].clone()
+}
+
+/// The phone follows an agent: an update at once, then at most one per gap (the latest state
+/// wins), `end` at once when the turn is over, and the token is gone after it.
+#[tokio::test]
+async fn live_activities_follow_the_agent() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    let hello = c.request("hello", json!({"protocol": 1})).await.unwrap();
+    assert!(hello["features"].as_array().unwrap().contains(&json!("push.activity")));
+    register(&c, "d1", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    for (params, code) in [
+        (json!({"pane": p, "device": "d1", "token": "not hex"}), "bad_request"),
+        (json!({"pane": p, "device": "d1", "token": "ab".repeat(101)}), "bad_request"),
+        (json!({"pane": p, "device": "d1", "token": "ab".repeat(31)}), "bad_request"),
+        (json!({"pane": p, "device": "d1", "token": tok("ab"), "env": "staging"}), "bad_request"),
+        (json!({"pane": p, "device": "nobody", "token": tok("ab")}), "not_found"),
+    ] {
+        let e = c.request("push.activity", params.clone()).await.unwrap_err();
+        assert!(e.to_string().contains(code), "{params}: {e}");
+    }
+    let report = |state: &str, prompt: Option<&str>| {
+        let mut r = json!({"pane": p, "state": state, "kind": "claude", "message": "secret text", "tool": "Bash", "tool_input": "rm -rf secret"});
+        if let Some(q) = prompt {
+            r["prompt"] = json!(q);
+        }
+        c.request("agent.report", r)
+    };
+    report("running", Some("a secret prompt")).await.unwrap();
+    let started = pane_agent(&c, p).await["turn_started"].as_f64().unwrap() as u64;
+
+    c.request("push.activity", json!({"pane": p, "device": "d1", "token": tok("ABCDEF")})).await.unwrap();
+    let (t0, b) = relay.next_activity();
+    let content = activity_body(&b, "update", "running");
+    assert_eq!((b["handle"].as_str(), b["token"].as_str()), (Some("handle-d1"), Some(tok("ABCDEF").as_str())));
+    assert_eq!((content["kind"].as_str(), content["started"].as_u64()), (Some("claude"), Some(started)));
+    assert!(!b.to_string().contains("secret") && !b.to_string().contains("Bash"), "no text: {b}");
+    assert_eq!(activities(&c).await.len(), 1);
+
+    // Within the gap: held, then sent with the latest state.
+    report("waiting", None).await.unwrap();
+    let (t1, b) = relay.next_activity();
+    assert!(t1 - t0 >= Duration::from_millis(900), "coalesced: {:?}", t1 - t0);
+    let content = activity_body(&b, "update", "waiting");
+    assert_eq!(content["started"].as_u64(), Some(started), "the turn's clock goes on");
+    assert!(content["since"].as_u64().unwrap() >= started);
+    let ts1 = b["timestamp"].as_u64().unwrap();
+    report("running", None).await.unwrap();
+    report("waiting", None).await.unwrap();
+    report("running", None).await.unwrap();
+    let (t2, b) = relay.next_activity();
+    assert!(t2 - t1 >= Duration::from_millis(900), "coalesced: {:?}", t2 - t1);
+    activity_body(&b, "update", "running");
+    assert!(b["timestamp"].as_u64().unwrap() > ts1, "timestamps only grow: {b}");
+    relay.no_activity_for(Duration::from_millis(1500));
+
+    // The turn ends: at once, not held by the gap.
+    report("waiting", None).await.unwrap();
+    let (tw, b) = relay.next_activity();
+    activity_body(&b, "update", "waiting");
+    report("done", None).await.unwrap();
+    let (t3, b) = relay.next_activity();
+    let content = activity_body(&b, "end", "done");
+    assert_eq!(content["started"].as_u64(), Some(started));
+    assert!(t3 - tw < Duration::from_millis(700), "an end isn't held by the gap: {:?}", t3 - tw);
+    assert!(activities(&c).await.is_empty(), "an ended activity's token is gone");
+    report("running", Some("next")).await.unwrap();
+    relay.no_activity_for(Duration::from_millis(1500));
+}
+
+/// Tokens go on a 410, after Apple's 8 hours, with their device's registration and with their
+/// pane (which ends them); they survive a daemon restart; a pane without an agent waits for one.
+#[tokio::test]
+async fn live_activity_tokens_come_and_go() {
+    let relay = FakeRelay::start();
+    let mut env = push_env();
+    let c = env.client().await;
+    register(&c, "d1", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    async fn report(c: &Client, p: u64, state: &str) {
+        c.request("agent.report", json!({"pane": p, "state": state, "kind": "codex"})).await.unwrap();
+    }
+
+    // No agent yet: kept, and the first one is sent when it shows up.
+    c.request("push.activity", json!({"pane": p, "device": "d1", "token": tok("aa")})).await.unwrap();
+    relay.no_activity_for(Duration::from_millis(500));
+    report(&c, p, "running").await;
+    let b = relay.next_activity().1;
+    assert_eq!(activity_body(&b, "update", "running")["kind"], "codex");
+
+    // A restart keeps the token.
+    drop(c);
+    env.kill();
+    env.start_with(&std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into()), &[("CLOTHOD_TEST_PUSH_FAST", "1")]);
+    let c = env.client().await;
+    assert_eq!(activities(&c).await.len(), 1, "survives a restart");
+
+    // 410: the activity ended on the phone. (Running raises no alert, which would take the 410.)
+    relay.queue(&[410]);
+    report(&c, p, "running").await;
+    activity_body(&relay.next_activity().1, "update", "running");
+    let deadline = Instant::now() + T;
+    while !activities(&c).await.is_empty() {
+        assert!(Instant::now() < deadline, "a 410 drops the token");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Unregistering the phone takes its activities.
+    c.request("push.activity", json!({"pane": p, "device": "d1", "token": tok("bb")})).await.unwrap();
+    activity_body(&relay.next_activity().1, "update", "running");
+    c.request("push.unregister", json!({"device": "d1"})).await.unwrap();
+    assert!(activities(&c).await.is_empty());
+    register(&c, "d1", &relay.url).await;
+
+    // A closed pane ends its activity with the last state it had.
+    c.request("push.activity", json!({"pane": p, "device": "d1", "token": tok("cc")})).await.unwrap();
+    activity_body(&relay.next_activity().1, "update", "running");
+    c.request("pane.close", json!({"pane": p})).await.unwrap();
+    let b = relay.next_activity().1;
+    assert_eq!(b["token"], tok("cc"));
+    activity_body(&b, "end", "running");
+    assert!(activities(&c).await.is_empty());
+
+    // push.activity_end only forgets: nothing is sent.
+    let p2 = new_pane(&c, sh()).await;
+    c.request("agent.report", json!({"pane": p2, "state": "running", "kind": "claude"})).await.unwrap();
+    c.request("push.activity", json!({"pane": p2, "device": "d1", "token": tok("dd")})).await.unwrap();
+    activity_body(&relay.next_activity().1, "update", "running");
+    c.request("push.activity_end", json!({"pane": p2, "device": "d1"})).await.unwrap();
+    c.request("agent.report", json!({"pane": p2, "state": "done", "kind": "claude"})).await.unwrap();
+    relay.no_activity_for(Duration::from_millis(800));
+    assert!(activities(&c).await.is_empty());
+}
+
+#[tokio::test]
+async fn live_activities_end_after_eight_hours() {
+    let relay = FakeRelay::start();
+    let mut env = Env::empty();
+    env.start_with(&std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into()), &[("CLOTHOD_TEST_PUSH_FAST", "1"), ("CLOTHOD_TEST_ACTIVITY_TTL_MS", "1500")]);
+    let c = env.client().await;
+    register(&c, "d1", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    c.request("agent.report", json!({"pane": p, "state": "running", "kind": "claude"})).await.unwrap();
+    c.request("push.activity", json!({"pane": p, "device": "d1", "token": tok("ee")})).await.unwrap();
+    activity_body(&relay.next_activity().1, "update", "running");
+    tokio::time::sleep(Duration::from_millis(1700)).await;
+    assert!(activities(&c).await.is_empty(), "listed only while Apple keeps it");
+    c.request("agent.report", json!({"pane": p, "state": "waiting", "kind": "claude"})).await.unwrap();
+    relay.no_activity_for(Duration::from_millis(1500));
 }
 
 #[tokio::test]

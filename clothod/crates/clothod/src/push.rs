@@ -20,6 +20,10 @@ const PER_DEVICE_HOUR: usize = 60;
 /// Timings, shortened by `CLOTHOD_TEST_PUSH_FAST` so tests don't wait minutes.
 struct Timing {
     per_pane: Duration,
+    /// Live Activity updates: at most one per activity this often (the latest state wins).
+    activity_gap: Duration,
+    /// Apple ends a Live Activity after 8 hours; its token is dropped then.
+    activity_ttl: Duration,
     backoff: Duration,
     backoff_max: Duration,
     give_up: Duration,
@@ -28,10 +32,11 @@ struct Timing {
 fn timing() -> Timing {
     if std::env::var_os("CLOTHOD_TEST_PUSH_FAST").is_some() {
         let ms = Duration::from_millis;
-        return Timing { per_pane: ms(1000), backoff: ms(100), backoff_max: ms(400), give_up: ms(3000) };
+        let ttl = std::env::var("CLOTHOD_TEST_ACTIVITY_TTL_MS").ok().and_then(|v| v.parse().ok()).map(ms).unwrap_or(Duration::from_secs(8 * 3600));
+        return Timing { per_pane: ms(1000), activity_gap: ms(1000), activity_ttl: ttl, backoff: ms(100), backoff_max: ms(400), give_up: ms(3000) };
     }
     let s = Duration::from_secs;
-    Timing { per_pane: s(30), backoff: s(2), backoff_max: s(60), give_up: s(600) }
+    Timing { per_pane: s(30), activity_gap: s(10), activity_ttl: s(8 * 3600), backoff: s(2), backoff_max: s(60), give_up: s(600) }
 }
 
 pub struct Error {
@@ -103,8 +108,63 @@ struct PaneState {
     alert: Option<Alert>,
 }
 
+/// A Live Activity following one pane's agent on one phone (`push.activity`).
+#[derive(Clone, Serialize, Deserialize)]
+struct Activity {
+    pane: u64,
+    device: String,
+    token: String,
+    env: String,
+    created: f64,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+/// What a Live Activity shows: generic only, never text (docs/push.md, Live Activity).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Live {
+    pub kind: String,
+    /// running, waiting, done or error.
+    pub state: String,
+    /// When the current state began (unix seconds).
+    pub since: u64,
+    /// When the turn began, else `since`: the activity's elapsed timer.
+    pub started: u64,
+}
+
+impl Live {
+    fn content(&self) -> Value {
+        // The relay takes `^[a-z][a-z0-9_-]{0,31}$`: a reported kind is any short text.
+        let mut kind: String = self.kind.to_ascii_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).take(32).collect();
+        if !kind.starts_with(|c: char| c.is_ascii_lowercase()) {
+            kind = "other".into();
+        }
+        json!({"state": self.state, "kind": kind, "since": self.since, "started": self.started})
+    }
+
+    fn ended(&self) -> bool {
+        matches!(self.state.as_str(), "done" | "error")
+    }
+}
+
+/// Sending state per activity (not stored).
+#[derive(Default)]
+struct ActivitySend {
+    last_sent: Option<Instant>,
+    /// A timer will send the latest state at the end of the gap.
+    pending: bool,
+    /// The content last sent, so an unchanged state isn't sent again.
+    sent: Option<Live>,
+    /// The last `timestamp` sent: APNs drops updates that aren't newer.
+    timestamp: u64,
+}
+
 #[derive(Default)]
 struct Inner {
+    activities: Vec<Activity>,
+    /// Each pane's agent as an activity shows it (None: no agent, or one it can't show).
+    live: HashMap<u64, Live>,
+    activity_send: HashMap<(u64, String), ActivitySend>,
     regs: Vec<Reg>,
     panes: HashMap<u64, PaneState>,
     sent: HashMap<String, VecDeque<Instant>>,
@@ -259,7 +319,11 @@ enum Outcome {
 }
 
 fn post(relay: &str, body: &Value) -> Outcome {
-    let url = format!("{}/v1/push", relay.trim_end_matches('/'));
+    post_to(relay, "/v1/push", body)
+}
+
+fn post_to(relay: &str, path: &str, body: &Value) -> Outcome {
+    let url = format!("{}{path}", relay.trim_end_matches('/'));
     match ureq::post(&url).timeout(Duration::from_secs(20)).set("content-type", "application/json").send_string(&body.to_string()) {
         Ok(_) => Outcome::Sent,
         Err(ureq::Error::Status(410, _)) => Outcome::Gone,
@@ -272,28 +336,38 @@ fn post(relay: &str, body: &Value) -> Outcome {
 
 impl Push {
     /// Registrations live in `dir/push.json`.
+    /// Registrations live in `dir/push.json`, Live Activities in `dir/push-activities.json`
+    /// (a file of their own, so push.json keeps the format older daemons read).
     pub fn load(dir: &Path) -> Arc<Push> {
         let path = dir.join("push.json");
         let regs = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Arc::new(Push { path, inner: Mutex::new(Inner { regs, ..Default::default() }) })
+        let activities = std::fs::read(Self::activities_path(&path)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        Arc::new(Push { path, inner: Mutex::new(Inner { regs, activities, ..Default::default() }) })
+    }
+
+    fn activities_path(path: &Path) -> PathBuf {
+        path.with_file_name("push-activities.json")
     }
 
     fn save(&self, regs: &[Reg]) {
+        self.write(&self.path, &serde_json::to_vec_pretty(regs).unwrap());
+    }
+
+    fn save_activities(&self, activities: &[Activity]) {
+        self.write(&Self::activities_path(&self.path), &serde_json::to_vec_pretty(activities).unwrap());
+    }
+
+    fn write(&self, path: &Path, data: &[u8]) {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        if let Some(dir) = self.path.parent() {
+        if let Some(dir) = path.parent() {
             let _ = clotho_proto::platform::ensure_private_dir(dir);
         }
-        let tmp = self.path.with_extension("tmp");
+        let tmp = path.with_extension("tmp");
         let _ = std::fs::remove_file(&tmp);
-        let ok = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .and_then(|mut f| f.write_all(&serde_json::to_vec_pretty(regs).unwrap()));
+        let ok = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).and_then(|mut f| f.write_all(data));
         if ok.is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
+            let _ = std::fs::rename(&tmp, path);
         }
     }
 
@@ -326,6 +400,45 @@ impl Push {
                 let mut g = self.inner.lock().unwrap();
                 g.regs.retain(|r| r.device != device);
                 self.save(&g.regs);
+                if g.activities.iter().any(|a| a.device == device) {
+                    g.activities.retain(|a| a.device != device);
+                    g.activity_send.retain(|(_, d), _| d != device);
+                    self.save_activities(&g.activities);
+                }
+                Ok(json!({}))
+            }
+            "push.activity" => {
+                let pane = p.get("pane").and_then(Value::as_u64).ok_or_else(|| bad("missing pane"))?;
+                let device = s("device").ok_or_else(|| bad("missing device"))?.to_string();
+                let token = s("token").ok_or_else(|| bad("missing token"))?.to_string();
+                if !(64..=200).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err(bad("token must be 64 to 200 hex characters"));
+                }
+                let mut g = self.inner.lock().unwrap();
+                let reg = g.regs.iter().find(|r| r.device == device).ok_or_else(|| Error { code: "not_found", message: format!("no registration for device {device}") })?;
+                let env = s("env").unwrap_or(&reg.env).to_string();
+                if !matches!(env.as_str(), "sandbox" | "production") {
+                    return Err(bad("env must be sandbox or production"));
+                }
+                g.activities.retain(|a| !(a.pane == pane && a.device == device));
+                g.activities.push(Activity { pane, device: device.clone(), token, env, created: unix_now(), last_error: None });
+                g.activity_send.remove(&(pane, device.clone()));
+                self.save_activities(&g.activities);
+                // Right away with the current state, so a change between the app starting the
+                // activity and this request isn't missed. An ended or absent agent waits for the
+                // next turn (the user's prompt may not have reached it yet).
+                if g.live.get(&pane).is_some_and(|l| !l.ended()) {
+                    self.activity_send(&mut g, pane, &device);
+                }
+                Ok(json!({}))
+            }
+            "push.activity_end" => {
+                let pane = p.get("pane").and_then(Value::as_u64).ok_or_else(|| bad("missing pane"))?;
+                let device = s("device").ok_or_else(|| bad("missing device"))?.to_string();
+                let mut g = self.inner.lock().unwrap();
+                g.activities.retain(|a| !(a.pane == pane && a.device == device));
+                g.activity_send.remove(&(pane, device));
+                self.save_activities(&g.activities);
                 Ok(json!({}))
             }
             "push.list" => {
@@ -335,7 +448,14 @@ impl Push {
                     .iter()
                     .map(|r| json!({"device": r.device, "label": r.label, "relay": r.relay, "env": r.env, "created": r.created, "last_error": r.last_error}))
                     .collect();
-                Ok(json!({"devices": devices}))
+                let ttl = timing().activity_ttl.as_secs_f64();
+                let activities: Vec<Value> = g
+                    .activities
+                    .iter()
+                    .filter(|a| unix_now() - a.created < ttl)
+                    .map(|a| json!({"pane": a.pane, "device": a.device, "created": a.created, "last_error": a.last_error}))
+                    .collect();
+                Ok(json!({"devices": devices, "activities": activities}))
             }
             "push.test" => {
                 let device = s("device").ok_or_else(|| bad("missing device"))?;
@@ -450,6 +570,165 @@ impl Push {
                 return;
             }
         }
+    }
+
+    /// A pane's agent, every time it changes (None: gone, or nothing an activity can show).
+    /// Activities following the pane get an update, or `end` when the turn is over.
+    pub fn agent(self: &Arc<Self>, pane: u64, live: Option<Live>) {
+        let mut g = self.inner.lock().unwrap();
+        let prev = match &live {
+            Some(l) => g.live.insert(pane, l.clone()),
+            None => g.live.remove(&pane),
+        };
+        if prev == live || !g.activities.iter().any(|a| a.pane == pane) {
+            return;
+        }
+        match live {
+            Some(l) if !l.ended() => {
+                let devices: Vec<String> = g.activities.iter().filter(|a| a.pane == pane).map(|a| a.device.clone()).collect();
+                for d in devices {
+                    self.activity_send(&mut g, pane, &d);
+                }
+            }
+            // Done, error or gone: the final state, then the tokens go.
+            Some(l) => self.activity_end(&mut g, pane, &l),
+            None => {
+                if let Some(p) = prev {
+                    self.activity_end(&mut g, pane, &p);
+                }
+            }
+        }
+    }
+
+    /// The pane closed: its activities end with the last state they showed.
+    pub fn pane_gone(self: &Arc<Self>, pane: u64) {
+        let mut g = self.inner.lock().unwrap();
+        let last = g.live.remove(&pane);
+        if !g.activities.iter().any(|a| a.pane == pane) {
+            return;
+        }
+        match last {
+            Some(l) => self.activity_end(&mut g, pane, &l),
+            None => {
+                g.activities.retain(|a| a.pane != pane);
+                g.activity_send.retain(|(p, _), _| *p != pane);
+                self.save_activities(&g.activities);
+            }
+        }
+    }
+
+    /// Drop activities past Apple's 8 hours. Returns whether any went.
+    fn expire_activities(&self, g: &mut Inner) -> bool {
+        let ttl = timing().activity_ttl.as_secs_f64();
+        let before = g.activities.len();
+        g.activities.retain(|a| unix_now() - a.created < ttl);
+        if g.activities.len() == before {
+            return false;
+        }
+        let live: Vec<(u64, String)> = g.activities.iter().map(|a| (a.pane, a.device.clone())).collect();
+        g.activity_send.retain(|k, _| live.contains(k));
+        self.save_activities(&g.activities);
+        true
+    }
+
+    /// Send an update for one activity now, or at the end of its gap (with the state then).
+    fn activity_send(self: &Arc<Self>, g: &mut Inner, pane: u64, device: &str) {
+        let gap = timing().activity_gap;
+        let st = g.activity_send.entry((pane, device.to_string())).or_default();
+        if st.pending {
+            return;
+        }
+        let wait = st.last_sent.map(|at| (at + gap).saturating_duration_since(Instant::now())).unwrap_or_default();
+        if wait.is_zero() {
+            self.activity_post(g, pane, device, "update", None);
+            return;
+        }
+        st.pending = true;
+        let (me, device) = (self.clone(), device.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let mut g = me.inner.lock().unwrap();
+            let Some(st) = g.activity_send.get_mut(&(pane, device.clone())) else { return };
+            st.pending = false;
+            // An end in the meantime dropped the activity; an ended state is the end's to send.
+            if g.live.get(&pane).is_some_and(|l| !l.ended()) {
+                me.activity_post(&mut g, pane, &device, "update", None);
+            }
+        });
+    }
+
+    /// `end` to every activity of the pane, at once, then forget them.
+    fn activity_end(self: &Arc<Self>, g: &mut Inner, pane: u64, last: &Live) {
+        let devices: Vec<String> = g.activities.iter().filter(|a| a.pane == pane).map(|a| a.device.clone()).collect();
+        for d in &devices {
+            self.activity_post(g, pane, d, "end", Some(last.clone()));
+        }
+        g.activities.retain(|a| a.pane != pane);
+        g.activity_send.retain(|(p, _), _| *p != pane);
+        self.save_activities(&g.activities);
+    }
+
+    /// POST one activity event. Updates go once (a newer one supersedes a failed one); `end` is
+    /// retried like alerts.
+    fn activity_post(self: &Arc<Self>, g: &mut Inner, pane: u64, device: &str, event: &'static str, last: Option<Live>) {
+        if self.expire_activities(g) && !g.activities.iter().any(|a| a.pane == pane && a.device == device) {
+            return;
+        }
+        let Some(live) = last.or_else(|| g.live.get(&pane).cloned()) else { return };
+        let Some(act) = g.activities.iter().find(|a| a.pane == pane && a.device == device).cloned() else { return };
+        let Some(reg) = g.regs.iter().find(|r| r.device == device && !r.blocked).cloned() else { return };
+        let st = g.activity_send.entry((pane, device.to_string())).or_default();
+        if event == "update" && st.sent.as_ref() == Some(&live) {
+            return;
+        }
+        let now = unix_now() as u64;
+        let timestamp = now.max(st.timestamp + 1);
+        st.timestamp = timestamp;
+        st.last_sent = Some(Instant::now());
+        st.sent = Some(live.clone());
+        let mut body = json!({"handle": reg.handle, "token": act.token, "env": act.env, "event": event, "content": live.content(), "timestamp": timestamp});
+        if event == "end" {
+            body["dismiss"] = json!(timestamp + 300);
+        } else {
+            body["stale"] = json!(timestamp + 900);
+        }
+        let me = self.clone();
+        let device = device.to_string();
+        tokio::spawn(async move {
+            let t = timing();
+            let deadline = Instant::now() + t.give_up;
+            let mut backoff = t.backoff;
+            loop {
+                let (relay, b) = (reg.relay.clone(), body.clone());
+                let outcome = tokio::task::spawn_blocking(move || post_to(&relay, "/v1/activity", &b)).await.unwrap_or(Outcome::Failed("send failed".into()));
+                let error = match outcome {
+                    Outcome::Sent => None,
+                    Outcome::Gone => {
+                        let mut g = me.inner.lock().unwrap();
+                        g.activities.retain(|a| !(a.pane == pane && a.device == device && a.token == act.token));
+                        me.save_activities(&g.activities);
+                        return;
+                    }
+                    Outcome::Retry(why) if event == "end" && Instant::now() + backoff <= deadline => {
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(t.backoff_max);
+                        let _ = why;
+                        continue;
+                    }
+                    Outcome::Refused(c) => Some(format!("relay refused the activity ({c})")),
+                    Outcome::Retry(e) | Outcome::Failed(e) => Some(e),
+                };
+                let mut g = me.inner.lock().unwrap();
+                if let Some(a) = g.activities.iter_mut().find(|a| a.pane == pane && a.device == device && a.token == act.token) {
+                    if a.last_error != error {
+                        a.last_error = error;
+                        let acts = g.activities.clone();
+                        me.save_activities(&acts);
+                    }
+                }
+                return;
+            }
+        });
     }
 
     /// Record how a send went on its registration (if that registration is still current).
@@ -622,6 +901,17 @@ mod tests {
         assert_eq!(open(SK, CT_PERMISSION, collapse_id(LABEL, 7).as_bytes()).unwrap(), PERMISSION.as_bytes());
         let v: Value = serde_json::from_str(PERMISSION).unwrap();
         assert_eq!((v["s"].clone(), v["rq"].clone(), v["tool"].clone()), (json!("waiting"), json!("87b99bd3910be450"), json!("Bash")));
+    }
+
+    #[test]
+    fn live_activity_kinds_fit_the_relay() {
+        let kind = |k: &str| Live { kind: k.into(), state: "running".into(), since: 1, started: 1 }.content()["kind"].as_str().unwrap().to_string();
+        assert_eq!(kind("claude"), "claude");
+        assert_eq!(kind("Claude Code"), "claude-code");
+        assert_eq!(kind("9lives"), "other");
+        assert_eq!(kind(""), "other");
+        assert_eq!(kind("ünï"), "other");
+        assert_eq!(kind(&"a".repeat(40)).len(), 32);
     }
 
     #[test]

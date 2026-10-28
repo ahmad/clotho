@@ -1334,6 +1334,7 @@ impl Daemon {
             self.pane_event(&p);
         }
         self.panes.lock().unwrap().remove(&pane);
+        self.push.pane_gone(pane);
         self.to_holder(&ToHolder::Forget { pane });
         let removed = self.model.lock().unwrap().remove_pane(pane);
         if removed {
@@ -1479,6 +1480,17 @@ impl Daemon {
             return;
         }
         p.agent = new;
+        // Live Activities following this pane: kind, state and times only.
+        let live = p.agent.as_ref().and_then(|a| {
+            let state = match a.state.as_str() {
+                "starting" | "running" => "running",
+                s @ ("waiting" | "done" | "error") => s,
+                _ => return None,
+            };
+            let since = a.since as u64;
+            Some(crate::push::Live { kind: a.kind.clone(), state: state.into(), since, started: a.turn_started.map(|t| t as u64).unwrap_or(since) })
+        });
+        self.push.agent(p.id, live);
         match (&old, &p.agent) {
             (Some(o), None) => p.record("gone", Some(&o.state), Some(o)),
             // Detection's output-only guesses flip with every redraw: an agent's arrival is
@@ -1961,7 +1973,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
