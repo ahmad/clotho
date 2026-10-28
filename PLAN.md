@@ -382,3 +382,14 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The user approved updating macbook's outdated chained Codex hook: `clothod hooks install codex`
   edits only clotho's command inside Computer Use's notify (`--previous-notify`) in
   ~/.codex/config.toml, with a backup first. Nothing else in that file changes.
+
+## Live Activity detail (user decision, 2026-10-28)
+
+- The user saw "Claude is working" and asked for more, then chose "Everything". This replaces the
+  generic-content-only rule above. Updates now carry the same detail notifications show: the tool,
+  the current command or file, and Claude's last message (or the question waiting for an answer),
+  each capped. The user accepted that Apple and the relay see this text unencrypted.
+- The phone also saves the machine, workspace, tab and prompt into the activity when the user taps
+  Follow. Those never leave the phone.
+- Ship when verified (Shipping rule): clothod release with in-place upgrades, relay deploy if needed,
+  TestFlight after the full iPhone suite and the iPad test.
