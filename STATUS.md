@@ -21,8 +21,10 @@ rule. This file has where things stand. The orchestrator keeps it current.
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
   failed; iPad passed.
 - **The push relay** has /v1/activity, deployed as version c1940b72.
-- **Device checks still owed by the user:** Allow from the lock screen on the fixed build, the
-  widget, the two-finger tab swipe and haptics, and the Live Activity.
+- **Allow from the lock screen works on device** (build 202610282014, user-confirmed 2026-10-28; the
+  log shows the iOS client answered and Claude ran the command).
+- **Device checks still owed by the user:** the widget, the two-finger tab swipe and haptics, and the
+  Live Activity.
 - **TestFlight:** the orchestrator uploads with scripts/testflight-remote. The key ids are in
   ~/.config/clotho/asc.env on devbox.
 - **The Mac's disk:** about 28 GiB free. test-all, dist, build.sh test and testflight-remote all
