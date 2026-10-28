@@ -71,10 +71,18 @@ final class MachineConnection: ObservableObject, Identifiable {
         backend = ClothodBackend(configuration: .init(transport: transport, clientName: "clotho-ios/0.1",
                                                       log: { log("[\(machine.displayName)] \($0)") }))
         store = ModelStore(backend: backend)
+        // The last-known model, shown at once (dimmed, read-only) until the machine's own arrives.
+        if let cached = SavedState.shared.load(machine.id) {
+            store.restore(cached)
+            lastSeen = cached.lastSeen
+        }
         // Drop terminals for panes that left the model.
         store.onChange = { [weak self] in
             guard let self else { return }
             self.pruneTerminals()
+            self.savedChanged()
+            self.scheduleSave()
+            self.fetchPreviews()
             // The probe that ran before this connection compares the machine's clothod with the app's.
             let status = (self.transport as? SSHTransport)?.versionStatus ?? .current
             if status != self.versionStatus { self.versionStatus = status }
@@ -213,6 +221,11 @@ final class MachineConnection: ObservableObject, Identifiable {
         started = true
         suspended = false
         Task {
+            #if DEBUG
+            // UI tests hold connections back for a while to see the saved model (`-HoldConnections 8`).
+            let hold = UserDefaults.standard.double(forKey: "HoldConnections")
+            if hold > 0 { try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000)) }
+            #endif
             do {
                 try await store.start()
             } catch {
@@ -224,6 +237,7 @@ final class MachineConnection: ObservableObject, Identifiable {
 
     /// Closes the connection when the app goes to the background. Terminals keep their seqs.
     func suspend() {
+        saveNow()
         guard started else { return }
         started = false
         suspended = true
@@ -238,6 +252,7 @@ final class MachineConnection: ObservableObject, Identifiable {
     }
 
     func disconnect() {
+        saveNow()
         started = false
         store.stop()
         panes.values.forEach { $0.detach() }
@@ -252,6 +267,7 @@ final class MachineConnection: ObservableObject, Identifiable {
     }
 
     var connectionLabel: String {
+        if store.isSaved { return savedLabel }
         if suspended { return "Paused" }
         switch store.connection {
         case .idle: return "Not connected"
@@ -270,8 +286,108 @@ final class MachineConnection: ObservableObject, Identifiable {
             guard let self, let host else { return }
             self.pasteImage(png, into: host)
         }
+        host.onLeave = { [weak self] host in self?.saveScreen(of: host) }
+        host.readOnly = store.isSaved
+        if let screen = SavedState.shared.screen(pane.id, on: machine.id) { host.showSaved(screen) }
         panes[pane.id] = host
         return host
+    }
+
+    // MARK: Saved state
+
+    /// Whether this machine shows its saved model (dimmed, read-only) rather than a live one.
+    var isSaved: Bool { store.isSaved }
+    /// When the machine was last seen live, as of the last save (while connected, it's connected).
+    @Published private(set) var lastSeen: Date?
+
+    private var saveScheduled = false
+
+    /// "Last seen 3m ago · Connecting…" for a saved model.
+    var savedLabel: String {
+        let state = suspended ? "Paused" : "Connecting…"
+        guard let lastSeen else { return state }
+        return "Last seen \(Self.ago(lastSeen)) · \(state)"
+    }
+
+    /// "just now", "3m ago", "2h ago", "4d ago".
+    static func ago(_ date: Date, now: Date = Date()) -> String {
+        let seconds = Int(now.timeIntervalSince(date))
+        switch seconds {
+        case ..<60: return "just now"
+        case ..<3600: return "\(seconds / 60)m ago"
+        case ..<86400: return "\(seconds / 3600)h ago"
+        default: return "\(seconds / 86400)d ago"
+        }
+    }
+
+    func hasSavedScreen(_ pane: PaneID) -> Bool {
+        SavedState.shared.hasScreen(pane, on: machine.id)
+    }
+
+    /// Terminals follow the saved/live switch.
+    private func savedChanged() {
+        let readOnly = store.isSaved
+        panes.values.forEach { $0.readOnly = readOnly }
+    }
+
+    /// Saves the model a moment after it changes, not on every event.
+    private func scheduleSave() {
+        guard !store.isSaved, !saveScheduled else { return }
+        saveScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self else { return }
+            self.saveScheduled = false
+            self.saveModel()
+        }
+    }
+
+    private func saveModel() {
+        // Nothing to save before the machine's model ever arrived.
+        guard !store.isSaved, store.hello != nil || !store.state.workspaces.isEmpty else { return }
+        let snapshot = store.cacheSnapshot()
+        SavedState.shared.save(snapshot, for: machine.id)
+        if lastSeen != snapshot.lastSeen { lastSeen = snapshot.lastSeen }
+    }
+
+    /// The daemon instance whose panes' previews were fetched.
+    private var previewedInstance: String?
+
+    /// Once per daemon instance, a plain-text preview (`pane.text`) of every pane this phone isn't showing,
+    /// so the saved model has a screen for each. Older daemons don't have it; that's no error.
+    private func fetchPreviews() {
+        guard SavedState.shared.keepPreviews, store.isConnected, !store.isSaved, let instance = store.hello?.instance,
+              previewedInstance != instance, !store.state.panes.isEmpty else { return }
+        previewedInstance = instance
+        let shown = Set(panes.filter { $0.value.haveSeq != nil }.map(\.key))
+        let wanted = store.state.panes.map(\.id).filter { !shown.contains($0) }.prefix(SavedState.maxScreens)
+        let backend = store.backend, id = machine.id, name = machine.displayName
+        Task { [weak self] in
+            var failures = 0
+            for pane in wanted {
+                do {
+                    let text = try await backend.paneText(pane)
+                    // A pane opened meanwhile has its own, newer screen.
+                    guard self?.panes[pane]?.haveSeq == nil else { continue }
+                    SavedState.shared.saveScreen(ScreenCapture.plain(text), pane: pane, on: id)
+                } catch {
+                    failures += 1
+                    if failures == 1 { log("[\(name)] pane previews: \(error.localizedDescription)") }
+                    if failures >= 3 { return }
+                }
+            }
+        }
+    }
+
+    private func saveScreen(of host: PaneHostView) {
+        guard !store.isSaved, let screen = host.capture() else { return }
+        SavedState.shared.saveScreen(screen, pane: host.paneID, on: machine.id)
+    }
+
+    /// The model and every terminal's screen, now (going to the background).
+    func saveNow() {
+        saveModel()
+        panes.values.forEach(saveScreen(of:))
     }
 
     func setFont(_ font: UIFont) {

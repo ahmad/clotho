@@ -176,6 +176,7 @@ struct SplitRootView: View {
                     Menu {
                         Button { navigator.guide = .firstRun } label: { Label("Welcome Guide", systemImage: "questionmark.circle") }
                         AppearancePicker()
+                        KeepPreviewsToggle()
                     } label: {
                         Label("More", systemImage: "ellipsis.circle")
                     }

@@ -15,11 +15,16 @@ final class PaneTerminalView: TerminalView {
     // meanwhile is an automatic reply to a query (DA, DSR, colors), which the daemon answers itself.
     // Keys, paste, and mouse and focus reports come from event handlers, outside feed.
     nonisolated(unsafe) var isFeeding = false
+    /// Showing a saved screen (the machine isn't live yet): nothing typed goes anywhere, and the keyboard
+    /// doesn't come up. Scrolling and selecting still work.
+    nonisolated(unsafe) var readOnly = false
 
     nonisolated override func send(source: Terminal, data: ArraySlice<UInt8>) {
-        if isFeeding { return }
+        if isFeeding || readOnly { return }
         super.send(source: source, data: data)
     }
+
+    override var canBecomeFirstResponder: Bool { !readOnly && super.canBecomeFirstResponder }
 
     /// Paste with an image and no text on the clipboard; the host uploads it and pastes its path.
     var onImagePaste: ((Data) -> Void)?
@@ -43,6 +48,7 @@ final class PaneTerminalView: TerminalView {
     /// An image alone on the clipboard can't go through a terminal paste, and the agent reading it runs on
     /// another machine; the host saves it there and pastes the path (ImagePaste). Text still wins.
     override func paste(_ sender: Any?) {
+        if readOnly { return }
         let board = UIPasteboard.general
         if let onImagePaste, ImagePaste.shouldPasteImage(hasText: board.hasStrings, hasImage: board.hasImages) {
             guard let png = ImagePaste.png(from: board) else { return }
@@ -88,6 +94,17 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     /// After output or a snapshot reached the terminal, and after it scrolled (find in pane).
     var onOutput: (() -> Void)?
     var onScroll: (() -> Void)?
+    /// When the pane leaves the screen, so its last screen can be saved first.
+    var onLeave: ((PaneHostView) -> Void)?
+    /// Read-only while the machine shows its saved model.
+    var readOnly = false {
+        didSet {
+            guard readOnly != oldValue else { return }
+            terminal.readOnly = readOnly
+            // Live again on screen: the keyboard comes back, as when the pane opens.
+            if readOnly { _ = terminal.resignFirstResponder() } else if window != nil { _ = terminal.becomeFirstResponder() }
+        }
+    }
     /// Where pane copies go; tests swap in their own.
     var pasteboard: PaneClipboard.Target = PaneClipboard.general
     private var sentViewport: Size?
@@ -131,7 +148,29 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     // Panes subscribe while they're on screen and resume from their last seq when they come back.
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { subscribe() } else { unsubscribe() }
+        if window != nil {
+            subscribe()
+        } else {
+            onLeave?(self)
+            unsubscribe()
+        }
+    }
+
+    // MARK: Saved screens
+
+    /// Shows a saved screen until the pane's own data arrives: only before any, and the daemon's snapshot
+    /// (which starts with a full reset) then draws over it in place.
+    func showSaved(_ screen: SavedScreen) {
+        guard haveSeq == nil, screen.cols > 0, screen.rows > 0 else { return }
+        applySize(Size(cols: screen.cols, rows: screen.rows))
+        terminal.feedFromBackend(ScreenCapture.replay(screen))
+    }
+
+    /// The live screen, for saving; nil until the pane has had data of its own.
+    func capture() -> SavedScreen? {
+        guard haveSeq != nil, let emulator = terminal.swiftTermTerminal else { return nil }
+        flush()
+        return ScreenCapture.capture(emulator)
     }
 
     // Subscribing waits for the first layout, so the subscribe carries a viewport.

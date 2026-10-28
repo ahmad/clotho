@@ -59,6 +59,15 @@ struct PaneScreen: View {
                 if let pane {
                     TerminalContainer(host: connection.terminal(for: pane), onMode: { mode = $0 }, onCopy: { copies += 1 })
                         .id(pane.id)
+                        // The saved screen, dimmed until the machine is live; it then draws over in place.
+                        .opacity(store.isSaved ? 0.5 : 1)
+                        .animation(.easeOut(duration: 0.25), value: store.isSaved)
+                        .overlay {
+                            if store.isSaved && !connection.hasSavedScreen(pane.id) {
+                                Text("No preview yet").font(.callout).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("noPreview")
+                            }
+                        }
                 } else {
                     Color(Theme.background)
                 }
@@ -75,7 +84,7 @@ struct PaneScreen: View {
         .toolbarRole(.editor)
         .toolbarTitleMenu { tabMenu }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) { actionsMenu }
+            ToolbarItem(placement: .primaryAction) { actionsMenu.disabled(store.isSaved) }
         }
         .background { ShortcutButtons(screen: self) }
         // The find bar follows the pane on screen.
@@ -142,7 +151,15 @@ struct PaneScreen: View {
     }
 
     @ViewBuilder private var statusBadge: some View {
-        if connection.suspended || !store.isConnected {
+        if store.isSaved {
+            Text(connection.savedLabel)
+                .font(.caption2)
+                .lineLimit(1)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(.thinMaterial, in: Capsule())
+                .padding(8)
+                .accessibilityIdentifier("savedBadge")
+        } else if connection.suspended || !store.isConnected {
             Text(connection.connectionLabel)
                 .font(.caption2)
                 .lineLimit(1)

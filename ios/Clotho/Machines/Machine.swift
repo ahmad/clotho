@@ -129,6 +129,8 @@ final class MachineList: ObservableObject {
     func delete(_ id: UUID) {
         machines.removeAll { $0.id == id }
         persist()
+        // Its saved model and pane screens go with it.
+        SavedState.shared.delete(id)
     }
 
     private func load() {

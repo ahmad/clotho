@@ -29,6 +29,7 @@ enum Onboarding {
         KeyStore.all().forEach { KeyStore.delete($0.id) }
         UserDefaults.standard.removeObject(forKey: "TrustedHostKeys")
         UserDefaults.standard.removeObject(forKey: doneKey)
+        MainActor.assumeIsolated { SavedState.shared.deleteAll() }
         #endif
     }
 }

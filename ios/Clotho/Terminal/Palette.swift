@@ -80,6 +80,8 @@ struct AppearanceMenu: View {
             Picker("Appearance", selection: $choice) {
                 ForEach(AppearanceChoice.allCases) { Text($0.title).tag($0) }
             }
+            // Until Home has a settings menu (phase 2).
+            Section { KeepPreviewsToggle() }
         } label: {
             Label("Appearance", systemImage: "circle.lefthalf.filled")
         }
