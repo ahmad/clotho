@@ -24,6 +24,11 @@ class ChromeItem: NSView {
     var colorsOwnTitle = false
     var selectedColor = Theme.background
     var hoverColor = Theme.hover
+    /// Whether the close button also shows on the selected item (tabs), or only under the pointer
+    /// (workspace rows).
+    var closeShowsWhenSelected = true { didSet { updateColors() } }
+    /// Called whenever the close button is shown or hidden.
+    func closeVisibilityChanged() {}
 
     /// How selection shows. `.row` (workspaces): an accent tint, a bar on the leading edge and a semibold
     /// title. `.tab`: an accent tint and an underline. Both turn grey while the window isn't key, as macOS
@@ -150,6 +155,7 @@ class ChromeItem: NSView {
         label.isHidden = true
         closeButton.isHidden = true
         editor = field
+        closeVisibilityChanged()
         commitEdit = commit
         window.makeFirstResponder(field)
         field.currentEditor()?.selectAll(nil)
@@ -186,7 +192,8 @@ class ChromeItem: NSView {
     }
 
     private func updateColors() {
-        closeButton.isHidden = !(hovering || isSelected) || onClose == nil || editor != nil
+        closeButton.isHidden = !(hovering || (isSelected && closeShowsWhenSelected)) || onClose == nil || editor != nil
+        closeVisibilityChanged()
         guard selectionStyle != .plain else {
             layer?.backgroundColor = (isSelected ? selectedColor : hovering ? hoverColor : .clear).cgColor
             if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
@@ -995,18 +1002,29 @@ private final class FlippedView: NSView {
     override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
-/// A workspace in the sidebar, with a slot for a status badge (agent status, later).
+/// A workspace in the sidebar, laid out like a machine header: the name, then its status dot right after
+/// it (as a machine's connected dot), and the tab count pinned to the trailing edge. The close button
+/// shows only under the pointer, in the count's place, so hovering moves nothing.
 final class WorkspaceRow: ChromeItem {
     /// Short trailing text, such as a tab count.
     let detail = NSTextField(labelWithString: "")
     let badge = NSView()
+    /// Where the count's right edge sits, from the row's trailing edge. The close button centres on it.
+    static var trailingInset: CGFloat { s(10) }
+    /// The dot (which follows the name) stops before the count when it shows; without it the name does.
+    private var badgeBeforeDetail: NSLayoutConstraint!
+    private var labelBeforeDetail: NSLayoutConstraint!
 
     override init(closable: Bool = true) {
         super.init(closable: closable)
         label.font = NSFont.systemFont(ofSize: s(13))
+        // The name keeps its own width, so the dot sits right after it rather than at the far end.
+        label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         selectionStyle = .row
+        closeShowsWhenSelected = false
         detail.font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
         detail.textColor = Theme.dimText
+        detail.alignment = .right
         detail.setContentHuggingPriority(.required, for: .horizontal)
         detail.setContentCompressionResistancePriority(.required, for: .horizontal)
         detail.translatesAutoresizingMaskIntoConstraints = false
@@ -1018,17 +1036,24 @@ final class WorkspaceRow: ChromeItem {
         addSubview(badge)
         // The title lines up with the machine's name above it, after the header's chevron.
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.constant = MachineHeader.nameInset }
-        // The title gives way to the trailing count and badge.
+        // ChromeItem stops the title before the close button; here the close button floats over the
+        // count instead, so the title stops before the dot or the count.
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
-        let end = closeButton.superview == nil ? trailingAnchor : closeButton.leadingAnchor
+        if closeButton.superview != nil {
+            constraints.filter { $0.firstItem === closeButton && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
+            closeButton.centerXAnchor.constraint(equalTo: trailingAnchor, constant: -Self.trailingInset - s(3)).isActive = true
+        }
+        badgeBeforeDetail = badge.trailingAnchor.constraint(lessThanOrEqualTo: detail.leadingAnchor, constant: s(-6))
+        labelBeforeDetail = label.trailingAnchor.constraint(lessThanOrEqualTo: detail.leadingAnchor, constant: s(-6))
         NSLayoutConstraint.activate([
+            // The same size, gap and centring as the dot after a machine's name.
+            badge.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: s(6)),
             badge.widthAnchor.constraint(equalToConstant: s(6)),
             badge.heightAnchor.constraint(equalToConstant: s(6)),
-            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
-            badge.trailingAnchor.constraint(equalTo: end, constant: closeButton.superview == nil ? -10 : -4),
-            detail.trailingAnchor.constraint(equalTo: badge.leadingAnchor, constant: s(-4)),
-            detail.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: detail.leadingAnchor, constant: s(-6)),
+            badge.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            detail.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.trailingInset),
+            detail.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            labelBeforeDetail,
         ])
     }
 
@@ -1038,6 +1063,14 @@ final class WorkspaceRow: ChromeItem {
     func setBadge(_ color: NSColor?) {
         badge.isHidden = color == nil
         badge.layer?.backgroundColor = color?.cgColor
+        // A hidden dot still takes part in layout, so the name only makes room for it when it shows.
+        badgeBeforeDetail.isActive = color != nil
+        labelBeforeDetail.isActive = color == nil
+    }
+
+    /// The count gives its place to the close button while that shows.
+    override func closeVisibilityChanged() {
+        detail.isHidden = !closeButton.isHidden
     }
 }
 

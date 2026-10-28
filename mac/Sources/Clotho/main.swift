@@ -627,6 +627,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let panes = store.state.panes.map(\.id)
                     return index < panes.count ? resolveAgent(machine: focusedMachine, pane: panes[index]) : log("TypeText: no pane \(index)")
                 }
+                // "ws:Name:3" makes a workspace with that name and 3 tabs; "wsname:Name" renames the focused one.
+                if step.hasPrefix("ws:") {
+                    let parts = step.dropFirst(3).split(separator: ":").map(String.init)
+                    let backend = backend
+                    Task {
+                        guard let created = try? await backend.createWorkspace(name: parts.first) else { return log("TypeText: no workspace") }
+                        for _ in 1..<max(1, Int(parts.dropFirst().first ?? "") ?? 1) { _ = try? await backend.createTab(in: created.workspace) }
+                    }
+                    return
+                }
+                if step.hasPrefix("wsname:"), let workspace = store.focusedWorkspace?.id {
+                    let backend = backend, name = String(step.dropFirst(7))
+                    Task { try? await backend.renameWorkspace(workspace, name: name) }
+                    return
+                }
+                // "hoverrow:1" hovers the sidebar's second workspace row, as the pointer would (-1: none).
+                if step.hasPrefix("hoverrow:"), let index = Int(step.dropFirst(9)) {
+                    func rows(in view: NSView) -> [WorkspaceRow] {
+                        view.subviews.flatMap { ($0 as? WorkspaceRow).map { [$0] } ?? rows(in: $0) }
+                    }
+                    let all = rows(in: sidebar).sorted { $0.convert(NSPoint.zero, to: nil).y > $1.convert(NSPoint.zero, to: nil).y }
+                    for (i, row) in all.enumerated() { row.setHovering(i == index) }
+                    return
+                }
                 if step.hasPrefix("drop:") {
                     return dropFiles([URL(fileURLWithPath: String(step.dropFirst(5)))], on: PaneKey(machine: focusedMachine, pane: pane))
                 }
