@@ -32,7 +32,9 @@ cd clotho/mac
 open ~/Applications/Clotho.app
 ```
 
-The script builds the app in release mode, runs `../clothod/scripts/dist.sh` and bundles its builds (macOS and Linux, x86_64 and ARM; the Linux ones go to remote machines), generates the icon, signs everything ad hoc, and installs `~/Applications/Clotho.app` (bundle id `app.clotho.desktop`). Running it again replaces the installed copy. Set `CLOTHOD_DIST` to bundle an existing `dist/` directory instead of building one.
+The script builds the app in release mode, bundles the released clothod (`../clothod/dist`, macOS and Linux, x86_64 and ARM; the Linux ones go to remote machines), generates the icon, signs everything ad hoc, and installs `~/Applications/Clotho.app` (bundle id `app.clotho.desktop`). Running it again replaces the installed copy.
+
+The installed app bundles only a released clothod: a dist whose version is `clothod/RELEASED`, made by `clothod/scripts/dist.sh`. It never builds one itself, and it refuses a dev dist (`clothod/target/dist-dev`), because whatever it bundles reaches every machine through "Update clothod". `--dev` may bundle a dev dist of the current version. [`scripts/clothod-dist.sh`](scripts/clothod-dist.sh) makes the choice; `./build-app.sh --check-dist` reports what a plain build would bundle (version and build ids) without building, and `scripts/test-clothod-dist.sh` tests the rules. `CLOTHOD_DIST` names another dist directory, which the same checks apply to.
 
 For a compile-only check, run `swift build`. `swift test` here runs the app's own tests (key encoding, inline rename); the shared package's tests run with `swift test` in `../ClothoKit`.
 

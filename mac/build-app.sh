@@ -24,8 +24,9 @@ case "${1:-}" in
   --dev) DEV=true ;;
   --release) RELEASE=true ;;
   --package) PACKAGE=true ;;
+  --check-dist) exec scripts/clothod-dist.sh --check ;;
   "") ;;
-  *) echo "usage: $0 [--dev | --release | --package]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--dev | --release | --package | --check-dist]" >&2; exit 2 ;;
 esac
 VERSION=${CLOTHO_VERSION:-$(cat VERSION)}
 BUILD=${CLOTHO_BUILD:-$(date -u +%Y%m%d%H%M)}
@@ -47,25 +48,15 @@ cp .build/release/Clotho "$APP/Contents/MacOS/Clotho"
 
 # clothod ships inside the app: every platform's build in Resources/clothod-dist (installed on remote
 # machines over SSH, see ../docs/remote.md), and this Mac's build next to the executable, where Clotho
-# installs it from. The builds come fresh from clothod's dist script, so a stale or debug daemon never
-# ends up in the app. CLOTHOD_DIST bundles an existing dist/ directory instead of building one.
-#
-# dist.sh only builds a release for a version newer than clothod/RELEASED, so rebuilding the app
-# without a new clothod reuses clothod/dist when it holds that release. A dev app with no such dist
-# gets a dev dist of the same version, kept apart in clothod/target/dist-dev so it never replaces
-# the release builds.
-CLOTHOD_VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' ../clothod/Cargo.toml)
-dist_version() { sed -n 's/.*"version": "\(.*\)".*/\1/p' "$1/manifest.json" 2>/dev/null | head -1; }
-if [[ -n "${CLOTHOD_DIST:-}" ]]; then
-  DIST="$CLOTHOD_DIST"
-elif [[ "$CLOTHOD_VERSION" == "$(cat ../clothod/RELEASED 2>/dev/null)" && "$(dist_version ../clothod/dist)" == "$CLOTHOD_VERSION" ]]; then
-  DIST=../clothod/dist
-elif $DEV; then
-  DIST_DIR=target/dist-dev ../clothod/scripts/dist.sh --dev
-  DIST=../clothod/target/dist-dev
+# installs it from. scripts/clothod-dist.sh picks the dist. The user's app (plain, --release,
+# --package) bundles only a released one, whose version is clothod/RELEASED, and never builds one:
+# anything it bundles reaches every machine through "Update clothod". --dev may use a dev dist of the
+# current version (clothod/target/dist-dev). CLOTHOD_DIST names an existing dist; the user's app still
+# checks it. `./build-app.sh --check-dist` reports which dist a plain build would bundle, and stops.
+if $DEV; then
+  DIST=$(scripts/clothod-dist.sh --dev)
 else
-  ../clothod/scripts/dist.sh
-  DIST=../clothod/dist
+  DIST=$(scripts/clothod-dist.sh)
 fi
 cp -R "$DIST" "$APP/Contents/Resources/clothod-dist"
 case "$(uname -m)" in arm64) HOST=macos-aarch64 ;; *) HOST=macos-x86_64 ;; esac
