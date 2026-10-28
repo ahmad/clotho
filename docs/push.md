@@ -177,6 +177,66 @@ Clearing: APNs can't delete a delivered notification. When the app opens, it rem
 alerts whose pane no longer has attention. Doing it in the background would take silent pushes,
 which iOS throttles heavily; that is left for later.
 
+## Live Activities (phase 6; built, not deployed)
+
+A Live Activity follows one agent on the lock screen and in the Dynamic Island while it runs: its kind,
+its state and how long the turn has taken. Unlike alerts, Live Activity content can't be encrypted for the
+phone (iOS shows it without an extension), so it carries no text at all: the user's decision 3
+(docs/ios-redesign.md). Apple and the relay see the agent kind, the state and the times, nothing else.
+
+### The app
+
+The app starts the activity (ActivityKit, `pushType: .token`) when the user follows an agent, sends its
+push token to the machine with `push.activity`, and ends it itself when it's no longer wanted
+(`push.activity_end` then only tells clothod to forget the token).
+
+### The relay
+
+`POST /v1/activity {handle, token, env?, event: "update"|"end", content: {state, kind, since, started},
+timestamp, stale?, dismiss?}`, authorised by the same push handle as alerts:
+- `token`: the activity's push token, 64–200 hex characters. `env` defaults to the handle's.
+- `content` must have exactly those four keys. `state` and `kind` match `^[a-z][a-z0-9_-]{0,31}$`; the
+  times are positive integers (unix seconds). Anything else is a 400, so no text can pass even by mistake.
+- It goes to APNs with `apns-push-type: liveactivity`, topic `nyc.amin.clotho.push-type.liveactivity`,
+  priority 5 for an update and 10 for an end, and ActivityKit's body
+  `{aps: {timestamp, event, content-state, stale-date?, dismissal-date?}}`.
+- Updates are limited per handle to a burst of 10 a minute (`ACTIVITY_LIMITER`; Cloudflare counts over
+  60 s at most); an end always goes through. APNs answers map as for alerts: 410 for `Unregistered`,
+  `BadDeviceToken` and `ExpiredToken`, 429, else 502.
+
+### clothod: requests (feature flag `push.activity`)
+
+| method | params | result |
+|---|---|---|
+| `push.activity` | `pane`, `device` (a `push.register`ed device), `token` (the activity's push token, 64–200 hex characters), `env?` (`sandbox`/`production`, default the registration's) | `{}`. Replaces an earlier one for the same pane and device. `not_found` without a registration for `device`; `bad_request` for a bad token or env |
+| `push.activity_end` | `pane`, `device` | `{}`. Forgets the token; nothing is sent (the app ends the activity itself) |
+| `push.list` | – | adds `activities: [{pane, device, created, last_error}]` |
+
+### clothod: what it sends
+
+`POST {relay}/v1/activity` with `{handle, token, env, event, content: {state, kind, since, started}, timestamp, stale | dismiss}`:
+- `state`: `running` (also while the agent is starting), `waiting`, `done` or `error`. `kind`: the agent
+  kind, made to fit `^[a-z][a-z0-9_-]{0,31}$` ("other" if it can't). `since`: unix seconds when the
+  current state began. `started`: unix seconds when the turn began, else `since`. That is the elapsed timer,
+  so running → waiting → running doesn't reset it. Never any text: no message, prompt, tool, title or path.
+- `update`: right after `push.activity` if the pane's agent is running or waiting. With no agent, or one
+  whose turn already ended, it waits for the next change. Then on every change of state, kind or times, at
+  most one per activity every 10 s; the latest state is sent at the end of the window.
+  `stale` = `timestamp` + 15 min.
+- `end`: at once, outside the window, when the agent reaches `done` or `error`, goes away, or its pane
+  closes, with the final state as content. `dismiss` = `timestamp` + 5 min. The token is dropped then.
+- `timestamp`: unix seconds, increasing per activity, so APNs can drop out-of-order updates.
+- Presence (`quiet`) and `muted` don't apply: the user chose to follow this agent.
+- Tokens are kept across restarts and upgrades (`push-activities.json` next to push.json, mode 0600).
+  They're dropped on `end`, a 410, after 8 hours (Apple's limit), on `push.activity_end`, and on
+  `push.unregister` of the device. An update that fails isn't retried, because the next one supersedes it.
+  An `end` is retried with the same backoff as alerts. Other failures show as the activity's `last_error`
+  in `push.list`.
+
+Shipping it needs the user's go twice: deploying the relay (`npx wrangler deploy`, which also creates the
+`ACTIVITY_LIMITER` binding) and releasing clothod with `push.activity`. Until then the app keeps the Live
+Activity out of TestFlight builds.
+
 ## Hosting the relay
 
 The relay is about 150 lines: two endpoints, AES-GCM, an ES256 JWT, one HTTP/2 POST. APNs itself
