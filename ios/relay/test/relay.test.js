@@ -154,7 +154,7 @@ test("an activity end is high priority and carries its dismissal date", async ()
   assert.equal(sent.payload.aps["dismissal-date"], 1761512645);
 });
 
-test("activity content can't carry text", async () => {
+test("activity content takes no unknown keys or malformed fields", async () => {
   const h = await register();
   const deliver = async () => assert.fail("must not deliver");
   const bad = [
@@ -172,6 +172,42 @@ test("activity content can't carry text", async () => {
   }
   const tampered = await handle(post("/v1/activity", activity(h.slice(0, -4) + "AAAA")), ENV, { deliver });
   assert.equal(tampered.status, 403);
+});
+
+test("activity content passes the tool, detail and message through unchanged", async () => {
+  const h = await register();
+  let sent;
+  const content = { state: "waiting", kind: "claude", since: 1761512300, started: 1761512200, tool: "Bash",
+                    detail: "rm -rf build — ünïcødé 🚀", msg: "Claude needs your permission to use Bash" };
+  const res = await handle(post("/v1/activity", activity(h, { content })), ENV, { deliver: async (_, msg) => { sent = msg; return { status: 200 }; } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(sent.payload.aps["content-state"], content);
+  // At the caps, counted in Unicode scalars: 300 emoji are 600 UTF-16 units but pass.
+  const full = { ...content, tool: "mcp__github__create_pull_request_" + "t".repeat(29), detail: "d".repeat(200), msg: "🚀".repeat(300) };
+  assert.equal((await handle(post("/v1/activity", activity(h, { content: full })), ENV, { deliver: async () => ({ status: 200 }) })).status, 200);
+});
+
+test("activity text is capped, one line, and only under known keys", async () => {
+  const h = await register();
+  const deliver = async () => assert.fail("must not deliver");
+  const base = { state: "running", kind: "claude", since: 1, started: 1 };
+  const bad = [
+    { ...base, tool: "t".repeat(65) },
+    { ...base, tool: "Bash Edit" },
+    { ...base, detail: "d".repeat(201) },
+    { ...base, msg: "m".repeat(301) },
+    { ...base, msg: "two\nlines" },
+    { ...base, detail: "tab\there" },
+    { ...base, msg: "sep\u2028arator" },
+    { ...base, msg: "" },
+    { ...base, tool: 7 },
+    { ...base, detail: null },
+    { ...base, prompt: "secret" },
+  ];
+  for (const content of bad) {
+    const res = await handle(post("/v1/activity", activity(h, { content })), ENV, { deliver });
+    assert.equal(res.status, 400, JSON.stringify(content));
+  }
 });
 
 test("activity updates are rate limited, and APNs answers map as for alerts", async () => {

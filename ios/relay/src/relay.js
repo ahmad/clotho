@@ -185,18 +185,30 @@ export async function handle(request, env, { deliver = apnsDeliver, now = Date.n
 const WORD = /^[a-z][a-z0-9_-]{0,31}$/;
 const isTime = (n) => Number.isInteger(n) && n > 0 && n < 1e10;
 
-/// A Live Activity request, checked strictly: the content is the agent's state and kind and two times,
-/// nothing else, so no text from a terminal or an agent can ride along (APNs sees Live Activity content
-/// in the clear). Null if anything is off.
+// One line of text: no control characters (C0, DEL, C1), no line or paragraph separators. Lengths are in
+// Unicode scalars, as clothod counts them.
+const LINE = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/u;
+const isLine = (max) => (s) => typeof s === "string" && LINE.test(s) && [...s].length <= max;
+const TOOL = /^[A-Za-z0-9_.:-]{1,64}$/;
+const TEXT = { tool: (s) => typeof s === "string" && TOOL.test(s), detail: isLine(200), msg: isLine(300) };
+// Below APNs' 4 KB, with room for aps. The caps above keep content near 2 KB at most; this is a backstop.
+const CONTENT_MAX = 3072;
+
+/// A Live Activity request, checked strictly. The content is the agent's state and kind, two times, and
+/// optionally the tool, the current command or file (`detail`) and the last message or question (`msg`),
+/// each capped (the user chose to show them, accepting that APNs sees Live Activity content in the clear).
+/// No other key passes. Null if anything is off.
 export function activityRequest(body) {
   const { handle, token, env, event, content, timestamp, stale, dismiss } = body;
   if (typeof handle !== "string" || !TOKEN.test(token ?? "")) return null;
   if (env !== undefined && !["sandbox", "production"].includes(env)) return null;
   if (!["update", "end"].includes(event) || !isTime(timestamp)) return null;
   if (!content || typeof content !== "object" || Array.isArray(content)) return null;
-  const keys = Object.keys(content).sort().join(",");
-  if (keys !== "kind,since,started,state") return null;
+  for (const key of Object.keys(content)) {
+    if (!["state", "kind", "since", "started"].includes(key) && !TEXT[key]?.(content[key])) return null;
+  }
   if (!WORD.test(content.state) || !WORD.test(content.kind) || !isTime(content.since) || !isTime(content.started)) return null;
+  if (new TextEncoder().encode(JSON.stringify(content)).length > CONTENT_MAX) return null;
   if (stale !== undefined && !isTime(stale)) return null;
   if (dismiss !== undefined && !isTime(dismiss)) return null;
   return { token: token.toLowerCase(), env, event, content, timestamp, stale, dismiss };
@@ -209,6 +221,9 @@ export function activityPayload(req, now) {
     event: req.event,
     "content-state": { state: req.content.state, kind: req.content.kind, since: req.content.since, started: req.content.started },
   };
+  for (const key of ["tool", "detail", "msg"]) {
+    if (req.content[key] !== undefined) aps["content-state"][key] = req.content[key];
+  }
   if (req.stale !== undefined) aps["stale-date"] = req.stale;
   if (req.event === "end" && req.dismiss !== undefined) aps["dismissal-date"] = req.dismiss;
   return { aps };
