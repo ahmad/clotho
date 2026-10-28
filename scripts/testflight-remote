@@ -20,7 +20,7 @@ env_file=$HOME/.config/clotho/asc.env
 . "$env_file"
 : "${ASC_KEY_ID:?not set in $env_file}" "${ASC_ISSUER_ID:?not set in $env_file}"
 
-paths=(ios/Clotho ios/ClothoNotify ClothoKit/Sources ios/project.yml ios/push.yml ClothoKit/Package.swift clothod/RELEASED)
+paths=(ios ClothoKit clothod/RELEASED)
 if ! git diff --quiet HEAD -- "${paths[@]}" || [ -n "$(git ls-files --others --exclude-standard -- "${paths[@]}")" ]; then
   echo "testflight-remote: the working tree differs from HEAD in the app's sources; commit or stash first" >&2
   exit 2
