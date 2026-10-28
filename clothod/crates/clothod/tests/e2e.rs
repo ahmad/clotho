@@ -153,8 +153,16 @@ impl Drop for Env {
 
 /// `want` is a line of the screen. Output can also land on the prompt line (`$ want`), when
 /// input arrives before the shell has printed its prompt and the terminal echoes it early.
+/// A line of a command's output, as the screen shows it. Under load the shell can start after
+/// the typed line was echoed and draw its prompt right before the output (`$ out`), so waits on
+/// command output match with or without that prompt.
 fn has_line(lines: &[String], want: &str) -> bool {
-    lines.iter().any(|l| l == want || l.strip_prefix("$ ") == Some(want))
+    lines.iter().any(|l| output(l) == want)
+}
+
+/// `line` without a prompt the shell drew late in front of it.
+fn output(line: &str) -> &str {
+    line.strip_prefix("$ ").unwrap_or(line)
 }
 
 fn sh() -> Value {
@@ -247,7 +255,7 @@ async fn a_snapshot_after_clear_shows_only_the_screen() {
     params["rows"] = json!(10);
     let p = new_pane(&c, params).await;
     c.input(p, format!("mkdir -p /tmp/{0} && cd /tmp/{0} && clear; printf 'saved screen 42\\n'; cd /\r", "x".repeat(40)).as_bytes());
-    wait_for_text(&c, p, T, |l| l.iter().any(|x| x == "saved screen 42")).await.unwrap();
+    wait_for_text(&c, p, T, |l| has_line(l, "saved screen 42")).await.unwrap();
     let (lines, _) = daemon_text(&c, p).await;
     assert_eq!(lines[0], "saved screen 42", "clear left the command line on screen: {lines:?}");
     let mut fresh = env.client().await;
@@ -1943,15 +1951,15 @@ fn versions(env: &Env) -> Vec<String> {
 async fn live_shell(c: &Client) -> (u64, String) {
     let p = new_pane(c, sh()).await;
     c.input(p, b"V=alive-$((6*7)); echo shellpid=$$\r");
-    let lines = wait_for_text(c, p, T, |l| l.iter().any(|l| l.starts_with("shellpid="))).await.unwrap();
-    let pid = lines.iter().find_map(|l| l.strip_prefix("shellpid=")).unwrap().to_string();
+    let lines = wait_for_text(c, p, T, |l| l.iter().any(|l| output(l).starts_with("shellpid="))).await.unwrap();
+    let pid = lines.iter().find_map(|l| output(l).strip_prefix("shellpid=")).unwrap().to_string();
     (p, pid)
 }
 
 async fn assert_shell_alive(c: &Client, p: u64, pid: &str) {
     c.input(p, b"echo $V-$$\r");
     let want = format!("alive-42-{pid}");
-    wait_for_text(c, p, T, |l| l.iter().any(|l| *l == want)).await.unwrap();
+    wait_for_text(c, p, T, |l| has_line(l, &want)).await.unwrap();
 }
 
 #[tokio::test]
@@ -3507,7 +3515,7 @@ async fn an_endless_osc_does_not_grow_serve() {
         let st = c.request("debug.stats", json!({})).await.unwrap();
         peak = peak.max(st["heap_peak"].as_u64().unwrap());
         let t = c.request("pane.text", json!({"pane": p})).await.unwrap();
-        if t["lines"].as_array().unwrap().iter().any(|l| l == "osc-42") {
+        if t["lines"].as_array().unwrap().iter().any(|l| l.as_str().is_some_and(|l| output(l) == "osc-42")) {
             break;
         }
         assert!(Instant::now() < deadline, "the pane never finished: {t}");
@@ -3529,8 +3537,9 @@ async fn pane_search_finds_scrollback_matches_in_snapshot_coordinates() {
     params["rows"] = json!(10);
     let p = new_pane(&c, params).await;
     let (_, mut s) = subscribe(&mut c, p, None).await;
-    c.input(p, b"for i in $(seq 1 60); do echo row-$i; done; echo Done-Marker\r");
-    wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "Done-Marker")).await.unwrap();
+    // `start` first: a prompt drawn late lands in front of it, not in front of a row searched for.
+    c.input(p, b"echo start; for i in $(seq 1 60); do echo row-$i; done; echo Done-Marker\r");
+    wait_for_text(&c, p, T, |l| has_line(l, "Done-Marker")).await.unwrap();
     sync(&mut c, &mut s).await.unwrap();
 
     let r = c.request("pane.search", json!({"pane": p, "query": "row-1"})).await.unwrap();
