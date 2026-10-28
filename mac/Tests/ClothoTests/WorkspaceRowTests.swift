@@ -2,16 +2,14 @@ import AppKit
 import XCTest
 @testable import Clotho
 
-/// Workspace rows read like machine headers: the status dot right after the name, the tab count pinned to
-/// the trailing edge, and the close button only under the pointer, in the count's place.
+/// Sidebar rows: the workspace's chevron and name, tabs indented under it, and every row's status dot
+/// pinned to one trailing edge, where the close button takes its place under the pointer.
 @MainActor
 final class WorkspaceRowTests: XCTestCase {
     override func setUp() { _ = NSApplication.shared }
 
-    private func row(_ name: String, count: String = "2", badge: NSColor? = .systemGreen, width: CGFloat = 240) -> WorkspaceRow {
-        let row = WorkspaceRow()
-        row.label.stringValue = name
-        row.detail.stringValue = count
+    private func laidOut<Row: SidebarRow>(_ row: Row, _ title: String, badge: NSColor? = .systemGreen, width: CGFloat = 240) -> Row {
+        row.label.stringValue = title
         row.onClose = {}
         row.setBadge(badge)
         row.frame = NSRect(x: 0, y: 0, width: width, height: 28)
@@ -19,59 +17,83 @@ final class WorkspaceRowTests: XCTestCase {
         return row
     }
 
-    func testDotSitsRightAfterTheName() {
-        let row = row("Resolve")
-        let label = row.label.alignmentRect(forFrame: row.label.frame)
-        XCTAssertEqual(row.badge.frame.minX, label.maxX + s(6), accuracy: 0.5, "the machine header's 6 pt gap")
-        XCTAssertEqual(row.badge.frame.size, NSSize(width: s(6), height: s(6)))
-        XCTAssertEqual(row.badge.frame.midY, row.label.frame.midY, accuracy: 0.5)
-        XCTAssertLessThan(row.badge.frame.maxX, row.bounds.width / 2, "next to a short name, not at the far end")
+    func testDotsLineUpOnTheTrailingEdge() {
+        let workspace = laidOut(WorkspaceRow(expanded: false), "A")
+        let tab = laidOut(TabRow(), "A much longer tab title")
+        XCTAssertEqual(workspace.badge.frame.midX, 240 - SidebarRow.dotInset, accuracy: 0.5)
+        XCTAssertEqual(tab.badge.frame.midX, workspace.badge.frame.midX, accuracy: 0.5)
+        XCTAssertEqual(tab.badge.frame.midY, tab.bounds.midY, accuracy: 0.5)
     }
 
-    func testCountsLineUpOnTheTrailingEdge() {
-        let short = row("A", count: "2"), long = row("A much longer workspace name", count: "12", badge: nil)
-        let edge = { (row: WorkspaceRow) in row.detail.alignmentRect(forFrame: row.detail.frame).maxX }
-        XCTAssertEqual(edge(short), 240 - WorkspaceRow.trailingInset, accuracy: 0.5)
-        XCTAssertEqual(edge(short), edge(long), accuracy: 0.5)
+    func testTabsIndentPastTheWorkspaceName() {
+        let workspace = laidOut(WorkspaceRow(), "Platform")
+        let tab = laidOut(TabRow(), "zsh")
+        XCTAssertEqual(workspace.label.frame.minX, MachineHeader.nameInset, accuracy: 1, "in line with the machine's name")
+        XCTAssertGreaterThan(tab.label.frame.minX, workspace.label.frame.minX + s(8))
+        XCTAssertLessThan(tab.label.font!.pointSize, workspace.label.font!.pointSize, "tabs a touch smaller")
+        XCTAssertNotNil(workspace.chevron)
+        XCTAssertNil(tab.chevron)
+        XCTAssertLessThan(workspace.chevron!.frame.maxX, workspace.label.frame.minX)
     }
 
-    func testLongNamesTruncateBeforeTheDot() {
-        let row = row(String(repeating: "Platform ", count: 10), count: "12", width: 200)
-        XCTAssertLessThanOrEqual(row.label.frame.maxX, row.badge.frame.minX)
-        XCTAssertLessThanOrEqual(row.badge.frame.maxX, row.detail.frame.minX)
-        let noDot = self.row(String(repeating: "Platform ", count: 10), count: "12", badge: nil, width: 200)
-        XCTAssertLessThanOrEqual(noDot.label.frame.maxX, noDot.detail.frame.minX)
-        XCTAssertGreaterThan(noDot.label.frame.width, row.label.frame.width, "no room is kept for a hidden dot")
+    func testLongTitlesTruncateBeforeTheDot() {
+        let row = laidOut(TabRow(), String(repeating: "Platform ", count: 10), width: 200)
+        XCTAssertLessThan(row.label.frame.maxX, row.badge.frame.minX)
+        let noDot = laidOut(TabRow(), String(repeating: "Platform ", count: 10), badge: nil, width: 200)
+        XCTAssertEqual(noDot.label.frame.maxX, row.label.frame.maxX, accuracy: 0.5, "titles end at one edge, dot or not")
     }
 
-    func testCloseOnlyOnHoverInTheCountsPlace() {
-        let row = row("Platform")
+    func testCloseOnlyOnHoverInTheDotsPlace() {
+        let row = laidOut(TabRow(), "zsh")
         row.isSelected = true
         row.layoutSubtreeIfNeeded()
         XCTAssertTrue(row.closeButton.isHidden, "selected but not hovered: no close button")
-        XCTAssertFalse(row.detail.isHidden)
-        let before = (row.label.frame, row.badge.frame, row.detail.frame)
+        XCTAssertFalse(row.badge.isHidden)
+        let before = (row.label.frame, row.badge.frame)
         row.setHovering(true)
         row.layoutSubtreeIfNeeded()
         XCTAssertFalse(row.closeButton.isHidden)
-        XCTAssertTrue(row.detail.isHidden, "the × takes the count's place")
-        XCTAssertTrue(row.closeButton.frame.intersects(before.2))
+        XCTAssertTrue(row.badge.isHidden, "the × takes the dot's place")
+        XCTAssertEqual(row.closeButton.frame.midX, before.1.midX, accuracy: 0.5)
         XCTAssertEqual(row.label.frame, before.0, "hovering moves nothing")
-        XCTAssertEqual(row.badge.frame, before.1)
-        XCTAssertEqual(row.detail.frame, before.2)
         row.setHovering(false)
         XCTAssertTrue(row.closeButton.isHidden)
-        XCTAssertFalse(row.detail.isHidden)
+        XCTAssertFalse(row.badge.isHidden)
+        // No dot: hovering shows only the ×, and leaving shows nothing.
+        let plain = laidOut(TabRow(), "zsh", badge: nil)
+        XCTAssertTrue(plain.badge.isHidden)
+        plain.setHovering(true)
+        XCTAssertTrue(plain.badge.isHidden)
     }
 
-    func testRenameHidesCloseAndKeepsCount() {
+    func testRenameHidesClose() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 28), styleMask: [], backing: .buffered, defer: true)
-        let row = row("Platform")
+        let row = laidOut(WorkspaceRow(), "Platform")
         window.contentView = row
         row.setHovering(true)
         row.beginEditing("Platform") { _ in }
         XCTAssertTrue(row.closeButton.isHidden)
-        XCTAssertFalse(row.detail.isHidden)
         row.endEditing(commit: false)
+    }
+
+    /// The chevron's column toggles (Option: every workspace); the rest of the row selects.
+    func testChevronTogglesAndTheRowSelects() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 28), styleMask: [], backing: .buffered, defer: true)
+        let row = laidOut(WorkspaceRow(), "Platform")
+        window.contentView = row
+        var toggles: [Bool] = [], clicks = 0
+        row.onToggle = { toggles.append($0) }
+        row.onClick = { clicks += 1 }
+        func click(x: CGFloat, _ flags: NSEvent.ModifierFlags = []) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: row.convert(NSPoint(x: x, y: 14), to: nil),
+                                                         modifierFlags: flags, timestamp: 0, windowNumber: window.windowNumber,
+                                                         context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            row.mouseDown(with: event)
+        }
+        try click(x: s(17))
+        try click(x: s(17), .option)
+        try click(x: 120)
+        XCTAssertEqual(toggles, [false, true])
+        XCTAssertEqual(clicks, 1)
     }
 }

@@ -19,6 +19,34 @@ extension AppDelegate {
         }
     }
 
+    /// Focuses a workspace, tab or pane on a machine: shown at once, from the local model, then sent to
+    /// the daemon (ModelStore.showFocus / sendFocus). The machine switches after the local focus is in
+    /// place, so switching shows the clicked workspace rather than the machine's previous one first.
+    /// FocusWaitsForDaemon=YES restores the old way (nothing changes until the daemon's state arrives),
+    /// to compare timings with TraceClicks.
+    func focusNow(_ target: FocusTarget, on key: MachineKey, trace: String) {
+        guard let store = connections[key]?.store else { return }
+        ClickTrace.begin("\(trace) @\(key == Self.localKey ? "local" : "remote")", machine: key, tab: store.state.focusing(target)?.focus.tab)
+        if UserDefaults.standard.bool(forKey: "FocusWaitsForDaemon") {
+            focus(machine: key)
+            let backend = store.backend
+            Task { @MainActor in try? await backend.focus(target) }
+            return
+        }
+        let switching = connections[key] != nil && focusedMachine != key
+        if switching { focusedMachine = key }
+        let before = store.state
+        store.showFocus(target)
+        if switching && store.state == before { sync() }
+        Task { @MainActor in
+            do {
+                try await store.sendFocus(target)
+            } catch {
+                log("focus \(target) on \(key) failed: \(error)")
+            }
+        }
+    }
+
     var activeTerminal: PaneTerminalView? {
         store.focusedPane.flatMap { paneHosts[PaneKey(machine: focusedMachine, pane: $0.id)]?.terminal }
     }
@@ -35,7 +63,9 @@ extension AppDelegate {
 
         settingsWindow?.refreshIfNeeded()
         let agents = agentEntries()
-        sidebar.update(agents: agents, unreachable: unreachableMonitoredMachines(), groups: sidebarGroups())
+        ClickTrace.measure("sidebar update") {
+            sidebar.update(agents: agents, unreachable: unreachableMonitoredMachines(), groups: sidebarGroups())
+        }
         updateDockBadge(agents)
         let tabs = (workspace?.tabs ?? []).map {
             (id: $0.id, title: store.displayTitle(of: $0), custom: $0.title, maximized: maximized[tabKey($0.id)] != nil,
@@ -63,6 +93,11 @@ extension AppDelegate {
         }
         let maximizedPane = tab.flatMap { maximized[tabKey($0.id)] }
         splitView.show(tab?.layout, hosts: shown, maximized: maximizedPane)
+        if let target = ClickTrace.target, target.machine == focusedMachine, let id = target.tab, tab?.id == id {
+            ClickTrace.mark("selected")
+            if tab?.layout.panes.allSatisfy({ shown[$0] != nil }) == true { ClickTrace.mark("shown") }
+            DispatchQueue.main.async { ClickTrace.mark("painted") }
+        }
 
         let focusedPane = store.focusedPane?.id
         for (id, host) in shown {
@@ -85,7 +120,7 @@ extension AppDelegate {
 
         // Keyboard focus follows the daemon's focus, unless an overlay or sheet has it.
         if let focusedPane, let host = shown[focusedPane], shortcutsOverlay == nil, fileBrowser == nil,
-           window.attachedSheet == nil, window.firstResponder !== host.terminal {
+           window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard {
             window.makeFirstResponder(host.terminal)
         }
     }
@@ -105,9 +140,7 @@ extension AppDelegate {
     func firstResponderChanged() {
         guard let terminal = window.firstResponder as? PaneTerminalView, let session = connections[terminal.machine],
               session.store.state.focus.pane != terminal.paneID, session.store.state.pane(terminal.paneID) != nil else { return }
-        focus(machine: terminal.machine)
-        let pane = terminal.paneID
-        run { try await $0.focus(.pane(pane)) }
+        focusNow(.pane(terminal.paneID), on: terminal.machine, trace: "pane \(terminal.paneID)")
     }
 
     func bell(_ pane: PaneID) {

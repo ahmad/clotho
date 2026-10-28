@@ -66,6 +66,15 @@ public final class ModelStore: ObservableObject {
     private var sinks: [PaneID: WeakSink] = [:]
     private var task: Task<Void, Never>?
 
+    /// A focus shown before the daemon confirmed it (`focus(_:)`): re-applied to the daemon's states until
+    /// one has it, the request fails, or `until` passes.
+    private var localFocus: (target: FocusTarget, focus: Focus, until: Date)?
+    /// The daemon's own focus and active tabs, to go back to when a focus request fails.
+    private var daemonFocus: (focus: Focus, activeTabs: [WorkspaceID: TabID?])?
+    /// How long a local focus waits for the daemon; after a successful reply, `localFocusGrace`.
+    public static var localFocusTimeout: TimeInterval = 3
+    public static var localFocusGrace: TimeInterval = 0.5
+
     public init(backend: SessionBackend) {
         self.backend = backend
     }
@@ -146,6 +155,61 @@ public final class ModelStore: ObservableObject {
     /// The daemon's features: live once connected, else those saved with the model.
     public var features: Set<Hello.Feature> { hello?.features ?? saved?.features ?? [] }
 
+    // MARK: Focus
+
+    /// Focuses `target` now, in `state` (by the daemon's rules, `ModelState.focusing`), and in the daemon.
+    /// A click shows on the frame it happens in rather than after a round trip; the daemon's state then
+    /// confirms it. States that arrive before the daemon has it (older changes, still in flight) keep the
+    /// local focus. If the daemon refuses, the daemon's focus comes back and the error is thrown.
+    public func focus(_ target: FocusTarget) async throws {
+        showFocus(target)
+        try await sendFocus(target)
+    }
+
+    /// The local half of `focus(_:)`: `state` shows the focus at once (synchronously, with `onChange`).
+    /// Follow it with `sendFocus(_:)`. Returns whether the target is in the model.
+    @discardableResult
+    public func showFocus(_ target: FocusTarget) -> Bool {
+        guard phase == .live, let shown = state.focusing(target) else { return false }
+        if localFocus == nil { daemonFocus = (state.focus, Self.activeTabs(state)) }
+        localFocus = (target, shown.focus, Date().addingTimeInterval(Self.localFocusTimeout))
+        if shown != state {
+            state = shown
+            onChange?()
+        }
+        return true
+    }
+
+    /// The daemon's half of `focus(_:)`.
+    public func sendFocus(_ target: FocusTarget) async throws {
+        do {
+            try await backend.focus(target)
+            // The daemon has it. Its state may already be here (then this was cleared), or be on its way.
+            if let local = localFocus, local.target == target {
+                localFocus!.until = min(local.until, Date().addingTimeInterval(Self.localFocusGrace))
+            }
+        } catch {
+            if let local = localFocus, local.target == target {
+                localFocus = nil
+                if let daemon = daemonFocus {
+                    state.focus = daemon.focus
+                    for (index, workspace) in state.workspaces.enumerated() {
+                        if let tab = daemon.activeTabs[workspace.id] { state.workspaces[index].activeTab = tab }
+                    }
+                    onChange?()
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Whether `state.focus` is a local one the daemon hasn't confirmed yet.
+    public var isFocusLocal: Bool { localFocus != nil }
+
+    private static func activeTabs(_ state: ModelState) -> [WorkspaceID: TabID?] {
+        Dictionary(state.workspaces.map { ($0.id, $0.activeTab) }, uniquingKeysWith: { a, _ in a })
+    }
+
     public func register(_ sink: PaneDataSink, for pane: PaneID) { sinks[pane] = WeakSink(sink) }
     public func unregister(_ pane: PaneID) { sinks[pane] = nil }
 
@@ -163,12 +227,23 @@ public final class ModelStore: ObservableObject {
             onChange?()
         case .disconnected(let reason):
             if connection.isConnected { lostAt = Date() }
+            localFocus = nil
             connection = .reconnecting(reason)
             onChange?()
         case .progress(let step):
             connection = .connecting(step)
             onChange?()
-        case .state(let newState):
+        case .state(var newState):
+            if let local = localFocus {
+                daemonFocus = (newState.focus, Self.activeTabs(newState))
+                if newState.focus == local.focus || Date() >= local.until {
+                    localFocus = nil
+                } else if let shown = newState.focusing(local.target) {
+                    newState = shown
+                } else {
+                    localFocus = nil
+                }
+            }
             state = newState
             if phase == .saved {
                 phase = .live

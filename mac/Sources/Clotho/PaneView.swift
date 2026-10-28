@@ -292,7 +292,14 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
 
     // MARK: PaneDataSink
 
+    /// Whether a running click trace leads to this pane's tab.
+    private var isTraced: Bool {
+        guard let target = ClickTrace.target, target.machine == terminal.machine, let tab = target.tab else { return false }
+        return store.state.tab(tab)?.layout.contains(paneID) == true
+    }
+
     func paneSubscribed(_ subscription: Subscription) {
+        if isTraced { ClickTrace.mark("subscribed") }
         flush()
         applySize(Size(cols: subscription.cols, rows: subscription.rows))
     }
@@ -311,7 +318,9 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
 
     func paneSnapshot(seq: UInt64, cols: Int, rows: Int, bytes: Data) {
         pending.removeAll()
+        let traced = isTraced
         applySize(Size(cols: cols, rows: rows))
+        defer { if traced { ClickTrace.mark("content") } }
         // The snapshot starts with a full reset, so earlier state doesn't matter.
         terminal.feedFromBackend(bytes)
         haveSeq = seq
@@ -353,7 +362,13 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         guard !pending.isEmpty else { return }
         let bytes = pending
         pending = Data()
-        terminal.feedFromBackend(bytes)
+        let traced = isTraced
+        if traced {
+            ClickTrace.measure("feed \(bytes.count) bytes") { terminal.feedFromBackend(bytes) }
+            ClickTrace.mark("content")
+        } else {
+            terminal.feedFromBackend(bytes)
+        }
         haveSeq = (haveSeq ?? 0) + UInt64(bytes.count)
         if search != nil {
             search?.outputArrived()

@@ -192,7 +192,11 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
+    /// Makes `focus` take this long, as a round trip to a remote daemon would (tests of local focus).
+    public var focusDelay: TimeInterval = 0
+
     public func focus(_ target: FocusTarget) async throws {
+        if focusDelay > 0 { try await Task.sleep(nanoseconds: UInt64(focusDelay * 1e9)) }
         try locked {
             switch target {
             case .pane(let pane):

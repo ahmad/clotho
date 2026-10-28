@@ -61,16 +61,14 @@ extension AppDelegate {
             let machine = session.title
             for workspace in store.state.workspaces {
                 add(QuickOpenItem(kind: .workspace, title: workspace.name, subtitle: machine, id: "ws|\(key)|\(workspace.id)")) { [weak self] in
-                    self?.focus(machine: key)
-                    Task { try? await store.backend.focus(.workspace(workspace.id)) }
+                    self?.focusNow(.workspace(workspace.id), on: key, trace: "quick open")
                 }
             }
             for workspace in store.state.workspaces {
                 for tab in workspace.tabs {
                     add(QuickOpenItem(kind: .tab, title: store.displayTitle(of: tab), subtitle: "\(machine) › \(workspace.name)",
                                       id: "tab|\(key)|\(tab.id)")) { [weak self] in
-                        self?.focus(machine: key)
-                        Task { try? await store.backend.focus(.tab(tab.id)) }
+                        self?.focusNow(.tab(tab.id), on: key, trace: "quick open")
                     }
                 }
             }

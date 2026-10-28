@@ -341,15 +341,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar = SidebarView()
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebar.onSelect = { [weak self] key, id in
-            guard let self else { return }
-            focus(machine: key)
-            run { try await $0.focus(.workspace(id)) }
+            self?.focusNow(.workspace(id), on: key, trace: "workspace \(id)")
         }
         sidebar.onRename = { [weak self] key, id, name in
             guard let store = self?.connections[key]?.store else { return }
             Task { try? await store.backend.renameWorkspace(id, name: name) }
         }
         sidebar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
+        sidebar.onSelectTab = { [weak self] key, tab in self?.focusNow(.tab(tab), on: key, trace: "sidebar tab \(tab)") }
+        sidebar.onRenameTab = { [weak self] key, tab, title in
+            guard let store = self?.connections[key]?.store else { return }
+            Task { try? await store.backend.renameTab(tab, title: title.isEmpty ? nil : title) }
+        }
+        sidebar.onCloseTab = { [weak self] key, tab in
+            self?.focus(machine: key)
+            self?.closeTab(tab)
+        }
+        sidebar.onFocusTerminal = { [weak self] in
+            guard let self else { return }
+            window.makeFirstResponder(activeTerminal)
+        }
         sidebar.onClose = { [weak self] key, id in
             self?.focus(machine: key)
             self?.closeWorkspace(id)
@@ -391,7 +402,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         tabBar = TabBarView()
         tabBar.translatesAutoresizingMaskIntoConstraints = false
-        tabBar.onSelect = { [weak self] id in self?.run { try await $0.focus(.tab(id)) } }
+        tabBar.onSelect = { [weak self] id in
+            guard let self else { return }
+            focusNow(.tab(id), on: focusedMachine, trace: "tab bar \(id)")
+        }
         tabBar.onClose = { [weak self] id in self?.closeTab(id) }
         tabBar.onRename = { [weak self] id, title in
             self?.run { try await $0.renameTab(id, title: title.isEmpty ? nil : title) }
@@ -629,13 +643,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let panes = store.state.panes.map(\.id)
                     return index < panes.count ? resolveAgent(machine: focusedMachine, pane: panes[index]) : log("TypeText: no pane \(index)")
                 }
-                // "ws:Name:3" makes a workspace with that name and 3 tabs; "wsname:Name" renames the focused one.
+                // "ws:Name:3" makes a workspace with that name and 3 tabs; "ws:Name:3:command" runs that shell
+                // command in each tab instead of a shell. "wsname:Name" renames the focused one.
                 if step.hasPrefix("ws:") {
-                    let parts = step.dropFirst(3).split(separator: ":").map(String.init)
+                    let parts = step.dropFirst(3).split(separator: ":", maxSplits: 2).map(String.init)
                     let backend = backend
+                    var spawn = SpawnOptions()
+                    if parts.count > 2 { spawn.command = ["/bin/sh", "-c", parts[2]] }
                     Task {
-                        guard let created = try? await backend.createWorkspace(name: parts.first) else { return log("TypeText: no workspace") }
-                        for _ in 1..<max(1, Int(parts.dropFirst().first ?? "") ?? 1) { _ = try? await backend.createTab(in: created.workspace) }
+                        guard let created = try? await backend.createWorkspace(name: parts.first, spawn: spawn) else { return log("TypeText: no workspace") }
+                        for _ in 1..<max(1, Int(parts.dropFirst().first ?? "") ?? 1) { _ = try? await backend.createTab(in: created.workspace, spawn: spawn) }
                     }
                     return
                 }
@@ -644,15 +661,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     Task { try? await backend.renameWorkspace(workspace, name: name) }
                     return
                 }
-                // "hoverrow:1" hovers the sidebar's second workspace row, as the pointer would (-1: none).
-                if step.hasPrefix("hoverrow:"), let index = Int(step.dropFirst(9)) {
-                    func rows(in view: NSView) -> [WorkspaceRow] {
-                        view.subviews.flatMap { ($0 as? WorkspaceRow).map { [$0] } ?? rows(in: $0) }
+                // "hoverrow:1" hovers the sidebar's second row (workspaces and tabs, top down), as the pointer
+                // would (-1: none). "clickrow:2" posts a real click at the middle of the third row, and
+                // "chevron:0" (with ",alt" for Option) at its chevron. "focussidebar" gives the sidebar the
+                // keyboard (then "key:down", "key:left" … walk it).
+                if step.hasPrefix("hoverrow:") || step.hasPrefix("clickrow:") || step.hasPrefix("chevron:") {
+                    func rows(in view: NSView) -> [SidebarRow] {
+                        view.subviews.flatMap { ($0 as? SidebarRow).map { [$0] } ?? rows(in: $0) }
                     }
                     let all = rows(in: sidebar).sorted { $0.convert(NSPoint.zero, to: nil).y > $1.convert(NSPoint.zero, to: nil).y }
-                    for (i, row) in all.enumerated() { row.setHovering(i == index) }
-                    return
+                    let parts = step.split(separator: ":")[1].split(separator: ",")
+                    guard let index = Int(parts[0]) else { return log("TypeText: bad row \(step)") }
+                    if step.hasPrefix("hoverrow:") {
+                        for (i, row) in all.enumerated() { row.setHovering(i == index) }
+                        return
+                    }
+                    guard index < all.count else { return log("TypeText: no row \(index)") }
+                    let row = all[index]
+                    let x = step.hasPrefix("chevron:") ? s(17) : row.bounds.midX
+                    let point = row.convert(NSPoint(x: x, y: row.bounds.midY), to: nil)
+                    let mods = parts.dropFirst().joined(separator: ",")
+                    return postTestClick("\(point.x),\(point.y)" + (mods.isEmpty ? "" : "," + mods))
                 }
+                if step == "focussidebar" { return focusSidebar(nil) }
+                // "machine:devbox" focuses that saved machine, connecting first if needed ("machine:local").
+                if step.hasPrefix("machine:") {
+                    let name = String(step.dropFirst(8))
+                    if name == "local" { return focus(machine: Self.localKey) }
+                    guard let machine = remoteMachines.first(where: { $0.label == name }) else { return log("TypeText: no machine \(name)") }
+                    if connections[machine.key] != nil { return focus(machine: machine.key) }
+                    return connect(machine, show: true)
+                }
+                // "windowid" logs the main window's number, for `screencapture -l`.
+                if step == "windowid" { return log("window id \(window.windowNumber)") }
+                if step == "wait" { return }
                 if step.hasPrefix("drop:") {
                     return dropFiles([URL(fileURLWithPath: String(step.dropFirst(5)))], on: PaneKey(machine: focusedMachine, pane: pane))
                 }
@@ -1047,6 +1089,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.restoreAfterMinimize()
     }
 
+    /// View ▸ Move Focus to Sidebar: the arrow keys walk the workspace and tab rows (see SidebarView.keyDown).
+    @objc func focusSidebar(_ sender: Any?) {
+        if sidebarWidth.constant == 0 { toggleSidebar(nil) }
+        sidebar.takeKeyboard()
+    }
+
+    @objc func expandAllWorkspaces(_ sender: Any?) { sidebar.setAllExpanded(true) }
+    @objc func collapseAllWorkspaces(_ sender: Any?) { sidebar.setAllExpanded(false) }
+
     @objc func toggleSidebar(_ sender: Any?) {
         let hide = sidebarWidth.constant > 0
         UserDefaults.standard.set(hide, forKey: "HideSidebar")
@@ -1145,11 +1196,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let header = all(MachineHeader.self, in: sidebar).first
         let row = all(WorkspaceRow.self, in: sidebar).first
+        let tabRow = all(TabRow.self, in: sidebar).first
         let tab = all(ChromeItem.self, in: tabBar).first
         let fmt = { (v: CGFloat) in String(format: "%.1f", v) }
         log("frames at \(Int((UIScale.factor * 100).rounded()))%: tab bar h \(fmt(tabBar.frame.height)), tab h \(fmt(tab?.frame.height ?? 0)) "
             + "font \(fmt(tab?.label.font?.pointSize ?? 0)), header h \(fmt(header?.frame.height ?? 0)), "
             + "workspace row h \(fmt(row?.frame.height ?? 0)) font \(fmt(row?.label.font?.pointSize ?? 0)) x \(fmt(row?.label.frame.minX ?? 0)), "
+            + "tab row h \(fmt(tabRow?.frame.height ?? 0)) font \(fmt(tabRow?.label.font?.pointSize ?? 0)) x \(fmt(tabRow?.label.frame.minX ?? 0)), "
+            + "dots \(fmt(row.map { $0.bounds.width - $0.badge.frame.midX } ?? 0))/\(fmt(tabRow.map { $0.bounds.width - $0.badge.frame.midX } ?? 0)) from the edge, "
             + "terminal \(fmt(terminalFontSize)) pt")
     }
 

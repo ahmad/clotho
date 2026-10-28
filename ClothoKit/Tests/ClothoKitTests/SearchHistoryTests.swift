@@ -172,4 +172,41 @@ extension ClothodBackendTests {
             XCTAssertGreaterThan(history.max, 0)
         }
     }
+
+    /// ModelState.focusing mirrors clothod's model.rs focus_pane / focus_tab / focus_workspace. This runs
+    /// one sequence of focus changes through both and checks every step agrees: the focus, each
+    /// workspace's active tab and each tab's active pane.
+    func testLocalFocusMatchesTheDaemon() async throws {
+        let backend = makeBackend()
+        defer { backend.stop() }
+        try await backend.start()
+        let sh = SpawnOptions(command: ["/bin/sh"], cwd: "/tmp")
+        let one = try await backend.createWorkspace(name: "one", spawn: sh)
+        let second = try await backend.createTab(in: one.workspace, spawn: sh)
+        let split = try await backend.split(second.pane, direction: .right, spawn: sh)
+        let two = try await backend.createWorkspace(name: "two", spawn: sh)
+        let empty = try await backend.createWorkspace(name: "empty", spawn: sh)
+        try await backend.closePane(empty.pane)
+        let targets: [FocusTarget] = [
+            .workspace(one.workspace), .tab(second.tab), .pane(second.pane), .workspace(two.workspace),
+            .workspace(one.workspace), .pane(split.pane), .tab(one.tab), .workspace(one.workspace),
+            .tab(second.tab), .pane(one.pane), .workspace(two.workspace), .tab(two.tab), .workspace(one.workspace),
+        ]
+        func shape(_ state: ModelState) -> String {
+            "focus \(state.focus.workspace.map(String.init) ?? "-")/\(state.focus.tab.map(String.init) ?? "-")/\(state.focus.pane.map(String.init) ?? "-") "
+                + state.workspaces.map { w in "w\(w.id):\(w.activeTab.map(String.init) ?? "-")[" + w.tabs.map { "t\($0.id):\($0.activePane)" }.joined(separator: ",") + "]" }
+                    .joined(separator: " ")
+        }
+        var state = try await backend.getState()
+        for target in targets {
+            let local = try XCTUnwrap(state.focusing(target), "\(target)")
+            try await backend.focus(target)
+            state = try await backend.getState()
+            XCTAssertEqual(shape(local), shape(state), "after \(target)")
+        }
+        if let gone = try await backend.getState().workspace(empty.workspace) {
+            // A workspace whose last tab closed, if the daemon keeps it: focusing it has no tab.
+            XCTAssertEqual(state.focusing(.workspace(gone.id))?.focus.tab, nil)
+        }
+    }
 }

@@ -87,6 +87,9 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Smaller Terminal Text", key: "-", modifiers: [.command, .option], action: #selector(terminalZoomOut(_:))),
             Shortcut(menu: "View", title: "Actual Terminal Text Size", key: "0", modifiers: [.command, .option], action: #selector(terminalActualSize(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:))),
+            Shortcut(menu: "View", title: "Move Focus to Sidebar", key: "s", modifiers: [.command, .option], action: #selector(focusSidebar(_:))),
+            Shortcut(menu: "View", title: "Expand All Workspaces", key: "", action: #selector(expandAllWorkspaces(_:)), listed: false),
+            Shortcut(menu: "View", title: "Collapse All Workspaces", key: "", action: #selector(collapseAllWorkspaces(_:)), listed: false),
 
             Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
             Shortcut(menu: "Workspace", title: "Close Workspace", key: "w", modifiers: [.command, .shift], action: #selector(closeActiveWorkspace(_:))),
@@ -251,8 +254,7 @@ extension AppDelegate {
         guard !all.isEmpty else { return }
         let index = all.firstIndex { $0.machine == focusedMachine && $0.workspace == store.focusedWorkspace?.id } ?? 0
         let target = all[(index + step + all.count) % all.count]
-        focus(machine: target.machine)
-        run { try await $0.focus(.workspace(target.workspace)) }
+        focusNow(.workspace(target.workspace), on: target.machine, trace: "step workspace")
     }
 
     // A new tab opens in the focused pane's folder.
@@ -284,14 +286,14 @@ extension AppDelegate {
         guard let tabs = store.focusedWorkspace?.tabs, !tabs.isEmpty else { return }
         let index = tabs.firstIndex { $0.id == store.focusedTab?.id } ?? 0
         let target = tabs[(index + step + tabs.count) % tabs.count].id
-        run { try await $0.focus(.tab(target)) }
+        focusNow(.tab(target), on: focusedMachine, trace: "step tab")
     }
 
     @objc func goToTab(_ sender: Any?) {
         let n = (sender as? NSMenuItem)?.tag ?? 1
         guard let tabs = store.focusedWorkspace?.tabs, n <= tabs.count else { return }
         let target = tabs[n - 1].id
-        run { try await $0.focus(.tab(target)) }
+        focusNow(.tab(target), on: focusedMachine, trace: "tab \(n)")
     }
 
     // Menu tags index into Shortcut.arrows (left, right, up, down).
@@ -338,7 +340,7 @@ extension AppDelegate {
         guard let pane = focusedPaneID, store.focusedTab.flatMap({ maximized[tabKey($0.id)] }) == nil else { return }
         let direction = Self.directions[(sender as? NSMenuItem)?.tag ?? 0]
         guard let target = Layout.neighbor(of: pane, toward: direction, in: splitView.paneFrames) else { return }
-        run { try await $0.focus(.pane(target)) }
+        focusNow(.pane(target), on: focusedMachine, trace: "switch pane")
     }
 
     // Moves the nearest divider on that axis toward the arrow.

@@ -170,12 +170,10 @@ extension AppDelegate {
     /// Shows the agent's pane (its machine, workspace, tab and pane). Looking doesn't resolve it: the
     /// checkmark does, or typing into the pane (the daemon clears attention on input).
     func openAgent(machine: MachineKey, pane: PaneID) {
-        guard let session = connections[machine] else { return }
-        focus(machine: machine)
+        guard connections[machine] != nil else { return }
         if NSApp.isHidden || !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         window.makeKeyAndOrderFront(nil)
-        let backend = session.store.backend
-        Task { @MainActor in try? await backend.focus(.pane(pane)) }
+        focusNow(.pane(pane), on: machine, trace: "agent \(pane)")
     }
 
     /// Whether the machine's clothod can mute agents.
