@@ -1,38 +1,39 @@
-# Status and handoff (2026-10-28, updated after clothod 0.1.12)
+# Status and handoff (2026-10-28, updated after clothod 0.1.14)
 
 Development moved from this Mac's sessions to devbox. CLAUDE.md has the rules. This file has where
 things stand and what the old agents learned. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.12** runs on macbook, devbox and imac, upgraded in place. The holders (9573, 1799611
-  and 27331) kept their pids through 0.1.6 to 0.1.12, and every upgrade since 0.1.9 won on attempt 1.
-  - Round 3 added docs/security.md (10 findings, all fixed), resume after a cut, pane.search,
-    agent.history, push records padded to 1024 bytes and capped at 2048, and agent.report caps.
-  - Earlier: pane.clipboard (OSC 52), settings and service requests, attention that clears only on
-    agent.ack or real work, agent.mute, numeric version ordering.
-  - Each machine's bin/ holds only 0.1.12. An unreleased 0.1.11 build briefly reached all three
-    through the app's "Update clothod"; 0.1.12 replaced it.
-- **Agent hooks** were refreshed with 0.1.12: Claude on all three machines, Codex on devbox and imac.
-  Codex on macbook is the user's Computer Use notifier and is left alone. The backups are
-  `settings.json.clotho-backup-*`. Check with `grep -c 'CLOTHOD_REPORT:-/'`, which should be 0.
-- **Start at login:** on for imac only. devbox needs `sudo loginctl enable-linger ahmad` first.
-- **The Mac app** (1.0.0, build 202610280257) bundles the released 0.1.12. Round 3 added:
-  - onboarding
-  - the transfer stall watchdog with retry and resume
-  - Sparkle, off until the user generates the EdDSA key
-  - Cmd+P quick open, Cmd+F find in scrollback, agent history, light mode
-  - workspace rows laid out like machine rows: the dot after the name, the count pinned right,
-    close on hover only
-  - `mac/build-app.sh` without `--dev` bundles only a released dist (bf85cc5)
-- **iOS:** TestFlight build 202610272305 (clothod 0.1.12), uploaded by the user. Round 3 added find,
-  agent history, quick open and the palette, the iPad split view, and onboarding. The iPhone suite
-  had 53 passed, 8 skipped and 0 failed, and the iPad test passed. The workspace row restyle is Mac
-  only.
-- **The push relay** is live at https://clotho-push.example.workers.dev. Its secrets exist in
-  Cloudflare only.
+- **clothod 0.1.14** runs on macbook, devbox and imac, upgraded in place. The holders (9573, 1799611
+  and 27331) have kept their pids since 0.1.6. Each bin/ holds only 0.1.14.
+  - 0.1.13: pushes only when the agent needs the user. It ignores Claude's idle reminder,
+    compaction and nested agents, and stays quiet while the user is at the pane (`quiet` on the
+    agent). Notifications carry the details: workspace, project, prompt, result and duration.
+    Allow/Deny comes through Claude's PermissionRequest hook and `agent.decide`.
+  - 0.1.14: an upgrade's start waits for the old serve to exit (no false "socket did not come
+    back"), and a `cd` shows up without OSC 7 (polled once a second).
+- **Agent hooks:** 8 Claude entries on all three machines (PostToolUse and PermissionRequest added
+  for Allow/Deny). Codex is ours on devbox and imac; on macbook it's the user's Computer Use
+  notifier.
+- **Start at login:** on for imac only.
+- **The Mac app** (build 202610281505) bundles 0.1.14. It has quiet rises, detailed notifications,
+  and Allow/Deny on permission notifications and in the row menu. A ModelStore regression that
+  dropped live pane events was fixed in aff7fd2. ClothoKit/scripts/test.sh builds with
+  -warnings-as-errors.
+- **iOS:** TestFlight build 202610281515 (clothod 0.1.14), uploaded by the orchestrator through
+  scripts/testflight-remote. 0.1.13 was build 202610281458. The iPhone suite had 64 passed, 8
+  skipped and 0 failed, and the iPad test passed.
+- **The iOS redesign** (docs/ios-redesign.md) is on the local branch ios-phase1, not merged:
+  - phase 1 (saved state) is done
+  - phase 2 (Home) is written and under test
+  - phase 3 (onboarding) isn't started
+  - phases 1 to 3 ship together
+- **TestFlight uploads:** the orchestrator uploads verified builds itself. The API key ids are in
+  ~/.config/clotho/asc.env on devbox.
+- **The push relay** is live at https://clotho-push.example.workers.dev.
 - **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes exact verified
-  commits after checking every commit in `origin/main..<sha>`.
+  commits.
 - **The website** (clotho.app, waitlist on Upstash) is built by a separate session in
   ~/Projects/clotho.app.
 
