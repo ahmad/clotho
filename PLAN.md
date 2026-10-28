@@ -310,3 +310,14 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The Live Activity shows generic content only: agent kind, state and elapsed time.
 - Notifications carry more detail: workspace, project, duration, and the result or the command
   waiting for permission. This ships in 0.1.13.
+
+## clothod 0.1.13 (user decision, 2026-10-28)
+
+- Ship once the iOS suite passes. The batch:
+  - in-place upgrades on devbox, macbook and imac
+  - the Mac app install
+  - the TestFlight command, for the user to run
+- 0.1.13 contains the push fixes (quiet, nested agents, idle reminders, compaction), the
+  notification detail, and Allow/Deny (agent.decide).
+- Install the two new Claude hooks (PostToolUse, and PermissionRequest with timeout 3600) on each
+  machine, so there are 8 Clotho entries. The user's own hooks are kept, with backups.
