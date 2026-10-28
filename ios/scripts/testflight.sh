@@ -37,7 +37,12 @@ fail() { echo "testflight: $*" >&2; exit 2; }
 KEY_PATH=$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
 [ -f "$KEY_PATH" ] || fail "no API key at ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8"
 
-RELEASED=$(tr -d '[:space:]' < "$ROOT/clothod/RELEASED") || fail "no clothod/RELEASED"
+# clothod/RELEASED is one line, the released version (e.g. 0.1.15); anything else is refused, not guessed at.
+[ -f "$ROOT/clothod/RELEASED" ] || fail "no clothod/RELEASED"
+lines=$(grep -c . "$ROOT/clothod/RELEASED" || true)
+[ "$lines" = 1 ] || fail "clothod/RELEASED must be one line, the released version; it has $lines"
+RELEASED=$(grep . "$ROOT/clothod/RELEASED" | tr -d '[:space:]')
+printf '%s' "$RELEASED" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "clothod/RELEASED isn't a version: $RELEASED"
 [ -f "$DIST/manifest.json" ] || fail "no clothod dist at $DIST"
 VERSION=$(jq -r .version "$DIST/manifest.json")
 [ "$VERSION" = "$RELEASED" ] || fail "the clothod dist is $VERSION, but clothod/RELEASED says $RELEASED"
