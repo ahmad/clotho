@@ -75,12 +75,15 @@ targets:
     platform: iOS
     sources:
       - ClothoTests
+      # The widget's views, rendered by WidgetPreviewTests.
+      - ClothoWidget/NeedsYouView.swift
     dependencies:
       - target: Clotho
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.tests
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_PREVIEW_TEST
         BUNDLE_LOADER: $(TEST_HOST)
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/Clotho.app/Clotho
   ClothoUITests:

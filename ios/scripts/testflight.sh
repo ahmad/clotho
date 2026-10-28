@@ -84,7 +84,8 @@ AUTH=(-allowProvisioningUpdates
 mkdir -p build-resources/dist
 # TestFlight always bundles the released clothod, never a dev dist (build.sh's CLOTHOD_DIST).
 unset CLOTHOD_DIST
-PUSH=YES xcodegen generate -q
+# The widget is in (user decision 2026-10-28, PLAN.md): its App ID, nyc.amin.clotho.widget, is approved.
+PUSH=YES WIDGET=YES xcodegen generate -q
 # Packed before xcodebuild plans its resource copy (see build.sh), so the archive has the current release.
 python3 scripts/pack-dist.py "$DIST" build-resources/dist
 ARCHIVE=$OUT/Clotho.xcarchive
