@@ -56,6 +56,9 @@ final class MachineConnection: ObservableObject, Identifiable {
     /// Permission requests answered from this phone, per pane, until the agent moves on: the daemon drops the
     /// request at once, but the agent stays waiting until the tool runs (allow) or Claude carries on (deny).
     var answered: [PaneID: PermissionDecision] = [:]
+    /// Notification actions being carried out on this machine; the app going to the background leaves the
+    /// connection open until they finish (AlertActionRunner suspends it after).
+    var answeringActions = 0
     var fakeMuted: Set<PaneID> = []
 
     private var panes: [PaneID: PaneHostView] = [:]
@@ -495,7 +498,9 @@ final class Connections: ObservableObject {
     /// when they finish or the time runs out.
     func suspendAll() {
         inBackground = true
-        connections.values.filter { !TransferCenter.shared.isActive(on: $0.id) }.forEach { $0.suspend() }
+        // Not while a transfer or a notification action (Allow, Deny, Reply) is still going: stopping the
+        // backend mid-request failed the answer even when the machine had already applied it.
+        connections.values.filter { !TransferCenter.shared.isActive(on: $0.id) && $0.answeringActions == 0 }.forEach { $0.suspend() }
         TransferCenter.shared.onIdle = { [weak self] id in
             guard let self, self.inBackground else { return }
             self.connections[id]?.suspend()

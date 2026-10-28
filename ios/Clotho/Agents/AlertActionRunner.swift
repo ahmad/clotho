@@ -21,6 +21,8 @@ enum AlertActionRunner {
         defer { if task != .invalid { app.endBackgroundTask(task) } }
 
         let connection = connections.connection(for: machine)
+        connection.answeringActions += 1
+        defer { connection.answeringActions -= 1 }
         connection.connect()
         let deadline = Date().addingTimeInterval(connectTimeout)
         while !connection.store.isConnected || connection.store.isSaved, Date() < deadline {
@@ -50,7 +52,8 @@ enum AlertActionRunner {
             case .done, .alreadyAnswered:
                 break
             case .failed(let message):
-                report(machine.displayName, "The answer didn't go through (\(message)). Open Clotho to answer.")
+                // The machine may have applied it before the connection dropped: say so, and check there.
+                report(machine.displayName, "Clotho couldn't confirm the answer (\(message)). Open Clotho to check.")
             }
         case .reply(let text):
             let message = text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -38,7 +38,7 @@ struct MachineView: View {
                     }
                 }
                     .listRowBackground(SelectionBackground(selected: store.state.focus.tab == tab.id))
-                    .swipeActions {
+                    .swipeActions(allowsFullSwipe: false) {
                         Button(role: .destructive) {
                             connection.run("Close tab") { try await $0.closeTab(tab.id) }
                         } label: { Label("Close", systemImage: "xmark") }

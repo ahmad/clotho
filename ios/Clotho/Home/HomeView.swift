@@ -262,7 +262,8 @@ private struct HomeMachineSection: View {
             WorkspaceRow(store: store, workspace: workspace)
         }
         .tint(.primary)
-        .swipeActions {
+        // No full swipe: closing a workspace ends its shells, so it takes a deliberate tap on Close.
+        .swipeActions(allowsFullSwipe: false) {
             Button(role: .destructive) {
                 connection.run("Close workspace") { try await $0.closeWorkspace(workspace.id) }
             } label: { Label("Close", systemImage: "xmark") }

@@ -127,7 +127,9 @@ extension MachineConnection {
         } catch let error as BackendError where error.isStale {
             return .alreadyAnswered
         } catch {
-            log("[\(machine.displayName)] decide failed: \(error.localizedDescription)")
+            // The request and the daemon's answer, for diagnosing a failed answer from a notification or card.
+            let code = (error as? BackendError)?.code ?? "?"
+            log("[\(machine.displayName)] agent.decide {pane: \(pane), request: \(request), decision: \(decision.rawValue)} failed: code \(code), \(error.localizedDescription)")
             return .failed(error.localizedDescription)
         }
     }
