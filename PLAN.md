@@ -376,3 +376,9 @@ clothod release, app install or TestFlight upload still needs the user's go when
   relay deploys, and refreshes of Clotho's own hooks. It reports afterwards. It still asks for new
   kinds of hooks or other changes to the user's config files, deleting user data, and new things
   in the Apple or Cloudflare accounts. CLAUDE.md has the rule.
+
+## macbook's Codex hook (user decision, 2026-10-28)
+
+- The user approved updating macbook's outdated chained Codex hook: `clothod hooks install codex`
+  edits only clotho's command inside Computer Use's notify (`--previous-notify`) in
+  ~/.codex/config.toml, with a backup first. Nothing else in that file changes.
