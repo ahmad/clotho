@@ -65,6 +65,26 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(out.threadIdentifier, "00000000-0000-0000-0000-00000000C10D/3")
     }
 
+    /// clothod's PERMISSION/CT_PERMISSION (62a4c25): a permission wait with its request id (`rq`), sealed by the
+    /// Rust sender. The extension makes it an actionable alert: Allow/Deny category and the request to answer.
+    func testOpensClothodPermissionVector() throws {
+        let rust = "Dsqpft9hJJTBD35nK1YON/fVtbJtptM3zZyUgxK7oml/myC4D7uWlwKzOMz+re6cuJr7sh+J3AVM9PpyoY1HYy5al79dy7tx8I+vzuTRNVBRu2P/YrYl0Q3HVSI74wRZtpL4Mw/70cFax41RKh7WxaU65zaBkybJQ5wJ7hlPHIfR7fylsZabQVzNqJKAXdl9IbCcoOy12lz+M7ofd3GQueaV3qpq7YwGkZQ45eg7u8yEcjkp4lEuADb6b7NKlaRH8DH1pgTBi3+/r73UWmTN4E1z969bGPsT1SGXohSgv01XURUgR+gw16adaaGfETT65lKd/n17Qlt9hOfLG4qlw7llWVHfYtLYGuw02ZAWmaOAnEqpz7dSBpv9lyesF10JKWg76EEJcnkcsaxqVwJilZVPZzuxx72xXzyd6jLzDgtpzyufo0KU9lbt/o/aEJtU9hcnxI95+UTrBG19+cOSqgibXViL6sLy2QIl/C92oYKrr85ZiKxzITv28XUG1UpDKyvCtWDdkXS3u4n2bkJq5YNP4eQMuducPV09/ew5iXbk5CzvKcyn+opBt2Va/LBecH8V4n+nplYvQqJVZPuL+ttUg19dMrHA5Hr8uePHCz9pWLxvwIVw3aAEd/aGbWcPdgAkeZV7SVJ4AeEZIEa+HqLq1Gyq5XhF7I6GX2gHvQT94J73SohuuHLoSMBhpD4+X/iiGuCRC1tU8GhBOa2pqsp3Zic5iBlUFpMrIl52Og508pBUY6VXlzShkpQhmzlkptiZgDe3u8OSt9mWEK1lXb8RDHWdSIm0QgHzjs5CQhn9Ina8zfcAXpTKBNq+AcIdmZvMfChlelmwNyzB78ArWp03psmwsmSAdPYZHi36Zz4bCVRUbnlUJZLXKdRcqhACiyWYlLxrGbyrVtCB43DAi7opBRfi9Nf+WeQkK5Sw80rj+UHY4MN6IUu6q9bQ+/bAORwhKlQYttTYiLADk0Sp4kk3qfBOAZ37SKJrpBdqatbtQ5rnOPJj6TaO7/gV1tb+IZGsW/9rwBXWL5XNFs8ixR096Nl0BzGb5x3jUAG2bu/Tj8Kywq87XXVJAzsO0LPQWJObYLcMHIPwKKq4SZtN7E+mm7bH/JrV4GUCUIrrV1bhH+oR9YHAGCuJHb0R4hb56QSKKHBKhGZwJYsHbJ3DxAJ+LOB+sFmP3Ux67jDgZjat/BpFGowIlhntfz3eUZ3zkK0Oxx8X0/XPBnk5eWlNjaLPk2Zp53LNd8Y/wIsotVQkJ1UiGG2ueZaiRktasoiow0vGjnZVApG7dH9cyuLv1yPNvQXLhRoR26LGxcitb0ofdkMQUqDx5RpRXadnnz+crfoNZ8E5jXElC3U235Hs8sYEnZBT0ktEZuqkuk4VpaguDXgkHHXwBHk4yUJWj48sd9L890tMCsgAJR4SSgwU1A=="
+        let alert = try PushAlert.open(rust, collapseID: Self.vectorCollapse, key: try vectorPrivateKey())
+        XCTAssertEqual(alert.rq, "87b99bd3910be450")
+        XCTAssertEqual(alert.s, "waiting")
+        XCTAssertEqual(alert.tool, "Bash")
+        XCTAssertEqual(alert.cmd, "date > /tmp/clotho-phone-test.txt")
+
+        let content = UNMutableNotificationContent()
+        content.threadIdentifier = Self.vectorCollapse
+        content.userInfo = ["e": rust]
+        let out = try XCTUnwrap(PushAlert.decrypt(content, key: try vectorPrivateKey()))
+        XCTAssertEqual(out.categoryIdentifier, AlertActions.permissionCategory)
+        XCTAssertEqual(out.userInfo["request"] as? String, "87b99bd3910be450")
+        XCTAssertEqual(out.title, "clotho · Claude is waiting")
+        XCTAssertEqual(out.body, "Allow Bash: date > /tmp/clotho-phone-test.txt?")
+    }
+
     func testWrongCollapseIDOrKeyFails() throws {
         XCTAssertThrowsError(try PushAlert.open(Self.vectorCiphertext, collapseID: "00000000000000000000000000000000",
                                                 key: try vectorPrivateKey()))
