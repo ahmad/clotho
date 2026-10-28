@@ -224,6 +224,22 @@ extension AppDelegate {
         }
     }
 
+    /// Answers one permission request (`agent.decide`). Already answered (in the terminal, or by another
+    /// device) is fine: it's said in the log, never retried.
+    func decide(machine: MachineKey, pane: PaneID, request: String, _ decision: PermissionDecision) {
+        guard let backend = connections[machine]?.store.backend else { return }
+        log("decide \(machine)/\(pane) request \(request): \(decision.rawValue)")
+        Task { @MainActor in
+            do {
+                try await backend.decide(pane: pane, request: request, decision: decision, message: nil)
+            } catch let error as BackendError where error.isStale {
+                log("decide \(machine)/\(pane) request \(request): already answered")
+            } catch {
+                log("decide \(machine)/\(pane) request \(request) failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Asks for a line of text and sends it with Enter.
     func promptReply(machine: MachineKey, pane: PaneID) {
         guard window.attachedSheet == nil, let session = connections[machine], let agent = session.store.state.pane(pane)?.agent else { return }
@@ -270,6 +286,18 @@ extension AppDelegate {
         if connections[machine]?.store.hello?.features.contains(.agentHistory) == true {
             menu.addItem(ClosureMenuItem(title: "History…") { [weak self] in self?.showAgentHistory(machine: machine, pane: pane) })
         }
+        // Permission requests the daemon can answer, oldest first.
+        if connections[machine]?.store.features.contains(.agentDecide) == true, let requests = agent?.pendingRequests, !requests.isEmpty {
+            menu.addItem(.separator())
+            for request in requests {
+                menu.addItem(ClosureMenuItem(title: String(request.question.dropLast())) { [weak self] in
+                    self?.decide(machine: machine, pane: pane, request: request.id, .allow)
+                })
+                menu.addItem(ClosureMenuItem(title: "Deny \(request.tool)") { [weak self] in
+                    self?.decide(machine: machine, pane: pane, request: request.id, .deny)
+                })
+            }
+        }
         guard canReply else { return menu }
         menu.addItem(.separator())
         for reply in Self.quickReplies {
@@ -286,9 +314,14 @@ extension AppDelegate {
         log("agent \(machine)/\(pane): \(before?.state.rawValue ?? "none") → \(after.map { "\($0.kind) \($0.state.rawValue) (\($0.source ?? "?"))\($0.message.map { ": " + $0 } ?? "")" } ?? "none")")
         if after?.isHookSourced == true { hookSourcedMachines.insert(machine) }
         // Only when the daemon raises attention (a hook-reported waiting, done or error, or a bell): quiet
-        // output alone never alerts.
-        guard let after, monitorsAgents(machine), after.needsAttention, before?.needsAttention != true,
-              [.waiting, .done, .error].contains(after.state), notifies(after.state) else { return }
+        // output alone never alerts. A quiet rise (a turn that ended while the user was at the pane) is
+        // badged but not announced.
+        guard let after, monitorsAgents(machine), after.notifiesRise(from: before), notifies(after.state) else {
+            if let after, after.isQuietRise, after.needsAttention, before?.needsAttention != true {
+                log("agent \(machine)/\(pane): quiet rise, no notification")
+            }
+            return
+        }
         // Not for the pane the user is looking at.
         if NSApp.isActive, window.isKeyWindow, machine == focusedMachine, store.focusedPane?.id == pane { return }
         // Detection can flicker (waiting → running → waiting), so one notification per pane and state a minute.
@@ -297,15 +330,16 @@ extension AppDelegate {
         lastAgentNotification[key] = (after.state, Date())
         guard let session = connections[machine] else { return }
         let location = session.store.state.location(of: pane)
-        let title = "\(after.kindName) \(after.state == .waiting ? "is waiting" : after.state == .done ? "finished" : "hit an error")"
-        // machine · workspace › tab, as in the Agents panel and on iOS.
-        let inside = [location?.workspace.name, location.map { session.store.displayTitle(of: $0.tab) }].compactMap { $0 }
-        let place = ([session.title] + (inside.isEmpty ? [] : [inside.joined(separator: " › ")])).joined(separator: " · ")
+        // "Platform · Claude finished" / "devbox · api-server · 4m" / the result: the same shape as on iOS.
+        let notice = AgentNotice(info: after, machine: session.title, workspace: location?.workspace.name,
+                                 cwd: session.store.state.pane(pane)?.cwd)
         // Answerable from the notification when the daemon can type for us.
         let canReply = session.store.hello?.features.contains(.paneKeys) == true
-        let category = canReply ? (after.state == .waiting ? Self.waitingCategory : Self.finishedCategory) : nil
-        postNotification(title: title, body: [place, after.message].compactMap { $0 }.joined(separator: "\n"),
-                         machine: machine, pane: pane, category: category)
+        // A permission request the daemon can answer: Allow and Deny for that request.
+        let request = session.store.features.contains(.agentDecide) && after.state == .waiting ? after.pendingRequests.first : nil
+        let category = request != nil ? Self.permissionCategory
+            : canReply ? (after.state == .waiting ? Self.waitingCategory : Self.finishedCategory) : nil
+        postNotification(notice, machine: machine, pane: pane, category: category, request: request?.id)
     }
 
     /// Mutable per state in the Agents menu; all on by default.
@@ -345,6 +379,9 @@ extension AppDelegate {
     }
 
     static let waitingCategory = "agent.waiting"
+    /// A permission request the daemon can answer for us (`agent.decide`): Allow and Deny go to that
+    /// request alone, whatever the terminal shows by then.
+    static let permissionCategory = "agent.permission"
     static let finishedCategory = "agent.finished"
 
     /// Approve (1), Deny (Esc) and a typed Reply for a waiting agent; a typed Reply for a finished one.
@@ -355,24 +392,31 @@ extension AppDelegate {
                                                   textInputPlaceholder: "Your reply")
         return [
             UNNotificationCategory(identifier: waitingCategory, actions: [approve, deny, reply], intentIdentifiers: []),
+            UNNotificationCategory(identifier: permissionCategory, actions: [
+                UNNotificationAction(identifier: "allow", title: "Allow"),
+                UNNotificationAction(identifier: "deny", title: "Deny", options: [.destructive]),
+            ], intentIdentifiers: []),
             UNNotificationCategory(identifier: finishedCategory, actions: [reply], intentIdentifiers: []),
         ]
     }
 
-    private func postNotification(title: String, body: String, machine: MachineKey, pane: PaneID, category: String? = nil) {
+    private func postNotification(_ notice: AgentNotice, machine: MachineKey, pane: PaneID, category: String? = nil, request: String? = nil) {
         // AgentNotifications=NO (for test runs) logs instead, so no permission prompt appears. bool(forKey:)
         // reads a launch argument's "NO" too.
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: "AgentNotifications") == nil || defaults.bool(forKey: "AgentNotifications") else {
-            return log("agent notification: \(title) — \(body.replacingOccurrences(of: "\n", with: " · "))\(category.map { " [\($0)]" } ?? "")")
+            return log("agent notification: \(notice.title) | \(notice.subtitle) | \(notice.body)\(category.map { " [\($0)]" } ?? "")\(request.map { " request \($0)" } ?? "")")
         }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
             let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = body
+            content.title = notice.title
+            content.subtitle = notice.subtitle
+            content.body = notice.body
             content.sound = .default
-            content.userInfo = ["machine": machine, "pane": NSNumber(value: pane)]
+            var userInfo: [String: Any] = ["machine": machine, "pane": NSNumber(value: pane)]
+            if let request { userInfo["request"] = request }
+            content.userInfo = userInfo
             if let category { content.categoryIdentifier = category }
             // One notification per pane: a newer state replaces the older one.
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "agent.\(machine).\(pane)", content: content, trigger: nil))
@@ -390,8 +434,10 @@ extension AppDelegate {
         UNUserNotificationCenter.current().delegate = notificationDelegate
         UNUserNotificationCenter.current().setNotificationCategories(Self.notificationCategories())
         notificationDelegate.onOpen = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
-        notificationDelegate.onAction = { [weak self] machine, pane, action, text in
+        notificationDelegate.onAction = { [weak self] machine, pane, action, text, request in
             switch action {
+            case "allow" where request != nil: self?.decide(machine: machine, pane: pane, request: request!, .allow)
+            case "deny" where request != nil: self?.decide(machine: machine, pane: pane, request: request!, .deny)
             case "approve": self?.reply(machine: machine, pane: pane, keys: ["1"])
             case "deny": self?.reply(machine: machine, pane: pane, keys: ["escape"])
             case "reply" where !(text ?? "").isEmpty: self?.reply(machine: machine, pane: pane, text: text, keys: ["enter"])
@@ -416,7 +462,8 @@ final class AgentsMenuDelegate: NSObject, NSMenuDelegate {
 final class AgentNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     var onOpen: ((MachineKey, PaneID) -> Void)?
     /// A notification button: the action id ("approve", "deny", "reply") and any typed text.
-    var onAction: ((MachineKey, PaneID, String, String?) -> Void)?
+    /// The request is the permission request the notification was about, if any.
+    var onAction: ((MachineKey, PaneID, String, String?, String?) -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
@@ -429,12 +476,13 @@ final class AgentNotificationDelegate: NSObject, UNUserNotificationCenterDelegat
         if let machine = info["machine"] as? String, let pane = (info["pane"] as? NSNumber)?.uint64Value {
             let action = response.actionIdentifier
             let text = (response as? UNTextInputNotificationResponse)?.userText
+            let request = info["request"] as? String
             DispatchQueue.main.async {
                 if action == UNNotificationDefaultActionIdentifier {
                     self.onOpen?(machine, pane)
                 } else if action != UNNotificationDismissActionIdentifier {
                     // Answered from the notification: the pane stays where it is.
-                    self.onAction?(machine, pane, action, text)
+                    self.onAction?(machine, pane, action, text, request)
                 }
             }
         }
@@ -510,7 +558,10 @@ final class AgentRow: ChromeItem {
             title.string,
             "\(info.kindName) on \(entry.machineName): \(shown.label)",
             entry.place.isEmpty ? nil : entry.place,
-            info.message,
+            info.prompt.map { "Asked: \($0)" },
+            info.result,
+            info.tool.flatMap { tool in info.state == .waiting ? nil : "Last tool: \(tool)" + (info.toolInput.map { " \($0)" } ?? "") },
+            info.turnDuration.flatMap(AgentNotice.duration).map { "Took \($0)" },
             info.isHookSourced ? "Reported by \(info.kindName)'s hooks" : "Detected from the terminal",
         ].compactMap { $0 }.joined(separator: "\n")
         for view in [icon, detail, elapsed] {
