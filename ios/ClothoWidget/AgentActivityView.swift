@@ -16,17 +16,17 @@ struct AgentActivityWidget: Widget {
                     Label(state.name, systemImage: state.symbol).font(.headline)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    elapsed(state).font(.headline.monospacedDigit())
+                    activityElapsed(state).font(.headline.monospacedDigit())
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     Text("\(state.name) \(state.verb)").font(.callout).foregroundStyle(.secondary)
                 }
             } compactLeading: {
-                Image(systemName: state.symbol).foregroundStyle(tint(state))
+                Image(systemName: state.symbol).foregroundStyle(activityTint(state))
             } compactTrailing: {
-                elapsed(state).monospacedDigit().frame(maxWidth: 52)
+                activityElapsed(state).monospacedDigit().frame(maxWidth: 52)
             } minimal: {
-                Image(systemName: state.symbol).foregroundStyle(tint(state))
+                Image(systemName: state.symbol).foregroundStyle(activityTint(state))
             }
             .widgetURL(URL(string: "clotho://pane/\(context.attributes.machine.uuidString)/\(context.attributes.pane)"))
         }
@@ -39,13 +39,13 @@ struct AgentActivityLockScreen: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: state.symbol).font(.title2).foregroundStyle(tint(state))
+            Image(systemName: state.symbol).font(.title2).foregroundStyle(activityTint(state))
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(state.name) \(state.verb)").font(.headline)
                 Text("Clotho").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            elapsed(state).font(.title3.monospacedDigit())
+            activityElapsed(state).font(.title3.monospacedDigit())
         }
         .padding()
     }
@@ -53,7 +53,7 @@ struct AgentActivityLockScreen: View {
 
 /// A running clock while the turn goes on; the final length once it's over.
 @ViewBuilder
-func elapsed(_ state: AgentActivityAttributes.ContentState) -> some View {
+func activityElapsed(_ state: AgentActivityAttributes.ContentState) -> some View {
     if state.isOver {
         let seconds = max(0, state.since - state.started)
         Text(Duration.seconds(seconds), format: .time(pattern: seconds >= 3600 ? .hourMinuteSecond : .minuteSecond))
@@ -62,7 +62,7 @@ func elapsed(_ state: AgentActivityAttributes.ContentState) -> some View {
     }
 }
 
-func tint(_ state: AgentActivityAttributes.ContentState) -> Color {
+func activityTint(_ state: AgentActivityAttributes.ContentState) -> Color {
     switch state.state {
     case "waiting": return .orange
     case "error": return .red
