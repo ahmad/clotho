@@ -1,41 +1,32 @@
-# Status and handoff (2026-10-28, updated after clothod 0.1.14)
+# Status and handoff (2026-10-28, updated after clothod 0.1.17)
 
-Development moved from this Mac's sessions to devbox. CLAUDE.md has the rules. This file has where
-things stand and what the old agents learned. The orchestrator keeps it current.
+CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
+rule. This file has where things stand. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.14** runs on macbook, devbox and imac, upgraded in place. The holders (9573, 1799611
-  and 27331) have kept their pids since 0.1.6. Each bin/ holds only 0.1.14.
-  - 0.1.13: pushes only when the agent needs the user. It ignores Claude's idle reminder,
-    compaction and nested agents, and stays quiet while the user is at the pane (`quiet` on the
-    agent). Notifications carry the details: workspace, project, prompt, result and duration.
-    Allow/Deny comes through Claude's PermissionRequest hook and `agent.decide`.
-  - 0.1.14: an upgrade's start waits for the old serve to exit (no false "socket did not come
-    back"), and a `cd` shows up without OSC 7 (polled once a second).
-- **Agent hooks:** 8 Claude entries on all three machines (PostToolUse and PermissionRequest added
-  for Allow/Deny). Codex is ours on devbox and imac; on macbook it's the user's Computer Use
-  notifier.
-- **Start at login:** on for imac only.
-- **The Mac app** (build 202610281505) bundles 0.1.14. It has quiet rises, detailed notifications,
-  and Allow/Deny on permission notifications and in the row menu. A ModelStore regression that
-  dropped live pane events was fixed in aff7fd2. ClothoKit/scripts/test.sh builds with
-  -warnings-as-errors.
-- **iOS:** TestFlight build 202610281515 (clothod 0.1.14), uploaded by the orchestrator through
-  scripts/testflight-remote. 0.1.13 was build 202610281458. The iPhone suite had 64 passed, 8
-  skipped and 0 failed, and the iPad test passed.
-- **The iOS redesign** (docs/ios-redesign.md) is on the local branch ios-phase1, not merged:
-  - phase 1 (saved state) is done
-  - phase 2 (Home) is written and under test
-  - phase 3 (onboarding) isn't started
-  - phases 1 to 3 ship together
-- **TestFlight uploads:** the orchestrator uploads verified builds itself. The API key ids are in
+- **clothod 0.1.17** runs on devbox, macbook and imac, upgraded in place. The holders (1799611, 9573
+  and 27331) have kept their pids since 0.1.6.
+  - 0.1.13: pushes only when needed, notification detail, Allow/Deny (agent.decide).
+  - 0.1.14: cwd without OSC 7, and no false upgrade alarm.
+  - 0.1.15: clothod.log names who closed or answered what.
+  - 0.1.16: Live Activity updates (push.activity).
+  - 0.1.17: a chained Codex notify reads "installed (chained)".
+- **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
+  (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
+  user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
+- **The Mac app:** build 202610282002, with 0.1.17.
+- **iOS:** TestFlight build 202610282014, with 0.1.17. It has the whole redesign: saved state, the
+  one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
+  gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
+  failed; iPad passed.
+- **The push relay** has /v1/activity, deployed as version c1940b72.
+- **Device checks still owed by the user:** Allow from the lock screen on the fixed build, the
+  widget, the two-finger tab swipe and haptics, and the Live Activity.
+- **TestFlight:** the orchestrator uploads with scripts/testflight-remote. The key ids are in
   ~/.config/clotho/asc.env on devbox.
-- **The push relay** is live at https://clotho-push.example.workers.dev.
-- **GitHub:** git@github.com:ahmad/clotho.git (private). The orchestrator pushes exact verified
-  commits.
-- **The website** (clotho.app, waitlist on Upstash) is built by a separate session in
-  ~/Projects/clotho.app.
+- **The Mac's disk:** about 28 GiB free. test-all, dist, build.sh test and testflight-remote all
+  clean up after themselves.
 
 ## Waiting on the user
 
