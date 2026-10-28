@@ -1,0 +1,33 @@
+# The "Needs you" widget (docs/ios-redesign.md, phase 6). Included only with WIDGET=YES (build.sh sets it for
+# the simulator): its target is a new App ID (nyc.amin.clotho.widget), which the first archive that includes
+# it registers in the developer account, so device and TestFlight builds leave it out until the user agrees.
+# Its data comes through the Keychain group the app and the notification extension already share.
+targets:
+  Clotho:
+    dependencies:
+      - target: ClothoWidget
+  ClothoWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - ClothoWidget
+      - Clotho/Push/AgentsSummary.swift
+      - path: Clotho/Push/PushShared.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.widget
+        PRODUCT_NAME: ClothoWidget
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: ClothoWidget/ClothoWidget.entitlements
+        CODE_SIGN_STYLE: Automatic
+    dependencies:
+      - package: ClothoKit
+        product: ClothoKit
+    info:
+      path: ClothoWidget/Info.plist
+      properties:
+        CFBundleDisplayName: Clotho
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

@@ -15,6 +15,7 @@ targets:
     sources:
       - ClothoNotify
       - Clotho/Push/PushShared.swift
+      - Clotho/Push/AgentsSummary.swift
     dependencies:
       # AgentNotice: the alert text, shared with the app and the Mac.
       - package: ClothoKit

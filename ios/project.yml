@@ -2,6 +2,8 @@ name: Clotho
 include:
   - path: push.yml
     enable: ${PUSH}
+  - path: widget.yml
+    enable: ${WIDGET}
 options:
   bundleIdPrefix: nyc.amin
   deploymentTarget:

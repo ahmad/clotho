@@ -124,6 +124,15 @@ struct RootView: View {
                 .keyboardShortcut("p", modifiers: .command)
                 .hidden()
         }
+        // From the widget: clotho://pane/<machine>/<pane> opens that pane; anything else, Home.
+        .onOpenURL { url in
+            let parts = url.pathComponents.filter { $0 != "/" }
+            if url.host == "pane", parts.count == 2, let machine = UUID(uuidString: parts[0]), let pane = PaneID(parts[1]) {
+                openPane(machine: machine, pane: pane)
+            } else {
+                navigator.path = []
+            }
+        }
         .task {
             if navigator.guide == nil, Onboarding.showsAtLaunch(savedMachines: machines.machines.count) {
                 AgentNotifier.shared.deferPrompt = true

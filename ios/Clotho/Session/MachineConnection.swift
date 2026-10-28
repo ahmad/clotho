@@ -2,6 +2,7 @@ import ClothoKit
 import Combine
 import Foundation
 import SwiftUI
+import WidgetKit
 
 /// One machine's live connection: a ClothodBackend over the machine's transport, the ModelStore that
 /// mirrors its model, and one terminal per pane the user has looked at.
@@ -470,6 +471,21 @@ final class Connections: ObservableObject {
         recomputeScheduled = false
         let rows = AgentRow.sorted(connections.values.flatMap(\.agentRows))
         if rows != agentRows { agentRows = rows }
+        updateWidget(rows)
+    }
+
+    /// The "Needs you" widget's summary: the agents that need the user, on the machines this app is connected
+    /// to (no text: kind, state, workspace and since). Machines not connected keep what the notification
+    /// extension last added for them.
+    private func updateWidget(_ rows: [AgentRow]) {
+        let live = Set(connections.values.filter { $0.store.isConnected }.map(\.id))
+        let kept = AgentsSummary.load().agents.filter { !live.contains($0.machine) }
+        let now = Date().timeIntervalSince1970
+        let current = rows.filter(\.wantsAttention).map {
+            AgentsSummary.Agent(machine: $0.machineID, machineName: $0.machineName, pane: $0.pane, workspace: $0.workspace,
+                                kind: $0.info.kind, state: $0.info.state.rawValue, since: $0.info.since ?? now)
+        }
+        if AgentsSummary(updated: now, agents: kept + current).normalized().save() { WidgetCenter.shared.reloadAllTimelines() }
     }
 
     func existing(_ id: UUID) -> MachineConnection? { connections[id] }

@@ -174,3 +174,38 @@ final class AlertActionTests: XCTestCase {
         XCTAssertEqual(banner.content.userInfo["request"] as? String, "a1")
     }
 }
+
+/// Phase 6: the "Needs you" widget's summary (no text, newest first, at most 12; an alert's agent replaces
+/// the same pane's).
+final class AgentsSummaryTests: XCTestCase {
+    private func agent(_ pane: UInt64, since: Double, machine: UUID = UUID(uuidString: "00000000-0000-0000-0000-00000000C10D")!) -> AgentsSummary.Agent {
+        AgentsSummary.Agent(machine: machine, machineName: "devbox", pane: pane, workspace: "Platform", kind: "claude",
+                            state: "waiting", since: since)
+    }
+
+    func testNewestFirstAndCapped() {
+        let many = (0..<20).map { agent(UInt64($0), since: Double($0)) }
+        let summary = AgentsSummary(updated: 1, agents: many).normalized()
+        XCTAssertEqual(summary.agents.count, AgentsSummary.maxAgents)
+        XCTAssertEqual(summary.agents.first?.pane, 19)
+    }
+
+    func testAnAlertReplacesTheSamePane() {
+        let summary = AgentsSummary(updated: 1, agents: [agent(7, since: 10), agent(8, since: 20)])
+        var newer = agent(7, since: 30)
+        newer.state = "done"
+        let merged = summary.adding(newer, now: 31)
+        XCTAssertEqual(merged.agents.map(\.pane), [7, 8])
+        XCTAssertEqual(merged.agents.first?.state, "done")
+        XCTAssertEqual(merged.updated, 31)
+    }
+
+    func testRoundTripsThroughTheKeychain() {
+        let original = AgentsSummary.load()
+        defer { _ = original.save() }
+        let summary = AgentsSummary(updated: 42, agents: [agent(3, since: 40)])
+        XCTAssertTrue(summary.save())
+        XCTAssertEqual(AgentsSummary.load(), summary)
+        XCTAssertFalse(summary.save(), "an unchanged summary isn't written (or the widget reloaded) again")
+    }
+}
