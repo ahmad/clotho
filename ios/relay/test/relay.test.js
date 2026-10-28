@@ -116,3 +116,72 @@ test("apnsDeliver sends a valid ES256 provider token and the APNs headers", asyn
     Buffer.from(sig, "base64url"), new TextEncoder().encode(`${header}.${claims}`));
   assert.ok(ok, "signature verifies with the key's public half");
 });
+
+// Live Activities (docs/ios-redesign.md, phase 6).
+const ACTIVITY_TOKEN = "cd".repeat(80);
+function activity(h, extra = {}) {
+  return {
+    handle: h, token: ACTIVITY_TOKEN, event: "update", timestamp: 1761512345,
+    content: { state: "running", kind: "claude", since: 1761512300, started: 1761512200 }, stale: 1761513245, ...extra,
+  };
+}
+
+test("an activity update goes to the activity's token as a liveactivity push", async () => {
+  const h = await register();
+  let sent;
+  const res = await handle(post("/v1/activity", activity(h)), ENV, { deliver: async (_, msg) => { sent = msg; return { status: 200 }; } });
+  assert.equal(res.status, 200);
+  assert.equal(sent.token, ACTIVITY_TOKEN);
+  assert.equal(sent.env, "sandbox", "the handle's environment when none is given");
+  assert.equal(sent.pushType, "liveactivity");
+  assert.equal(sent.topic, "nyc.amin.clotho.push-type.liveactivity");
+  assert.equal(sent.priority, "5");
+  assert.deepEqual(sent.payload, { aps: {
+    timestamp: 1761512345, event: "update", "stale-date": 1761513245,
+    "content-state": { state: "running", kind: "claude", since: 1761512300, started: 1761512200 },
+  } });
+});
+
+test("an activity end is high priority and carries its dismissal date", async () => {
+  const h = await register();
+  let sent;
+  const body = activity(h, { event: "end", dismiss: 1761512645, content: { state: "done", kind: "claude", since: 1761512340, started: 1761512200 } });
+  const env = { ...ENV, ACTIVITY_LIMITER: { limit: async () => ({ success: false }) } };
+  const res = await handle(post("/v1/activity", body), env, { deliver: async (_, msg) => { sent = msg; return { status: 200 }; } });
+  assert.equal(res.status, 200, "an end isn't rate limited");
+  assert.equal(sent.priority, "10");
+  assert.equal(sent.payload.aps.event, "end");
+  assert.equal(sent.payload.aps["dismissal-date"], 1761512645);
+});
+
+test("activity content can't carry text", async () => {
+  const h = await register();
+  const deliver = async () => assert.fail("must not deliver");
+  const bad = [
+    activity(h, { content: { state: "running", kind: "claude", since: 1, started: 1, message: "rm -rf /" } }),
+    activity(h, { content: { state: "Allow rm -rf build?", kind: "claude", since: 1, started: 1 } }),
+    activity(h, { content: { state: "running", kind: "claude", since: "now", started: 1 } }),
+    activity(h, { event: "start" }),
+    activity(h, { token: "not hex" }),
+    activity(h, { timestamp: 1.5 }),
+    activity(h, { env: "staging" }),
+  ];
+  for (const body of bad) {
+    const res = await handle(post("/v1/activity", body), ENV, { deliver });
+    assert.equal(res.status, 400, JSON.stringify(body.content ?? body));
+  }
+  const tampered = await handle(post("/v1/activity", activity(h.slice(0, -4) + "AAAA")), ENV, { deliver });
+  assert.equal(tampered.status, 403);
+});
+
+test("activity updates are rate limited, and APNs answers map as for alerts", async () => {
+  const h = await register();
+  const limited = { ...ENV, ACTIVITY_LIMITER: { limit: async () => ({ success: false }) } };
+  const res = await handle(post("/v1/activity", activity(h)), limited, { deliver: async () => assert.fail("must not deliver") });
+  assert.equal(res.status, 429);
+  for (const [apns, expected] of [[{ status: 410, reason: "Unregistered" }, 410], [{ status: 400, reason: "ExpiredToken" }, 410],
+                                  [{ status: 429, reason: "TooManyRequests" }, 429], [{ status: 500 }, 502]]) {
+    const r = await handle(post("/v1/activity", activity(h)), ENV, { deliver: async () => apns });
+    assert.equal(r.status, expected, JSON.stringify(apns));
+  }
+});

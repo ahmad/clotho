@@ -21,3 +21,11 @@ name = "RATE_LIMITER"
 type = "ratelimit"
 namespace_id = "1001"
 simple = { limit = 10, period = 60 }
+
+# Live Activity updates (/v1/activity), per handle: a burst limit like the alerts'. clothod sends at most one
+# update per activity every 10 s; an activity's end isn't counted.
+[[unsafe.bindings]]
+name = "ACTIVITY_LIMITER"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }

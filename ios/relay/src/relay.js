@@ -154,24 +154,78 @@ export async function handle(request, env, { deliver = apnsDeliver, now = Date.n
     return json(502, { error: "apns", status: res.status, reason });
   }
 
+  if (url.pathname === "/v1/activity") {
+    const body = await readJSON(request);
+    const req = body && activityRequest(body);
+    if (!req) return json(400, { error: "bad_request" });
+    const target = await openHandle(env, body.handle);
+    if (!target) return json(403, { error: "bad_handle" });
+    // Updates share a per-handle burst limit; an end always goes through, so an activity can always close.
+    if (req.event === "update" && env.ACTIVITY_LIMITER) {
+      const { success } = await env.ACTIVITY_LIMITER.limit({ key: body.handle.slice(0, 64) });
+      if (!success) return json(429, { error: "rate_limited" });
+    }
+    const res = await deliver(env, {
+      token: req.token, env: req.env ?? target.env, payload: activityPayload(req, now), now,
+      pushType: "liveactivity", topic: `${env.APNS_TOPIC}.push-type.liveactivity`,
+      priority: req.event === "end" ? "10" : "5",
+    });
+    if (res.status === 200) return json(200, {});
+    const reason = res.reason ?? "";
+    if (res.status === 410 || ["BadDeviceToken", "Unregistered", "ExpiredToken", "DeviceTokenNotForTopic"].includes(reason)) {
+      return json(410, { error: "unregistered", reason });
+    }
+    if (res.status === 429) return json(429, { error: "rate_limited", reason });
+    return json(502, { error: "apns", status: res.status, reason });
+  }
+
   return json(404, { error: "not_found" });
 }
 
-export async function apnsDeliver(env, { token, env: apnsEnv, payload, collapseID, now }) {
+const WORD = /^[a-z][a-z0-9_-]{0,31}$/;
+const isTime = (n) => Number.isInteger(n) && n > 0 && n < 1e10;
+
+/// A Live Activity request, checked strictly: the content is the agent's state and kind and two times,
+/// nothing else, so no text from a terminal or an agent can ride along (APNs sees Live Activity content
+/// in the clear). Null if anything is off.
+export function activityRequest(body) {
+  const { handle, token, env, event, content, timestamp, stale, dismiss } = body;
+  if (typeof handle !== "string" || !TOKEN.test(token ?? "")) return null;
+  if (env !== undefined && !["sandbox", "production"].includes(env)) return null;
+  if (!["update", "end"].includes(event) || !isTime(timestamp)) return null;
+  if (!content || typeof content !== "object" || Array.isArray(content)) return null;
+  const keys = Object.keys(content).sort().join(",");
+  if (keys !== "kind,since,started,state") return null;
+  if (!WORD.test(content.state) || !WORD.test(content.kind) || !isTime(content.since) || !isTime(content.started)) return null;
+  if (stale !== undefined && !isTime(stale)) return null;
+  if (dismiss !== undefined && !isTime(dismiss)) return null;
+  return { token: token.toLowerCase(), env, event, content, timestamp, stale, dismiss };
+}
+
+/// The aps body of a Live Activity update or end (ActivityKit's push format).
+export function activityPayload(req, now) {
+  const aps = {
+    timestamp: req.timestamp ?? Math.floor(now / 1000),
+    event: req.event,
+    "content-state": { state: req.content.state, kind: req.content.kind, since: req.content.since, started: req.content.started },
+  };
+  if (req.stale !== undefined) aps["stale-date"] = req.stale;
+  if (req.event === "end" && req.dismiss !== undefined) aps["dismissal-date"] = req.dismiss;
+  return { aps };
+}
+
+export async function apnsDeliver(env, { token, env: apnsEnv, payload, collapseID, now, pushType = "alert", topic, priority = "10" }) {
   const host = apnsEnv === "sandbox" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
-  const res = await fetch(`https://${host}/3/device/${token}`, {
-    method: "POST",
-    headers: {
-      authorization: `bearer ${await providerToken(env, now)}`,
-      "apns-topic": env.APNS_TOPIC,
-      "apns-push-type": "alert",
-      "apns-priority": "10",
-      "apns-collapse-id": collapseID,
-      // A "needs you" that can't arrive within the hour isn't worth showing.
-      "apns-expiration": String(Math.floor(now / 1000) + 3600),
-    },
-    body: JSON.stringify(payload),
-  });
+  const headers = {
+    authorization: `bearer ${await providerToken(env, now)}`,
+    "apns-topic": topic ?? env.APNS_TOPIC,
+    "apns-push-type": pushType,
+    "apns-priority": priority,
+    // A "needs you", or a Live Activity's state, that can't arrive within the hour isn't worth showing.
+    "apns-expiration": String(Math.floor(now / 1000) + 3600),
+  };
+  if (collapseID) headers["apns-collapse-id"] = collapseID;
+  const res = await fetch(`https://${host}/3/device/${token}`, { method: "POST", headers, body: JSON.stringify(payload) });
   let reason;
   if (res.status !== 200) {
     try { reason = (await res.json()).reason; } catch { reason = undefined; }
