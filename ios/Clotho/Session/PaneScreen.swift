@@ -1,6 +1,7 @@
 import ClothoKit
 import PhotosUI
 import SwiftUI
+import UIKit
 
 /// One pane full screen. A strip above it switches between the tab's panes (tap or swipe), the title menu
 /// jumps to any tab, and every action is a backend call.
@@ -61,6 +62,8 @@ struct PaneScreen: View {
                 if let pane {
                     TerminalContainer(host: connection.terminal(for: pane), onMode: { [notes] in notes.mode = $0 }, onCopy: { [notes] in notes.copies += 1 })
                         .id(pane.id)
+                        // Zero-size: the notes draw nothing over the pane (see PaneNotesView).
+                        .background(PaneNotesView(notes: notes))
                         // The saved screen, dimmed until the machine is live; it then draws over in place.
                         .opacity(store.isSaved ? 0.5 : 1)
                         .animation(.easeOut(duration: 0.25), value: store.isSaved)
@@ -87,7 +90,6 @@ struct PaneScreen: View {
             ToolbarItem(placement: .primaryAction) { actionsMenu.disabled(store.isSaved) }
             // In the navigation bar, so it doesn't resize the pane for the two seconds it shows.
             // Short notes on the leading side, so the actions button never moves while they come and go.
-            ToolbarItem(placement: .topBarLeading) { PaneNotesView(notes: notes) }
         }
         .background { ShortcutButtons(screen: self) }
         // The find bar follows the pane on screen.
@@ -414,36 +416,28 @@ final class PaneNotes: ObservableObject {
     @Published var copies = 0
 }
 
-/// The pane's short notes, in the navigation bar so they never cover its text. They only fade, so the
-/// toolbar never changes shape.
+/// The pane's short notes, which never draw over its text or change the toolbar (that closed an open Pane
+/// actions menu): "Copied" is a success haptic and a VoiceOver announcement; how the last subscribe resumed is
+/// an accessibility element only (tests check that a return resumes instead of reloading).
 struct PaneNotesView: View {
     @ObservedObject var notes: PaneNotes
 
     var body: some View {
-        HStack(spacing: 8) {
-            Label("Copied", systemImage: "doc.on.clipboard")
-                .labelStyle(.titleAndIcon)
-                .font(.caption)
-                .opacity(notes.copies > 0 ? 1 : 0)
-                .accessibilityHidden(notes.copies == 0)
-                .accessibilityIdentifier("copiedBadge")
-                .task(id: notes.copies) {
-                    guard notes.copies > 0 else { return }
-                    try? await Task.sleep(nanoseconds: 1_200_000_000)
-                    withAnimation { notes.copies = 0 }
-                }
-            Text(notes.mode?.rawValue ?? "live")
-                .font(.caption2.monospaced())
-                .opacity(notes.mode == nil ? 0 : 1)
-                .accessibilityHidden(notes.mode == nil)
-                .accessibilityIdentifier("resumeMode")
-                .task(id: notes.mode) {
-                    guard notes.mode != nil else { return }
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    notes.mode = nil
-                }
-        }
-        .foregroundStyle(.secondary)
-        .allowsHitTesting(false)
+        Text(notes.mode?.rawValue ?? "")
+            .frame(width: 0, height: 0)
+            .opacity(0)
+            .accessibilityHidden(notes.mode == nil)
+            .accessibilityIdentifier("resumeMode")
+            .task(id: notes.mode) {
+                guard notes.mode != nil else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                notes.mode = nil
+            }
+            .onChange(of: notes.copies) { _, copies in
+                guard copies > 0 else { return }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                UIAccessibility.post(notification: .announcement, argument: "Copied")
+                notes.copies = 0
+            }
     }
 }
