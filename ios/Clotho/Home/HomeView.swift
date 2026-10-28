@@ -10,6 +10,7 @@ struct HomeView: View {
     @EnvironmentObject private var connections: Connections
     @EnvironmentObject private var navigator: Navigator
     @State private var editing: Machine?
+    @State private var sheet: MachineSheet?
 
     /// Debug builds default new machines to the test install dirs, so trying things out never touches the
     /// daemon a machine already runs.
@@ -26,7 +27,7 @@ struct HomeView: View {
                     navigator.open(.pane(row.machineID, row.tab, row.pane))
                 }
                 ForEach(machines.all) { machine in
-                    HomeMachineSection(machine: machine, connection: connections.connection(for: machine), editing: $editing)
+                    HomeMachineSection(machine: machine, connection: connections.connection(for: machine), editing: $editing, sheet: $sheet)
                 }
             }
             .listStyle(.insetGrouped)
@@ -70,8 +71,35 @@ struct HomeView: View {
             .sheet(item: $editing) { machine in
                 MachineEditor(machine: machine) { machines.save($0) }
             }
+            .sheet(item: $sheet) { sheet in
+                if let machine = machines.machine(sheet.machine) {
+                    let connection = connections.connection(for: machine)
+                    NavigationStack {
+                        Group {
+                            switch sheet {
+                            case .files: FileBrowserView(connection: connection, path: FileBrowserView.startPath(connection))
+                            case .settings: MachineSettingsView(connection: connection)
+                            }
+                        }
+                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { self.sheet = nil } } }
+                    }
+                }
+            }
         }
     }
+}
+
+/// A machine's Files or Settings, from its header menu.
+enum MachineSheet: Identifiable, Hashable {
+    case files(UUID)
+    case settings(UUID)
+
+    var machine: UUID {
+        switch self {
+        case .files(let id), .settings(let id): return id
+        }
+    }
+    var id: Self { self }
 }
 
 /// One machine on Home: its header, any offer to update its clothod, and its workspaces.
@@ -80,20 +108,20 @@ private struct HomeMachineSection: View {
     @ObservedObject var connection: MachineConnection
     @ObservedObject private var store: ModelStore
     @Binding var editing: Machine?
+    @Binding var sheet: MachineSheet?
     @EnvironmentObject private var machines: MachineList
     @EnvironmentObject private var connections: Connections
     @EnvironmentObject private var navigator: Navigator
     @State private var renaming: WorkspaceID?
-    @State private var showingFiles = false
-    @State private var showingSettings = false
     @State private var confirmingUpdate = false
     @State private var confirmingRestart = false
 
-    init(machine: Machine, connection: MachineConnection, editing: Binding<Machine?>) {
+    init(machine: Machine, connection: MachineConnection, editing: Binding<Machine?>, sheet: Binding<MachineSheet?>) {
         self.machine = machine
         self.connection = connection
         store = connection.store
         _editing = editing
+        _sheet = sheet
     }
 
     var body: some View {
@@ -119,42 +147,6 @@ private struct HomeMachineSection: View {
             header
         }
         .onAppear { connection.connect() }
-        .sheet(isPresented: $showingFiles) {
-            NavigationStack {
-                FileBrowserView(connection: connection, path: FileBrowserView.startPath(connection))
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showingFiles = false } } }
-            }
-        }
-        .sheet(isPresented: $showingSettings) {
-            NavigationStack {
-                MachineSettingsView(connection: connection)
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showingSettings = false } } }
-            }
-        }
-        .alert("Clotho", isPresented: Binding(get: { connection.lastError != nil }, set: { if !$0 { connection.lastError = nil } })) {
-            Button("OK") {}
-        } message: {
-            Text(connection.lastError ?? "")
-        }
-        .confirmationDialog("Update clothod on \(machine.displayName)?", isPresented: $confirmingUpdate, titleVisibility: .visible) {
-            Button("Update") { connection.updateClothod() }
-        } message: {
-            Text("Installs this app's clothod and switches to it. Shells keep running; if anything fails, the machine keeps its current version.")
-        }
-        .confirmationDialog("Restart clothod on \(machine.displayName)?", isPresented: $confirmingRestart, titleVisibility: .visible) {
-            Button("End all shells and restart", role: .destructive) { connection.restartSessions() }
-        } message: {
-            Text("Every shell on this machine ends, including ones open on your other devices. Running programs are stopped.")
-        }
-        .alert("Host key changed", isPresented: Binding(get: { connection.hostKeyChange != nil },
-                                                        set: { if !$0 { connection.hostKeyChange = nil } })) {
-            Button("Cancel", role: .cancel) {}
-            Button("Trust new key", role: .destructive) { connection.trustPresentedHostKey() }
-        } message: {
-            if let change = connection.hostKeyChange {
-                Text("\(machine.displayName) presented a different host key than before.\n\nWas: \(HostKeys.fingerprint(change.trusted) ?? "?")\nNow: \(HostKeys.fingerprint(change.presented) ?? "?")\n\nThis happens after reinstalling the machine, or when someone intercepts the connection. Only trust it if you know why it changed.")
-            }
-        }
     }
 
     // MARK: Header
@@ -186,9 +178,9 @@ private struct HomeMachineSection: View {
             }
             .disabled(!store.isConnected)
             Menu {
-                Button { showingFiles = true } label: { Label("Files", systemImage: "folder") }
+                Button { sheet = .files(machine.id) } label: { Label("Files", systemImage: "folder") }
                     .disabled(!store.isConnected)
-                Button { showingSettings = true } label: { Label("Settings", systemImage: "gearshape") }
+                Button { sheet = .settings(machine.id) } label: { Label("Settings", systemImage: "gearshape") }
                 if machine.kind == .ssh {
                     Divider()
                     Button { editing = machine } label: { Label("Edit", systemImage: "pencil") }
@@ -207,6 +199,31 @@ private struct HomeMachineSection: View {
             .accessibilityLabel("\(machine.displayName) menu")
         }
         .padding(.bottom, 2)
+        // On the header, a plain view: alerts and dialogs attached inside a List section don't show reliably.
+        .alert("Clotho", isPresented: Binding(get: { connection.lastError != nil }, set: { if !$0 { connection.lastError = nil } })) {
+            Button("OK") {}
+        } message: {
+            Text(connection.lastError ?? "")
+        }
+        .confirmationDialog("Update clothod on \(machine.displayName)?", isPresented: $confirmingUpdate, titleVisibility: .visible) {
+            Button("Update") { connection.updateClothod() }
+        } message: {
+            Text("Installs this app's clothod and switches to it. Shells keep running; if anything fails, the machine keeps its current version.")
+        }
+        .confirmationDialog("Restart clothod on \(machine.displayName)?", isPresented: $confirmingRestart, titleVisibility: .visible) {
+            Button("End all shells and restart", role: .destructive) { connection.restartSessions() }
+        } message: {
+            Text("Every shell on this machine ends, including ones open on your other devices. Running programs are stopped.")
+        }
+        .alert("Host key changed", isPresented: Binding(get: { connection.hostKeyChange != nil },
+                                                        set: { if !$0 { connection.hostKeyChange = nil } })) {
+            Button("Cancel", role: .cancel) {}
+            Button("Trust new key", role: .destructive) { connection.trustPresentedHostKey() }
+        } message: {
+            if let change = connection.hostKeyChange {
+                Text("\(machine.displayName) presented a different host key than before.\n\nWas: \(HostKeys.fingerprint(change.trusted) ?? "?")\nNow: \(HostKeys.fingerprint(change.presented) ?? "?")\n\nThis happens after reinstalling the machine, or when someone intercepts the connection. Only trust it if you know why it changed.")
+            }
+        }
     }
 
     private func newWorkspace() {
@@ -227,9 +244,11 @@ private struct HomeMachineSection: View {
                 .disabled(connection.updating)
         }
         if case .appOutdated(let running) = connection.shownVersionStatus {
-            Label("\(machine.displayName) runs clothod \(running), newer than this app's. Update the app to stay in step.",
-                  systemImage: "arrow.up.circle")
-                .font(.callout)
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Update the app", systemImage: "arrow.up.circle")
+                Text("\(machine.displayName) runs clothod \(running), newer than this app's. Clotho keeps using it; update the app to stay in step.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         if connection.holderOutdated {
             Button(connection.restarting ? "Restarting clothod…" : "Restart clothod…", role: .destructive) { confirmingRestart = true }

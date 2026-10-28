@@ -9,9 +9,8 @@ final class QuickReplyUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting"]
         app.launch()
-        app.staticTexts["Local Mac (dev)"].firstMatch.tap()
+        // Home connects every machine; give the local one a moment to report its agents.
         sleep(2)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
 
         let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Claude' AND label CONTAINS 'Waiting'")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10), "no waiting Claude in the Agents list")

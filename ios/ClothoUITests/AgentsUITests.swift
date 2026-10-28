@@ -20,7 +20,7 @@ final class AgentsUITests: XCTestCase {
             app.buttons[direction].tap()
             sleep(1)
         }
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        // Back to Home (one level: Home has no machine screen in between).
         app.navigationBars.buttons.element(boundBy: 0).tap()
 
         XCTAssertTrue(app.staticTexts["Agents"].waitForExistence(timeout: 5))

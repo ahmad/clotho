@@ -114,8 +114,8 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 5))
 
         // Remove the test clothod from this Mac (cleanup-dev.sh would too).
-        let row = app.buttons.containing(.staticText, identifier: "Guide test").firstMatch
-        row.press(forDuration: 1)
+        // On Home, the machine's header menu has Disconnect.
+        app.buttons["Guide test menu"].tap()
         app.buttons["Disconnect and remove test clothod"].tap()
         sleep(3)
     }

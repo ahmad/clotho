@@ -31,15 +31,15 @@ final class PaneActionsUITests: XCTestCase {
         sleep(1)
         attach(app, "split")
 
-        // The machine screen marks the current workspace and its focused tab.
+        // Back on Home, the new workspace (the last row) opens its tab again, with its two panes.
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let current = app.descendants(matching: .any).matching(NSPredicate(format: "label ENDSWITH ', current'")).firstMatch
-        let focusedTab = app.buttons.matching(NSPredicate(format: "isSelected == true")).firstMatch
-        // The new workspace is last; earlier tests' workspaces may push it below the screen.
-        for _ in 0..<8 where !current.waitForExistence(timeout: 2) || !focusedTab.exists || !focusedTab.isHittable { app.swipeUp() }
-        XCTAssertTrue(current.exists, "no current-workspace marker")
-        attach(app, "machine screen")
-        focusedTab.tap()
+        let workspaces = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Workspace '"))
+        XCTAssertTrue(workspaces.firstMatch.waitForExistence(timeout: 10), "no workspace rows on Home")
+        let row = workspaces.element(boundBy: workspaces.count - 1)
+        // Earlier tests' workspaces may push it below the screen.
+        for _ in 0..<8 where !row.isHittable { app.swipeUp() }
+        attach(app, "home")
+        row.tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
 
         actions.tap()

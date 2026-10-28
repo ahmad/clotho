@@ -28,7 +28,9 @@ final class AppearanceUITests: XCTestCase {
         // Switch to Dark from the pane's menu; the open terminal changes with it.
         actions.tap()
         app.buttons["Appearance"].tap()
-        app.buttons["Dark"].tap()
+        let dark = app.buttons["Dark"]
+        XCTAssertTrue(dark.waitForExistence(timeout: 3))
+        dark.tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         sleep(1)
         let dark = background(app)

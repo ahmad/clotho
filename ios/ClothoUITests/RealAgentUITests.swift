@@ -8,9 +8,8 @@ final class RealAgentUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting"]
         app.launch()
-        app.staticTexts["Local Mac (dev)"].firstMatch.tap()
+        // Home connects every machine; give the local one a moment to report its agents.
         sleep(2)
-        app.navigationBars.buttons.element(boundBy: 0).tap()
         let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Allow cargo test --release?'")).firstMatch
         guard row.waitForExistence(timeout: 10) else { throw XCTSkip("no agent reported on the dev clothod") }
         XCTAssertTrue(row.label.contains("Waiting"), row.label)
