@@ -32,6 +32,13 @@ dev=0
 [ "${1:-}" = "--dev" ] && dev=1
 version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
 released=$(cat RELEASED 2>/dev/null || echo 0.0.0)
+# RELEASED is one line, the last released version: the apps' scripts read the whole file as the
+# version. Refuse anything else (a hand edit that appended) instead of comparing against it.
+if [ -f RELEASED ] && { [ "$(wc -l < RELEASED)" -ne 1 ] || ! grep -qx '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' RELEASED; }; then
+    echo "dist: RELEASED must be one line holding the last released version (x.y.z), not:" >&2
+    cat RELEASED >&2
+    exit 1
+fi
 if [ "$dev" = 0 ] && ! newer "$version" "$released"; then
     echo "dist: version $version is not newer than the last release ($released)." >&2
     echo "dist: bump [workspace.package] version in Cargo.toml for a release, or pass --dev for a test build." >&2
