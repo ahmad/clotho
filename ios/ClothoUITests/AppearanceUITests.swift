@@ -12,7 +12,7 @@ final class AppearanceUITests: XCTestCase {
         app.buttons["Light"].tap()
         attach(app, "machines light")
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
         attach(app, "machine light")
         newWorkspace.tap()

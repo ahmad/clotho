@@ -85,7 +85,7 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if sizeClass == .regular { SplitRootView() } else { MachineListView() }
+            if sizeClass == .regular { SplitRootView() } else { HomeView() }
         }
         .environmentObject(navigator)
         .onAppear { navigator.switchLayout(regular: sizeClass == .regular) }

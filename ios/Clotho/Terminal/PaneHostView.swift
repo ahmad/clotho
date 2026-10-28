@@ -321,13 +321,25 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         sendViewportIfNeeded()
     }
 
+    private var viewportWork: DispatchWorkItem?
+
+    /// Sends the room this view has as the pane's viewport, a moment after it settles: a keyboard or key bar
+    /// sliding in changes the size twice in a row, and the pane should only take the last one (a grow then a
+    /// shrink pulls scrollback onto the screen and makes full-screen apps redraw twice). Needs clothod 0.1.14's
+    /// cwd poll: older daemons only noticed a cwd change on the next resize or title change.
     private func sendViewportIfNeeded() {
         guard subscribed, !readOnly, bounds.width > 0, bounds.height > 0 else { return }
-        let viewport = fittedSize()
-        guard viewport != sentViewport else { return }
-        sentViewport = viewport
-        let id = paneID
-        Task { [backend] in try? await backend.setViewport(id, viewport) }
+        viewportWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.subscribed, !self.readOnly, self.bounds.width > 0, self.bounds.height > 0 else { return }
+            let viewport = self.fittedSize()
+            guard viewport != self.sentViewport else { return }
+            self.sentViewport = viewport
+            let id = self.paneID
+            Task { [backend = self.backend] in try? await backend.setViewport(id, viewport) }
+        }
+        viewportWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     // Taps in the padding focus the terminal too.

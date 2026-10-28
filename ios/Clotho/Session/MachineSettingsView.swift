@@ -27,6 +27,7 @@ struct MachineSettingsView: View {
             } else {
                 scrollbackSection
                 loginSection
+                alertsSection
             }
             if let error {
                 Section { Text(error).font(.callout).foregroundStyle(.red) }
@@ -64,6 +65,19 @@ struct MachineSettingsView: View {
     }
 
     // MARK: Scrollback
+
+    /// "Send test alert" (it was on the machine screen, which Home replaced).
+    @ViewBuilder private var alertsSection: some View {
+        if connection.supportsPush, connection.alertsOn, PushRegistrar.shared.handle != nil {
+            Section {
+                Button("Send test alert") { connection.sendTestAlert() }
+            } header: {
+                Text("Alerts")
+            } footer: {
+                Text("\(name) sends this iPhone an encrypted alert through the relay, the way it does when an agent needs you while Clotho is closed.")
+            }
+        }
+    }
 
     @ViewBuilder private var scrollbackSection: some View {
         Section {

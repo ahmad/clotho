@@ -97,7 +97,7 @@ final class OnboardingUITests: XCTestCase {
         let open = app.buttons["openMachine"]
         XCTAssertTrue(open.waitForExistence(timeout: 5))
         open.tap()
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 30)
         attach(app, "machine open")
 
@@ -105,13 +105,13 @@ final class OnboardingUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-UITesting", "-CleanState", "NO"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["Welcome to Clotho"].exists)
         XCTAssertTrue(app.staticTexts["Guide test"].exists, "the machine wasn't saved")
         app.buttons["Welcome Guide"].tap()
         XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 5))
         app.buttons["onboardingSkip"].tap()
-        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 5))
 
         // Remove the test clothod from this Mac (cleanup-dev.sh would too).
         let row = app.buttons.containing(.staticText, identifier: "Guide test").firstMatch
@@ -126,11 +126,11 @@ final class OnboardingUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 10))
         app.buttons["onboardingSkip"].tap()
-        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 5))
         app.terminate()
         app.launchArguments = ["-UITesting", "-CleanState", "NO"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.staticTexts["Welcome to Clotho"].exists, "the skipped guide came back")
     }
 

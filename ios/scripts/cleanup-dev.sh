@@ -12,9 +12,11 @@ T=/tmp/clotho-ios-sshtest
 # clothod, waits up to 10 s for it to exit (the holder goes a moment after serve), deletes its dirs, and
 # lists what's left.
 read -r -d '' CLEANUP <<'SH'
-rt=/tmp/clothod-ios-dev-$(id -u)
+rt=/tmp/cki-ios-dev-$(id -u)
+# Builds before the rename ran it in /tmp/clothod-ios-dev-<uid>; those go too.
+old=/tmp/clothod-ios-dev-$(id -u)
 for b in "$HOME"/.local/share/clotho-ios-dev/bin/*/clothod; do
-  [ -x "$b" ] && CLOTHOD_RUNTIME_DIR=$rt "$b" shutdown >/dev/null 2>&1
+  for r in "$rt" "$old"; do [ -x "$b" ] && CLOTHOD_RUNTIME_DIR=$r "$b" shutdown >/dev/null 2>&1; done
 done
 if [ "${CKI:-}" = 1 ] && [ -x /tmp/cki-ios-bin/clothod ]; then
   /tmp/cki-ios-bin/clothod shutdown --runtime-dir /tmp/cki-ios >/dev/null 2>&1
@@ -28,7 +30,7 @@ ps -eo pid,args | grep 'clothod-install' | grep 'clotho-ios-dev/bin' | grep -v -
   | while read -r pid _; do kill "$pid" 2>/dev/null && echo "ended stuck dev install $pid"; done
 i=0
 while [ $i -lt 20 ] && mine >/dev/null; do sleep 0.5; i=$((i + 1)); done
-rm -rf "$HOME/.local/share/clotho-ios-dev" "$rt"
+rm -rf "$HOME/.local/share/clotho-ios-dev" "$rt" "$old"
 [ "${CKI:-}" = 1 ] && rm -rf /tmp/cki-ios /tmp/cki-ios-bin
 if mine; then echo "!! iOS test daemons still running"; else echo "no iOS test daemons"; fi
 echo "all clothod:"

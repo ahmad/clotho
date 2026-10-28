@@ -40,7 +40,7 @@ final class RemoteUITests: XCTestCase {
         }
         app.staticTexts["\(user)@\(host)"].firstMatch.tap()
 
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 60)
         attach(app, "connected")
         newWorkspace.tap()
@@ -62,7 +62,7 @@ final class RemoteUITests: XCTestCase {
         // Disconnecting removes the test clothod from the machine (scripts/cleanup-dev.sh checks).
         sleep(1)
         // Closing the tab already leaves the pane screen; go back until the machine list shows.
-        for _ in 0..<3 where !app.navigationBars["Machines"].exists {
+        for _ in 0..<3 where !app.navigationBars["Clotho"].exists {
             app.navigationBars.buttons.element(boundBy: 0).tap()
             sleep(1)
         }

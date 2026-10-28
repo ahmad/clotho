@@ -15,7 +15,7 @@ final class IPadUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Choose a tab"].exists, "no empty detail")
         attach(app, "sidebar")
         overview.tap()
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 15)
         let current = app.staticTexts.matching(NSPredicate(format: "label ENDSWITH ', current'"))
         let before = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Workspace '")).count

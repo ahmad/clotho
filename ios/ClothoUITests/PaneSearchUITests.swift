@@ -7,7 +7,7 @@ final class PaneSearchUITests: XCTestCase {
         app.launchArguments = ["-UITesting"]
         app.launch()
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
         newWorkspace.tap()
         let actions = app.buttons["Pane actions"]

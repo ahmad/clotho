@@ -52,7 +52,7 @@ struct OnboardingView: View {
     @EnvironmentObject private var machines: MachineList
     @EnvironmentObject private var connections: Connections
     @State private var step: Step
-    @State private var machine = Machine(name: "", devDirs: MachineListView.defaultDevDirs)
+    @State private var machine = Machine(name: "", devDirs: HomeView.defaultDevDirs)
     @State private var port = "22"
     @State private var saved = false
 

@@ -22,7 +22,11 @@ final class FilesUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting", "-FilesStart", root]
         app.launch()
-        app.staticTexts["Local Mac (dev)"].firstMatch.tap()
+        // Files and Settings are in the machine's menu on Home, once it's connected.
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
+        XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 15)
+        app.buttons["Local Mac (dev) menu"].tap()
         let files = app.buttons["Files"]
         XCTAssertTrue(files.waitForExistence(timeout: 10))
         files.tap()

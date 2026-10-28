@@ -58,7 +58,7 @@ final class PushUITests: XCTestCase {
         let allow = springboard.buttons["Allow"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
         sleep(3) // push.register after hello

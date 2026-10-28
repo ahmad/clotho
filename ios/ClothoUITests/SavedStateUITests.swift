@@ -9,7 +9,7 @@ final class SavedStateUITests: XCTestCase {
         app.launchArguments = ["-UITesting"]
         app.launch()
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
-        let newWorkspace = app.buttons["New Workspace"]
+        let newWorkspace = app.buttons["New Workspace"].firstMatch
         XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
         newWorkspace.tap()
@@ -43,7 +43,7 @@ final class SavedStateUITests: XCTestCase {
         let row = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "saved-state-test")).firstMatch
         for _ in 0..<4 where !row.waitForExistence(timeout: 1) || !row.isHittable { app.swipeUp() }
         XCTAssertTrue(row.exists, "the saved model lists the tab before the machine connects")
-        XCTAssertFalse(app.buttons["New Workspace"].isEnabled, "still the saved model")
+        XCTAssertFalse(app.buttons["New Workspace"].firstMatch.isEnabled, "still the saved model")
         row.tap()
 
         let badge = app.descendants(matching: .any)["savedBadge"]

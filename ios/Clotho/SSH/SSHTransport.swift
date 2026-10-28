@@ -11,7 +11,7 @@ final class SSHTransport: ClothodTransport, @unchecked Sendable {
 
     /// Where test builds install and run clothod on a machine, away from the user's own daemon there.
     static let devInstallDir = "$HOME/.local/share/clotho-ios-dev/bin"
-    static let devRuntimeDir = "/tmp/clothod-ios-dev-$(id -u)"
+    static let devRuntimeDir = "/tmp/cki-ios-dev-$(id -u)"
     /// A test instance ends itself after this many idle seconds (no clients, no panes). Not "exit": iOS drops
     /// the connection whenever the app is backgrounded, and resuming must find the shells still there.
     /// Disconnecting the machine removes it right away (`removeDevDaemon`).
@@ -73,7 +73,7 @@ final class SSHTransport: ClothodTransport, @unchecked Sendable {
     /// after serve), and deletes its install and runtime dirs. Test daemons are temporary: the one clothod
     /// on a machine is the user's own. Run with `sh -s` so the login shell (zsh globs) doesn't matter.
     static let devCleanupScript = """
-        rt=/tmp/clothod-ios-dev-$(id -u)
+        rt=/tmp/cki-ios-dev-$(id -u)
         for b in "$HOME"/.local/share/clotho-ios-dev/bin/*/clothod; do
           [ -x "$b" ] && CLOTHOD_RUNTIME_DIR=$rt "$b" shutdown >/dev/null 2>&1
         done
