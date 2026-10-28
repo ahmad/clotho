@@ -306,7 +306,7 @@ encodings, but it tracks flags an application sets anyway, so `pane.keys` stays 
 INPUT frames for a pane that doesn't exist are dropped silently. There is no reply for an INPUT
 frame.
 
-| `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?` | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
+| `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both) | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
 | `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it) |
 | `agent.history` | `pane`; optional `limit` (1–200, default 200), `since` (unix seconds: entries after it), `session` | `{"pane", "entries": [..], "max": 200}`, oldest first; see [Agent history](#agent-history) |
 | `agent.mute` | `pane`, `muted` (bool) | `{"agent": <agent>}`: mutes or unmutes the pane's agent; see [Agents](#agents). `not_found` if the pane has no agent |
@@ -459,7 +459,10 @@ and otherwise:
 | `kind` | `"claude"`, `"codex"` or `"other"` (more may be added) |
 | `state` | `"starting"`, `"running"`, `"waiting"` (needs the user: a permission prompt, a question, idle after being asked something), `"done"` (the turn finished), `"error"`. Clients treat unknown values as unknown |
 | `source` | `"hook"` (the agent reports through `clothod report`) or `"detected"` (inferred from the pane's processes and output) |
-| `message` | what the agent says, or `null` |
+| `message` | what the agent says, or `null`. For `waiting`, the prompt it shows ("Claude needs your permission to use Bash"); for `done`, the start of the reply its turn ended with (Claude Code's `last_assistant_message`, Codex's `last-assistant-message`: whitespace collapsed to one line, at most 300 chars); for `error`, the error |
+| `prompt` | the first line of the prompt the user typed for the current turn (at most 120 chars), or `null`: no prompt yet, or a turn the user didn't type (started by another agent's message or a finished background task; the wrapper text is never shown) |
+| `tool`, `tool_input` | the last tool the agent used in this turn (`"Bash"`) and its key input (`"npm test"`, at most 160 chars: Bash's command, the file of Read/Write/Edit, the pattern of Glob/Grep, the URL, the query, a task's description, else the first text field), or `null`. Cleared by a new turn and by a wait that isn't a permission prompt, so while `waiting` they say what the permission is for |
+| `turn_started` | unix seconds (float) when the current turn started (its prompt, or work resuming after the turn ended), or `null`. For `done` and `error`, `since - turn_started` is how long the turn took |
 | `since` | when `state` last changed, in **unix seconds as a float** |
 | `attention` | the agent needs the user. **Raised** only by exact signals: a hook-reported transition into `waiting`, `done` or `error` (including a hook report that takes over from detection in the same state, e.g. detection guessed `waiting` and then the hook reports `waiting`; that also sends an `agent` event whose `from` equals the state), or a terminal bell (BEL) from a detected agent. **Cleared** only when the agent works again (a transition into `running` or `starting` reported by a hook, or shown by Claude Code's title spinner), by `agent.ack` (the user resolved it), or when the agent goes away. Input never clears it: opening a pane makes a client send focus and mouse reports, and looking is not resolving. A typed reply clears it through the agent going back to work. Detection's guesses from output alone (busy read as `running`, quiet as `waiting`) neither raise nor clear it, since an app's redraw after a resize would read as work. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions**, unless `quiet` is true. Pushes (`push`) follow the same rises, except quiet ones |
 | `quiet` | the last rise of `attention` was quiet: the agent's turn ended (`done`) while the user was at the pane, meaning a client that shows the pane (subscribed) sent it input within the last 60 s. The user sees that turn end, so `attention` is raised (badge it, show it in the pane) but the daemon sends no push, and **clients must not post a notification for it** either. Decided when `attention` rises and kept until the next rise (through `agent.ack`), so it is in the `agent` and `pane` events of that rise. Always false for a rise into `waiting` or `error`: those notify even when the user just typed, since they may have stepped away and the agent is stuck until they answer. Absent (older daemons) means false |
@@ -515,6 +518,12 @@ payload, so the installed hooks don't change:
 - `SessionStart` with `source` `"compact"`: compaction, auto or `/compact`, carries on the same
   session. It is not a start, and must not clear a raised `attention`.
 - `PreCompact`, `SubagentStop` and anything else.
+
+The turn's context comes from the same payloads: `UserPromptSubmit`'s `prompt` (its first line;
+`""` when it is a wrapper Claude Code injected, such as `<cross-session-message>` or
+`<task-notification>`), `PreToolUse`'s `tool_name` and `tool_input`, and `Stop`'s
+`last_assistant_message` as the `message`. A `Notification` other than a permission prompt clears
+the tool. For Codex, `agent-turn-complete`'s last `input-messages` entry is the prompt.
 
 **Nested agents:** an agent that the pane's agent runs (an SDK app it is testing, `claude -p` from
 a tool, `codex exec`) has the same hooks, and they report into the same pane. With `pid`, the daemon

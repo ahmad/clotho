@@ -1096,6 +1096,94 @@ async fn a_turn_that_ends_while_the_user_is_at_the_pane_does_not_push() {
     assert_eq!(opened(&relay.next().1)["s"], "done");
 }
 
+/// What a push tells about the turn, from Claude Code's real hook payloads through
+/// `clothod report --claude-hook`: the prompt the user typed, the tool a permission prompt is
+/// about, the reply the turn ended with, how long it took, and where (workspace, tab, project).
+#[tokio::test]
+async fn pushes_carry_the_turns_details() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let proj = env.dir.path().join("my-project");
+    std::fs::create_dir_all(&proj).unwrap();
+    let mut params = sh();
+    params["cwd"] = json!(proj.display().to_string());
+    params["name"] = json!("Work");
+    let r = c.request("workspace.create", params).await.unwrap();
+    let (p, ws, tab) = (r["pane"].as_u64().unwrap(), r["workspace"].as_u64().unwrap(), r["tab"].as_u64().unwrap());
+    c.request("tab.rename", json!({"tab": tab, "title": "api"})).await.unwrap();
+
+    // Each line is one hook event, as Claude Code 2.1.312 sends them; the stand-in agent feeds
+    // them to the hook command one by one, waiting for a line on the terminal between steps.
+    let events = env.dir.path().join("events");
+    std::fs::create_dir_all(&events).unwrap();
+    let base = r#""session_id":"s1","transcript_path":"/t.jsonl","cwd":"/p","permission_mode":"default""#;
+    let steps: [&[&str]; 4] = [
+        &[
+            r#""hook_event_name":"UserPromptSubmit","prompt":"fix the failing build\nthen run the tests""#,
+            r#""hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test","description":"Run tests"}"#,
+            r#""hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt""#,
+        ],
+        &[
+            r#""hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}"#,
+            r#""hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"The build is fixed.\n\nAll 12 tests pass.","background_tasks":[]"#,
+        ],
+        &[
+            r#""hook_event_name":"UserPromptSubmit","prompt":"Another Claude session sent a message:\n<cross-session-message from=\"x\">hi</cross-session-message>""#,
+            r#""hook_event_name":"Notification","message":"Claude needs your input","notification_type":"elicitation_dialog""#,
+        ],
+        &[r#""hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"ok","background_tasks":[]"#],
+    ];
+    let b = test_bin();
+    let mut script = String::new();
+    for (i, step) in steps.iter().enumerate() {
+        if i > 0 {
+            script.push_str("read x; ");
+        }
+        for (j, e) in step.iter().enumerate() {
+            let f = events.join(format!("{i}-{j}.json"));
+            std::fs::write(&f, format!("{{{base},{e}}}")).unwrap();
+            script.push_str(&format!("'{b}' report --claude-hook < '{}'; ", f.display()));
+        }
+    }
+    let file = env.dir.path().join("agent.sh");
+    std::fs::write(&file, format!("{script}sleep 60\n")).unwrap();
+    c.input(p, format!("sh '{}'\r", file.display()).as_bytes());
+
+    let a = wait_agent(&c, p, "waiting", |a| a["state"] == "waiting").await;
+    assert_eq!(a["prompt"], "fix the failing build", "the first line: {a}");
+    assert_eq!((a["tool"].clone(), a["tool_input"].clone()), (json!("Bash"), json!("npm test")));
+    let started = a["turn_started"].as_f64().unwrap();
+    let r = opened(&relay.next().1);
+    assert_eq!((r["s"].clone(), r["msg"].clone()), (json!("waiting"), json!("Claude needs your permission to use Bash")));
+    assert_eq!((r["tool"].clone(), r["cmd"].clone(), r["q"].clone()), (json!("Bash"), json!("npm test"), json!("fix the failing build")));
+    assert_eq!((r["w"].clone(), r["wid"].clone(), r["tb"].clone(), r["pj"].clone()), (json!("Work"), json!(ws), json!("api"), json!("my-project")));
+    assert!(r.get("d").is_none(), "no duration while waiting: {r}");
+
+    // Allowed: the turn ends with Claude's reply, on one line, and how long the turn took.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    c.input(p, b"\r");
+    let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    assert_eq!(a["message"], "The build is fixed. All 12 tests pass.");
+    assert_eq!(a["turn_started"].as_f64(), Some(started), "the same turn");
+    let r = opened(&relay.next().1);
+    assert_eq!((r["s"].clone(), r["msg"].clone(), r["q"].clone()), (json!("done"), json!("The build is fixed. All 12 tests pass."), json!("fix the failing build")));
+    assert!(r["d"].as_u64().unwrap() <= 30, "{r}");
+    assert!(r.get("tool").is_none() && r.get("cmd").is_none(), "the tool belongs to the wait: {r}");
+
+    // A turn another agent's message started has no prompt (never the wrapper), and a question
+    // is not about the last tool.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    c.input(p, b"\r");
+    let a = wait_agent(&c, p, "asking", |a| a["state"] == "waiting").await;
+    assert!(a["prompt"].is_null() && a["tool"].is_null() && a["tool_input"].is_null(), "{a}");
+    assert!(a["turn_started"].as_f64().unwrap() >= started);
+    let r = opened(&relay.next().1);
+    assert_eq!(r["msg"], "Claude needs your input");
+    assert!(r.get("q").is_none() && r.get("tool").is_none(), "{r}");
+}
+
 /// An agent the pane's agent runs (an SDK app under test, `claude -p` from a tool) has hooks
 /// too: its reports reach this pane but must not move the pane's agent or push.
 #[tokio::test]

@@ -44,12 +44,33 @@ fn bad(message: impl Into<String>) -> Error {
 }
 
 /// What a pane's agent says when it asks for the user.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Alert {
     pub kind: String,
     pub state: String,
+    /// What the agent says: for `done` the start of its last reply, for `waiting` the prompt
+    /// it shows, for `error` the error.
     pub message: Option<String>,
     pub since: f64,
+    /// The user's prompt that started this turn (first line), if they typed it.
+    pub prompt: Option<String>,
+    /// For `waiting`: the tool it asks about ("Bash") and its key input ("npm test").
+    pub tool: Option<String>,
+    pub tool_input: Option<String>,
+    /// For `done` and `error`: seconds since the turn started.
+    pub duration: Option<u64>,
+    pub workspace_id: Option<u64>,
+    pub workspace: Option<String>,
+    pub tab: Option<String>,
+    /// The agent's directory's name: the project.
+    pub project: Option<String>,
+}
+
+impl Alert {
+    /// Just the basics (the test alert, older callers).
+    pub fn basic(kind: &str, state: &str, message: Option<String>, since: f64) -> Alert {
+        Alert { kind: kind.into(), state: state.into(), message, since, ..Default::default() }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -125,7 +146,13 @@ pub fn open(private_b64: &str, ciphertext_b64: &str, aad: &[u8]) -> Option<Vec<u
     hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>(&OpModeR::Base, &sk, &enc, INFO, ct, aad).ok()
 }
 
-/// The record a phone decrypts: `{"v":1, "m", "p", "k", "s", "msg", "t"}`.
+/// The record a phone decrypts: `{"v":1, "m", "p", "k", "s", "msg", "t"}`, plus what of
+/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `d` the alert has (docs/push.md).
+///
+/// Each text is first held to its own cap (bytes, on a char boundary). If the record would still
+/// pass MAX_RECORD padded (long names, escape-heavy text), texts are halved in this order until
+/// it fits: the result (`msg`), the prompt (`q`), the tool input (`cmd`), the project, tab and
+/// workspace names, and last the label.
 fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
     let cut = |m: &str, max: usize| {
         let mut end = m.len().min(max);
@@ -134,28 +161,59 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
         }
         m[..end].to_string()
     };
-    let (mut label, mut msg) = (label.to_string(), a.message.as_deref().map(|m| cut(m, MAX_MSG)));
-    let record = |label: &str, msg: &Option<String>| json!({"v": 1, "m": label, "p": pane, "k": a.kind, "s": a.state, "msg": msg, "t": a.since});
+    let capped = |t: &Option<String>, max: usize| t.as_deref().map(|t| cut(t, max));
+    // In cutting order; the label (`m`) goes last.
+    let mut texts: Vec<(&str, Option<String>)> = vec![
+        ("msg", capped(&a.message, MAX_MSG)),
+        ("q", capped(&a.prompt, MAX_PROMPT)),
+        ("cmd", capped(&a.tool_input, MAX_TOOL_INPUT)),
+        ("pj", capped(&a.project, MAX_NAME)),
+        ("tb", capped(&a.tab, MAX_NAME)),
+        ("w", capped(&a.workspace, MAX_NAME)),
+    ];
+    let mut label = label.to_string();
+    let record = |label: &str, texts: &[(&str, Option<String>)]| {
+        let mut v = json!({"v": 1, "m": label, "p": pane, "k": a.kind, "s": a.state, "msg": texts[0].1, "t": a.since});
+        for (k, t) in &texts[1..] {
+            if let Some(t) = t {
+                v[*k] = json!(t);
+            }
+        }
+        if let Some(id) = a.workspace_id {
+            v["wid"] = json!(id);
+        }
+        if let Some(tool) = &a.tool {
+            v["tool"] = json!(cut(tool, MAX_NAME));
+        }
+        if let Some(d) = a.duration {
+            v["d"] = json!(d);
+        }
+        v
+    };
     let pad_key = r#","pad":"""#.len();
-    // At most MAX_RECORD padded (the relay refuses bigger ciphertexts): a message (or label) that
-    // escapes to more than that in JSON is cut until it fits.
+    // At most MAX_RECORD padded (the relay refuses bigger ciphertexts).
     loop {
-        let len = serde_json::to_vec(&record(&label, &msg)).unwrap().len() + pad_key;
+        let len = serde_json::to_vec(&record(&label, &texts)).unwrap().len() + pad_key;
         if len <= MAX_RECORD {
             break;
         }
-        match &msg {
-            Some(m) if !m.is_empty() => msg = Some(cut(m, m.len() / 2)),
-            _ => label = cut(&label, label.len() / 2),
+        match texts.iter_mut().find(|(_, t)| t.as_ref().is_some_and(|t| !t.is_empty())) {
+            Some((_, t)) => *t = t.as_deref().map(|t| cut(t, t.len() / 2)),
+            None => label = cut(&label, label.len() / 2),
         }
     }
-    let mut v = record(&label, &msg);
+    let mut v = record(&label, &texts);
     // Padded to a multiple of PAD_TO bytes with a `pad` of spaces, so the ciphertext's length
-    // (which the relay and APNs see) doesn't tell how long the message is.
+    // (which the relay and APNs see) doesn't tell how long the texts are.
     let len = serde_json::to_vec(&v).unwrap().len() + pad_key;
     v["pad"] = json!(" ".repeat(len.div_ceil(PAD_TO) * PAD_TO - len));
     serde_json::to_vec(&v).unwrap()
 }
+
+/// Caps per text in a push record, in bytes (before the record's own cap).
+const MAX_PROMPT: usize = 240;
+const MAX_TOOL_INPUT: usize = 240;
+const MAX_NAME: usize = 96;
 
 /// Largest record sealed: 2048 bytes is about 2,800 base64 characters of ciphertext, under the
 /// relay's 3,000 (ios/relay, MAX_CIPHERTEXT).
@@ -278,7 +336,7 @@ impl Push {
                 let device = s("device").ok_or_else(|| bad("missing device"))?;
                 let reg = self.inner.lock().unwrap().regs.iter().find(|r| r.device == device).cloned();
                 let reg = reg.ok_or_else(|| Error { code: "not_found", message: format!("no registration for device {device}") })?;
-                let alert = Alert { kind: "clotho".into(), state: "done".into(), message: Some("Test alert".into()), since: unix_now() };
+                let alert = Alert::basic("clotho", "done", Some("Test alert".into()), unix_now());
                 let body = body(&reg, 0, &alert).ok_or_else(|| bad("registered key is invalid"))?;
                 let relay = reg.relay.clone();
                 let outcome = tokio::task::spawn_blocking(move || post(&relay, &body)).await.unwrap_or(Outcome::Failed("send failed".into()));
@@ -439,10 +497,13 @@ mod tests {
     const PADDED: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Allow cargo test --release?","t":1761512345.5,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        "}"#;
     /// PADDED sealed to PK (by clothod), for iOS to open with SK.
     const CT_PADDED: &str = "waIuQwmR41aqP/FeDl6qcxO3VMlzn9JWMLLSVBBno3RoZ6H0WMBF+pB381kmx09JSwR0LKdoo1tQiL82E1SUpXiSbNRqF/I2TLdju9z5NN3Tcjo28n1MRYN8N54znoR81MryHYIWWw/enTmy3dld+zdiULd8YS8ZWuh/Yzv82zWvJRRoOMF2gHElBCt9BxNEXA3vxxlgM8dxksJx8uKZGql7nXKBsBVjnkUjSm/5JnzaHW89fhAbpaKXUXLP5TwGJ8N6d1k0yO/ikMJgQOJ3cMSkygWVIOLJFtuQ/hPDEj7vJSzVcud/zb+wZlbVJxjl1eSr+t4x9ESxBWnwy13o3zdDhwiHkbXlVYpCbaNtFjTmvSRf27nGoPEPCEIMskcnciNhc1aRrE1oEg9gHO2AbWuTD3qBOazA3YMGXPkgljx3JMSdjPA0mKoascgEZzt6x1aITqdnu4dNhTaDtgN8qpyZi+bDaSvXRpY5vRm14T9izWayls3wHDa2VWBVXSiKTbge3gYoKIBtTMnNEPYQ/hM3ibv0u8eIXRpdvTNljP9+WOPSb2y0dMcK7ZgnCMZ7CqJbM+Bk0rXye+WiuM+vQGe4E1grJMo7Ot7NtW+oWSadm8s+QeGELUhwk9Ol1zkbswNWON1mSCcFh3XnAyZzegzd1lqMCIBL57bnxm/trSrpPOQNICHjvQhd91H0A20XSXMQWOfVP6m8O0AMa9fwLM3GzWJhlZJhysvmRlZjHtV/gsq1/rqnMOGGj6GlWYDZ1ye59wBkwOPfJmOrTjQVgnrIi4GG7WhlKd2o4Ushvh3Bml7+S1uJq2b+DymcOydvSsqYRmG7N7vSvd+VsgeSbdn7DQ2nwY100B99kosRiOeID6wmQml+OIP6YJsSSrLgBtF+zwvWD4NMGg+DLCFeCusFQZE9JVbEPDATWHe4FGVXfKrR2uzK6Hhj3QSUOJzAOUdPKYIs+aDYgrqC3FRZtZdwFUFORxp9kfG4uhF3fVqXFCxM4PQMQv5PtuGzkrYvIxASp1+ZmIBWUB03C5R3HJ7IU/HE0IViOzJmSv3XpSmbf2S+fF+yZv1Jv8OJbtzF7n+0mKzM5tbXNVOlEI1ie7nC1zExWoVjE/XYOzaMToo10qzrW0PRf5VBRMX0i2rOZTHyJE9KTCHDoy/0DqfewdGX/HbB16P+yzY9r50J9fcR3YyPOPba/qtMEVs/Ovskng9U+br7THXQ17gr3x86oQRcDwzfv0ws/g+VgmNANpL72ra6TewLGmYWOiyam7jHJrfcY5V17E7Tdm4pqpLadui7ua6GShgm6c4iR/ppy80CJOYYnFfxqeZczor6O5Rear0J9C/ul1NCYeONaGOzZtq8xf4t3QrMmxhO5/4rPvwOBwUsqqf1apYuBAN3NNF1I36qfakZ6JlKqOg2O587HA==";
+    /// A done record with every detail (`full()`), padded to 1024 bytes.
+    const FULL: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"done","msg":"All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.","t":1761512345.5,"q":"fix the flaky push test on macOS","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"d":254,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         "}"#;
+    const CT_FULL: &str = "KxD6ecRzxhwdb8a8kQcn1HJxe06PVDr0jPkrw1AEjga5wOWPrCWNc5qyxqJ+lsXrI7SA0wNVuQu/in3JHvk3noKJbNfkv/8vSZ8/WW384OUMBgNJ2ty1NyH0XqR0KfV0nbo/2ZwEOzKdPcaZXb+bxF0Q11LFd4OEQVDg86qZTihbonRnCwYr96K/GjhDXpI/d9thuhi4UESO9jZMh3getSVp+aE6qAUNe+ye01LhSYn+Bk26fTbXlaRIM4/0NCmgNs2ARYS3i8ga4SlHiIzfcn9TktUdbxKlT6TTf3pFn+b8KT6SHS1UV4sNCV8H/NHUG8Tg3/MlhoVm+naQuCjMsH8EhpYaWNJBHs5M7KdzaOkgvCPLRbSy0xyP0Gf4v3uJb2FRry8qElK9F1HUoEEGKG5e1Vk6koOhqaC5lMNN91ess/5bNQvUHfE7tU5I+JAXHRrs1lhweWWUfpKMfDH+PQiA9CutRG/2xAk5smyQGvVY9n4/BRJsVnLmkj56cDT/PPRad6uTu2a8N1gZkXqQX/gUxUh3E7mAdLxk1HANFgke899K8yCKvGSxk58qygdzn9tBxOyXyD6+pYLsPHktZGhaCT7WtXr58RHdBXYjoYv91HazhfWd1Zb7r02zBw4tjEMuz/t6vk1X0Pbr71rWRlm8vsvDSgVrOuTInrkuIhipVp1TqBI3UZYiMwTF09RdPYJdxTZjMWdzbX7LQtaCgl6sOQ0wUuQlKM+x936kynYd1YzVS3Qu0aCTVCRRTrX5i9EnDvX0H3QB4OAbiwBdRtvrxa11p/GQ1lmAKYUY4AjgoT+F9555gCqDAIAh/mhiEaW0NafPWirKRZyxnt6heh0VXSEsunyHS7Xwab7uOR7UgssBND893fTxI1TZNbjVtdsjOe5bUd5zoJAsspqRXMys0gylgG8IAnfJObGhUFbuqr0r+eRn7A79FLOynhofadfN/BotO2Y2kUUYVOf5PJmr31M6EvggN3D0vW0tiufnhvG9XS5S06WQNpuansEtgsXYyXcNVoVzNJGx+fIorzTVdfpQLD7ZwOyynXr0hwDF58qS5jAb9AkCcufxQZpvUM2l5K2i/bQTB+R/or5X9cdp2cqNbUlOwj4fTTfHAPYElDHU+y1aUZObnjfkOntr0U3ILIIp5FcV7zOJrbgpeqolQIvUMbTb9jmexng2JVIxduxnEFhyG0herCshLkgSGypxJcl/Ljsj8Xd7KZ9CqgpOhC67+HcViQJb5OYK6FxfbikXGO1wssEqDn8ePL7eOI3SdfhdDMiHKknavr2alPRdVxy10LXufYjoLlmnouLkQNID4AaBghhKW0NAJCvE8Kx8AbbC4alLlKtH3470EcEMSJ4Nc9yUmkwrgXp6QUUNw8Ka8rbNifdBgMIIddCRGQLHBvp6iA5iZVnxvPRteQ==";
     const PLAIN: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Allow cargo test --release?","t":1761512345.5}"#;
 
     fn alert() -> Alert {
-        Alert { kind: "claude".into(), state: "waiting".into(), message: Some("Allow cargo test --release?".into()), since: 1761512345.5 }
+        Alert::basic("claude", "waiting", Some("Allow cargo test --release?".into()), 1761512345.5)
     }
 
     #[test]
@@ -468,7 +529,74 @@ mod tests {
         assert!(msg.len() <= MAX_MSG && msg.len() >= MAX_MSG - 1, "{}", msg.len());
     }
 
+    /// A done alert with every detail, as a real Claude turn produces it.
+    fn full() -> Alert {
+        Alert {
+            kind: "claude".into(),
+            state: "done".into(),
+            message: Some("All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.".into()),
+            since: 1761512345.5,
+            prompt: Some("fix the flaky push test on macOS".into()),
+            tool: None,
+            tool_input: None,
+            duration: Some(254),
+            workspace_id: Some(3),
+            workspace: Some("clotho".into()),
+            tab: Some("clothod".into()),
+            project: Some("clotho".into()),
+        }
+    }
+
     #[test]
+    fn records_carry_the_turns_details() {
+        let v: Value = serde_json::from_slice(&plaintext(LABEL, 7, &full())).unwrap();
+        for (k, want) in [("q", json!("fix the flaky push test on macOS")), ("d", json!(254)), ("wid", json!(3)), ("w", json!("clotho")), ("tb", json!("clothod")), ("pj", json!("clotho"))] {
+            assert_eq!(v[k], want, "{k}");
+        }
+        assert!(v.get("tool").is_none() && v.get("cmd").is_none(), "absent details are left out: {v}");
+        let waiting = Alert { state: "waiting".into(), message: Some("Claude needs your permission to use Bash".into()), tool: Some("Bash".into()), tool_input: Some("npm test".into()), duration: None, ..full() };
+        let v: Value = serde_json::from_slice(&plaintext(LABEL, 7, &waiting)).unwrap();
+        assert_eq!((v["tool"].clone(), v["cmd"].clone()), (json!("Bash"), json!("npm test")));
+        assert!(v.get("d").is_none());
+        // A basic alert is byte for byte what older daemons sent (the shared vector).
+        assert_eq!(std::str::from_utf8(&plaintext(LABEL, 7, &alert())).unwrap(), PADDED);
+    }
+
+    /// Every text at its cap, in 4-byte characters and in characters JSON escapes six-fold:
+    /// the record stays within MAX_RECORD (the relay's limit), and texts are cut in order:
+    /// a later one is cut only once every earlier one is empty.
+    #[test]
+    fn full_records_fit_and_cut_the_result_first() {
+        for ch in ["\u{1F600}", "\u{1}", "é"] {
+            let big = |n: usize| Some(ch.repeat(n));
+            let a = Alert { message: big(400), prompt: big(240), tool: big(96), tool_input: big(240), workspace: big(96), tab: big(96), project: big(96), ..full() };
+            let rec = plaintext(&ch.repeat(100), 7, &a);
+            assert!(rec.len() <= MAX_RECORD && rec.len() % PAD_TO == 0, "{ch:?}: {}", rec.len());
+            assert!(seal(PK, &rec, b"x").unwrap().len() <= 3000);
+            let v: Value = serde_json::from_slice(&rec).unwrap();
+            let caps = [("msg", MAX_MSG), ("q", MAX_PROMPT), ("cmd", MAX_TOOL_INPUT), ("pj", MAX_NAME), ("tb", MAX_NAME), ("w", MAX_NAME)];
+            let len = |k: &str| v[k].as_str().map_or(0, str::len);
+            let full_len = |cap: usize| cap - cap % ch.len();
+            for (i, (k, cap)) in caps.iter().enumerate() {
+                if len(k) < full_len(*cap) {
+                    for (earlier, _) in &caps[..i] {
+                        assert_eq!(len(earlier), 0, "{ch:?}: {k} was cut while {earlier} was not empty");
+                    }
+                }
+            }
+            if ch == "\u{1}" {
+                assert!(len("msg") < full_len(MAX_MSG), "six-fold escapes overflow: the result is cut first");
+            }
+        }
+    }
+
+    /// FULL sealed to PK (by clothod), for iOS to open with SK: a record with every detail.
+    #[test]
+    fn the_full_vector_opens() {
+        assert_eq!(std::str::from_utf8(&plaintext(LABEL, 7, &full())).unwrap(), FULL);
+        assert_eq!(open(SK, CT_FULL, collapse_id(LABEL, 7).as_bytes()).unwrap(), FULL.as_bytes());
+    }
+
     #[test]
     fn records_are_padded_to_a_fixed_size() {
         let len = |m: Option<&str>| plaintext(LABEL, 3, &Alert { message: m.map(String::from), ..alert() }).len();

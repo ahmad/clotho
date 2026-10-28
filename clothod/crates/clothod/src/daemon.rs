@@ -170,6 +170,14 @@ struct Agent {
     /// The last rise of `attention` was quiet: a turn ended (`done`) while the user was at the
     /// pane, so no push went out and clients don't notify either. Kept until the next rise.
     quiet: bool,
+    /// What the user asked in the current turn (first line of the prompt they typed), if they
+    /// typed it: a turn started by another agent's message or a finished task has none.
+    prompt: Option<String>,
+    /// The last tool the agent used in this turn ("Bash") and its key input ("npm test").
+    tool: Option<String>,
+    tool_input: Option<String>,
+    /// Unix seconds when the current turn started (its prompt, or work after a turn ended).
+    turn_started: Option<f64>,
 }
 
 impl Agent {
@@ -250,6 +258,10 @@ impl Agent {
             "attention": self.attention,
             "muted": self.muted,
             "quiet": self.quiet,
+            "prompt": self.prompt,
+            "tool": self.tool,
+            "tool_input": self.tool_input,
+            "turn_started": self.turn_started,
             "session": self.session,
         })
     }
@@ -297,6 +309,11 @@ const PRESENCE: Duration = Duration::from_secs(60);
 fn presence() -> Duration {
     std::env::var("CLOTHOD_TEST_PRESENCE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(PRESENCE)
 }
+
+/// Longest prompt line and tool description kept for an agent's turn (chars).
+const AGENT_PROMPT_MAX: usize = 120;
+const AGENT_TOOL_MAX: usize = 160;
+const AGENT_TOOL_NAME_MAX: usize = 64;
 
 /// Entries kept per pane by `agent.history`.
 const HISTORY_MAX: usize = 200;
@@ -419,6 +436,9 @@ pub struct Daemon {
     shutdown_all: AtomicBool,
     had_real_client: AtomicBool,
     push: Arc<crate::push::Push>,
+    /// Each pane's workspace name and tab title, for push alerts (refreshed with every persist,
+    /// so reading it never needs the model's lock while a pane's is held).
+    places: Mutex<HashMap<u64, (Option<u64>, Option<String>, Option<String>)>>,
 }
 
 #[derive(Debug)]
@@ -651,6 +671,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         shutdown_all: AtomicBool::new(false),
         had_real_client: AtomicBool::new(false),
         // Ephemeral (test) instances keep registrations with themselves, so they go away together.
+        places: Mutex::new(HashMap::new()),
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
     });
 
@@ -891,6 +912,11 @@ impl Daemon {
     fn persist(&self) {
         self.dirty.store(false, Ordering::Relaxed);
         let model = self.model.lock().unwrap().clone();
+        *self.places.lock().unwrap() = model
+            .workspaces
+            .iter()
+            .flat_map(|w| w.tabs.iter().flat_map(move |t| t.panes().into_iter().map(move |p| (p, (Some(w.id), Some(w.name.clone()), t.title.clone())))))
+            .collect();
         let meta: HashMap<String, Value> = self
             .panes
             .lock()
@@ -1357,7 +1383,23 @@ impl Daemon {
         }
         let attention = |a: &Option<Agent>| a.as_ref().is_some_and(|a| a.attention);
         if attention(&old) != attention(&p.agent) {
-            let alert = p.agent.as_ref().map(|a| crate::push::Alert { kind: a.kind.clone(), state: a.state.clone(), message: a.message.clone(), since: a.since });
+            let (workspace_id, workspace, tab) = self.places.lock().unwrap().get(&p.id).cloned().unwrap_or_default();
+            let dir = p.cwd.clone().or_else(|| p.agent.as_ref().and_then(|a| a.pid).and_then(platform::process_cwd).map(|c| c.display().to_string()));
+            let dir = dir.and_then(|d| std::path::Path::new(&d).file_name().map(|n| n.to_string_lossy().into_owned()));
+            let alert = p.agent.as_ref().map(|a| crate::push::Alert {
+                kind: a.kind.clone(),
+                state: a.state.clone(),
+                message: a.message.clone(),
+                since: a.since,
+                prompt: a.prompt.clone(),
+                tool: a.tool.clone().filter(|_| a.state == "waiting"),
+                tool_input: a.tool_input.clone().filter(|_| a.state == "waiting"),
+                duration: a.turn_started.filter(|_| a.state != "waiting").map(|t| (a.since - t).max(0.0).round() as u64),
+                workspace_id,
+                workspace,
+                tab,
+                project: dir,
+            });
             let quiet = p.agent.as_ref().is_some_and(|a| a.quiet);
             self.push.attention(p.id, attention(&p.agent), alert, quiet);
         }
@@ -1420,6 +1462,10 @@ impl Daemon {
                     guess: false,
                     muted: false,
                     quiet: false,
+                    prompt: None,
+                    tool: None,
+                    tool_input: None,
+                    turn_started: None,
                 });
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
@@ -1471,6 +1517,27 @@ impl Daemon {
         let prev = pp.agent.clone().filter(|a| a.source == "hook");
         // The agent is whatever owns the terminal while it reports.
         let pid = platform::foreground(pp.pid).map(|f| f.pgrp).filter(|g| *g != pp.pid).or(prev.as_ref().and_then(|a| a.pid));
+        // The turn: a prompt starts one (empty: one the user didn't type); so does work after the
+        // agent stopped. A new session starts afresh. Bounded like every reported text.
+        let text = |k: &str, max: usize| p.get(k).and_then(Value::as_str).map(|t| clotho_vt::printable(t, max));
+        let asked = text("prompt", AGENT_PROMPT_MAX);
+        let fresh = state == "starting";
+        let resumed = state == "running" && prev.as_ref().is_none_or(|a| !matches!(a.state.as_str(), "running" | "waiting"));
+        let new_turn = asked.is_some() || resumed || fresh;
+        let prompt = match asked {
+            Some(q) => Some(q).filter(|q| !q.is_empty()),
+            None if new_turn => None,
+            None => prev.as_ref().and_then(|a| a.prompt.clone()),
+        };
+        // A tool report brings both (the input may be absent); otherwise the turn's last stays.
+        // An empty tool clears it (a wait that isn't about a tool).
+        let (tool, tool_input) = match text("tool", AGENT_TOOL_NAME_MAX) {
+            Some(t) if t.is_empty() => (None, None),
+            Some(t) => (Some(t), text("tool_input", AGENT_TOOL_MAX).filter(|t| !t.is_empty())),
+            None if new_turn => (None, None),
+            None => (prev.as_ref().and_then(|a| a.tool.clone()), prev.as_ref().and_then(|a| a.tool_input.clone())),
+        };
+        let turn_started = if fresh { None } else if new_turn { Some(unix_now()) } else { prev.as_ref().and_then(|a| a.turn_started) };
         let a = Agent {
             kind: kind.or(prev.as_ref().map(|a| a.kind.clone())).unwrap_or_else(|| "other".into()),
             state: state.into(),
@@ -1483,6 +1550,10 @@ impl Daemon {
             guess: false,
             muted: false,
             quiet: false,
+            prompt,
+            tool,
+            tool_input,
+            turn_started,
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))

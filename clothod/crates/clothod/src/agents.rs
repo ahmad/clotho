@@ -29,6 +29,8 @@ fn try_report(args: &[String]) -> Result<()> {
     let mut kind: Option<String> = None;
     let mut message: Option<String> = None;
     let mut session: Option<String> = None;
+    // Turn context: what the user asked, the tool in use (agent.report's prompt/tool/tool_input).
+    let mut extra: Vec<(&str, String)> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -44,6 +46,11 @@ fn try_report(args: &[String]) -> Result<()> {
                 kind = Some("claude".into());
                 message = v["message"].as_str().map(String::from);
                 session = v["session_id"].as_str().map(String::from);
+                let (m, e) = claude_hook_context(&v);
+                if m.is_some() {
+                    message = m;
+                }
+                extra = e;
             }
             "--codex-notify" => {
                 let v: Value = serde_json::from_str(it.next().map(String::as_str).unwrap_or("{}"))?;
@@ -52,7 +59,10 @@ fn try_report(args: &[String]) -> Result<()> {
                 }
                 state = Some("done".into());
                 kind = Some("codex".into());
-                message = v["last-assistant-message"].as_str().map(|m| m.chars().take(300).collect());
+                message = v["last-assistant-message"].as_str().map(|m| one_line(m, RESULT_MAX));
+                // The user's messages in this turn, oldest first: the last one is what they asked.
+                let asked = v["input-messages"].as_array().and_then(|m| m.last()).and_then(Value::as_str).map(user_prompt);
+                extra.extend(asked.map(|q| ("prompt", q)));
             }
             s if !s.starts_with("--") && state.is_none() => state = Some(s.into()),
             _ => {}
@@ -64,6 +74,9 @@ fn try_report(args: &[String]) -> Result<()> {
         if let Some(v) = v {
             params[k] = json!(v);
         }
+    }
+    for (k, v) in extra {
+        params[k] = json!(v);
     }
     // The pane's daemon: named by the pane's environment (newer holders), else the default
     // socket, else any registered daemon. Each checks `pid` is really in its pane and refuses
@@ -119,6 +132,81 @@ fn claude_hook_state(v: &Value) -> Option<&'static str> {
         "SessionEnd" => "clear",
         _ => return None,
     })
+}
+
+/// Longest result (an agent's last reply), prompt line and tool input sent, in chars.
+const RESULT_MAX: usize = 300;
+const PROMPT_MAX: usize = 120;
+const TOOL_INPUT_MAX: usize = 160;
+
+/// `text` on one line: whitespace runs (newlines too) become one space; at most `max` chars.
+fn one_line(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for w in text.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+        if out.chars().count() >= max {
+            break;
+        }
+    }
+    out.chars().take(max).collect()
+}
+
+/// The first line of a prompt the user typed, or "" for one the agent's app injected (another
+/// agent's message, a finished background task): "" tells the daemon the turn has no prompt,
+/// rather than show the wrapper's text.
+fn user_prompt(prompt: &str) -> String {
+    let t = prompt.trim_start();
+    let injected = t.starts_with('<') || ["<cross-session-message", "<task-notification", "<teammate-message"].iter().any(|w| prompt.contains(w));
+    if injected {
+        return String::new();
+    }
+    one_line(t.lines().find(|l| !l.trim().is_empty()).unwrap_or(""), PROMPT_MAX)
+}
+
+/// A tool call's key input: the command, the file, the pattern, the URL... else its first text.
+fn tool_input(name: &str, input: &Value) -> Option<String> {
+    let key = match name {
+        "Bash" => "command",
+        "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_path",
+        "Glob" | "Grep" => "pattern",
+        "WebFetch" => "url",
+        "WebSearch" => "query",
+        "Task" | "Agent" => "description",
+        _ => "",
+    };
+    let text = input.get(key).and_then(Value::as_str).or_else(|| input.as_object()?.values().find_map(Value::as_str))?;
+    Some(one_line(text, TOOL_INPUT_MAX))
+}
+
+/// The turn context in a Claude Code hook's payload: a message that replaces the hook's own
+/// (the reply a turn ended with), and agent.report's prompt / tool / tool_input.
+fn claude_hook_context(v: &Value) -> (Option<String>, Vec<(&'static str, String)>) {
+    match v["hook_event_name"].as_str().unwrap_or("") {
+        "UserPromptSubmit" => (None, vec![("prompt", v["prompt"].as_str().map(user_prompt).unwrap_or_default())]),
+        "PreToolUse" => {
+            let Some(name) = v["tool_name"].as_str() else { return (None, vec![]) };
+            let mut e = vec![("tool", name.chars().take(64).collect())];
+            e.extend(tool_input(name, &v["tool_input"]).map(|i| ("tool_input", i)));
+            (None, e)
+        }
+        // Only a permission prompt is about the tool in use: any other wait (a question)
+        // clears it, so the phone never offers to allow a tool the question isn't about.
+        "Notification" if !is_permission(v) => (None, vec![("tool", String::new())]),
+        "Stop" => (v["last_assistant_message"].as_str().map(|m| one_line(m, RESULT_MAX)).filter(|m| !m.is_empty()), vec![]),
+        _ => (None, vec![]),
+    }
+}
+
+/// A Notification asking permission for a tool: `permission_prompt`, or (older Claude Code,
+/// no type) a message that says so.
+fn is_permission(v: &Value) -> bool {
+    match v["notification_type"].as_str() {
+        Some(t) => t == "permission_prompt",
+        None => v["message"].as_str().is_some_and(|m| m.contains("permission")),
+    }
 }
 
 /// One attempt: Ok(true) if this daemon took the report.
@@ -446,6 +534,34 @@ pub fn hooks(args: &[String], install_self: impl Fn() -> Result<()>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_payloads_give_the_turns_context() {
+        let ctx = |j: &str| claude_hook_context(&serde_json::from_str(j).unwrap());
+        // The prompt's first non-empty line, bounded; injected prompts give "" (no prompt).
+        assert_eq!(ctx(r#"{"hook_event_name":"UserPromptSubmit","prompt":"\n  fix the build\nand test"}"#).1, vec![("prompt", "fix the build".to_string())]);
+        assert_eq!(user_prompt(&"é".repeat(500)).chars().count(), PROMPT_MAX);
+        for injected in ["Another Claude session sent a message:\n<cross-session-message from=\"x\">hi</cross-session-message>", "<task-notification>\n<task-id>b1</task-id>", "<command-name>/compact</command-name>"] {
+            assert_eq!(user_prompt(injected), "", "{injected}");
+        }
+        assert_eq!(user_prompt("/compact"), "/compact");
+        // A tool's key input.
+        let tool = |name: &str, input: &str| tool_input(name, &serde_json::from_str(input).unwrap());
+        assert_eq!(tool("Bash", r#"{"command":"npm  test\n&& ls","description":"Run"}"#).as_deref(), Some("npm test && ls"));
+        assert_eq!(tool("Edit", r#"{"file_path":"/a/b.rs","old_string":"x"}"#).as_deref(), Some("/a/b.rs"));
+        assert_eq!(tool("mcp__ember__send", r#"{"text":"hello"}"#).as_deref(), Some("hello"));
+        assert_eq!(tool("Bash", "{}"), None);
+        assert_eq!(ctx(r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}"#).1, vec![("tool", "Bash".to_string()), ("tool_input", "npm test".to_string())]);
+        // The reply a turn ended with, on one line, at most RESULT_MAX chars.
+        let (m, _) = ctx(r#"{"hook_event_name":"Stop","last_assistant_message":"Done.\n\n- one\n- two"}"#);
+        assert_eq!(m.as_deref(), Some("Done. - one - two"));
+        let long = format!(r#"{{"hook_event_name":"Stop","last_assistant_message":"{}"}}"#, "word ".repeat(200));
+        assert_eq!(ctx(&long).0.unwrap().chars().count(), RESULT_MAX);
+        // A permission prompt keeps the turn's tool; any other wait clears it.
+        assert!(ctx(r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt"}"#).1.is_empty());
+        assert!(ctx(r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#).1.is_empty());
+        assert_eq!(ctx(r#"{"hook_event_name":"Notification","message":"Claude needs your input","notification_type":"elicitation_dialog"}"#).1, vec![("tool", String::new())]);
+    }
 
     /// Payloads as Claude Code 2.1.312 sends them (logged from a real session; paths and ids
     /// shortened): which events move the agent's state and which leave it alone.
