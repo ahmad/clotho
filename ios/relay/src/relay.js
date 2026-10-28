@@ -205,7 +205,8 @@ export function activityRequest(body) {
   if (!["update", "end"].includes(event) || !isTime(timestamp)) return null;
   if (!content || typeof content !== "object" || Array.isArray(content)) return null;
   for (const key of Object.keys(content)) {
-    if (!["state", "kind", "since", "started"].includes(key) && !TEXT[key]?.(content[key])) return null;
+    // Own keys only: "constructor", "toString" or "__proto__" must not find something on the prototype.
+    if (!["state", "kind", "since", "started"].includes(key) && !(Object.hasOwn(TEXT, key) && TEXT[key](content[key]))) return null;
   }
   if (!WORD.test(content.state) || !WORD.test(content.kind) || !isTime(content.since) || !isTime(content.started)) return null;
   if (new TextEncoder().encode(JSON.stringify(content)).length > CONTENT_MAX) return null;

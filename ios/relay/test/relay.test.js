@@ -1,7 +1,7 @@
 // node --test relay/test
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { apnsDeliver, handle, openHandle, unb64url } from "../src/relay.js";
+import { activityRequest, apnsDeliver, handle, openHandle, unb64url } from "../src/relay.js";
 
 const keyPair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
 const pkcs8 = Buffer.from(await crypto.subtle.exportKey("pkcs8", keyPair.privateKey)).toString("base64");
@@ -207,6 +207,20 @@ test("activity text is capped, one line, and only under known keys", async () =>
   for (const content of bad) {
     const res = await handle(post("/v1/activity", activity(h, { content })), ENV, { deliver });
     assert.equal(res.status, 400, JSON.stringify(content));
+  }
+});
+
+test("activity content keys are looked up as own keys only", async () => {
+  const h = await register();
+  const deliver = async () => assert.fail("must not deliver");
+  for (const key of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    // As the Worker reads it: JSON.parse makes "__proto__" an own key.
+    const raw = `{"state":"running","kind":"claude","since":1,"started":1,${JSON.stringify(key)}:"x"}`;
+    const body = { ...activity(h), content: JSON.parse(raw) };
+    assert.ok(Object.keys(body.content).includes(key), key);
+    assert.equal(activityRequest(body), null, key);
+    const res = await handle(post("/v1/activity", body), ENV, { deliver });
+    assert.equal(res.status, 400, key);
   }
 });
 
