@@ -76,12 +76,14 @@ struct PushAlert: Codable, Equatable, Sendable {
     var cmd: String?
     /// Done and error: seconds since the turn started.
     var d: Double?
+    /// A permission request's id (clothod 0.1.13): the alert can answer it with Allow or Deny.
+    var rq: String?
 
     init(v: Int = 1, m: String, p: UInt64, k: String, s: String, msg: String? = nil, t: Double? = nil,
          w: String? = nil, wid: UInt64? = nil, tb: String? = nil, pj: String? = nil, q: String? = nil,
-         tool: String? = nil, cmd: String? = nil, d: Double? = nil) {
+         tool: String? = nil, cmd: String? = nil, d: Double? = nil, rq: String? = nil) {
         self.v = v; self.m = m; self.p = p; self.k = k; self.s = s; self.msg = msg; self.t = t
-        self.w = w; self.wid = wid; self.tb = tb; self.pj = pj; self.q = q; self.tool = tool; self.cmd = cmd; self.d = d
+        self.w = w; self.wid = wid; self.tb = tb; self.pj = pj; self.q = q; self.tool = tool; self.cmd = cmd; self.d = d; self.rq = rq
     }
 
     /// The alert's text (ClothoKit's AgentNotice, the same as the app's own banner and the Mac's). With no
@@ -120,7 +122,9 @@ struct PushAlert: Codable, Equatable, Sendable {
         info.removeValue(forKey: "e")
         info["machine"] = target.machine.uuidString
         info["pane"] = NSNumber(value: alert.p)
+        if let rq = alert.rq, alert.s == "waiting" { info["request"] = rq }
         out.userInfo = info
+        out.categoryIdentifier = AlertActions.category(state: alert.s, request: alert.rq)
         return out
     }
 
@@ -164,5 +168,38 @@ enum AlertText {
     static func thread(machine: UUID, workspace: String?) -> String {
         guard let workspace, !workspace.isEmpty else { return machine.uuidString }
         return machine.uuidString + "/" + workspace
+    }
+}
+
+/// What an agent alert lets the user do without opening the app: answer a permission request (Allow, which needs
+/// the phone unlocked, Deny, or Deny with a reason the agent is told), or reply to a waiting or finished agent.
+/// The same for a push (the extension sets the category) and the app's own banner.
+enum AlertActions {
+    static let permissionCategory = "agent.permission"
+    static let replyCategory = "agent.reply"
+    static let allow = "allow"
+    static let deny = "deny"
+    static let denyWithReason = "denyReason"
+    static let reply = "reply"
+
+    /// A waiting agent with a request id is a permission request; other waits and finished turns take a reply.
+    static func category(state: String, request: String?) -> String {
+        if state == "waiting", let request, !request.isEmpty { return permissionCategory }
+        return state == "waiting" || state == "done" ? replyCategory : ""
+    }
+
+    static var categories: Set<UNNotificationCategory> {
+        let allowAction = UNNotificationAction(identifier: allow, title: "Allow", options: [.authenticationRequired])
+        let denyAction = UNNotificationAction(identifier: deny, title: "Deny", options: [.destructive])
+        let reasonAction = UNTextInputNotificationAction(identifier: denyWithReason, title: "Deny with Reason…",
+                                                         options: [.destructive], textInputButtonTitle: "Deny",
+                                                         textInputPlaceholder: "Tell the agent why")
+        let replyAction = UNTextInputNotificationAction(identifier: reply, title: "Reply", options: [],
+                                                        textInputButtonTitle: "Send", textInputPlaceholder: "Message")
+        return [
+            UNNotificationCategory(identifier: permissionCategory, actions: [allowAction, denyAction, reasonAction],
+                                   intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: replyCategory, actions: [replyAction], intentIdentifiers: [], options: []),
+        ]
     }
 }

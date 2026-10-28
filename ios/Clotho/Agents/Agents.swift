@@ -105,6 +105,33 @@ extension MachineConnection {
         run("Acknowledge") { try await $0.ackAgent(pane) }
     }
 
+    /// Whether this machine answers permission requests (`agent.decide`, clothod 0.1.13).
+    var canDecide: Bool { store.isConnected && store.features.contains(.agentDecide) }
+
+    enum DecideResult: Equatable {
+        case done
+        /// Answered already (here, on another device or in the terminal), or the request moved on.
+        case alreadyAnswered
+        case failed(String)
+    }
+
+    /// Answers one permission request, by its id, exactly once. A stale request is not an error to retry:
+    /// someone answered it, or the turn moved on.
+    func decide(_ pane: PaneID, request: String, decision: PermissionDecision, message: String? = nil) async -> DecideResult {
+        do {
+            try await store.backend.decide(pane: pane, request: request, decision: decision,
+                                           message: decision == .deny ? (message ?? "Denied from the phone") : nil)
+            answered[pane] = decision
+            objectWillChange.send()
+            return .done
+        } catch let error as BackendError where error.isStale {
+            return .alreadyAnswered
+        } catch {
+            log("[\(machine.displayName)] decide failed: \(error.localizedDescription)")
+            return .failed(error.localizedDescription)
+        }
+    }
+
     /// Whether this machine's daemon takes `pane.keys`, which quick replies need: a bare CR doesn't submit once
     /// an agent turns on the kitty keyboard protocol, and only the daemon knows the pane's current modes.
     /// Older daemons get no reply action (never a raw-CR fallback).
@@ -149,6 +176,19 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = AgentNotifier()
     /// The user tapped a notification; the home screen opens that pane.
     var onOpen: ((UUID, PaneID) -> Void)?
+    /// The user picked one of a notification's actions (Allow, Deny, Reply); RootView carries it out. Actions
+    /// that arrive before it's set (a background launch for the action) wait for it.
+    var onAction: ((AlertAction) async -> Void)? {
+        didSet {
+            guard let onAction else { return }
+            let waiting = pendingActions
+            pendingActions = []
+            for (action, done) in waiting {
+                Task { await onAction(action); done() }
+            }
+        }
+    }
+    private var pendingActions: [(AlertAction, () -> Void)] = []
     /// Whether the app has a live connection to a machine, whose own notifications make its pushes redundant.
     var isLive: ((UUID) -> Bool)?
     private var authorized = false
@@ -160,6 +200,7 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// until there's a machine whose agents can need the user (the guide's step, or `promptIfUndecided`).
     func setUp() {
         UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().setNotificationCategories(AlertActions.categories)
         refreshAuthorization()
         // UI tests other than the guide's expect the prompt at launch, as before the guide had a step for it.
         let arguments = ProcessInfo.processInfo.arguments
@@ -216,7 +257,11 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
         AlertText.apply(notice(machine: machine, place: place, agent: after), to: content)
         content.threadIdentifier = AlertText.thread(machine: machine.id, workspace: place.workspaceID.map(String.init) ?? place.workspace)
         content.sound = .default
-        content.userInfo = ["machine": machine.id.uuidString, "pane": pane]
+        var info: [String: Any] = ["machine": machine.id.uuidString, "pane": pane]
+        let request = after.state == .waiting ? after.pendingRequests.first?.id : nil
+        if let request { info["request"] = request }
+        content.userInfo = info
+        content.categoryIdentifier = AlertActions.category(state: after.state.rawValue, request: request)
         let label = PushLabel.make(machine: machine.id, name: machine.displayName)
         return UNNotificationRequest(identifier: PushLabel.collapseID(label: label, pane: pane), content: content, trigger: nil)
     }
@@ -258,9 +303,46 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let info = response.notification.request.content.userInfo
-        if let machine = (info["machine"] as? String).flatMap(UUID.init(uuidString:)), let pane = (info["pane"] as? NSNumber)?.uint64Value {
-            Task { @MainActor in self.onOpen?(machine, pane) }
+        guard let machine = (info["machine"] as? String).flatMap(UUID.init(uuidString:)),
+              let pane = (info["pane"] as? NSNumber)?.uint64Value else { return completionHandler() }
+        let request = info["request"] as? String
+        let text = (response as? UNTextInputNotificationResponse)?.userText
+        let kind: AlertAction.Kind?
+        switch response.actionIdentifier {
+        case AlertActions.allow: kind = .allow
+        case AlertActions.deny: kind = .deny(reason: nil)
+        case AlertActions.denyWithReason: kind = .deny(reason: text)
+        case AlertActions.reply: kind = .reply(text ?? "")
+        default: kind = nil
         }
-        completionHandler()
+        guard let kind else {
+            Task { @MainActor in self.onOpen?(machine, pane) }
+            return completionHandler()
+        }
+        // Done only once the machine has the answer (or it couldn't be reached), within iOS's background time.
+        let action = AlertAction(machine: machine, pane: pane, request: request, kind: kind)
+        Task { @MainActor in
+            if let onAction = self.onAction {
+                await onAction(action)
+                completionHandler()
+            } else {
+                self.pendingActions.append((action, completionHandler))
+            }
+        }
     }
+}
+
+/// A notification action to carry out on a machine.
+struct AlertAction: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case allow
+        case deny(reason: String?)
+        case reply(String)
+    }
+
+    var machine: UUID
+    var pane: PaneID
+    /// The permission request it answers (Allow, Deny).
+    var request: String?
+    var kind: Kind
 }

@@ -1,5 +1,6 @@
 import ClothoKit
 import SwiftUI
+import UIKit
 
 /// The top of the home screen: agents on every connected machine that need the user, each with Resolve,
 /// then a folded "Quiet" group with the rest (running, idle and resolved ones).
@@ -53,14 +54,17 @@ struct AgentsSection: View {
 
     private func attentionRow(_ row: AgentRow) -> some View {
         let connection = connections.existing(row.machineID)
-        return HStack(spacing: 8) {
-            Button { open(row) } label: { AgentRowView(row: row) }
-                .buttonStyle(.plain)
-            Button { resolve(row) } label: {
-                Image(systemName: "checkmark.circle").font(.title3)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button { open(row) } label: { AgentRowView(row: row) }
+                    .buttonStyle(.plain)
+                Button { resolve(row) } label: {
+                    Image(systemName: "checkmark.circle").font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Resolve")
             }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Resolve")
+            if let connection { PermissionButtons(row: row, connection: connection) }
         }
         .swipeActions(edge: .trailing) {
             Button { resolve(row) } label: { Label("Resolve", systemImage: "checkmark") }
@@ -207,6 +211,65 @@ extension AgentRowView {
         case ..<3600: return "\(seconds / 60)m"
         case ..<86400: return "\(seconds / 3600)h"
         default: return "\(seconds / 86400)d"
+        }
+    }
+}
+
+/// Allow and Deny for an agent's pending permission request (`agent.decide`), on its card. They answer that
+/// request by id, so a late tap can't approve a different prompt; Claude's own dialog in the terminal stays
+/// up too, and whichever answers first wins.
+struct PermissionButtons: View {
+    let row: AgentRow
+    @ObservedObject var connection: MachineConnection
+    @State private var working = false
+    @State private var note: String?
+
+    var body: some View {
+        if let answered = connection.answered[row.pane] {
+            Label(answered == .allow ? "Allowed" : "Denied", systemImage: answered == .allow ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(answered == .allow ? .green : .red)
+                .accessibilityIdentifier("answered")
+        } else if let request = row.info.pendingRequests.first, connection.canDecide, row.wantsAttention {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(request.question).font(.callout.weight(.medium)).lineLimit(3)
+                HStack(spacing: 10) {
+                    Button { answer(request, .allow) } label: {
+                        Label("Allow", systemImage: "checkmark").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent).tint(.green)
+                    .accessibilityIdentifier("allowRequest")
+                    Button(role: .destructive) { answer(request, .deny) } label: {
+                        Label("Deny", systemImage: "xmark").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("denyRequest")
+                }
+                .controlSize(.large)
+                .disabled(working)
+                if row.info.pendingRequests.count > 1 {
+                    Text("\(row.info.pendingRequests.count - 1) more waiting after this one")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.leading, 30)
+        }
+        if let note {
+            Text(note).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("decideNote")
+        }
+    }
+
+    private func answer(_ request: PermissionRequest, _ decision: PermissionDecision) {
+        working = true
+        note = nil
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        Task {
+            switch await connection.decide(row.pane, request: request.id, decision: decision) {
+            case .done: break
+            case .alreadyAnswered: note = "Already answered."
+            case .failed(let message): note = "Couldn't answer: \(message)"
+            }
+            working = false
         }
     }
 }

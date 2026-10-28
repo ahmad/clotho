@@ -93,6 +93,9 @@ struct RootView: View {
         .onAppear {
             AgentNotifier.shared.onOpen = { machine, pane in openPane(machine: machine, pane: pane) }
             AgentNotifier.shared.isLive = { [connections] id in connections.existing(id)?.store.isConnected == true }
+            AgentNotifier.shared.onAction = { [machines, connections] action in
+                await AlertActionRunner.run(action, machines: machines, connections: connections)
+            }
         }
         .fullScreenCover(item: $navigator.guide) { mode in
             OnboardingView(mode: mode) { opened in

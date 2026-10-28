@@ -121,3 +121,56 @@ final class AlertDetailTests: XCTestCase {
         XCTAssertEqual(banner.content.body, "Allow Bash: npm test?")
     }
 }
+
+/// Phase 4: what a notification lets the user do (docs/ios-redesign.md).
+final class AlertActionTests: XCTestCase {
+    func testCategories() {
+        XCTAssertEqual(AlertActions.category(state: "waiting", request: "a1b2"), AlertActions.permissionCategory)
+        XCTAssertEqual(AlertActions.category(state: "waiting", request: nil), AlertActions.replyCategory, "a question takes a reply")
+        XCTAssertEqual(AlertActions.category(state: "done", request: nil), AlertActions.replyCategory)
+        XCTAssertEqual(AlertActions.category(state: "done", request: "a1b2"), AlertActions.replyCategory, "a stale id on a finished turn")
+        XCTAssertEqual(AlertActions.category(state: "error", request: nil), "")
+        let permission = AlertActions.categories.first { $0.identifier == AlertActions.permissionCategory }
+        let allow = permission?.actions.first { $0.identifier == AlertActions.allow }
+        XCTAssertTrue(allow?.options.contains(.authenticationRequired) == true, "Allow needs the phone unlocked")
+        XCTAssertTrue(permission?.actions.contains { $0 is UNTextInputNotificationAction && $0.identifier == AlertActions.denyWithReason } == true)
+    }
+
+    /// A push with `rq` from clothod becomes an actionable alert carrying the request id.
+    func testPushWithRequestIsActionable() throws {
+        let key = Curve25519.KeyAgreement.PrivateKey()
+        let machine = UUID()
+        let label = PushLabel.make(machine: machine, name: "devbox")
+        let collapse = PushLabel.collapseID(label: label, pane: 7)
+        let alert = PushAlert(m: label, p: 7, k: "claude", s: "waiting", msg: "Claude needs your permission to use Bash",
+                              w: "Platform", wid: 3, tool: "Bash", cmd: "npm test", rq: "9f1c2d3e4a5b6c7d")
+        let content = UNMutableNotificationContent()
+        content.threadIdentifier = collapse
+        content.userInfo = ["e": try PushAlert.seal(alert, collapseID: collapse, to: key.publicKey)]
+        let out = try XCTUnwrap(PushAlert.decrypt(content, key: key))
+        XCTAssertEqual(out.categoryIdentifier, AlertActions.permissionCategory)
+        XCTAssertEqual(out.userInfo["request"] as? String, "9f1c2d3e4a5b6c7d")
+        XCTAssertEqual(out.body, "Allow Bash: npm test?")
+
+        // An older daemon's waiting alert (no rq): a reply, no request.
+        let old = PushAlert(m: label, p: 7, k: "claude", s: "waiting", msg: "Which database?")
+        content.userInfo = ["e": try PushAlert.seal(old, collapseID: collapse, to: key.publicKey)]
+        let plain = try XCTUnwrap(PushAlert.decrypt(content, key: key))
+        XCTAssertEqual(plain.categoryIdentifier, AlertActions.replyCategory)
+        XCTAssertNil(plain.userInfo["request"])
+    }
+
+    /// The app's own banner for a permission wait carries the oldest request, like the push.
+    @MainActor
+    func testBannerCarriesTheRequest() throws {
+        let m = Machine(name: "devbox", host: "devbox", user: "ahmad")
+        let running = AgentInfo(kind: "claude", state: .running, source: "hook", attention: false)
+        let waiting = AgentInfo(kind: "claude", state: .waiting, source: "hook", message: "Claude needs your permission to use Bash",
+                                attention: true, requests: [PermissionRequest(id: "a1", tool: "Bash", summary: "npm test"),
+                                                            PermissionRequest(id: "b2", tool: "Read", summary: "x")])
+        let banner = try XCTUnwrap(AgentNotifier.banner(machine: m, pane: 7, place: .init(workspace: "Platform", workspaceID: 3, tab: "t"),
+                                                        before: running, after: waiting))
+        XCTAssertEqual(banner.content.categoryIdentifier, AlertActions.permissionCategory)
+        XCTAssertEqual(banner.content.userInfo["request"] as? String, "a1")
+    }
+}

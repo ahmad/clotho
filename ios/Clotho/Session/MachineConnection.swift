@@ -53,6 +53,9 @@ final class MachineConnection: ObservableObject, Identifiable {
 
     /// Fake agents (see `FakeAgents`) the user acknowledged.
     var fakeAcked: Set<PaneID> = []
+    /// Permission requests answered from this phone, per pane, until the agent moves on: the daemon drops the
+    /// request at once, but the agent stays waiting until the tool runs (allow) or Claude carries on (deny).
+    var answered: [PaneID: PermissionDecision] = [:]
     var fakeMuted: Set<PaneID> = []
 
     private var panes: [PaneID: PaneHostView] = [:]
@@ -92,6 +95,7 @@ final class MachineConnection: ObservableObject, Identifiable {
         }
         store.onAgentChange = { [weak self] pane, before, after in
             guard let self else { return }
+            if after?.state != .waiting || after?.pendingRequests.isEmpty == false { self.answered[pane] = nil }
             let location = self.store.state.location(of: pane)
             let place = AgentNotifier.Place(workspace: location?.workspace.name, workspaceID: location?.workspace.id,
                                             tab: location.map { self.store.displayTitle(of: $0.tab) } ?? "",
