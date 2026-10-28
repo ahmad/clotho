@@ -71,17 +71,13 @@ struct HomeView: View {
             .sheet(item: $editing) { machine in
                 MachineEditor(machine: machine) { machines.save($0) }
             }
-            .sheet(item: $sheet) { sheet in
+            // Pushed, as from the old machine screen: in a sheet the file editor didn't take the keyboard.
+            .navigationDestination(item: $sheet) { sheet in
                 if let machine = machines.machine(sheet.machine) {
                     let connection = connections.connection(for: machine)
-                    NavigationStack {
-                        Group {
-                            switch sheet {
-                            case .files: FileBrowserView(connection: connection, path: FileBrowserView.startPath(connection))
-                            case .settings: MachineSettingsView(connection: connection)
-                            }
-                        }
-                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { self.sheet = nil } } }
+                    switch sheet {
+                    case .files: FileBrowserView(connection: connection, path: FileBrowserView.startPath(connection))
+                    case .settings: MachineSettingsView(connection: connection)
                     }
                 }
             }
@@ -89,7 +85,7 @@ struct HomeView: View {
     }
 }
 
-/// A machine's Files or Settings, from its header menu.
+/// A machine's Files or Settings, from its header menu (pushed onto Home's stack).
 enum MachineSheet: Identifiable, Hashable {
     case files(UUID)
     case settings(UUID)

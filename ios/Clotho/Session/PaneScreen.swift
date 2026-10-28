@@ -175,35 +175,38 @@ struct PaneScreen: View {
     }
 
     /// How the last (re)subscribe resumed, briefly: live or replay means no reload happened.
-    @ViewBuilder private var resumeBadge: some View {
-        if let mode {
-            Text(mode.rawValue)
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("resumeMode")
-                .task(id: mode) {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    self.mode = nil
-                }
-        }
+    // Both notes stay in the toolbar and only fade: adding or removing a toolbar item rebuilds the toolbar,
+    // which closes the Pane actions menu if it's open.
+    private var resumeBadge: some View {
+        Text(mode?.rawValue ?? "live")
+            .font(.caption2.monospaced())
+            .foregroundStyle(.secondary)
+            .opacity(mode == nil ? 0 : 1)
+            .accessibilityHidden(mode == nil)
+            .accessibilityIdentifier("resumeMode")
+            .task(id: mode) {
+                guard mode != nil else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                self.mode = nil
+            }
     }
 
     /// A short "Copied" after the pane (Claude Code, Codex, any OSC 52 app) put text on the clipboard.
-    @ViewBuilder private var copiedBadge: some View {
-        if copies > 0 {
-            // In the navigation bar, like the other short notes, so it never covers the pane's text.
-            Label("Copied", systemImage: "doc.on.clipboard")
-                .labelStyle(.titleAndIcon)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .transition(.opacity)
-                .accessibilityIdentifier("copiedBadge")
-                .allowsHitTesting(false)
-                .task(id: copies) {
-                    try? await Task.sleep(nanoseconds: 1_200_000_000)
-                    withAnimation { copies = 0 }
-                }
-        }
+    private var copiedBadge: some View {
+        // In the navigation bar, like the other short notes, so it never covers the pane's text.
+        Label("Copied", systemImage: "doc.on.clipboard")
+            .labelStyle(.titleAndIcon)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .opacity(copies > 0 ? 1 : 0)
+            .accessibilityHidden(copies == 0)
+            .accessibilityIdentifier("copiedBadge")
+            .allowsHitTesting(false)
+            .task(id: copies) {
+                guard copies > 0 else { return }
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                withAnimation { copies = 0 }
+            }
     }
 
     /// The tab's title; setting it (from the title's Rename) renames the tab on the machine.
