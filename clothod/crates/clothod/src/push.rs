@@ -120,8 +120,10 @@ struct Activity {
     last_error: Option<String>,
 }
 
-/// What a Live Activity shows: generic only, never text (docs/push.md, Live Activity).
-#[derive(Clone, Debug, PartialEq)]
+/// What a Live Activity shows (docs/push.md, Live Activity): the agent's state and times, and
+/// the detail notifications carry. That text goes in the clear to the relay and Apple (the user's
+/// choice, PLAN.md "Live Activity detail").
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Live {
     pub kind: String,
     /// running, waiting, done or error.
@@ -130,6 +132,54 @@ pub struct Live {
     pub since: u64,
     /// When the turn began, else `since`: the activity's elapsed timer.
     pub started: u64,
+    /// The tool it's in or asks about ("Bash"), for running and waiting.
+    pub tool: Option<String>,
+    /// That tool's key input: the command or file path.
+    pub detail: Option<String>,
+    /// Done: its last message. Error: the error. Waiting: what it asks.
+    pub msg: Option<String>,
+}
+
+/// The relay's limits on the detail keys (it refuses more with a 400). Counted in bytes of the
+/// key's JSON string, escapes included: at least the UTF-16 units the relay counts, and the
+/// three together stay well inside its 1024-byte content cap.
+pub const LIVE_TOOL_MAX: usize = 64;
+pub const LIVE_DETAIL_MAX: usize = 200;
+pub const LIVE_MSG_MAX: usize = 300;
+
+/// One line of text for an activity: control characters and line separators become spaces, runs of space fold,
+/// and it's cut to `max` bytes as a JSON string (without its quotes), ending "…" when cut.
+/// None when nothing is left.
+pub fn live_text(text: &str, max: usize) -> Option<String> {
+    let mut line = String::new();
+    for c in text.chars() {
+        let c = if c.is_control() || c == '\u{2028}' || c == '\u{2029}' { ' ' } else { c };
+        if c == ' ' && (line.is_empty() || line.ends_with(' ')) {
+            continue;
+        }
+        line.push(c);
+    }
+    let line = line.trim_end();
+    if line.is_empty() {
+        return None;
+    }
+    let size = |c: char| match c {
+        '"' | '\\' => 2,
+        c => c.len_utf8(),
+    };
+    if line.chars().map(size).sum::<usize>() <= max {
+        return Some(line.to_string());
+    }
+    let mut out = String::new();
+    let mut used = 3; // "…"
+    for c in line.chars() {
+        if used + size(c) > max {
+            break;
+        }
+        used += size(c);
+        out.push(c);
+    }
+    Some(format!("{}…", out.trim_end()))
 }
 
 impl Live {
@@ -139,7 +189,17 @@ impl Live {
         if !kind.starts_with(|c: char| c.is_ascii_lowercase()) {
             kind = "other".into();
         }
-        json!({"state": self.state, "kind": kind, "since": self.since, "started": self.started})
+        let mut c = json!({"state": self.state, "kind": kind, "since": self.since, "started": self.started});
+        // Optional, and left out when absent: older apps decode the four keys above.
+        let tool = self.tool.as_deref().filter(|t| (1..=LIVE_TOOL_MAX).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b)));
+        let detail = self.detail.as_deref().and_then(|d| live_text(d, LIVE_DETAIL_MAX));
+        let msg = self.msg.as_deref().and_then(|m| live_text(m, LIVE_MSG_MAX));
+        for (k, v) in [("tool", tool.map(str::to_string)), ("detail", detail), ("msg", msg)] {
+            if let Some(v) = v {
+                c[k] = json!(v);
+            }
+        }
+        c
     }
 
     fn ended(&self) -> bool {
@@ -905,13 +965,47 @@ mod tests {
 
     #[test]
     fn live_activity_kinds_fit_the_relay() {
-        let kind = |k: &str| Live { kind: k.into(), state: "running".into(), since: 1, started: 1 }.content()["kind"].as_str().unwrap().to_string();
+        let kind = |k: &str| Live { kind: k.into(), state: "running".into(), since: 1, started: 1, ..Default::default() }.content()["kind"].as_str().unwrap().to_string();
         assert_eq!(kind("claude"), "claude");
         assert_eq!(kind("Claude Code"), "claude-code");
         assert_eq!(kind("9lives"), "other");
         assert_eq!(kind(""), "other");
         assert_eq!(kind("ünï"), "other");
         assert_eq!(kind(&"a".repeat(40)).len(), 32);
+    }
+
+    #[test]
+    fn live_activity_detail_fits_the_relay() {
+        let live = |tool: Option<&str>, detail: Option<&str>, msg: Option<&str>| {
+            Live { kind: "claude".into(), state: "waiting".into(), since: 1, started: 1, tool: tool.map(Into::into), detail: detail.map(Into::into), msg: msg.map(Into::into) }.content()
+        };
+        // Absent keys are left out: older apps decode the rest.
+        let bare = live(None, None, None);
+        assert_eq!(bare.as_object().unwrap().len(), 4, "{bare}");
+        let c = live(Some("Bash"), Some("npm test\n  && echo ok"), Some("Claude needs\tyour permission"));
+        assert_eq!((c["tool"].as_str(), c["detail"].as_str(), c["msg"].as_str()), (Some("Bash"), Some("npm test && echo ok"), Some("Claude needs your permission")));
+        // Tools the relay wouldn't take are left out; empty text too.
+        assert_eq!(live(Some("mcp__github__create_pr"), None, None)["tool"], "mcp__github__create_pr");
+        for t in ["", "two words", "naïve", &"a".repeat(65)] {
+            assert!(live(Some(t), None, None).get("tool").is_none(), "{t}");
+        }
+        assert!(live(None, Some(" \n\t "), Some("")).as_object().unwrap().len() == 4);
+        // Line separators go too; caps hold in UTF-8 bytes of the escaped string, ellipsis
+        // included, whatever the text.
+        assert_eq!(live_text("a\u{2028}b\u{2029}c\u{85}d", 100).as_deref(), Some("a b c d"));
+        for text in ["x".repeat(1000), "é".repeat(1000), "🙂".repeat(1000), "\"".repeat(1000), "\\".repeat(1000), format!("a{}", "😀".repeat(500))] {
+            let c = live(None, Some(&text), Some(&text));
+            for (k, max) in [("detail", LIVE_DETAIL_MAX), ("msg", LIVE_MSG_MAX)] {
+                let v = c[k].as_str().unwrap();
+                let escaped = serde_json::to_string(v).unwrap().len() - 2;
+                assert!(escaped <= max && escaped > max - 8, "{k}: {escaped} bytes");
+                assert!(v.ends_with('…') && v.chars().count() <= max && v.encode_utf16().count() <= max);
+            }
+        }
+        assert_eq!(live_text(&"y".repeat(LIVE_MSG_MAX), LIVE_MSG_MAX).unwrap().len(), LIVE_MSG_MAX, "exactly at the cap: kept whole");
+        // The worst case stays well inside the relay's content cap.
+        let worst = live(Some(&"m".repeat(64)), Some(&"\"".repeat(999)), Some(&"🙂".repeat(999)));
+        assert!(worst.to_string().len() < 1024, "{}", worst.to_string().len());
     }
 
     #[test]

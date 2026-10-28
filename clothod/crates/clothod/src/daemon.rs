@@ -1480,7 +1480,8 @@ impl Daemon {
             return;
         }
         p.agent = new;
-        // Live Activities following this pane: kind, state and times only.
+        // Live Activities following this pane: kind, state, times, and the detail a
+        // notification carries (the tool and its input; the message when it waits or ends).
         let live = p.agent.as_ref().and_then(|a| {
             let state = match a.state.as_str() {
                 "starting" | "running" => "running",
@@ -1488,7 +1489,15 @@ impl Daemon {
                 _ => return None,
             };
             let since = a.since as u64;
-            Some(crate::push::Live { kind: a.kind.clone(), state: state.into(), since, started: a.turn_started.map(|t| t as u64).unwrap_or(since) })
+            // Waiting on a permission request: what it asks about, as the alert says it.
+            let req = a.requests.last().filter(|_| state == "waiting");
+            let (tool, detail) = match (state, req) {
+                (_, Some(r)) => (Some(r.tool.clone()), r.summary.clone()),
+                ("running" | "waiting", None) => (a.tool.clone(), a.tool_input.clone()),
+                _ => (None, None),
+            };
+            let msg = a.message.clone().filter(|_| state != "running");
+            Some(crate::push::Live { kind: a.kind.clone(), state: state.into(), since, started: a.turn_started.map(|t| t as u64).unwrap_or(since), tool, detail, msg })
         });
         self.push.agent(p.id, live);
         match (&old, &p.agent) {

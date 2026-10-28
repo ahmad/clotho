@@ -3219,8 +3219,8 @@ async fn activities(c: &Client) -> Vec<Value> {
     c.request("push.list", json!({})).await.unwrap()["activities"].as_array().unwrap().clone()
 }
 
-/// A Live Activity body: the relay's contract (ios/relay, /v1/activity), and nothing but kind,
-/// state and times in it.
+/// A Live Activity body: the relay's contract (ios/relay, /v1/activity): kind, state and times,
+/// and only the optional detail keys besides.
 fn activity_body(b: &Value, event: &str, state: &str) -> Value {
     assert_eq!(b["_path"], "/v1/activity", "{b}");
     assert_eq!((b["event"].as_str(), b["content"]["state"].as_str(), b["env"].as_str()), (Some(event), Some(state), Some("sandbox")), "{b}");
@@ -3229,9 +3229,15 @@ fn activity_body(b: &Value, event: &str, state: &str) -> Value {
     let want: &[&str] = if event == "end" { &["_path", "content", "dismiss", "env", "event", "handle", "timestamp", "token"] } else { &["_path", "content", "env", "event", "handle", "stale", "timestamp", "token"] };
     assert_eq!(keys, want, "{b}");
     let content = b["content"].as_object().unwrap();
-    let mut ck: Vec<&str> = content.keys().map(String::as_str).collect();
-    ck.sort();
-    assert_eq!(ck, ["kind", "since", "started", "state"]);
+    for k in ["kind", "since", "started", "state"] {
+        assert!(content.contains_key(k), "{k}: {b}");
+    }
+    for (k, v) in content {
+        assert!(["kind", "since", "started", "state", "tool", "detail", "msg"].contains(&k.as_str()), "{k}: {b}");
+        if ["tool", "detail", "msg"].contains(&k.as_str()) {
+            assert!(v.as_str().is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control)), "{k}: {b}");
+        }
+    }
     for k in ["since", "started"] {
         assert!(content[k].is_u64(), "{k} is unix seconds: {b}");
     }
@@ -3279,7 +3285,10 @@ async fn live_activities_follow_the_agent() {
     let content = activity_body(&b, "update", "running");
     assert_eq!((b["handle"].as_str(), b["token"].as_str()), (Some("handle-d1"), Some(tok("ABCDEF").as_str())));
     assert_eq!((content["kind"].as_str(), content["started"].as_u64()), (Some("claude"), Some(started)));
-    assert!(!b.to_string().contains("secret") && !b.to_string().contains("Bash"), "no text: {b}");
+    // The detail a notification carries: the tool and its input while running, not the
+    // message (that's for waiting and the end), never the prompt.
+    assert_eq!((content["tool"].as_str(), content["detail"].as_str()), (Some("Bash"), Some("rm -rf secret")));
+    assert!(content.get("msg").is_none() && !b.to_string().contains("a secret prompt"), "{b}");
     assert_eq!(activities(&c).await.len(), 1);
 
     // Within the gap: held, then sent with the latest state.
@@ -3287,6 +3296,7 @@ async fn live_activities_follow_the_agent() {
     let (t1, b) = relay.next_activity();
     assert!(t1 - t0 >= Duration::from_millis(900), "coalesced: {:?}", t1 - t0);
     let content = activity_body(&b, "update", "waiting");
+    assert_eq!((content["tool"].as_str(), content["msg"].as_str()), (Some("Bash"), Some("secret text")));
     assert_eq!(content["started"].as_u64(), Some(started), "the turn's clock goes on");
     assert!(content["since"].as_u64().unwrap() >= started);
     let ts1 = b["timestamp"].as_u64().unwrap();
@@ -3307,10 +3317,46 @@ async fn live_activities_follow_the_agent() {
     let (t3, b) = relay.next_activity();
     let content = activity_body(&b, "end", "done");
     assert_eq!(content["started"].as_u64(), Some(started));
+    assert_eq!((content.get("tool"), content["msg"].as_str()), (None, Some("secret text")), "the end: its message, no tool");
     assert!(t3 - tw < Duration::from_millis(700), "an end isn't held by the gap: {:?}", t3 - tw);
     assert!(activities(&c).await.is_empty(), "an ended activity's token is gone");
     report("running", Some("next")).await.unwrap();
     relay.no_activity_for(Duration::from_millis(1500));
+}
+
+/// A running turn's tool changes send updates too, held to the gap like state changes, with
+/// the latest always sent; a change of nothing shown sends nothing.
+#[tokio::test]
+async fn live_activities_follow_the_tool() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "d1", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let tool = |tool: &str, input: &str| c.request("agent.report", json!({"pane": p, "state": "running", "kind": "claude", "tool": tool, "tool_input": input}));
+    c.request("agent.report", json!({"pane": p, "state": "running", "kind": "claude", "prompt": "go"})).await.unwrap();
+    c.request("push.activity", json!({"pane": p, "device": "d1", "token": tok("ab")})).await.unwrap();
+    let (t0, b) = relay.next_activity();
+    let content = activity_body(&b, "update", "running");
+    assert!(content.get("tool").is_none() && content.get("detail").is_none(), "no tool yet: {content}");
+
+    tool("Read", "src/main.rs").await.unwrap();
+    tool("Edit", "src/main.rs").await.unwrap();
+    tool("Bash", "cargo test && echo done").await.unwrap();
+    let (t1, b) = relay.next_activity();
+    assert!(t1 - t0 >= Duration::from_millis(900), "held to the gap: {:?}", t1 - t0);
+    let content = activity_body(&b, "update", "running");
+    assert_eq!((content["tool"].as_str(), content["detail"].as_str()), (Some("Bash"), Some("cargo test && echo done")), "the latest: {content}");
+    relay.no_activity_for(Duration::from_millis(1500));
+
+    // The same tool again: nothing new to show.
+    tool("Bash", "cargo test && echo done").await.unwrap();
+    relay.no_activity_for(Duration::from_millis(1500));
+    tool("Write", "notes.md").await.unwrap();
+    let content = activity_body(&relay.next_activity().1, "update", "running");
+    assert_eq!((content["tool"].as_str(), content["detail"].as_str()), (Some("Write"), Some("notes.md")));
+    c.request("agent.report", json!({"pane": p, "state": "clear"})).await.unwrap();
+    activity_body(&relay.next_activity().1, "end", "running");
 }
 
 /// Tokens go on a 410, after Apple's 8 hours, with their device's registration and with their

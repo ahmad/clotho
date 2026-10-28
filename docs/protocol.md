@@ -118,7 +118,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `agent.history` ([Agent history](#agent-history), since 0.1.11), `agent.decide`
   ([Permission requests](#permission-requests), the agent's `requests`, since 0.1.13),
   `push.activity` (Live Activities: `push.activity`, `push.activity_end` and `push.list`'s
-  `activities`, see docs/push.md, Live Activity; not yet released).
+  `activities`, see docs/push.md, Live Activities; since 0.1.16. Since 0.1.18 the content
+  sent to the relay also carries the optional `tool`, `detail` and `msg`: the detail
+  notifications carry, as one line of at most 64, 200 and 300 characters).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
