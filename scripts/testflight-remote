@@ -33,4 +33,6 @@ sha=$(ios/scripts/sources-sha.sh "$tmp")
 echo "==> $(git log --oneline -1 HEAD) | sources $sha | clothod $(cat clothod/RELEASED)"
 
 clotho-mac true
-exec ssh ahmad@macbook "cd ~/Builds/clotho-clothod && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
+# The Mac has little disk: after a successful upload keep only the newest archive in ~/Builds/testflight.
+ssh ahmad@macbook "cd ~/Builds/clotho-clothod && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
+ssh ahmad@macbook 'cd ~/Builds/testflight 2>/dev/null && ls -dt Clotho-* | tail -n +2 | xargs rm -rf; rm -rf ~/Builds/clotho-clothod/ios/build/Index.noindex; df -h /System/Volumes/Data | tail -1'

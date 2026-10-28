@@ -49,6 +49,12 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
   keychain is locked, but TestFlight uploads still work: they unlock it from the Mac's ~/.keychain_pw and
   use the App Store Connect API key in ~/.appstoreconnect/private_keys/. The Mac app is
   signed ad hoc, so `mac/build-app.sh` installs fine over SSH.
+- **Disk space on the Mac is limited (user rule).** Keep `~/Builds` small. After every run on the Mac, remove
+  what the run left that isn't needed: cargo cross-target and debug dirs in the mirror's `clothod/target`
+  (keep `dist-dev`), Xcode's `Index.noindex`, old archives, and scratch dirs. `~/Builds/testflight` keeps
+  only the latest uploaded archive. Never delete `clothod/dist` (the released builds). Keep at least 20 GiB
+  free; check with `df -h /System/Volumes/Data` before big builds. Don't touch `~/Library` caches or
+  simulators without asking the user.
 - **imac** (macOS arm64, `macbook@imac`): a remote test host.
 
 ## Build and test
