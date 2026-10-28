@@ -191,19 +191,44 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func agentChanged(machine: Machine, pane: PaneID, title: String, before: AgentInfo?, after: AgentInfo?) {
-        // Only when the daemon raises attention (false → true), not on every state change.
-        // A muted agent never notifies (needsAttention is false while muted).
-        guard authorized, let after, after.needsAttention, before?.needsAttention != true else { return }
+    /// Where the agent is: its workspace and tab, from the machine's model.
+    struct Place: Equatable {
+        var workspace: String?
+        var workspaceID: WorkspaceID?
+        var tab: String
+        /// The pane's cwd, whose last part names the project.
+        var cwd: String? = nil
+    }
+
+    func agentChanged(machine: Machine, pane: PaneID, place: Place, before: AgentInfo?, after: AgentInfo?) {
+        guard authorized, let request = Self.banner(machine: machine, pane: pane, place: place, before: before, after: after) else { return }
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    /// The local banner for an agent change, if it calls for one: only when the daemon raises attention
+    /// (false → true) into waiting, done or error, not on every state change. Never for a muted agent, or for
+    /// a quiet rise (a turn that ended while the user was at the pane, which the daemon doesn't push either);
+    /// those still badge and show in the Agents list, which follow `needsAttention`. It reads like the push
+    /// for the same rise (AlertText), which it replaces (same identifier).
+    static func banner(machine: Machine, pane: PaneID, place: Place, before: AgentInfo?, after: AgentInfo?) -> UNNotificationRequest? {
+        guard let after, after.notifiesRise(from: before) else { return nil }
         let content = UNMutableNotificationContent()
-        content.title = AlertText.title(kind: after.kind, state: after.state.rawValue, machine: machine.displayName)
-        content.body = after.message ?? title
+        AlertText.apply(notice(machine: machine, place: place, agent: after), to: content)
+        content.threadIdentifier = AlertText.thread(machine: machine.id, workspace: place.workspaceID.map(String.init) ?? place.workspace)
         content.sound = .default
-        content.threadIdentifier = machine.id.uuidString
         content.userInfo = ["machine": machine.id.uuidString, "pane": pane]
         let label = PushLabel.make(machine: machine.id, name: machine.displayName)
-        let request = UNNotificationRequest(identifier: PushLabel.collapseID(label: label, pane: pane), content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        return UNNotificationRequest(identifier: PushLabel.collapseID(label: label, pane: pane), content: content, trigger: nil)
+    }
+
+    /// As the push for the same rise reads; the tab title is the last fallback for the body, as before.
+    static func notice(machine: Machine, place: Place, agent: AgentInfo) -> AgentNotice {
+        AgentNotice(kind: agent.kind, state: agent.state.rawValue, machine: machine.displayName, workspace: place.workspace,
+                    project: place.cwd.flatMap(AgentNotice.project), duration: agent.turnDuration, result: agent.message,
+                    // The oldest pending request, as the push for this wait describes it (and AgentNotice(info:)).
+                    tool: agent.pendingRequests.first?.tool ?? agent.tool,
+                    toolInput: agent.pendingRequests.first.map { $0.summary } ?? agent.toolInput,
+                    fallback: agent.prompt ?? place.tab)
     }
 
     /// Removes delivered agent notifications (local or pushed) for a machine's panes that no longer want attention.

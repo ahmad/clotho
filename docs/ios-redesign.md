@@ -175,6 +175,24 @@ Codex has no equivalent hook today: for Codex (and Claude without the new hook i
 back to keys, but only after `pane.text` confirms the expected prompt is on screen, and only Reply/Open
 otherwise. Cards show Allow/Deny only when the daemon offers a `request`.
 
+### As built in clothod (b75a7a6)
+
+clothod built this ahead of phase 4 and checked it against a real Claude Code session; protocol.md has
+the details under "Permission requests".
+- Claude's terminal dialog always shows as well. Whichever answer comes first wins.
+- The agent carries `requests: [{id, tool, summary}]`, oldest first, and several can be pending at
+  once. `tool`/`tool_input` describe the newest.
+- `agent.decide {pane, request, decision, message?}` answers that id exactly once.
+  - A second answer, a retired id or an unknown id gets `stale`. The app says "Already answered",
+    refreshes, and never retries.
+  - clothod drops the request from `requests` before replying, so a card can show "Allowed" or
+    "Denied" as soon as the reply arrives. Don't key that on the state: it stays `waiting` until
+    the tool runs (allow) or Claude moves on (deny).
+- Deny: by default the app sends the message "Denied from the phone". The notification's
+  "Deny with reason…" text field sends the typed reason instead (at most 300 characters).
+- Push: the record's `rq` makes a push actionable (with `tool`/`cmd` for that exact request). Only
+  the first request of a wait pushes; the rest show in the app.
+
 ### Notification actions
 - Category "agent.permission": Allow (`.authenticationRequired`, so never from a locked phone without
   Face ID), Deny, Reply (text input). Category "agent.done": Reply, Open.

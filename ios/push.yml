@@ -15,6 +15,10 @@ targets:
     sources:
       - ClothoNotify
       - Clotho/Push/PushShared.swift
+    dependencies:
+      # AgentNotice: the alert text, shared with the app and the Mac.
+      - package: ClothoKit
+        product: ClothoKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: nyc.amin.clotho.notify

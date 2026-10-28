@@ -1,3 +1,4 @@
+import ClothoKit
 import CryptoKit
 import Foundation
 import Security
@@ -52,7 +53,8 @@ enum PushKey {
     }
 }
 
-/// What a machine encrypts into an alert: `{"v":1, "m", "p", "k", "s", "msg", "t"}`.
+/// What a machine encrypts into an alert (docs/push.md): `{"v":1, "m", "p", "k", "s", "msg", "t"}`, and
+/// since clothod 0.1.13 the detail fields below, each optional.
 struct PushAlert: Codable, Equatable, Sendable {
     var v: Int
     /// The label the app registered with (`PushLabel`).
@@ -62,6 +64,32 @@ struct PushAlert: Codable, Equatable, Sendable {
     var s: String
     var msg: String?
     var t: Double?
+    /// Workspace name and id, tab title, project.
+    var w: String?
+    var wid: UInt64?
+    var tb: String?
+    var pj: String?
+    /// The first line of the prompt the user typed for this turn.
+    var q: String?
+    /// A wait: the last tool the turn used and its key input ("Bash", "npm test").
+    var tool: String?
+    var cmd: String?
+    /// Done and error: seconds since the turn started.
+    var d: Double?
+
+    init(v: Int = 1, m: String, p: UInt64, k: String, s: String, msg: String? = nil, t: Double? = nil,
+         w: String? = nil, wid: UInt64? = nil, tb: String? = nil, pj: String? = nil, q: String? = nil,
+         tool: String? = nil, cmd: String? = nil, d: Double? = nil) {
+        self.v = v; self.m = m; self.p = p; self.k = k; self.s = s; self.msg = msg; self.t = t
+        self.w = w; self.wid = wid; self.tb = tb; self.pj = pj; self.q = q; self.tool = tool; self.cmd = cmd; self.d = d
+    }
+
+    /// The alert's text (ClothoKit's AgentNotice, the same as the app's own banner and the Mac's). With no
+    /// result the body is the prompt, then the tab title.
+    func notice(machine name: String) -> AgentNotice {
+        AgentNotice(kind: k, state: s, machine: name, workspace: w, project: pj, duration: d, result: msg,
+                    tool: tool, toolInput: cmd, fallback: q ?? tb)
+    }
 
     static let info = Data("clotho push v1".utf8)
     static let suite = HPKE.Ciphersuite(kem: .Curve25519_HKDF_SHA256, kdf: .HKDF_SHA256, aead: .chaChaPoly)
@@ -86,9 +114,8 @@ struct PushAlert: Codable, Equatable, Sendable {
               let target = PushLabel.parse(alert.m),
               PushLabel.collapseID(label: alert.m, pane: alert.p) == content.threadIdentifier,
               let out = content.mutableCopy() as? UNMutableNotificationContent else { return nil }
-        out.title = AlertText.title(kind: alert.k, state: alert.s, machine: target.name)
-        out.body = alert.msg ?? ""
-        out.threadIdentifier = target.machine.uuidString
+        AlertText.apply(alert.notice(machine: target.name), to: out)
+        out.threadIdentifier = AlertText.thread(machine: target.machine, workspace: alert.wid.map(String.init) ?? alert.w)
         var info = out.userInfo
         info.removeValue(forKey: "e")
         info["machine"] = target.machine.uuidString
@@ -124,14 +151,18 @@ enum PushLabel {
     }
 }
 
-/// How an agent alert reads, the same in a push and in the app's foreground notification.
+/// How an agent alert shows: AgentNotice's text, threaded by machine and workspace so one workspace's alerts
+/// stack. The same for a push (ClothoNotify) and the app's foreground notification.
 enum AlertText {
-    static func title(kind: String, state: String, machine: String) -> String {
-        let name = kind.prefix(1).uppercased() + kind.dropFirst()
-        switch state {
-        case "waiting": return "\(name) is waiting on \(machine)"
-        case "error": return "\(name) hit an error on \(machine)"
-        default: return "\(name) finished on \(machine)"
-        }
+    static func apply(_ notice: AgentNotice, to content: UNMutableNotificationContent) {
+        content.title = notice.title
+        content.subtitle = notice.subtitle
+        content.body = notice.body
+    }
+
+    /// Machine and workspace (its id, else its name); the machine alone when the workspace isn't known.
+    static func thread(machine: UUID, workspace: String?) -> String {
+        guard let workspace, !workspace.isEmpty else { return machine.uuidString }
+        return machine.uuidString + "/" + workspace
     }
 }

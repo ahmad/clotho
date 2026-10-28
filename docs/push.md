@@ -74,9 +74,41 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
 - Plaintext, before encryption:
   `{"v":1, "m":<label>, "p":<pane>, "k":<kind>, "s":<state>, "msg":<message, at most 400 bytes>, "t":<since>}`.
   `msg` is the agent's own message (for example "Allow cargo test --release?"), never pane output.
-- Padding: clothod adds `"pad":"<spaces>"` as the last key, so every plaintext is exactly 1024 bytes
-  (2048 only when the label and an escape-heavy message are unusually long; clothod shortens the
-  message, then the label, so a record never exceeds 2048).
+- Detail (clothod 0.1.13), every key optional:
+  - `w`: the workspace name. `wid`: its id, stable per daemon.
+  - `tb`: the tab title.
+  - `pj`: the project, the basename of the pane's cwd.
+  - `q`: the first line of the prompt the user typed for this turn. It's absent for turns the user didn't type.
+  - `tool` and `cmd`: only for a permission wait (Claude Code's `permission_prompt`). They're the tool it
+    asks about and its key input, e.g. "Bash" and "npm test". Any other wait (a question) carries neither.
+  - `rq`: the id of the permission request this wait is (clothod 0.1.13, feature `agent.decide`; at most
+    64 bytes, never cut). A push with `rq` is actionable: Allow and Deny call `agent.decide {pane: p,
+    request: rq, decision, message?}` on that machine, and `tool`/`cmd` describe exactly that request.
+    It answers that request only, once; `stale` means it was answered already (here, in the app or in
+    the terminal) or is gone. Only the first request of a wait pushes; others show in the agent's
+    `requests` (docs/protocol.md, Permission requests).
+  - `d`: done and error only. Seconds since the turn started.
+
+  `msg` is now the result: the last reply on done, the error on error, the question or permission on waiting.
+- How the phone shows it, the same for a push (the extension) and for the app's own foreground
+  notification:
+  - title: "Platform · Claude finished" (workspace · agent state)
+  - subtitle: "devbox · api-server · 4m" (machine · project · duration)
+  - body: the result. A permission wait (waiting, with `tool`, and a `msg` that is a permission
+    message or absent) reads "Allow Bash: npm test?". clothod sends `tool` only for permission waits, so
+    "waiting with `tool`" is enough; the `msg` check is a guard.
+  - Alerts thread by machine and `wid`, so one workspace's alerts stack together.
+  - An older record without these keys reads as before: "Claude finished on devbox", body `msg`,
+    threaded by machine. Each missing part simply drops out.
+- Sizes: every text is first held to its own cap, in bytes and cut on a character boundary: `msg` 400,
+  `q` 240, `cmd` 240, `w`, `tb`, `pj` and `tool` 96 each. (At the source they are shorter still: a
+  reply is at most 300 characters, a prompt 120, a tool input 160.) If the padded record would still pass
+  2048 bytes (long names, text that JSON escapes heavily), clothod halves texts in this order until it
+  fits: `msg`, `q`, `cmd`, `pj`, `tb`, `w`, and the label `m` last. A text is shortened only when every
+  text before it in that order is already empty.
+- Padding: clothod adds `"pad":"<spaces>"` as the last key, so every plaintext is a multiple of 1024
+  bytes: 1024 for nearly every record, 2048 only for unusually long or escape-heavy texts, and never
+  more.
   Otherwise the ciphertext's length would give away the message's. Readers ignore unknown keys, and an
   unpadded record from an older clothod still opens.
 - Ciphertext on the wire: `base64(enc || ct)`, about 1,430 characters for a 1024-byte record (at most 2,800, for
@@ -116,7 +148,9 @@ In clothod, per registration:
 - Except a rise into `done` while the user is at the pane: a client that shows the pane
   (subscribed) sent it input within the last 60 s. The user sees that turn end, so attention is
   raised (badges and the Agents list show it) but no push is sent. `waiting` and `error` always
-  push.
+  push. The agent's `quiet` field (clothod 0.1.13) says so: true on such a rise, kept until the
+  next one. The app shows no local banner for it either; a missing field (older daemons) means
+  false.
 - Reports from an agent that the pane's agent runs (an SDK app under test, `claude -p` from a tool,
   `codex exec`) are ignored: `agent.report` answers `{"ignored": "nested"}`, and the pane's agent,
   its attention and pushes are untouched.

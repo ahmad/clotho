@@ -84,8 +84,11 @@ final class MachineConnection: ObservableObject, Identifiable {
         }
         store.onAgentChange = { [weak self] pane, before, after in
             guard let self else { return }
-            let title = self.store.state.location(of: pane).map { self.store.displayTitle(of: $0.tab) } ?? ""
-            AgentNotifier.shared.agentChanged(machine: self.machine, pane: pane, title: title, before: before, after: after)
+            let location = self.store.state.location(of: pane)
+            let place = AgentNotifier.Place(workspace: location?.workspace.name, workspaceID: location?.workspace.id,
+                                            tab: location.map { self.store.displayTitle(of: $0.tab) } ?? "",
+                                            cwd: self.store.state.pane(pane)?.cwd)
+            AgentNotifier.shared.agentChanged(machine: self.machine, pane: pane, place: place, before: before, after: after)
         }
         let id = machine.id
         hostKeyObserver = NotificationCenter.default.addObserver(forName: .hostKeyChanged, object: nil, queue: .main) { [weak self] note in

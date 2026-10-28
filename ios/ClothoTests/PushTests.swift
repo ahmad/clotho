@@ -44,6 +44,27 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(Data(base64Encoded: rust)?.count, 32 + 1024 + 16)
     }
 
+    /// clothod 0.1.13's FULL/CT_FULL: a done record with every detail field, padded to 1024, sealed by the
+    /// Rust sender. Pins the record keys and the extension's text for them.
+    func testOpensClothodFullVector() throws {
+        let rust = "KxD6ecRzxhwdb8a8kQcn1HJxe06PVDr0jPkrw1AEjga5wOWPrCWNc5qyxqJ+lsXrI7SA0wNVuQu/in3JHvk3noKJbNfkv/8vSZ8/WW384OUMBgNJ2ty1NyH0XqR0KfV0nbo/2ZwEOzKdPcaZXb+bxF0Q11LFd4OEQVDg86qZTihbonRnCwYr96K/GjhDXpI/d9thuhi4UESO9jZMh3getSVp+aE6qAUNe+ye01LhSYn+Bk26fTbXlaRIM4/0NCmgNs2ARYS3i8ga4SlHiIzfcn9TktUdbxKlT6TTf3pFn+b8KT6SHS1UV4sNCV8H/NHUG8Tg3/MlhoVm+naQuCjMsH8EhpYaWNJBHs5M7KdzaOkgvCPLRbSy0xyP0Gf4v3uJb2FRry8qElK9F1HUoEEGKG5e1Vk6koOhqaC5lMNN91ess/5bNQvUHfE7tU5I+JAXHRrs1lhweWWUfpKMfDH+PQiA9CutRG/2xAk5smyQGvVY9n4/BRJsVnLmkj56cDT/PPRad6uTu2a8N1gZkXqQX/gUxUh3E7mAdLxk1HANFgke899K8yCKvGSxk58qygdzn9tBxOyXyD6+pYLsPHktZGhaCT7WtXr58RHdBXYjoYv91HazhfWd1Zb7r02zBw4tjEMuz/t6vk1X0Pbr71rWRlm8vsvDSgVrOuTInrkuIhipVp1TqBI3UZYiMwTF09RdPYJdxTZjMWdzbX7LQtaCgl6sOQ0wUuQlKM+x936kynYd1YzVS3Qu0aCTVCRRTrX5i9EnDvX0H3QB4OAbiwBdRtvrxa11p/GQ1lmAKYUY4AjgoT+F9555gCqDAIAh/mhiEaW0NafPWirKRZyxnt6heh0VXSEsunyHS7Xwab7uOR7UgssBND893fTxI1TZNbjVtdsjOe5bUd5zoJAsspqRXMys0gylgG8IAnfJObGhUFbuqr0r+eRn7A79FLOynhofadfN/BotO2Y2kUUYVOf5PJmr31M6EvggN3D0vW0tiufnhvG9XS5S06WQNpuansEtgsXYyXcNVoVzNJGx+fIorzTVdfpQLD7ZwOyynXr0hwDF58qS5jAb9AkCcufxQZpvUM2l5K2i/bQTB+R/or5X9cdp2cqNbUlOwj4fTTfHAPYElDHU+y1aUZObnjfkOntr0U3ILIIp5FcV7zOJrbgpeqolQIvUMbTb9jmexng2JVIxduxnEFhyG0herCshLkgSGypxJcl/Ljsj8Xd7KZ9CqgpOhC67+HcViQJb5OYK6FxfbikXGO1wssEqDn8ePL7eOI3SdfhdDMiHKknavr2alPRdVxy10LXufYjoLlmnouLkQNID4AaBghhKW0NAJCvE8Kx8AbbC4alLlKtH3470EcEMSJ4Nc9yUmkwrgXp6QUUNw8Ka8rbNifdBgMIIddCRGQLHBvp6iA5iZVnxvPRteQ=="
+        let alert = try PushAlert.open(rust, collapseID: Self.vectorCollapse, key: try vectorPrivateKey())
+        XCTAssertEqual(alert, PushAlert(v: 1, m: Self.vectorLabel, p: 7, k: "claude", s: "done",
+                                        msg: "All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.",
+                                        t: 1761512345.5, w: "clotho", wid: 3, tb: "clothod", pj: "clotho",
+                                        q: "fix the flaky push test on macOS", d: 254))
+        XCTAssertEqual(Data(base64Encoded: rust)?.count, 32 + 1024 + 16)
+
+        let content = UNMutableNotificationContent()
+        content.threadIdentifier = Self.vectorCollapse
+        content.userInfo = ["e": rust]
+        let out = try XCTUnwrap(PushAlert.decrypt(content, key: try vectorPrivateKey()))
+        XCTAssertEqual(out.title, "clotho · Claude finished")
+        XCTAssertEqual(out.subtitle, "devbox · clotho · 4m")
+        XCTAssertEqual(out.body, "All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.")
+        XCTAssertEqual(out.threadIdentifier, "00000000-0000-0000-0000-00000000C10D/3")
+    }
+
     func testWrongCollapseIDOrKeyFails() throws {
         XCTAssertThrowsError(try PushAlert.open(Self.vectorCiphertext, collapseID: "00000000000000000000000000000000",
                                                 key: try vectorPrivateKey()))
@@ -67,10 +88,14 @@ final class PushTests: XCTestCase {
         XCTAssertNil(PushLabel.parse("nonsense"))
     }
 
-    func testAlertText() {
-        XCTAssertEqual(AlertText.title(kind: "claude", state: "waiting", machine: "devbox"), "Claude is waiting on devbox")
-        XCTAssertEqual(AlertText.title(kind: "codex", state: "error", machine: "imac"), "Codex hit an error on imac")
-        XCTAssertEqual(AlertText.title(kind: "claude", state: "done", machine: "imac"), "Claude finished on imac")
+    /// An older daemon's record (no detail fields): today's titles, with the machine in them.
+    func testOlderRecordTitles() {
+        func title(_ kind: String, _ state: String, _ machine: String) -> String {
+            PushAlert(m: "x", p: 1, k: kind, s: state).notice(machine: machine).title
+        }
+        XCTAssertEqual(title("claude", "waiting", "devbox"), "Claude is waiting on devbox")
+        XCTAssertEqual(title("codex", "error", "imac"), "Codex hit an error on imac")
+        XCTAssertEqual(title("claude", "done", "imac"), "Claude finished on imac")
     }
 
     /// What the notification service extension shows for the relay's notification.
