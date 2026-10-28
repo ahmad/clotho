@@ -206,6 +206,23 @@ fn title_activity(title: Option<&str>) -> Option<bool> {
     }
 }
 
+/// Whether the agent process that ran a reporter (`pid`, a hook's `clothod report`) is itself run
+/// by another agent in the pane (led by `leader`): two agent processes among its ancestors with
+/// something else between them. Directly chained agent processes are one agent (`node .../codex`
+/// running the native `codex-<target>`).
+fn nested_agent(pid: u32, leader: u32) -> bool {
+    let mut agents = 0;
+    let mut in_agent = false;
+    for p in platform::ancestors(pid, leader) {
+        let agent = agent_kind(&platform::process_names(p)).is_some();
+        if agent && !in_agent {
+            agents += 1;
+        }
+        in_agent = agent;
+    }
+    agents >= 2
+}
+
 fn agent_kind(names: &[String]) -> Option<&'static str> {
     for n in names {
         let n = n.to_ascii_lowercase();
@@ -258,12 +275,23 @@ struct Pane {
     exited: Option<ExitStatus>,
     subs: HashMap<u64, Sub>,
     last_input_client: Option<u64>,
+    /// When a client last typed in (or sent focus or mouse reports to) the pane: whether the
+    /// user is at it right now (`user_present`).
+    last_input_at: Option<Instant>,
     snap_seq: u64,
     snap_at: Instant,
     last_output: Instant,
     /// What its agents did, oldest first (`agent.history`), at most HISTORY_MAX entries; kept
     /// across serve restarts in the pane meta.
     history: VecDeque<Value>,
+}
+
+/// A client that sent input to a pane it shows within this long means the user is at that pane:
+/// a turn that ends then raises attention there, but sends no push to the phone.
+const PRESENCE: Duration = Duration::from_secs(60);
+
+fn presence() -> Duration {
+    std::env::var("CLOTHOD_TEST_PRESENCE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(PRESENCE)
 }
 
 /// Entries kept per pane by `agent.history`.
@@ -299,6 +327,11 @@ impl Pane {
 }
 
 impl Pane {
+    /// A client showing this pane sent it input within `presence()`.
+    fn user_present(&self) -> bool {
+        self.last_input_at.is_some_and(|at| at.elapsed() < presence()) && self.last_input_client.is_some_and(|c| self.subs.contains_key(&c))
+    }
+
     fn new(info: &PaneInfo, scrollback: usize, own_scrollback: bool) -> Pane {
         Pane {
             id: info.pane,
@@ -324,6 +357,7 @@ impl Pane {
             exited: info.exited,
             subs: HashMap::new(),
             last_input_client: None,
+            last_input_at: None,
             snap_seq: 0,
             snap_at: Instant::now(),
             last_output: Instant::now(),
@@ -1244,6 +1278,7 @@ impl Daemon {
         let mut p = p.lock().unwrap();
         // Input never clears an agent's attention: opening a pane alone sends focus reports and
         // mouse motion. A reply makes the agent work again, and that clears it (set_agent).
+        p.last_input_at = Some(Instant::now());
         if p.last_input_client != Some(client) {
             p.last_input_client = Some(client);
             self.apply_viewport_policy(&mut p, client);
@@ -1313,7 +1348,11 @@ impl Daemon {
         let attention = |a: &Option<Agent>| a.as_ref().is_some_and(|a| a.attention);
         if attention(&old) != attention(&p.agent) {
             let alert = p.agent.as_ref().map(|a| crate::push::Alert { kind: a.kind.clone(), state: a.state.clone(), message: a.message.clone(), since: a.since });
-            self.push.attention(p.id, attention(&p.agent), alert);
+            // A turn that ends while the user is at the pane needs no push: they see it end.
+            // Waiting (a permission prompt, a question) and errors still push: the user may
+            // have stepped away right after typing, and the agent is stuck until they answer.
+            let quiet = p.agent.as_ref().is_some_and(|a| a.state == "done") && p.user_present();
+            self.push.attention(p.id, attention(&p.agent), alert, quiet);
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
         let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str()) || (!attention(&old) && attention(&p.agent));
@@ -1337,7 +1376,7 @@ impl Daemon {
         p.agent = Some(a);
         p.record(if on { "mute" } else { "unmute" }, Some(&old.state), None);
         if old.attention && on {
-            self.push.attention(p.id, false, None);
+            self.push.attention(p.id, false, None, false);
         }
         self.pane_event(p);
         self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": old.state}));
@@ -1402,6 +1441,14 @@ impl Daemon {
         if let Some(pid) = p.get("pid").and_then(Value::as_u64) {
             if !platform::process_in_session(pid as u32, pp.pid) {
                 return Err(err("wrong_pane", format!("process {pid} is not in pane {pane} of this daemon")));
+            }
+        }
+        // An agent run by the pane's agent (`claude -p` from a tool, an SDK app it is testing,
+        // `codex exec`) has hooks too, and they report into this pane: they are not the agent the
+        // user talks to, so their turns and exits must not move its state or push.
+        if let Some(pid) = p.get("pid").and_then(Value::as_u64) {
+            if nested_agent(pid as u32, pp.pid) {
+                return Ok(json!({"ignored": "nested"}));
             }
         }
         if state == "clear" {

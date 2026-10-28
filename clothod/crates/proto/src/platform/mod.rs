@@ -197,18 +197,40 @@ pub struct Foreground {
 
 pub fn foreground(pid: u32) -> Option<Foreground> {
     let pgrp = os::terminal_pgrp(pid)?;
+    Some(Foreground { pgrp, names: process_names(pgrp) })
+}
+
+/// Names that identify a process: executable and argv[0..2] basenames (for `node .../claude`).
+pub fn process_names(pid: u32) -> Vec<String> {
     let mut names = Vec::new();
-    if let Some(exe) = os::process_exe(pgrp) {
+    if let Some(exe) = os::process_exe(pid) {
         names.extend(exe.file_name().map(|n| n.to_string_lossy().into_owned()));
     }
-    names.extend(os::process_name(pgrp));
-    for a in os::process_args(pgrp).into_iter().take(2) {
+    names.extend(os::process_name(pid));
+    for a in os::process_args(pid).into_iter().take(2) {
         if let Some(n) = Path::new(&a).file_name() {
             names.push(n.to_string_lossy().into_owned());
         }
     }
     names.dedup();
-    Some(Foreground { pgrp, names })
+    names
+}
+
+/// `pid`'s parent, its parent and so on, nearest first, up to (not including) `until` or init;
+/// at most 64.
+pub fn ancestors(pid: u32, until: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut p = pid;
+    while out.len() < 64 {
+        match os::parent_pid(p) {
+            Some(pp) if pp > 1 && pp != p && pp != until => {
+                out.push(pp);
+                p = pp;
+            }
+            _ => break,
+        }
+    }
+    out
 }
 
 pub fn process_alive(pid: u32) -> bool {

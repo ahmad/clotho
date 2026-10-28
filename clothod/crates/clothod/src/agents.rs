@@ -39,14 +39,7 @@ fn try_report(args: &[String]) -> Result<()> {
                 let mut input = String::new();
                 std::io::stdin().take(1 << 20).read_to_string(&mut input)?;
                 let v: Value = serde_json::from_str(&input)?;
-                let s = match v["hook_event_name"].as_str().unwrap_or("") {
-                    "SessionStart" => "starting",
-                    "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => "running",
-                    "Notification" => "waiting",
-                    "Stop" => "done",
-                    "SessionEnd" => "clear",
-                    _ => return Ok(()),
-                };
+                let Some(s) = claude_hook_state(&v) else { return Ok(()) };
                 state = Some(s.into());
                 kind = Some("claude".into());
                 message = v["message"].as_str().map(String::from);
@@ -100,6 +93,32 @@ fn try_report(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Claude Code's text for its idle reminder, for builds that don't send `notification_type`.
+const CLAUDE_IDLE_MESSAGE: &str = "Claude is waiting for your input";
+
+/// The state a Claude Code hook event reports, or None for events that say nothing new about
+/// whether the agent needs the user (they leave its state, and attention, as they are).
+fn claude_hook_state(v: &Value) -> Option<&'static str> {
+    Some(match v["hook_event_name"].as_str().unwrap_or("") {
+        // Compaction (auto or /compact) is the same session carrying on, not a new one: it
+        // must not clear a raised attention for the next reminder to raise it again.
+        "SessionStart" if v["source"] == "compact" => return None,
+        "SessionStart" => "starting",
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => "running",
+        // Only a prompt the user must answer waits: permission and elicitation dialogs (and
+        // types newer than this build, to be safe). `idle_prompt` repeats, a minute later, a turn
+        // end the user was already told about; `auth_success` needs nothing.
+        "Notification" => match v["notification_type"].as_str() {
+            Some("idle_prompt" | "auth_success") => return None,
+            None if v["message"] == CLAUDE_IDLE_MESSAGE => return None,
+            _ => "waiting",
+        },
+        "Stop" => "done",
+        "SessionEnd" => "clear",
+        _ => return None,
+    })
 }
 
 /// One attempt: Ok(true) if this daemon took the report.
@@ -427,6 +446,36 @@ pub fn hooks(args: &[String], install_self: impl Fn() -> Result<()>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Payloads as Claude Code 2.1.312 sends them (logged from a real session; paths and ids
+    /// shortened): which events move the agent's state and which leave it alone.
+    #[test]
+    fn claude_hook_events_that_need_the_user() {
+        let state = |j: &str| claude_hook_state(&serde_json::from_str(j).unwrap());
+        let base = r#""session_id":"24e0052b","transcript_path":"/t.jsonl","cwd":"/tmp/p""#;
+        let ev = |rest: &str| format!("{{{base},{rest}}}");
+        assert_eq!(state(&ev(r#""hook_event_name":"SessionStart","source":"startup","model":"claude-haiku-5-5""#)), Some("starting"));
+        assert_eq!(state(&ev(r#""hook_event_name":"SessionStart","source":"resume""#)), Some("starting"));
+        assert_eq!(state(&ev(r#""hook_event_name":"SessionStart","source":"clear""#)), Some("starting"));
+        assert_eq!(state(&ev(r#""hook_event_name":"UserPromptSubmit","prompt_id":"2816","permission_mode":"auto","prompt":"Reply with just: ok""#)), Some("running"));
+        assert_eq!(state(&ev(r#""hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"touch x"}"#)), Some("running"));
+        assert_eq!(state(&ev(r#""hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"ok","background_tasks":[]"#)), Some("done"));
+        assert_eq!(state(&ev(r#""hook_event_name":"SessionEnd","reason":"prompt_input_exit""#)), Some("clear"));
+        // Needs the user: a permission or elicitation prompt, and a type this build doesn't know.
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt""#)), Some("waiting"));
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Claude needs your input","notification_type":"elicitation_dialog""#)), Some("waiting"));
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Something new","notification_type":"some_future_type""#)), Some("waiting"));
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Claude needs your permission to use Bash""#)), Some("waiting"));
+        // Doesn't: the idle reminder a minute after a turn ends (with or without its type), a
+        // login notice, compaction (manual or auto: PreCompact, then SessionStart "compact"),
+        // and subagents finishing.
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt""#)), None);
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Claude is waiting for your input""#)), None);
+        assert_eq!(state(&ev(r#""hook_event_name":"Notification","message":"Logged in","notification_type":"auth_success""#)), None);
+        assert_eq!(state(&ev(r#""hook_event_name":"PreCompact","trigger":"auto","custom_instructions":null"#)), None);
+        assert_eq!(state(&ev(r#""hook_event_name":"SessionStart","source":"compact","model":"claude-haiku-5-5""#)), None);
+        assert_eq!(state(&ev(r#""hook_event_name":"SubagentStop","agent_id":"a237","agent_type":"","stop_hook_active":false"#)), None);
+    }
 
     /// The install path is one shell word whatever it contains: a home directory with quotes,
     /// `$(...)` or backquotes must neither break the hook nor run anything.

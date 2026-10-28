@@ -75,6 +75,8 @@ struct PaneState {
     rise: u64,
     last_sent: Option<Instant>,
     delayed: bool,
+    /// The current rise is quiet: the user is at the pane (no push for it, now or delayed).
+    quiet: bool,
     alert: Option<Alert>,
 }
 
@@ -291,7 +293,8 @@ impl Push {
 
     /// A pane's attention, every time it changes. A rise pushes to every registered phone, at
     /// most once per pane per `per_pane` (a later rise waits and goes out with the latest alert).
-    pub fn attention(self: &Arc<Self>, pane: u64, on: bool, alert: Option<Alert>) {
+    /// A `quiet` rise (the user is at the pane) sends nothing.
+    pub fn attention(self: &Arc<Self>, pane: u64, on: bool, alert: Option<Alert>, quiet: bool) {
         let t = timing();
         let mut g = self.inner.lock().unwrap();
         if g.regs.is_empty() && !on {
@@ -306,6 +309,10 @@ impl Push {
         }
         ps.rise += 1;
         ps.alert = alert;
+        ps.quiet = quiet;
+        if quiet {
+            return;
+        }
         let wait = ps.last_sent.map(|at| (at + t.per_pane).saturating_duration_since(Instant::now())).unwrap_or_default();
         if wait.is_zero() {
             self.dispatch(&mut g, pane);
@@ -317,7 +324,7 @@ impl Push {
                 let mut g = me.inner.lock().unwrap();
                 let Some(ps) = g.panes.get_mut(&pane) else { return };
                 ps.delayed = false;
-                if ps.attention {
+                if ps.attention && !ps.quiet {
                     me.dispatch(&mut g, pane);
                 }
             });

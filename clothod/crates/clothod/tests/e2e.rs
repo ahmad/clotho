@@ -1049,6 +1049,96 @@ async fn a_muted_agent_sends_no_push() {
     assert_eq!(opened(&relay.next().1)["s"], "done");
 }
 
+/// A turn that ends while the user is at the pane (a client showing it sent input lately)
+/// raises attention there but sends no push; waiting still pushes, and so does a turn that ends
+/// after the user went quiet, or when the input came from a client not showing the pane.
+#[tokio::test]
+async fn a_turn_that_ends_while_the_user_is_at_the_pane_does_not_push() {
+    let relay = FakeRelay::start();
+    let mut env = Env::empty();
+    env.start_with(&std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into()), &[("CLOTHOD_TEST_PUSH_FAST", "1"), ("CLOTHOD_TEST_PRESENCE_MS", "1500")]);
+    let c = env.client().await;
+    let other = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    c.request("pane.subscribe", json!({"pane": p})).await.unwrap();
+    let report = |state: &str| c.request("agent.report", json!({"pane": p, "state": state, "kind": "claude"}));
+
+    report("running").await.unwrap();
+    c.request("pane.input", json!({"pane": p, "data": "\x1b[I"})).await.unwrap();
+    report("done").await.unwrap();
+    assert_eq!(pane_agent(&c, p).await["attention"], true, "still raised for the app");
+    relay.none_for(Duration::from_millis(1200));
+
+    // Asked something while the user is there: pushed (they may have just stepped away).
+    report("running").await.unwrap();
+    c.request("pane.input", json!({"pane": p, "data": "y"})).await.unwrap();
+    report("waiting").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["s"], "waiting");
+
+    // Quiet for longer than the presence window: the turn's end pushes.
+    report("running").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    report("done").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["s"], "done");
+
+    // Input from a client that isn't showing the pane says nothing about the user.
+    report("running").await.unwrap();
+    other.request("pane.input", json!({"pane": p, "data": "z"})).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    report("done").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["s"], "done");
+}
+
+/// An agent the pane's agent runs (an SDK app under test, `claude -p` from a tool) has hooks
+/// too: its reports reach this pane but must not move the pane's agent or push.
+#[tokio::test]
+async fn agents_run_by_the_panes_agent_do_not_report_into_it() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let mut c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let b = test_bin();
+    let dir = env.dir.path().join("agents");
+    let marker = dir.join("inner-ran");
+    for d in ["outer", "inner"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let script = |name: &str, body: String| {
+        let f = dir.join(name).join("claude");
+        std::fs::write(&f, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        f.display().to_string()
+    };
+    // The inner agent runs under a shell its parent started (as a tool would run it), reports
+    // a whole session of its own, and exits.
+    let inner = script("inner", format!("'{b}' report starting --agent claude --session child\n'{b}' report running\n'{b}' report done\n'{b}' report clear\ntrue\n"));
+    let outer = script(
+        "outer",
+        format!("'{b}' report running --agent claude --session parent\nsh -c \"'{inner}'; true\"\ntouch '{}'\nread x\n'{b}' report done\nsleep 60\n", marker.display()),
+    );
+    let p = new_pane(&c, sh()).await;
+    c.input(p, format!("'{outer}'\r").as_bytes());
+    let deadline = Instant::now() + T;
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "the inner agent never ran");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["state"].clone(), a["session"].clone(), a["attention"].clone()), (json!("running"), json!("parent"), json!(false)), "{a}");
+    let ev = agent_events(&mut c);
+    assert!(!ev.iter().any(|e| e["agent"]["session"] == "child" || e["agent"].is_null()), "{ev:?}");
+    relay.none_for(Duration::from_millis(500));
+    // The pane's own agent still reports.
+    c.input(p, b"\r");
+    let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    assert_eq!((a["session"].clone(), a["attention"].clone()), (json!("parent"), json!(true)));
+    assert_eq!(opened(&relay.next().1)["s"], "done");
+}
+
 /// Detection without hooks guesses from output: busy is running, quiet is waiting. Opening a
 /// pane resizes it and the app redraws, which reads as "running". A guess must never clear the
 /// attention a BEL raised; only acknowledging it (or the agent leaving) does.
