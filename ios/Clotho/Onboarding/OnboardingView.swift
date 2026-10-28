@@ -40,10 +40,14 @@ enum Onboarding {
 struct OnboardingView: View {
     enum Mode { case firstRun, addMachine }
 
+    /// Three screens: add a machine (with its key), check it (host key, log in, install clothod), done.
+    /// Notifications are asked once a machine is connected, and Start at login is in the machine's Settings.
     enum Step: Int, Comparable {
-        case welcome, concepts, machine, key, hostKey, logIn, install, notifications, login, done
+        case machine, check, done
         static func < (a: Step, b: Step) -> Bool { a.rawValue < b.rawValue }
     }
+
+    enum CheckStage: Int { case hostKey, logIn, install }
 
     let mode: Mode
     /// Called when the guide closes, with the machine it set up (if it got that far).
@@ -55,11 +59,12 @@ struct OnboardingView: View {
     @State private var machine = Machine(name: "", devDirs: HomeView.defaultDevDirs)
     @State private var port = "22"
     @State private var saved = false
+    @State private var stage = CheckStage.hostKey
 
     init(mode: Mode, finish: @escaping (UUID?) -> Void) {
         self.mode = mode
         self.finish = finish
-        _step = State(initialValue: mode == .firstRun ? .welcome : .machine)
+        _step = State(initialValue: .machine)
     }
 
     var body: some View {
@@ -91,42 +96,32 @@ struct OnboardingView: View {
     }
 
     private var progress: Double? {
-        let first: Step = mode == .firstRun ? .welcome : .machine
         guard step != .done else { return nil }
-        return Double(step.rawValue - first.rawValue + 1) / Double(Step.done.rawValue - first.rawValue + 1)
+        return Double(step.rawValue + 1) / Double(Step.done.rawValue + 1)
     }
 
     @ViewBuilder private var page: some View {
         switch step {
-        case .welcome: WelcomePage { step = .concepts }
-        case .concepts: ConceptsPage { step = .machine }
-        case .machine: MachinePage(machine: $machine, port: $port) { advance(from: .machine) }
-        case .key: KeyPage(machine: $machine) { step = .hostKey }
-        case .hostKey: HostKeyPage(machine: machine, back: { step = .machine }) { step = .logIn }
-        case .logIn: LogInPage(machine: machine, back: { step = .key }) { save(); step = .install }
-        case .install: InstallPage(connection: connections.connection(for: machine)) { advance(from: .install) }
-        case .notifications: NotificationsPage { step = .login }
-        case .login: LoginPage(connection: connections.connection(for: machine)) { step = .done }
-        case .done: DonePage(machine: machine, mode: mode) { close(openMachine: true) }
+        case .machine:
+            AddMachinePage(machine: $machine, port: $port, firstRun: mode == .firstRun) { advance() }
+        case .check:
+            CheckList(stage: stage, machine: machine)
+            switch stage {
+            case .hostKey: HostKeyPage(machine: machine, back: { step = .machine }) { stage = .logIn }
+            case .logIn: LogInPage(machine: machine, back: { step = .machine }) { save(); stage = .install }
+            case .install: InstallPage(connection: connections.connection(for: machine)) { step = .done }
+            }
+        case .done:
+            DonePage(machine: machine, mode: mode) { close(openMachine: true) }
         }
     }
 
-    private func advance(from current: Step) {
-        switch current {
-        case .machine:
-            machine.port = Int(port) ?? 22
-            machine.host = machine.host.trimmingCharacters(in: .whitespaces)
-            machine.user = machine.user.trimmingCharacters(in: .whitespaces)
-            step = .key
-        case .install:
-            // The permission prompt comes once there's a machine whose agents can need the user.
-            Task {
-                let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
-                step = status == .notDetermined ? .notifications : .login
-            }
-        default:
-            break
-        }
+    private func advance() {
+        machine.port = Int(port) ?? 22
+        machine.host = machine.host.trimmingCharacters(in: .whitespaces)
+        machine.user = machine.user.trimmingCharacters(in: .whitespaces)
+        stage = .hostKey
+        step = .check
     }
 
     private func save() {
@@ -210,88 +205,32 @@ private struct Field: View {
     }
 }
 
-// MARK: - Intro
+// MARK: - Add a machine
 
-private struct WelcomePage: View {
-    let next: () -> Void
-
-    var body: some View {
-        PageHeader(symbol: "rectangle.split.2x2", title: "Welcome to Clotho",
-                   text: "Your terminals and coding agents, on every machine you use, from this device. Shells and agents keep running on the machine when Clotho closes, and pick up where they were when it opens.")
-        VStack(alignment: .leading, spacing: 12) {
-            Point(symbol: "server.rack", text: "Connects to your Macs and Linux machines over SSH.")
-            Point(symbol: "bell.badge", text: "Tells you when an agent like Claude Code or Codex needs you, even while Clotho is closed.")
-            Point(symbol: "lock", text: "Keys stay in this device's Keychain. Alerts are encrypted on the machine for this device only.")
-        }
-        PrimaryButton(title: "Get Started", action: next)
-    }
-}
-
-private struct Point: View {
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        Label { Text(text) } icon: { Image(systemName: symbol).foregroundStyle(Color.selection).frame(width: 28) }
-    }
-}
-
-private struct ConceptsPage: View {
-    let next: () -> Void
-
-    var body: some View {
-        PageHeader(symbol: "square.stack.3d.up", title: "Workspaces, Tabs and Panes",
-                   text: "Every machine runs clothod, which keeps your shells in three levels.")
-        ConceptRow(title: "Workspace", symbol: "folder",
-                   text: "One project or task: a set of tabs, often in one folder. Switch between workspaces on each machine.")
-        ConceptRow(title: "Tab", symbol: "rectangle.on.rectangle",
-                   text: "A layout of panes side by side, like a window on your computer.")
-        ConceptRow(title: "Pane", symbol: "terminal",
-                   text: "One shell or agent. Here a pane fills the screen; swipe the pane strip to switch. Panes keep running when you close the app.")
-        PrimaryButton(title: "Add a Machine", action: next)
-    }
-}
-
-private struct ConceptRow: View {
-    let title: String
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: symbol)
-                .font(.title2)
-                .foregroundStyle(Color.selection)
-                .frame(width: 44, height: 44)
-                .background(Color.selection.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.headline)
-                Text(text).font(.callout).foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-// MARK: - Machine
-
-private struct MachinePage: View {
+/// Screen 1: where the machine is, and the key this device logs in with. A key is made silently when the device
+/// has none (Ed25519 in the Keychain); the card below shows the one command that lets it in.
+private struct AddMachinePage: View {
     @Binding var machine: Machine
     @Binding var port: String
+    let firstRun: Bool
     let next: () -> Void
+    @State private var keys: [SSHKey] = KeyStore.all()
+    @State private var choosingKey = false
+    @State private var importing = false
+    @State private var error: String?
 
     private var host: String { machine.host.trimmingCharacters(in: .whitespaces) }
     private var user: String { machine.user.trimmingCharacters(in: .whitespaces) }
     private var problem: String? { host.isEmpty && user.isEmpty ? nil : Machine.problem(host: host, user: user) }
+    private var key: SSHKey? { keys.first { $0.id == machine.keyID } }
 
     private var valid: Bool {
-        !host.isEmpty && !user.isEmpty && problem == nil && Int(port).map { (1...65535).contains($0) } == true
+        !host.isEmpty && !user.isEmpty && problem == nil && key != nil && Int(port).map { (1...65535).contains($0) } == true
     }
 
     var body: some View {
-        PageHeader(symbol: "server.rack", title: "Add a machine",
-                   text: "Any Mac or Linux machine you can reach with SSH from this device: on the same network, or over Tailscale or a VPN. On a Mac, turn on System Settings › General › Sharing › Remote Login.")
+        PageHeader(symbol: "server.rack", title: firstRun ? "Welcome to Clotho" : "Add a machine",
+                   text: "Clotho runs your terminals and agents on a Mac or Linux machine you can reach with SSH, on your network or over Tailscale. On a Mac, turn on System Settings › General › Sharing › Remote Login.")
         Field(label: "Host", placeholder: "mac-mini.local, 192.168.1.20 or a Tailscale name", text: $machine.host, keyboard: .URL)
         Field(label: "User", placeholder: "Your user name on that machine", text: $machine.user)
         HStack(spacing: 12) {
@@ -303,69 +242,103 @@ private struct MachinePage: View {
             .font(.callout)
         #endif
         if let problem { ErrorNote(text: problem) }
-        PrimaryButton(title: "Continue", enabled: valid, action: next)
-    }
-}
 
-// MARK: - Key
-
-private struct KeyPage: View {
-    @Binding var machine: Machine
-    let next: () -> Void
-    @State private var keys: [SSHKey] = KeyStore.all()
-    @State private var importing = false
-    @State private var error: String?
-
-    private var key: SSHKey? { keys.first { $0.id == machine.keyID } }
-
-    var body: some View {
-        PageHeader(symbol: "key", title: "Log in with a key",
-                   text: "Clotho logs in with an SSH key kept in this device's Keychain. Make a new one here (recommended), or import one you already use.")
         if let key {
-            PublicKeyCard(key: key, user: machine.user, host: machine.host)
-            Button("Use a different key") { machine.keyID = nil }
+            Text("Let this device log in").font(.headline).padding(.top, 8)
+            PublicKeyCard(key: key, user: user.isEmpty ? "you" : user, host: host.isEmpty ? "the machine" : host)
+            Button(choosingKey ? "Keep this key" : "Use a different key…") { choosingKey.toggle() }
                 .font(.callout)
-            PrimaryButton(title: "I've Added the Key", action: next)
-        } else {
-            if !keys.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Keys on this device").font(.subheadline.weight(.medium))
-                    ForEach(keys) { key in
-                        Button { machine.keyID = key.id } label: {
-                            Label("\(key.name) (\(key.kindLabel))", systemImage: "key.horizontal")
-                        }
-                    }
+                .accessibilityIdentifier("chooseKey")
+        }
+        if choosingKey || key == nil {
+            keyChoices
+        }
+        if let error { ErrorNote(text: error) }
+        PrimaryButton(title: "Continue", enabled: valid, action: next)
+        Color.clear.frame(height: 0)
+            .onAppear(perform: pickKey)
+            .sheet(isPresented: $importing) {
+                KeyImportSheet { imported in
+                    keys = KeyStore.all()
+                    machine.keyID = imported.id
+                    choosingKey = false
                 }
             }
-            PrimaryButton(title: "Generate New Key") { generate(.ed25519) }
+    }
+
+    @ViewBuilder private var keyChoices: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(keys) { other in
+                Button {
+                    machine.keyID = other.id
+                    choosingKey = false
+                } label: {
+                    Label("\(other.name) (\(other.kindLabel))", systemImage: other.id == machine.keyID ? "checkmark.circle.fill" : "key.horizontal")
+                }
+            }
+            Button { generate(.ed25519) } label: { Label("Make a New Key", systemImage: "plus") }
                 .accessibilityIdentifier("generateKey")
             if KeyStore.secureEnclaveAvailable {
-                Button("Generate in the Secure Enclave") { generate(.secureEnclaveP256) }
-                    .font(.callout)
-                Text("A Secure Enclave key can never leave this device. Some servers (older OpenSSH, Tailscale SSH aside) don't accept its type, so Ed25519 is the default.")
+                Button { generate(.secureEnclaveP256) } label: { Label("Make One in the Secure Enclave", systemImage: "lock.shield") }
+                Text("A Secure Enclave key can never leave this device. Some servers don't accept its type, so Ed25519 is the default.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Button { importing = true } label: { Label("Import an Existing Key…", systemImage: "square.and.arrow.down") }
                 .accessibilityIdentifier("importKey")
         }
-        if let error { ErrorNote(text: error) }
-        Color.clear.frame(height: 0)
-            .sheet(isPresented: $importing) {
-                KeyImportSheet { imported in
-                    keys = KeyStore.all()
-                    machine.keyID = imported.id
-                }
-            }
+        .font(.callout)
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// The key this machine will use: the one already chosen, else the device's first, else a new Ed25519 one.
+    private func pickKey() {
+        guard machine.keyID == nil || key == nil else { return }
+        if let first = keys.first {
+            machine.keyID = first.id
+        } else {
+            generate(.ed25519)
+        }
     }
 
     private func generate(_ kind: SSHKey.Kind) {
         do {
-            let key = try KeyStore.generate(kind: kind, name: "clotho-\(UIDevice.current.name)".replacingOccurrences(of: " ", with: "-"))
+            let made = try KeyStore.generate(kind: kind, name: "clotho-\(UIDevice.current.name)".replacingOccurrences(of: " ", with: "-"))
             keys = KeyStore.all()
-            machine.keyID = key.id
+            machine.keyID = made.id
+            choosingKey = false
             error = nil
         } catch {
             self.error = "Couldn't make a key: \(error.localizedDescription)"
+        }
+    }
+}
+
+/// Screen 2's progress: what has been checked so far.
+private struct CheckList: View {
+    let stage: OnboardingView.CheckStage
+    let machine: Machine
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row("Machine's identity", done: stage.rawValue > OnboardingView.CheckStage.hostKey.rawValue, current: stage == .hostKey)
+            row("Log in as \(machine.user)", done: stage.rawValue > OnboardingView.CheckStage.logIn.rawValue, current: stage == .logIn)
+            row("clothod running", done: false, current: stage == .install)
+        }
+        .font(.callout)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("checkList")
+    }
+
+    private func row(_ title: String, done: Bool, current: Bool) -> some View {
+        Label {
+            Text(title).foregroundStyle(done || current ? .primary : .secondary)
+        } icon: {
+            Image(systemName: done ? "checkmark.circle.fill" : current ? "circle.dotted" : "circle")
+                .foregroundStyle(done ? .green : current ? Color.selection : .secondary)
         }
     }
 }
@@ -568,7 +541,11 @@ private struct LogInPage: View {
             Label("Logged in to \(machine.host) (\(result.system)).", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .accessibilityIdentifier("loggedIn")
-            PrimaryButton(title: "Install clothod", action: next)
+                // On to installing without another tap: the guide only stops for a decision or a problem.
+                .task {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    next()
+                }
         } else if let error {
             ErrorNote(text: error)
             if let key = machine.keyID.flatMap(KeyStore.key) {
@@ -621,7 +598,10 @@ private struct InstallPage: View {
             Label("clothod \(store.hello?.version ?? "") is running on \(connection.machine.displayName).", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
                 .accessibilityIdentifier("clothodRunning")
-            PrimaryButton(title: "Continue", action: next)
+                .task {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    next()
+                }
         case .reconnecting(let reason):
             ErrorNote(text: reason)
             Text("Clotho keeps trying. Fix the problem on the machine, or go on and come back to it later.")
@@ -636,95 +616,7 @@ private struct InstallPage: View {
     }
 }
 
-// MARK: - Notifications and login
-
-private struct NotificationsPage: View {
-    let next: () -> Void
-
-    var body: some View {
-        PageHeader(symbol: "bell.badge", title: "Know when an agent needs you",
-                   text: "When an agent on one of your machines finishes, asks a question or hits an error, Clotho can tell you, even while it's closed. The lock screen shows the agent's message, decrypted on this device.")
-        PrimaryButton(title: "Allow Notifications") {
-            Task {
-                await AgentNotifier.shared.requestPermission()
-                next()
-            }
-        }
-        .accessibilityIdentifier("allowNotifications")
-        Button("Not Now", action: next)
-            .frame(maxWidth: .infinity)
-        Text("You can change this later in Settings › Clotho › Notifications, and turn alerts off per machine.")
-            .font(.caption).foregroundStyle(.secondary)
-    }
-}
-
-private struct LoginPage: View {
-    @ObservedObject var connection: MachineConnection
-    @ObservedObject private var store: ModelStore
-    let next: () -> Void
-    @State private var busy = false
-    @State private var error: String?
-
-    init(connection: MachineConnection, next: @escaping () -> Void) {
-        self.connection = connection
-        store = connection.store
-        self.next = next
-    }
-
-    private var name: String { connection.machine.displayName }
-    private var supported: Bool { store.hello?.features.contains(.service) == true }
-
-    var body: some View {
-        PageHeader(symbol: "power", title: "Start clothod at login",
-                   text: "Then your shells and agents on \(name) come back by themselves after it restarts, before any app connects.")
-        if connection.machine.isTestInstall {
-            Text("\(name) uses this app's test install of clothod, which never starts at login.")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("loginUnavailable")
-            PrimaryButton(title: "Continue", action: next)
-        } else if !store.isConnected || !supported {
-            Text(store.isConnected ? "Update clothod on \(name) to turn this on from here." : "Once Clotho is connected to \(name), turn this on in the machine's Settings.")
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("loginUnavailable")
-            PrimaryButton(title: "Continue", action: next)
-        } else if let service = store.service {
-            if service.installed {
-                Label("clothod starts at login on \(name).", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                PrimaryButton(title: "Continue", action: next)
-            } else if LoginService.canToggle(service, testInstall: false) {
-                PrimaryButton(title: "Start at Login", enabled: !busy) { turnOn() }
-                Button("Not Now", action: next).frame(maxWidth: .infinity)
-            } else {
-                Text(LoginService.footer(service, machine: name, testInstall: false)).foregroundStyle(.secondary)
-                PrimaryButton(title: "Continue", action: next)
-            }
-        } else if let error {
-            ErrorNote(text: error)
-            PrimaryButton(title: "Continue", action: next)
-        } else {
-            ProgressView()
-        }
-        Color.clear.frame(height: 0).task(id: store.hello?.instance) { await load() }
-    }
-
-    private func load() async {
-        guard store.isConnected, supported, !connection.machine.isTestInstall else { return }
-        do { try await store.loadService() } catch { self.error = error.localizedDescription }
-    }
-
-    private func turnOn() {
-        busy = true
-        Task {
-            do {
-                _ = try await store.setStartsAtLogin(true)
-                next()
-            } catch {
-                self.error = error.localizedDescription
-            }
-            busy = false
-        }
-    }
-}
+// MARK: - Done
 
 private struct DonePage: View {
     let machine: Machine
@@ -733,8 +625,8 @@ private struct DonePage: View {
 
     var body: some View {
         PageHeader(symbol: "checkmark.circle", title: "\(machine.displayName) is ready",
-                   text: "Open it to start a workspace. Agents that need you show at the top of the Machines list. Add more machines with +, and reopen this guide from the ? button.")
-        PrimaryButton(title: "Open \(machine.displayName)", action: open)
+                   text: "Its workspaces show on Home; tap + there to start one. Agents that need you appear at the top. Add more machines with + at the top of Home.")
+        PrimaryButton(title: "Open Home", action: open)
             .accessibilityIdentifier("openMachine")
     }
 }

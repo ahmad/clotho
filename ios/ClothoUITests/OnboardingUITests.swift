@@ -27,34 +27,26 @@ final class OnboardingUITests: XCTestCase {
         app.launchArguments = ["-UITesting", "-CleanState", "YES"]
         app.launch()
 
+        // Screen 1: the machine, and the key (made silently: a clean state has none).
         XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 10), "no guide on a clean start")
-        attach(app, "welcome")
-        app.buttons["Get Started"].tap()
-        XCTAssertTrue(app.staticTexts["Workspaces, Tabs and Panes"].waitForExistence(timeout: 5))
-        attach(app, "concepts")
-        app.buttons["Add a Machine"].tap()
-
         let host = app.textFields["Host"]
         XCTAssertTrue(host.waitForExistence(timeout: 5))
         let next = app.buttons["Continue"]
         XCTAssertFalse(next.isEnabled, "continues without a host")
+        let publicKey = app.staticTexts["publicKey"]
+        XCTAssertTrue(publicKey.waitForExistence(timeout: 5), "no key made")
+        XCTAssertTrue(publicKey.label.hasPrefix("ssh-ed25519 "), publicKey.label)
+        XCTAssertTrue(app.buttons["Copy Command"].exists)
         host.tap(); host.typeText("127.0.0.1")
         app.textFields["User"].tap(); app.textFields["User"].typeText(user)
         let port = app.textFields["Port"]
         port.tap(); port.typeText(XCUIKeyboardKey.delete.rawValue + XCUIKeyboardKey.delete.rawValue + "2222")
         app.textFields["Name"].tap(); app.textFields["Name"].typeText("Guide test")
-        attach(app, "machine")
+        attach(app, "add a machine")
         next.tap()
 
-        app.buttons["generateKey"].tap()
-        let publicKey = app.staticTexts["publicKey"]
-        XCTAssertTrue(publicKey.waitForExistence(timeout: 5))
-        XCTAssertTrue(publicKey.label.hasPrefix("ssh-ed25519 "), publicKey.label)
-        XCTAssertTrue(app.buttons["Copy Command"].exists)
-        attach(app, "key")
-        app.buttons["I've Added the Key"].tap()
-
-        // The host key, shown before it's trusted, matches the sshd's.
+        // Screen 2: the host key, shown before it's trusted, matches the sshd's.
+        XCTAssertTrue(app.descendants(matching: .any)["checkList"].waitForExistence(timeout: 5))
         let fingerprint = app.staticTexts["hostKeyFingerprint"]
         XCTAssertTrue(fingerprint.waitForExistence(timeout: 15), "no host key")
         XCTAssertEqual(fingerprint.label, Self.fingerprint(hostKey))
@@ -72,30 +64,12 @@ final class OnboardingUITests: XCTestCase {
         handle.write(Data("\n\(line)\n".utf8))
         try handle.close()
         app.buttons["Try Again"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["loggedIn"].waitForExistence(timeout: 15), "no login after adding the key")
-        attach(app, "logged in")
-
-        app.buttons["Install clothod"].tap()
-        XCTAssertTrue(app.descendants(matching: .any)["clothodRunning"].waitForExistence(timeout: 120), "clothod didn't start")
-        attach(app, "installed")
-        app.buttons["Continue"].tap()
-
-        // Notifications: asked here only if this simulator hasn't answered before.
-        let allow = app.buttons["allowNotifications"]
-        if allow.waitForExistence(timeout: 3) {
-            attach(app, "notifications")
-            allow.tap()
-            let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-            let system = springboard.buttons["Allow"]
-            if system.waitForExistence(timeout: 5) { system.tap() }
-        }
-        // A test install never starts at login.
-        XCTAssertTrue(app.descendants(matching: .any)["loginUnavailable"].waitForExistence(timeout: 10))
-        attach(app, "login")
-        app.buttons["Continue"].tap()
-
+        // Logging in and installing go on by themselves once each works (each shows its check briefly), so
+        // the next stop is screen 3. An error on the way would stop there instead.
         let open = app.buttons["openMachine"]
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        let stopped = app.descendants(matching: .any)["onboardingError"]
+        XCTAssertTrue(open.waitForExistence(timeout: 120), stopped.exists ? "stopped: \(stopped.label)" : "never reached the end")
+        attach(app, "ready")
         open.tap()
         let newWorkspace = app.buttons["New Workspace"].firstMatch
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 30)

@@ -98,7 +98,10 @@ struct RootView: View {
             OnboardingView(mode: mode) { opened in
                 navigator.guide = nil
                 AgentNotifier.shared.deferPrompt = false
-                if let opened { navigator.open(.machine(opened)) }
+                // The guide no longer asks: right after it, with a machine set up, is the moment.
+                AgentNotifier.shared.promptIfUndecided()
+                // On the iPad the sidebar selects it; on the iPhone, Home already shows it.
+                if let opened, navigator.regular { navigator.open(.machine(opened)) }
             }
             .environmentObject(machines)
             .environmentObject(connections)
