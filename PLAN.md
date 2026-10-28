@@ -267,3 +267,15 @@ clothod release, app install or TestFlight upload still needs the user's go when
   status `outdated`). The user chose to ship 0.1.12 from HEAD: upgrade in place, reinstall the app
   with the released dist, refresh the hooks, then TestFlight. The user's install of the app should
   only ever bundle a released dist.
+
+## Fewer pushes (user decision, 2026-10-28)
+
+- A push means the agent needs the user. clothod ignores:
+  - Claude's idle reminder (idle_prompt) and auth_success
+  - SessionStart after compaction
+  - reports from agents nested under the pane's agent
+- A turn that ends while the user is at the pane (a client showing it sent input in the last
+  60 s) raises attention in the app but doesn't push. Permission prompts, questions and errors
+  always push.
+- Turns the user didn't type (peer messages, background tasks) still push when they end. The
+  user chose this; it avoids depending on Claude Code's prompt wrapper.
