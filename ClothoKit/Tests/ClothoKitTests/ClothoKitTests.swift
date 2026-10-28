@@ -301,6 +301,14 @@ final class PushModelTests: XCTestCase {
         XCTAssertEqual(devices, [PushDevice(device: "d1", label: "mac", relay: "https://r", env: "sandbox", created: 1761512345.5, lastError: "410")])
         XCTAssertEqual(Hello.Feature(rawValue: "push"), .push)
     }
+
+    func testDecodesPushActivities() throws {
+        let json = #"[{"pane": 7, "device": "d1", "created": 1761512345.5, "last_error": null}, {"pane": 9, "device": "d2", "created": 1761512346, "last_error": "relay: 429"}]"#
+        let activities = try JSONDecoder().decode([PushActivity].self, from: Data(json.utf8))
+        XCTAssertEqual(activities, [PushActivity(pane: 7, device: "d1", created: 1761512345.5),
+                                    PushActivity(pane: 9, device: "d2", created: 1761512346, lastError: "relay: 429")])
+        XCTAssertEqual(Hello.Feature(rawValue: "push.activity"), .pushActivity)
+    }
 }
 
 final class DisplayTitleTests: XCTestCase {

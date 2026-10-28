@@ -71,6 +71,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case splitSetRatio = "split.set_ratio"
         /// Push alerts to phones through a relay (docs/push.md).
         case push
+        /// `push.activity` / `push.activity_end`: Live Activity updates through the relay (docs/push.md, "Live Activities").
+        case pushActivity = "push.activity"
         /// File access: `fs.*` and FILE_DATA streams (protocol.md, "Files").
         case fs
         /// `pane.clipboard` events: OSC 52 copies from a pane's application.
@@ -382,6 +384,16 @@ public protocol SessionBackend: AnyObject, Sendable {
     func pushUnregister(device: String) async throws
     func pushList() async throws -> [PushDevice]
     func pushTest(device: String) async throws
+
+    // Live Activities (docs/push.md, "Live Activities"), when hello's `features` contains `.pushActivity`.
+    /// Sends an activity's push token for `pane` to the machine, which then pushes the pane's agent to it.
+    /// Replaces an earlier token for the same pane and device. `device` must be `push.register`ed
+    /// (`not_found` otherwise); `token` is 64–200 hex characters; `env` defaults to the registration's.
+    func pushActivity(pane: PaneID, device: String, token: String, env: String?) async throws
+    /// Tells the machine to forget the pane's activity token. Nothing is sent: the app ends the activity.
+    func pushActivityEnd(pane: PaneID, device: String) async throws
+    /// The machine's live activity tokens, as `push.list` reports them (never the token).
+    func pushActivities() async throws -> [PushActivity]
 }
 
 public extension SessionBackend {
@@ -433,8 +445,12 @@ public extension SessionBackend {
     func pushUnregister(device: String) async throws { throw Self.noPush }
     func pushList() async throws -> [PushDevice] { throw Self.noPush }
     func pushTest(device: String) async throws { throw Self.noPush }
+    func pushActivity(pane: PaneID, device: String, token: String, env: String?) async throws { throw Self.noActivities }
+    func pushActivityEnd(pane: PaneID, device: String) async throws { throw Self.noActivities }
+    func pushActivities() async throws -> [PushActivity] { throw Self.noActivities }
 
     private static var noPush: BackendError { BackendError(code: "unknown_method", message: "this backend has no push alerts") }
+    private static var noActivities: BackendError { BackendError(code: "unknown_method", message: "this backend has no Live Activities") }
 
     func createWorkspace(name: String? = nil) async throws -> CreatedWorkspace {
         try await createWorkspace(name: name, spawn: SpawnOptions())
@@ -490,6 +506,24 @@ public struct PushDevice: Codable, Equatable, Sendable {
         self.label = label
         self.relay = relay
         self.env = env
+        self.created = created
+        self.lastError = lastError
+    }
+}
+
+/// A Live Activity token a machine holds, as `push.list` reports it (never the token itself).
+public struct PushActivity: Codable, Equatable, Sendable {
+    public var pane: PaneID
+    public var device: String
+    public var created: Double?
+    /// The last failure sending to it, if any.
+    public var lastError: String?
+
+    enum CodingKeys: String, CodingKey { case pane, device, created, lastError = "last_error" }
+
+    public init(pane: PaneID, device: String, created: Double? = nil, lastError: String? = nil) {
+        self.pane = pane
+        self.device = device
         self.created = created
         self.lastError = lastError
     }

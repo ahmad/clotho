@@ -72,6 +72,49 @@ extension ClothodBackendTests {
         XCTAssertFalse(text.text.hasSuffix("\n"))
     }
 
+    /// push.activity and push.activity_end against a real daemon: a token for a registered device shows in
+    /// push.list's activities (never the token), and ending it removes it. The relay is never reached: the
+    /// pane runs no agent, so nothing is sent.
+    func testPushActivity() async throws {
+        let backend = makeBackend()
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        try await waitFor("hello") { collector.all.contains { if case .connected = $0 { return true }; return false } }
+        guard let hello = backend.locked({ backend.lastHello }), hello.features.contains(.pushActivity) else {
+            throw XCTSkip("this clothod predates push.activity")
+        }
+        let created = try await backend.createWorkspace(name: "activity", spawn: SpawnOptions(command: ["/bin/sh"], cwd: "/tmp"))
+        let token = String(repeating: "ab", count: 32)
+        do {
+            try await backend.pushActivity(pane: created.pane, device: "cki-phone", token: token, env: nil)
+            XCTFail("an unregistered device is accepted")
+        } catch let error as BackendError {
+            XCTAssertEqual(error.code, "not_found")
+        }
+        let key = Data(repeating: 9, count: 32).base64EncodedString()
+        try await backend.pushRegister(PushRegistration(device: "cki-phone", handle: "h", key: key, label: "test",
+                                                        relay: "http://127.0.0.1:9", env: "sandbox"))
+        do {
+            try await backend.pushActivity(pane: created.pane, device: "cki-phone", token: "not-hex", env: nil)
+            XCTFail("a bad token is accepted")
+        } catch let error as BackendError {
+            XCTAssertEqual(error.code, "bad_request")
+        }
+        try await backend.pushActivity(pane: created.pane, device: "cki-phone", token: token, env: "production")
+        let activities = try await backend.pushActivities()
+        XCTAssertEqual(activities.map(\.pane), [created.pane])
+        XCTAssertEqual(activities.first?.device, "cki-phone")
+        XCTAssertNotNil(activities.first?.created)
+        let devices = try await backend.pushList()
+        XCTAssertEqual(devices.map(\.device), ["cki-phone"], "push.list's devices still decode")
+        try await backend.pushActivityEnd(pane: created.pane, device: "cki-phone")
+        let after = try await backend.pushActivities()
+        XCTAssertEqual(after, [])
+        try await backend.pushUnregister(device: "cki-phone")
+    }
+
     func testPaneTextDecodes() throws {
         let json = #"{"lines":["$ ls","a  b",""],"cursor":[2,1],"cols":80,"rows":3,"seq":42,"modes":{"bracketed_paste":true}}"#
         let text = try JSONDecoder().decode(PaneText.self, from: Data(json.utf8))

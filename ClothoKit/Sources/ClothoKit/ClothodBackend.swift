@@ -384,6 +384,21 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("push.test", ["device": device])
     }
 
+    public func pushActivity(pane: PaneID, device: String, token: String, env: String?) async throws {
+        var params: [String: Any] = ["pane": pane, "device": device, "token": token]
+        params["env"] = env
+        _ = try await request("push.activity", params)
+    }
+
+    public func pushActivityEnd(pane: PaneID, device: String) async throws {
+        _ = try await request("push.activity_end", ["pane": pane, "device": device])
+    }
+
+    public func pushActivities() async throws -> [PushActivity] {
+        let result = try await request("push.list", nil) as? [String: Any]
+        return try Self.decode([PushActivity].self, from: result?["activities"] ?? [Any]())
+    }
+
     public func ackAgent(_ pane: PaneID) async throws {
         _ = try await request("agent.ack", ["pane": pane])
     }
