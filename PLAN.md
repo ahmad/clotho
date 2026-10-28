@@ -262,3 +262,8 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The user asked the mac agent to install the app. It bundles clothod 0.1.11.
 - The user chose to upgrade devbox, macbook and imac to 0.1.11 in place once the iOS tests passed,
   then refresh the hooks. TestFlight is still the user's to run.
+- The installed app bundled macbook's dev dist of 0.1.11, and the user's "Update clothod" put that
+  build on all three machines. It predates 0488b00 (the push record cap, the report caps, and hooks
+  status `outdated`). The user chose to ship 0.1.12 from HEAD: upgrade in place, reinstall the app
+  with the released dist, refresh the hooks, then TestFlight. The user's install of the app should
+  only ever bundle a released dist.
