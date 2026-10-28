@@ -225,6 +225,16 @@ struct PaneScreen: View {
             if let pane, pane.agent != nil || store.hello?.features.contains(.agentHistory) == true {
                 Button { showingHistory = pane.id } label: { Label("Agent History", systemImage: "clock.arrow.circlepath") }
             }
+            #if LIVE_ACTIVITIES
+            // Follow the agent on the lock screen and in the Dynamic Island (state and elapsed time only).
+            if let pane, pane.agent != nil, connection.canFollow || connection.isFollowing(pane.id) {
+                if connection.isFollowing(pane.id) {
+                    Button { connection.unfollow(pane.id) } label: { Label("Stop Following", systemImage: "pin.slash") }
+                } else {
+                    Button { connection.follow(pane.id) } label: { Label("Follow on Lock Screen", systemImage: "pin") }
+                }
+            }
+            #endif
             Button { browsingFiles = pane?.cwd ?? "~" } label: { Label("Files here", systemImage: "folder") }
             Button { pickingPhoto = true } label: { Label("Paste Photo…", systemImage: "photo.on.rectangle") }
             Divider()

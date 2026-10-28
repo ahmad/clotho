@@ -12,6 +12,8 @@ targets:
     sources:
       - ClothoWidget
       - Clotho/Push/AgentsSummary.swift
+      # All inside #if LIVE_ACTIVITIES (liveactivity.yml), so nothing without it.
+      - Clotho/Push/AgentActivity.swift
       - path: Clotho/Push/PushShared.swift
     settings:
       base:

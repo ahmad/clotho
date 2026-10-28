@@ -209,3 +209,29 @@ final class AgentsSummaryTests: XCTestCase {
         XCTAssertFalse(summary.save(), "an unchanged summary isn't written (or the widget reloaded) again")
     }
 }
+
+#if LIVE_ACTIVITIES
+/// Phase 6: the Live Activity's content is exactly what the relay sends (docs/push.md, "Live Activities").
+final class AgentActivityTests: XCTestCase {
+    func testDecodesTheRelaysContentState() throws {
+        // The relay's aps["content-state"], as relay.test.js builds it.
+        let json = #"{"state":"running","kind":"claude","since":1761512300,"started":1761512200}"#
+        let state = try JSONDecoder().decode(AgentActivityAttributes.ContentState.self, from: Data(json.utf8))
+        XCTAssertEqual(state, .init(state: "running", kind: "claude", since: 1761512300, started: 1761512200))
+        XCTAssertEqual(state.verb, "is working")
+        XCTAssertFalse(state.isOver)
+        // And back: the same four keys, nothing more.
+        let keys = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? [String: Any]).keys.sorted()
+        XCTAssertEqual(keys, ["kind", "since", "started", "state"])
+    }
+
+    @MainActor
+    func testFirstContentMapsLikeClothod() {
+        let starting = AgentInfo(kind: "Claude", state: .starting, since: 100)
+        XCTAssertEqual(MachineConnection.activityState(starting),
+                       .init(state: "running", kind: "claude", since: 100, started: 100), "started falls back to since")
+        let waiting = AgentInfo(kind: "codex", state: .waiting, since: 200, turnStarted: 150)
+        XCTAssertEqual(MachineConnection.activityState(waiting), .init(state: "waiting", kind: "codex", since: 200, started: 150))
+    }
+}
+#endif

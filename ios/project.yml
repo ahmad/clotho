@@ -4,6 +4,8 @@ include:
     enable: ${PUSH}
   - path: widget.yml
     enable: ${WIDGET}
+  - path: liveactivity.yml
+    enable: ${LIVE_ACTIVITY}
 options:
   bundleIdPrefix: nyc.amin
   deploymentTarget:

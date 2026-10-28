@@ -1,0 +1,17 @@
+# Live Activities (docs/push.md, "Live Activities"). Included only with LIVE_ACTIVITY=YES (build.sh sets it for
+# the simulator): they need the relay's /v1/activity deployed and a clothod with push.activity, each on the
+# user's go, so TestFlight builds leave them out until then.
+targets:
+  Clotho:
+    settings:
+      base:
+        INFOPLIST_KEY_NSSupportsLiveActivities: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) LIVE_ACTIVITIES
+  ClothoWidget:
+    settings:
+      base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) LIVE_ACTIVITIES
+  ClothoTests:
+    settings:
+      base:
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) WIDGET_PREVIEW_TEST LIVE_ACTIVITIES

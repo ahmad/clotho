@@ -8,6 +8,9 @@ import WidgetKit
 struct ClothoWidgets: WidgetBundle {
     var body: some Widget {
         NeedsYouWidget()
+        #if LIVE_ACTIVITIES
+        AgentActivityWidget()
+        #endif
     }
 }
 
