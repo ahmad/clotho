@@ -254,3 +254,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
   - agent history (a bounded per-agent log in clothod plus a view)
   - iPad split view
   - light mode on the Mac and iOS
+
+## clothod 0.1.11 and the sidebar rows (user decision, 2026-10-27)
+
+- Workspace rows: the status dot sits right after the name, like the machine dot. The tab count is
+  pinned to the trailing edge. The close button shows only on hover, in the count's place.
+- The user asked the mac agent to install the app. It bundles clothod 0.1.11.
+- The user chose to upgrade devbox, macbook and imac to 0.1.11 in place once the iOS tests passed,
+  then refresh the hooks. TestFlight is still the user's to run.
