@@ -345,3 +345,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
   answered each permission request (17385b7).
 - The batch: in-place upgrades on all three machines, a Mac app reinstall, and a TestFlight build
   of main bundling 0.1.15 after the full iPhone suite and the iPad test.
+
+## The widget (user decision, 2026-10-28)
+
+- The user approved the "Needs you" widget (home and lock screen). The next TestFlight upload
+  registers one more App ID, nyc.amin.clotho.widget, with keychain sharing only, so there's no new
+  capability. It never shows terminal text.
+- Live Activity (generic content only): the relay endpoint and the clothod change may be built and
+  tested. Deploying the relay and releasing clothod for it each need the user's go.
