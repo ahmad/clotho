@@ -46,7 +46,8 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
 - **This Mac** (Tailscale name `macbook`, `ahmad@macbook`): has Xcode. From devbox,
   `clotho-mac <command>` syncs the clone to `~/Builds/clotho-clothod` on the Mac and runs the command
   there, e.g. `clotho-mac ios/build.sh` or `clotho-mac mac/build-app.sh --dev`. Over SSH the login
-  keychain is locked, so archives and TestFlight uploads need the Mac's own session. The Mac app is
+  keychain is locked, but TestFlight uploads still work: they unlock it from the Mac's ~/.keychain_pw and
+  use the App Store Connect API key in ~/.appstoreconnect/private_keys/. The Mac app is
   signed ad hoc, so `mac/build-app.sh` installs fine over SSH.
 - **imac** (macOS arm64, `macbook@imac`): a remote test host.
 
@@ -62,7 +63,10 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
     user approved a new version.
 - iOS:
   - `ios/build.sh` builds for the simulator; `ios/build.sh test` runs the tests.
-  - `ios/scripts/testflight.sh` uploads to TestFlight, and needs the user's go each time.
+  - `ios/scripts/testflight.sh` uploads to TestFlight. The orchestrator runs it over SSH without
+    asking, once a build has passed the full iPhone suite and the iPad test and has been verified,
+    then tells the user the build number. The API key ids live in devbox's
+    `~/.config/clotho/asc.env`, never in the repo.
 - Relay: `cd ios/relay && npm test`. Deploy with `npx wrangler deploy`, only when asked.
 
 ## Keys (never in the repo)

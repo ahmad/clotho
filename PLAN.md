@@ -321,3 +321,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
   notification detail, and Allow/Deny (agent.decide).
 - Install the two new Claude hooks (PostToolUse, and PermissionRequest with timeout 3600) on each
   machine, so there are 8 Clotho entries. The user's own hooks are kept, with backups.
+
+## TestFlight uploads (user decision, 2026-10-28)
+
+- The orchestrator uploads to TestFlight itself, without asking, once a build has passed the full
+  iPhone suite and the iPad test and has been verified. It reports the build number afterwards.
+- Uploads run over SSH, the way the user's ~/.local/bin/deploy-testflight does: unlock the
+  keychain from the Mac's ~/.keychain_pw, and use the App Store Connect API key. The key ids are in
+  devbox's ~/.config/clotho/asc.env, outside the repo.
