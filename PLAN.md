@@ -338,3 +338,10 @@ clothod release, app install or TestFlight upload still needs the user's go when
   2. The Mac app reinstalled, bundling 0.1.14.
   3. A TestFlight build of main bundling 0.1.14, after the full iPhone suite and the iPad test.
      The redesign branch isn't included.
+
+## clothod 0.1.15 (user decision, 2026-10-28)
+
+- Release: clothod.log names who closed a workspace, tab or pane, how each pane ended, and who
+  answered each permission request (17385b7).
+- The batch: in-place upgrades on all three machines, a Mac app reinstall, and a TestFlight build
+  of main bundling 0.1.15 after the full iPhone suite and the iPad test.
