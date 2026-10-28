@@ -3927,6 +3927,68 @@ async fn agent_history_logs_transitions_and_survives_a_restart() {
     assert!(e.to_string().contains("not_found"), "{e}");
 }
 
+/// Codex Computer Use wraps the notify it finds: `[client, "turn-ended", "--previous-notify",
+/// "<JSON of ours>"]`. Ours still runs (the client calls it), so status says so, install updates
+/// it in place instead of wrapping the client, and uninstall unwraps it.
+#[test]
+fn a_codex_notify_chained_inside_another_client_counts_as_installed() {
+    let env = Env::empty();
+    let home = env.dir.path().join("home");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    let bin_dir = env.dir.path().join("bin");
+    let old_bin = bin_dir.join("current").join("clothod");
+    let config = home.join(".codex/config.toml");
+    let client = "/Applications/Codex Computer Use.app/Contents/MacOS/SkyComputerUseClient";
+    let write = |notify: &[String]| {
+        let mut doc: toml_edit::DocumentMut = "model = \"gpt\"\n".parse().unwrap();
+        let mut arr = toml_edit::Array::new();
+        for s in notify {
+            arr.push(s.as_str());
+        }
+        doc["notify"] = toml_edit::value(arr);
+        std::fs::write(&config, doc.to_string()).unwrap();
+    };
+    let read = || -> Vec<String> {
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&config).unwrap().parse().unwrap();
+        assert_eq!(doc["model"].as_str(), Some("gpt"), "the rest is kept");
+        doc.get("notify").and_then(|n| n.as_array()).map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect()).unwrap_or_default()
+    };
+    let run = |args: &[&str]| {
+        let out = Command::new(test_bin()).args(args).env("HOME", &home).env("CLOTHOD_INSTALL_DIR", &bin_dir).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // As on the user's Mac: an older build's notify (0.1.10's quoting), escaped the way the
+    // client writes JSON ("\/").
+    let old_script = format!(r#"for a; do j=$a; done; c="${{CLOTHOD_REPORT:-{}}}"; [ -n "$CLOTHO_PANE" ] && [ -x "$c" ] && "$c" report --codex-notify "$j"; [ $# -gt 1 ] && exec "$@"; exit 0"#, old_bin.display());
+    let inner = serde_json::to_string(&["/bin/sh", "-c", old_script.as_str(), "clotho-notify"]).unwrap().replace('/', "\\/");
+    write(&[client.into(), "turn-ended".into(), "--previous-notify".into(), inner]);
+    assert!(run(&["hooks", "status"]).contains("codex: outdated (chained)"));
+
+    assert!(run(&["hooks", "install", "codex"]).contains(": installed (chained)"));
+    let n = read();
+    assert_eq!(n.len(), 4, "not wrapped again: {n:?}");
+    assert_eq!((n[0].as_str(), n[1].as_str(), n[2].as_str()), (client, "turn-ended", "--previous-notify"));
+    let ours: Vec<String> = serde_json::from_str(&n[3]).unwrap();
+    assert_eq!((ours.len(), ours[0].as_str(), ours[3].as_str()), (4, "/bin/sh", "clotho-notify"));
+    assert!(!ours[2].contains(r#"c="${CLOTHOD_REPORT"#), "brought up to date: {}", ours[2]);
+    assert!(run(&["hooks", "status"]).contains("codex: installed (chained)"));
+    assert!(run(&["hooks", "install", "codex"]).contains("already installed (chained)"));
+
+    // Uninstall: the client stays, without a previous notify.
+    assert!(run(&["hooks", "uninstall", "codex"]).contains(": uninstalled"));
+    assert_eq!(read(), [client, "turn-ended"]);
+    assert!(run(&["hooks", "status"]).contains("codex: not installed"));
+
+    // Ours chaining the user's own program, inside the client: uninstall leaves that program.
+    let inner = serde_json::to_string(&["/bin/sh", "-c", "x", "clotho-notify", "echo", "mine"]).unwrap();
+    write(&[client.into(), "turn-ended".into(), "--previous-notify".into(), inner]);
+    assert!(run(&["hooks", "status"]).contains("codex: outdated (chained)"));
+    run(&["hooks", "uninstall", "codex"]);
+    let n = read();
+    assert_eq!(serde_json::from_str::<Vec<String>>(&n[3]).unwrap(), ["echo", "mine"]);
+}
+
 /// Hooks installed by 0.1.10 (the install path spliced in double quotes, docs/security.md
 /// finding 6) show as `outdated`, and `hooks install` replaces them in place, keeping the
 /// user's own hooks and Codex's chained notify program.

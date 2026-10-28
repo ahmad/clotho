@@ -444,17 +444,26 @@ fn claude_status(settings: &Value) -> &'static str {
     }
 }
 
-fn codex_status(notify: Option<&[String]>) -> &'static str {
+/// `installed`, `outdated` or `not installed`; ` (chained)` when ours runs inside another
+/// program's notify (Codex Computer Use wraps the notify it finds as `--previous-notify <JSON>`).
+fn codex_status(notify: Option<&[String]>) -> String {
+    let current = |n: &[String]| n[..4] == ["/bin/sh".to_string(), "-c".into(), codex_script(), CODEX_ARG0.into()];
     match notify {
-        Some(n) if codex_is_ours(n) => {
-            if n[..4] == ["/bin/sh".to_string(), "-c".into(), codex_script(), CODEX_ARG0.into()] {
-                "installed"
-            } else {
-                "outdated"
-            }
-        }
-        _ => "not installed",
+        Some(n) if codex_is_ours(n) => (if current(n) { "installed" } else { "outdated" }).into(),
+        Some(n) => match codex_chained(n) {
+            Some((_, inner)) => format!("{} (chained)", if current(&inner) { "installed" } else { "outdated" }),
+            None => "not installed".into(),
+        },
+        None => "not installed".into(),
     }
+}
+
+/// Ours inside another program's notify: `… --previous-notify <JSON array of ours>`. Returns
+/// where the JSON is and what it holds.
+fn codex_chained(notify: &[String]) -> Option<(usize, Vec<String>)> {
+    let i = notify.iter().position(|a| a == "--previous-notify")? + 1;
+    let inner: Vec<String> = serde_json::from_str(notify.get(i)?).ok()?;
+    codex_is_ours(&inner).then_some((i, inner))
 }
 
 fn install_claude() -> Result<String> {
@@ -533,6 +542,21 @@ fn install_codex() -> Result<String> {
     let path = codex_config()?;
     let mut doc = read_toml(&path)?;
     let current = codex_notify(&doc);
+    // Ours inside another program's notify: bring it up to date where it is, rather than wrap
+    // that program (which would then call ours twice).
+    if let Some((i, inner)) = current.as_deref().and_then(codex_chained) {
+        let mut ours = vec!["/bin/sh".to_string(), "-c".into(), codex_script(), CODEX_ARG0.into()];
+        ours.extend(inner[4..].iter().cloned());
+        if inner == ours {
+            return Ok(format!("{}: already installed (chained)", path.display()));
+        }
+        let mut n = current.unwrap();
+        n[i] = serde_json::to_string(&ours)?;
+        set_notify(&mut doc, Some(n));
+        backup(&path)?;
+        write_atomic(&path, doc.to_string().as_bytes())?;
+        return Ok(format!("{}: installed (chained)", path.display()));
+    }
     // Chain to the user's own program (unwrapping our old wrapper first, after an upgrade).
     let user = match &current {
         Some(n) if codex_is_ours(n) => n[4..].to_vec(),
@@ -557,6 +581,19 @@ fn uninstall_codex() -> Result<String> {
         Some(n) if codex_is_ours(&n) => {
             let user = n[4..].to_vec();
             set_notify(&mut doc, (!user.is_empty()).then_some(user));
+            backup(&path)?;
+            write_atomic(&path, doc.to_string().as_bytes())?;
+            Ok(format!("{}: uninstalled", path.display()))
+        }
+        // Chained: what ours chained to takes its place, or the option goes.
+        Some(mut n) if codex_chained(&n).is_some() => {
+            let (i, inner) = codex_chained(&n).unwrap();
+            if inner.len() > 4 {
+                n[i] = serde_json::to_string(&inner[4..])?;
+            } else {
+                n.drain(i - 1..=i);
+            }
+            set_notify(&mut doc, Some(n));
             backup(&path)?;
             write_atomic(&path, doc.to_string().as_bytes())?;
             Ok(format!("{}: uninstalled", path.display()))

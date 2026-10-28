@@ -558,6 +558,14 @@ the user's existing hooks. It backs the file up to
 `<file>.clotho-backup-<unix time>` before changing it. For Codex, which allows only one `notify`
 program, an existing one is kept and called after clotho's. `uninstall` puts it back.
 
+`hooks status` prints one `<agent>: <status>` line per agent. The status is `installed`,
+`outdated` (an older clothod's hooks, which `install` replaces in place) or `not installed`.
+For Codex, `installed (chained)` and `outdated (chained)` (since 0.1.17) mean that another
+program took over `notify` and calls clotho's as its `--previous-notify <JSON>`, as Codex
+Computer Use does. Clotho's hook still runs, so count it as installed. `install` then updates
+clotho's command inside the JSON rather than wrapping the other program (which would call
+clotho's twice), and `uninstall` removes it from there.
+
 ### Permission requests
 
 Claude Code asks before it runs a tool, in a dialog in the terminal. With the hooks installed,
