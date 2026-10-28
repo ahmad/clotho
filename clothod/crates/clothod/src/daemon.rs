@@ -178,6 +178,25 @@ struct Agent {
     tool_input: Option<String>,
     /// Unix seconds when the current turn started (its prompt, or work after a turn ended).
     turn_started: Option<f64>,
+    /// Permission requests waiting for an answer from a client (`agent.decide`), oldest first.
+    requests: Vec<Request>,
+}
+
+/// A tool call the agent asks permission for, answerable from a client (`agent.decide`) while
+/// its hook (`clothod report --claude-permission`) waits.
+#[derive(Debug, Clone, PartialEq)]
+struct Request {
+    id: String,
+    tool: String,
+    summary: Option<String>,
+    /// Hash of the tool call (name and input): a PostToolUse for the same call retires it.
+    key: String,
+}
+
+/// The waiting hook's side of a request: where its answer goes.
+struct Pending {
+    tx: tokio::sync::oneshot::Sender<Value>,
+    client: u64,
 }
 
 impl Agent {
@@ -262,6 +281,7 @@ impl Agent {
             "tool": self.tool,
             "tool_input": self.tool_input,
             "turn_started": self.turn_started,
+            "requests": self.requests.iter().map(|r| json!({"id": r.id, "tool": r.tool, "summary": r.summary})).collect::<Vec<_>>(),
             "session": self.session,
         })
     }
@@ -294,6 +314,8 @@ struct Pane {
     /// When a client last typed in (or sent focus or mouse reports to) the pane: whether the
     /// user is at it right now (`user_present`).
     last_input_at: Option<Instant>,
+    /// The hooks waiting on this pane's agent's permission requests, by request id.
+    pending: HashMap<String, Pending>,
     snap_seq: u64,
     snap_at: Instant,
     last_output: Instant,
@@ -308,6 +330,17 @@ const PRESENCE: Duration = Duration::from_secs(60);
 
 fn presence() -> Duration {
     std::env::var("CLOTHOD_TEST_PRESENCE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(PRESENCE)
+}
+
+/// A request id no one can guess from another (the socket is the user's alone; this keeps a
+/// stale id from ever naming a newer request).
+fn request_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    format!("{:016x}", h.finish())
 }
 
 /// Longest prompt line and tool description kept for an agent's turn (chars).
@@ -348,6 +381,29 @@ impl Pane {
 }
 
 impl Pane {
+    /// Retire the agent's requests that `which` picks: their hooks exit with no decision, so
+    /// the agent's own dialog (which shows all along) takes over. True if any went.
+    fn retire(&mut self, which: impl Fn(&Request) -> bool) -> bool {
+        let Some(a) = self.agent.as_mut() else {
+            for (_, p) in self.pending.drain() {
+                let _ = p.tx.send(json!({"retired": true}));
+            }
+            return false;
+        };
+        let before = a.requests.len();
+        let pending = &mut self.pending;
+        a.requests.retain(|r| {
+            if !which(r) {
+                return true;
+            }
+            if let Some(p) = pending.remove(&r.id) {
+                let _ = p.tx.send(json!({"retired": true}));
+            }
+            false
+        });
+        a.requests.len() != before
+    }
+
     /// A client showing this pane sent it input within `presence()`.
     fn user_present(&self) -> bool {
         self.last_input_at.is_some_and(|at| at.elapsed() < presence()) && self.last_input_client.is_some_and(|c| self.subs.contains_key(&c))
@@ -379,6 +435,7 @@ impl Pane {
             subs: HashMap::new(),
             last_input_client: None,
             last_input_at: None,
+            pending: HashMap::new(),
             snap_seq: 0,
             snap_at: Instant::now(),
             last_output: Instant::now(),
@@ -1321,6 +1378,13 @@ impl Daemon {
     /// Replace a pane's agent. A new state gets a fresh `since` and, for waiting/done/error,
     /// `attention`. Sends `pane` (any change) and `agent` (appeared, gone, or new state).
     fn set_agent(&self, p: &mut Pane, mut new: Option<Agent>) {
+        if new.is_none() {
+            // The agent went away: nothing is left to answer its requests.
+            p.retire(|_| true);
+            for (_, pend) in p.pending.drain() {
+                let _ = pend.tx.send(json!({"retired": true}));
+            }
+        }
         let old = p.agent.clone();
         let from = old.as_ref().map(|a| a.state.clone());
         if let Some(a) = new.as_mut() {
@@ -1392,8 +1456,10 @@ impl Daemon {
                 message: a.message.clone(),
                 since: a.since,
                 prompt: a.prompt.clone(),
-                tool: a.tool.clone().filter(|_| a.state == "waiting"),
-                tool_input: a.tool_input.clone().filter(|_| a.state == "waiting"),
+                // A permission request says exactly what it asks about, and can be answered.
+                tool: a.requests.last().map(|r| r.tool.clone()).or(a.tool.clone()).filter(|_| a.state == "waiting"),
+                tool_input: a.requests.last().map(|r| r.summary.clone()).unwrap_or(a.tool_input.clone()).filter(|_| a.state == "waiting"),
+                request: a.requests.last().map(|r| r.id.clone()).filter(|_| a.state == "waiting"),
                 duration: a.turn_started.filter(|_| a.state != "waiting").map(|t| (a.since - t).max(0.0).round() as u64),
                 workspace_id,
                 workspace,
@@ -1466,6 +1532,7 @@ impl Daemon {
                     tool: None,
                     tool_input: None,
                     turn_started: None,
+                    requests: Vec::new(),
                 });
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
@@ -1487,6 +1554,65 @@ impl Daemon {
     }
 
     fn agent_report(&self, p: &Value) -> RpcResult {
+        self.agent_report_with(p, None)
+    }
+
+    /// `agent.permission`: the agent asks permission for a tool call. It waits like a report of
+    /// `waiting` with that tool, and adds a request whose answer goes to `rx` (sent back to the
+    /// waiting hook when a client decides, or `{"retired": true}`).
+    fn agent_permission(&self, client: u64, p: &Value) -> std::result::Result<tokio::sync::oneshot::Receiver<Value>, RpcError> {
+        let tool = p.get("tool").and_then(Value::as_str).map(|t| clotho_vt::printable(t, AGENT_TOOL_NAME_MAX)).filter(|t| !t.is_empty()).ok_or_else(|| err("bad_request", "missing tool"))?;
+        let key = p.get("key").and_then(Value::as_str).map(|k| clotho_vt::printable(k, 64)).filter(|k| !k.is_empty()).ok_or_else(|| err("bad_request", "missing key"))?;
+        let summary = p.get("tool_input").and_then(Value::as_str).map(|t| clotho_vt::printable(t, AGENT_TOOL_MAX)).filter(|t| !t.is_empty());
+        let id = request_id();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut params = p.clone();
+        params["state"] = json!("waiting");
+        let r = self.agent_report_with(&params, Some((Request { id, tool, summary, key }, Pending { tx, client })))?;
+        if r.get("ignored").is_some() {
+            return Err(err("ignored", "nested agent"));
+        }
+        Ok(rx)
+    }
+
+    /// `agent.decide`: answer a pending request. Only the one the id names, only once.
+    fn agent_decide(&self, p: &Value) -> RpcResult {
+        let pane = param_u64(p, "pane")?;
+        let id = p.get("request").and_then(Value::as_str).ok_or_else(|| err("bad_request", "missing request"))?;
+        let decision = p.get("decision").and_then(Value::as_str).filter(|d| matches!(*d, "allow" | "deny")).ok_or_else(|| err("bad_request", "decision must be allow or deny"))?;
+        let message = p.get("message").and_then(Value::as_str).map(|m| clotho_vt::printable(m, 300)).filter(|m| !m.is_empty());
+        let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+        let mut pp = pp.lock().unwrap();
+        let stale = || err("stale", "that request was already answered or is gone");
+        let pend = pp.pending.remove(id).ok_or_else(stale)?;
+        if let Some(mut a) = pp.agent.clone() {
+            a.requests.retain(|r| r.id != id);
+            self.set_agent(&mut pp, Some(a));
+        }
+        pend.tx.send(json!({"decision": decision, "message": message})).map_err(|_| stale())?;
+        Ok(json!({}))
+    }
+
+    /// A client went away: requests whose hook waited on it can't be answered any more.
+    fn retire_client_requests(&self, client: u64) {
+        let panes: Vec<_> = self.panes.lock().unwrap().values().cloned().collect();
+        for p in panes {
+            let mut p = p.lock().unwrap();
+            let gone: Vec<String> = p.pending.iter().filter(|(_, v)| v.client == client).map(|(k, _)| k.clone()).collect();
+            if gone.is_empty() {
+                continue;
+            }
+            for id in &gone {
+                p.pending.remove(id);
+            }
+            if let Some(mut a) = p.agent.clone() {
+                a.requests.retain(|r| !gone.contains(&r.id));
+                self.set_agent(&mut p, Some(a));
+            }
+        }
+    }
+
+    fn agent_report_with(&self, p: &Value, request: Option<(Request, Pending)>) -> RpcResult {
         let pane = param_u64(p, "pane")?;
         let state = p.get("state").and_then(Value::as_str).ok_or_else(|| err("bad_request", "missing state"))?;
         let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
@@ -1504,6 +1630,11 @@ impl Daemon {
             if nested_agent(pid as u32, pp.pid) {
                 return Ok(json!({"ignored": "nested"}));
             }
+        }
+        // The turn moved on: requests it settled (the user answered in the terminal: a
+        // PostToolUse for that very call), or all of them (a new prompt, the turn's end).
+        if let Some(r) = p.get("retire").and_then(Value::as_str) {
+            pp.retire(|q| r == "all" || q.key == r);
         }
         if state == "clear" {
             self.set_agent(&mut pp, None);
@@ -1554,6 +1685,13 @@ impl Daemon {
             tool,
             tool_input,
             turn_started,
+            requests: match request {
+                Some((r, pend)) => {
+                    pp.pending.insert(r.id.clone(), pend);
+                    pp.agent.as_ref().map(|a| a.requests.clone()).unwrap_or_default().into_iter().chain([r]).collect()
+                }
+                None => pp.agent.as_ref().map(|a| a.requests.clone()).unwrap_or_default(),
+            },
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))
@@ -1659,6 +1797,21 @@ impl Daemon {
                     }
                     let result = if !hello && method != "hello" {
                         Err(err("handshake_required", "send hello first"))
+                    } else if method == "agent.permission" {
+                        // Answered when a client decides (or the request is retired): the read
+                        // loop goes on meanwhile, so the hook going away is noticed.
+                        match self.agent_permission(id, &params) {
+                            Ok(rx) => {
+                                let c = client.clone();
+                                let req_id = req_id.clone();
+                                tokio::spawn(async move {
+                                    let v = rx.await.unwrap_or(json!({"retired": true}));
+                                    c.json(json!({"id": req_id, "result": v}));
+                                });
+                                continue;
+                            }
+                            Err(e) => Err(e),
+                        }
                     } else if method == "pane.subscribe" {
                         // Sends its own reply, ordered before the pane's frames.
                         match self.subscribe(&client, req_id.clone(), &params) {
@@ -1720,6 +1873,7 @@ impl Daemon {
         for p in panes {
             p.lock().unwrap().subs.remove(&id);
         }
+        self.retire_client_requests(id);
         drop(client);
         writer.abort();
     }
@@ -1740,7 +1894,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1764,6 +1918,7 @@ impl Daemon {
             m if m.starts_with("fs.") => crate::fs::request(&self.fs_ctx(), client, m, p).await.map_err(|e| err(e.code, e.message)),
             m if m.starts_with("push.") => self.push.request(m, p).await.map_err(|e| err(e.code, e.message)),
             "agent.report" => self.agent_report(p),
+            "agent.decide" => self.agent_decide(p),
             "agent.ack" => {
                 let pane = param_u64(p, "pane")?;
                 let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;

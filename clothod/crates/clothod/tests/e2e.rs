@@ -1184,6 +1184,153 @@ async fn pushes_carry_the_turns_details() {
     assert!(r.get("q").is_none() && r.get("tool").is_none(), "{r}");
 }
 
+/// Runs Claude Code hook payloads through `clothod report` in a pane: `steps` are shell lines,
+/// `{hook NAME PAYLOAD}` placeholders already expanded by `hook_line`.
+fn hook_line(dir: &std::path::Path, name: &str, mode: &str, payload: &str, out: Option<&str>) -> String {
+    let f = dir.join(format!("{name}.json"));
+    std::fs::write(&f, payload).unwrap();
+    let redirect = out.map(|o| format!(" > '{}'", dir.join(o).display())).unwrap_or_default();
+    format!("'{}' report {mode} < '{}'{redirect}", test_bin(), f.display())
+}
+
+fn permission_payload(command: &str) -> String {
+    json!({"session_id": "s1", "transcript_path": "/t.jsonl", "cwd": "/p", "prompt_id": "p1", "permission_mode": "default",
+        "hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": command, "description": "run it"},
+        "permission_suggestions": [{"type": "setMode", "mode": "acceptEdits", "destination": "session"}]}).to_string()
+}
+
+fn post_tool_payload(command: &str) -> String {
+    json!({"session_id": "s1", "transcript_path": "/t.jsonl", "cwd": "/p", "hook_event_name": "PostToolUse", "tool_name": "Bash",
+        "tool_input": {"command": command, "description": "run it"}, "tool_response": {"stdout": "", "stderr": ""}}).to_string()
+}
+
+async fn wait_file(f: &std::path::Path) -> String {
+    let deadline = Instant::now() + T;
+    loop {
+        if let Ok(s) = std::fs::read_to_string(f) {
+            if s.ends_with('\n') || s == "done" {
+                return s;
+            }
+        }
+        assert!(Instant::now() < deadline, "no {}", f.display());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Two tool calls ask permission at once (parallel calls): each is a request of its own,
+/// answerable from a client exactly once, and only the one its id names gets the answer.
+#[tokio::test]
+async fn permission_requests_are_answered_once_and_only_by_id() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let dir = env.dir.path().join("perm");
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = hook_line(&dir, "a", "--claude-permission", &permission_payload("npm test"), Some("a.out"));
+    let b = hook_line(&dir, "b", "--claude-permission", &permission_payload("rm -rf build"), Some("b.out"));
+    let script = dir.join("agent.sh");
+    std::fs::write(&script, format!("({a}; echo done >> '{d}/a.end') & sleep 0.3; ({b}; echo done >> '{d}/b.end') & wait; sleep 60\n", d = dir.display())).unwrap();
+    let p = new_pane(&c, sh()).await;
+    c.input(p, format!("sh '{}'\r", script.display()).as_bytes());
+
+    let ag = wait_agent(&c, p, "two requests", |a| a["requests"].as_array().is_some_and(|r| r.len() == 2)).await;
+    assert_eq!((ag["state"].clone(), ag["attention"].clone()), (json!("waiting"), json!(true)));
+    let reqs = ag["requests"].as_array().unwrap().clone();
+    assert_eq!((reqs[0]["tool"].clone(), reqs[0]["summary"].clone()), (json!("Bash"), json!("npm test")));
+    assert_eq!(reqs[1]["summary"], "rm -rf build");
+    let (ra, rb) = (reqs[0]["id"].as_str().unwrap().to_string(), reqs[1]["id"].as_str().unwrap().to_string());
+    assert_ne!(ra, rb);
+    // The push for the wait can be acted on: it names the request.
+    let r = opened(&relay.next().1);
+    assert_eq!((r["s"].clone(), r["rq"].clone(), r["tool"].clone(), r["cmd"].clone()), (json!("waiting"), json!(ra), json!("Bash"), json!("npm test")));
+
+    // Allow the second: only its hook answers; the first still waits.
+    c.request("agent.decide", json!({"pane": p, "request": rb, "decision": "allow"})).await.unwrap();
+    let out = wait_file(&dir.join("b.out")).await;
+    let v: Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(v, json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}));
+    wait_file(&dir.join("b.end")).await;
+    let ag = pane_agent(&c, p).await;
+    assert_eq!(ag["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(ag["requests"][0]["id"], json!(ra));
+    assert!(std::fs::read_to_string(dir.join("a.out")).unwrap().is_empty(), "the other request got nothing");
+
+    // A double tap is stale, and nothing more is printed.
+    let e = c.request("agent.decide", json!({"pane": p, "request": rb, "decision": "deny"})).await.unwrap_err();
+    assert!(e.to_string().contains("stale"), "{e}");
+    let e = c.request("agent.decide", json!({"pane": p, "request": ra, "decision": "maybe"})).await.unwrap_err();
+    assert!(e.to_string().contains("bad_request"), "{e}");
+
+    // Deny the first, with a reason for Claude.
+    c.request("agent.decide", json!({"pane": p, "request": ra, "decision": "deny", "message": "Not on main"})).await.unwrap();
+    let v: Value = serde_json::from_str(wait_file(&dir.join("a.out")).await.trim()).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["decision"], json!({"behavior": "deny", "message": "Not on main"}));
+    wait_file(&dir.join("a.end")).await;
+    assert_eq!(std::fs::read_to_string(dir.join("b.out")).unwrap().lines().count(), 1, "one answer per request");
+    assert!(pane_agent(&c, p).await["requests"].as_array().unwrap().is_empty());
+}
+
+/// The user answers in the terminal (Claude's own dialog shows all along): the call's
+/// PostToolUse retires its request, and a tap on the phone afterwards is stale. Another call's
+/// PostToolUse (a subagent's) leaves an unrelated request alone; the turn's end retires the rest,
+/// and a hook that goes away (Claude's timeout) takes its request with it.
+#[tokio::test]
+async fn requests_answered_in_the_terminal_go_stale() {
+    let env = Env::new();
+    let c = env.client().await;
+    let dir = env.dir.path().join("perm");
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.display();
+    let ask_x = hook_line(&dir, "x", "--claude-permission", &permission_payload("make x"), Some("x.out"));
+    let ask_y = hook_line(&dir, "y", "--claude-permission", &permission_payload("make y"), Some("y.out"));
+    let ask_z = hook_line(&dir, "z", "--claude-permission", &permission_payload("make z"), Some("z.out"));
+    let post_x = hook_line(&dir, "px", "--claude-hook", &post_tool_payload("make x"), None);
+    let post_other = hook_line(&dir, "po", "--claude-hook", &post_tool_payload("ls"), None);
+    let stop = hook_line(&dir, "stop", "--claude-hook", &json!({"session_id": "s1", "hook_event_name": "Stop", "last_assistant_message": "ok"}).to_string(), None);
+    let script = dir.join("agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "({ask_x}; echo done > '{d}/x.end') & ({ask_y}; echo done > '{d}/y.end') & read a; {post_x}; {post_other}; read b; {stop}; read c; {ask_z} & echo $! > '{d}/z.pid'; wait; sleep 60\n"
+        ),
+    )
+    .unwrap();
+    let p = new_pane(&c, sh()).await;
+    c.input(p, format!("sh '{}'\r", script.display()).as_bytes());
+    let ag = wait_agent(&c, p, "two requests", |a| a["requests"].as_array().is_some_and(|r| r.len() == 2)).await;
+    let id_of = |cmd: &str| ag["requests"].as_array().unwrap().iter().find(|r| r["summary"] == cmd).unwrap()["id"].as_str().unwrap().to_string();
+    let (x, y) = (id_of("make x"), id_of("make y"));
+
+    // Answered in the terminal: x ran (its PostToolUse), and a subagent's other call ran too.
+    c.input(p, b"\r");
+    assert_eq!(wait_file(&dir.join("x.end")).await, "done\n");
+    assert!(std::fs::read_to_string(dir.join("x.out")).unwrap().is_empty(), "a retired request prints nothing");
+    let e = c.request("agent.decide", json!({"pane": p, "request": x, "decision": "allow"})).await.unwrap_err();
+    assert!(e.to_string().contains("stale"), "{e}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let ag = pane_agent(&c, p).await;
+    assert_eq!(ag["requests"].as_array().unwrap().iter().map(|r| r["id"].clone()).collect::<Vec<_>>(), vec![json!(y)], "an unrelated call leaves y: {ag}");
+
+    // The turn ends: what's left is retired.
+    c.input(p, b"\r");
+    wait_file(&dir.join("y.end")).await;
+    assert!(std::fs::read_to_string(dir.join("y.out")).unwrap().is_empty());
+    let e = c.request("agent.decide", json!({"pane": p, "request": y, "decision": "allow"})).await.unwrap_err();
+    assert!(e.to_string().contains("stale"), "{e}");
+
+    // A hook that goes away (Claude's timeout ends it) takes its request with it.
+    c.input(p, b"\r");
+    let ag = wait_agent(&c, p, "request z", |a| a["requests"].as_array().is_some_and(|r| r.len() == 1)).await;
+    let z = ag["requests"][0]["id"].as_str().unwrap().to_string();
+    let pid: i32 = wait_file(&dir.join("z.pid")).await.trim().parse().unwrap();
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let ag = wait_agent(&c, p, "z gone", |a| a["requests"].as_array().is_some_and(|r| r.is_empty())).await;
+    assert_eq!(ag["state"], "waiting");
+    let e = c.request("agent.decide", json!({"pane": p, "request": z, "decision": "allow"})).await.unwrap_err();
+    assert!(e.to_string().contains("stale"), "{e}");
+}
+
 /// An agent the pane's agent runs (an SDK app under test, `claude -p` from a tool) has hooks
 /// too: its reports reach this pane but must not move the pane's agent or push.
 #[tokio::test]
@@ -1563,7 +1710,11 @@ fn hooks_install_keeps_other_tools_hooks_in_order() {
     assert_eq!(&events[..3], ["PermissionRequest", "Notification", "PreToolUse"]);
     // The other tool's entries are untouched and still first within their events.
     let orig: Value = serde_json::from_str(original).unwrap();
-    assert_eq!(s["hooks"]["PermissionRequest"], orig["hooks"]["PermissionRequest"], "PermissionRequest is not ours to touch");
+    assert_eq!(s["hooks"]["PermissionRequest"][0], orig["hooks"]["PermissionRequest"][0], "the other tool's PermissionRequest hook stays first");
+    let ours = &s["hooks"]["PermissionRequest"][1];
+    assert_eq!(ours["matcher"], "*");
+    assert!(ours["hooks"][0]["command"].as_str().unwrap().contains("report --claude-permission"));
+    assert_eq!(ours["hooks"][0]["timeout"], 3600, "Claude's dialog shows meanwhile; the phone may answer within the hour");
     assert_eq!(s["hooks"]["Notification"][0], orig["hooks"]["Notification"][0]);
     assert_eq!(s["hooks"]["PreToolUse"][0], orig["hooks"]["PreToolUse"][0]);
     assert!(s["hooks"]["Notification"][1]["hooks"][0]["command"].as_str().unwrap().contains("report --claude-hook"));
@@ -3492,7 +3643,7 @@ fn hooks_from_an_older_build_are_outdated_and_reinstall_replaces_them() {
     let all: Vec<&str> = s["hooks"].as_object().unwrap().values().flat_map(|g| g.as_array().unwrap()).flat_map(|g| g["hooks"].as_array().unwrap()).map(|h| h["command"].as_str().unwrap()).collect();
     assert!(all.contains(&"echo mine"), "user hook kept");
     assert!(!all.iter().any(|c| c.contains(r#"c="${CLOTHOD_REPORT"#)), "no old command left: {all:?}");
-    assert_eq!(all.iter().filter(|c| c.contains(marker)).count(), 6, "one of ours per event");
+    assert_eq!(all.iter().filter(|c| c.contains(marker)).count(), 8, "one of ours per event");
     let doc: toml_edit::DocumentMut = std::fs::read_to_string(&config).unwrap().parse().unwrap();
     let notify: Vec<String> = doc["notify"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert_eq!(notify.len(), 6, "{notify:?}");

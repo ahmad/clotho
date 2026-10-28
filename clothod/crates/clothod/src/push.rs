@@ -57,6 +57,8 @@ pub struct Alert {
     /// For `waiting`: the tool it asks about ("Bash") and its key input ("npm test").
     pub tool: Option<String>,
     pub tool_input: Option<String>,
+    /// For `waiting` on a permission request: its id, for `agent.decide` (Allow/Deny).
+    pub request: Option<String>,
     /// For `done` and `error`: seconds since the turn started.
     pub duration: Option<u64>,
     pub workspace_id: Option<u64>,
@@ -147,7 +149,7 @@ pub fn open(private_b64: &str, ciphertext_b64: &str, aad: &[u8]) -> Option<Vec<u
 }
 
 /// The record a phone decrypts: `{"v":1, "m", "p", "k", "s", "msg", "t"}`, plus what of
-/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `d` the alert has (docs/push.md).
+/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `d`, `rq` the alert has (docs/push.md).
 ///
 /// Each text is first held to its own cap (bytes, on a char boundary). If the record would still
 /// pass MAX_RECORD padded (long names, escape-heavy text), texts are halved in this order until
@@ -187,6 +189,9 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
         }
         if let Some(d) = a.duration {
             v["d"] = json!(d);
+        }
+        if let Some(r) = &a.request {
+            v["rq"] = json!(cut(r, 64));
         }
         v
     };
@@ -539,6 +544,7 @@ mod tests {
             prompt: Some("fix the flaky push test on macOS".into()),
             tool: None,
             tool_input: None,
+            request: None,
             duration: Some(254),
             workspace_id: Some(3),
             workspace: Some("clotho".into()),
@@ -569,7 +575,7 @@ mod tests {
     fn full_records_fit_and_cut_the_result_first() {
         for ch in ["\u{1F600}", "\u{1}", "é"] {
             let big = |n: usize| Some(ch.repeat(n));
-            let a = Alert { message: big(400), prompt: big(240), tool: big(96), tool_input: big(240), workspace: big(96), tab: big(96), project: big(96), ..full() };
+            let a = Alert { message: big(400), prompt: big(240), tool: big(96), tool_input: big(240), workspace: big(96), tab: big(96), project: big(96), request: Some("f".repeat(16)), ..full() };
             let rec = plaintext(&ch.repeat(100), 7, &a);
             assert!(rec.len() <= MAX_RECORD && rec.len() % PAD_TO == 0, "{ch:?}: {}", rec.len());
             assert!(seal(PK, &rec, b"x").unwrap().len() <= 3000);

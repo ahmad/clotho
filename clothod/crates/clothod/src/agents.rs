@@ -24,6 +24,9 @@ pub fn report(args: &[String]) -> i32 {
 }
 
 fn try_report(args: &[String]) -> Result<()> {
+    if args.first().map(String::as_str) == Some("--claude-permission") {
+        return try_permission();
+    }
     let Some(pane) = std::env::var("CLOTHO_PANE").ok().and_then(|p| p.parse::<u64>().ok()) else { return Ok(()) };
     let mut state: Option<String> = None;
     let mut kind: Option<String> = None;
@@ -78,9 +81,60 @@ fn try_report(args: &[String]) -> Result<()> {
     for (k, v) in extra {
         params[k] = json!(v);
     }
-    // The pane's daemon: named by the pane's environment (newer holders), else the default
-    // socket, else any registered daemon. Each checks `pid` is really in its pane and refuses
-    // otherwise, so a pane id that exists in two daemons can't be reported to the wrong one.
+    for sock in daemon_sockets() {
+        if let Ok(Some(_)) = send_report(&sock, "agent.report", &params, Some(Duration::from_millis(500))) {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// `clothod report --claude-permission`, Claude Code's PermissionRequest hook: ask the pane's
+/// daemon, which shows the request to the apps, and wait for a decision. Print Claude's
+/// answer for allow or deny; print nothing (Claude's own dialog, on screen all along, decides)
+/// when the request is retired, the user answered in the terminal, or there's no daemon.
+fn try_permission() -> Result<()> {
+    let Some(pane) = std::env::var("CLOTHO_PANE").ok().and_then(|p| p.parse::<u64>().ok()) else { return Ok(()) };
+    let mut input = String::new();
+    std::io::stdin().take(1 << 20).read_to_string(&mut input)?;
+    let v: Value = serde_json::from_str(&input)?;
+    let Some(tool) = v["tool_name"].as_str() else { return Ok(()) };
+    let mut params = json!({"pane": pane, "pid": std::process::id(), "kind": "claude", "tool": tool.chars().take(64).collect::<String>(), "key": tool_key(tool, &v["tool_input"])});
+    if let Some(i) = tool_input(tool, &v["tool_input"]) {
+        params["tool_input"] = json!(i);
+    }
+    if let Some(s) = v["session_id"].as_str() {
+        params["session"] = json!(s);
+    }
+    for sock in daemon_sockets() {
+        // No time limit: the answer comes when someone decides. Claude ends the hook at its
+        // timeout, and the daemon notices the connection go.
+        let Ok(Some(r)) = send_report(&sock, "agent.permission", &params, None) else { continue };
+        let behavior = r["decision"].as_str().filter(|d| matches!(*d, "allow" | "deny"));
+        if let Some(b) = behavior {
+            let mut decision = json!({"behavior": b});
+            if let Some(m) = r["message"].as_str().filter(|_| b == "deny") {
+                decision["message"] = json!(m);
+            }
+            println!("{}", json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}));
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Identifies one tool call: its name and input. PermissionRequest and PostToolUse carry the
+/// same two, so the call the user answered in the terminal retires its request.
+fn tool_key(name: &str, input: &Value) -> String {
+    use sha2::Digest;
+    let h = sha2::Sha256::digest(format!("{name}\n{input}").as_bytes());
+    h.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// The pane's daemon: named by the pane's environment (newer holders), else the default socket,
+/// else any registered daemon. Each checks `pid` is really in its pane and refuses otherwise, so
+/// a pane id that exists in two daemons can't be reported to the wrong one.
+fn daemon_sockets() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(s) = std::env::var_os("CLOTHOD_SOCKET").filter(|s| !s.is_empty()) {
         candidates.push(s.into());
@@ -96,16 +150,12 @@ fn try_report(args: &[String]) -> Result<()> {
         candidates.extend(registered.into_iter().map(|(_, s)| s));
     }
     let mut seen = Vec::new();
-    for sock in candidates {
-        if seen.contains(&sock) {
-            continue;
-        }
-        seen.push(sock.clone());
-        if let Ok(true) = send_report(&sock, &params) {
-            return Ok(());
-        }
-    }
-    Ok(())
+    candidates.retain(|s| {
+        let new = !seen.contains(s);
+        seen.push(s.clone());
+        new
+    });
+    candidates
 }
 
 /// Claude Code's text for its idle reminder, for builds that don't send `notification_type`.
@@ -185,7 +235,9 @@ fn tool_input(name: &str, input: &Value) -> Option<String> {
 /// (the reply a turn ended with), and agent.report's prompt / tool / tool_input.
 fn claude_hook_context(v: &Value) -> (Option<String>, Vec<(&'static str, String)>) {
     match v["hook_event_name"].as_str().unwrap_or("") {
-        "UserPromptSubmit" => (None, vec![("prompt", v["prompt"].as_str().map(user_prompt).unwrap_or_default())]),
+        "UserPromptSubmit" => (None, vec![("prompt", v["prompt"].as_str().map(user_prompt).unwrap_or_default()), ("retire", "all".into())]),
+        // The call ran: the user allowed it (here or in the terminal), so its request is done.
+        "PostToolUse" => (None, v["tool_name"].as_str().map(|t| vec![("retire", tool_key(t, &v["tool_input"]))]).unwrap_or_default()),
         "PreToolUse" => {
             let Some(name) = v["tool_name"].as_str() else { return (None, vec![]) };
             let mut e = vec![("tool", name.chars().take(64).collect())];
@@ -195,7 +247,7 @@ fn claude_hook_context(v: &Value) -> (Option<String>, Vec<(&'static str, String)
         // Only a permission prompt is about the tool in use: any other wait (a question)
         // clears it, so the phone never offers to allow a tool the question isn't about.
         "Notification" if !is_permission(v) => (None, vec![("tool", String::new())]),
-        "Stop" => (v["last_assistant_message"].as_str().map(|m| one_line(m, RESULT_MAX)).filter(|m| !m.is_empty()), vec![]),
+        "Stop" => (v["last_assistant_message"].as_str().map(|m| one_line(m, RESULT_MAX)).filter(|m| !m.is_empty()), vec![("retire", "all".into())]),
         _ => (None, vec![]),
     }
 }
@@ -209,14 +261,15 @@ fn is_permission(v: &Value) -> bool {
     }
 }
 
-/// One attempt: Ok(true) if this daemon took the report.
-fn send_report(socket: &Path, params: &Value) -> Result<bool> {
+/// One attempt: Ok(Some(result)) if this daemon took the request, Ok(None) if it refused it
+/// (another daemon's pane).
+fn send_report(socket: &Path, method: &str, params: &Value, timeout: Option<Duration>) -> Result<Option<Value>> {
     let mut s = UnixStream::connect(socket)?;
-    s.set_read_timeout(Some(Duration::from_millis(500)))?;
+    s.set_read_timeout(timeout)?;
     s.set_write_timeout(Some(Duration::from_millis(500)))?;
     let hello = json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "clothod-report"}});
     let mut out = Frame::Json(hello).encode();
-    out.extend(Frame::Json(json!({"id": 2, "method": "agent.report", "params": params})).encode());
+    out.extend(Frame::Json(json!({"id": 2, "method": method, "params": params})).encode());
     s.write_all(&out)?;
     // Wait for the reply: it says whether this was the right daemon, and keeps quick
     // successive hooks in order.
@@ -228,7 +281,7 @@ fn send_report(socket: &Path, params: &Value) -> Result<bool> {
         if body.first() == Some(&clotho_proto::frame::T_JSON) {
             let v: Value = serde_json::from_slice(&body[1..])?;
             if v["id"] == 2 {
-                return Ok(v.get("result").is_some());
+                return Ok(v.get("result").cloned());
             }
         }
     }
@@ -268,24 +321,35 @@ fn codex_config() -> Result<PathBuf> {
 }
 
 /// Claude Code events and their matcher (tool events need one).
-const CLAUDE_EVENTS: [(&str, Option<&str>); 6] = [
+const CLAUDE_EVENTS: [(&str, Option<&str>); 8] = [
     ("SessionStart", None),
     ("UserPromptSubmit", None),
     ("PreToolUse", Some("*")),
+    ("PostToolUse", Some("*")),
+    ("PermissionRequest", Some("*")),
     ("Notification", None),
     ("Stop", None),
     ("SessionEnd", None),
 ];
 
+/// How long Claude lets the PermissionRequest hook wait for an answer from a phone or the app.
+/// Its own dialog shows all the while, so a long wait costs nothing: at the end Claude stops
+/// the hook and the dialog stays.
+const PERMISSION_TIMEOUT_S: u64 = 3600;
+
 fn claude_snippet() -> Value {
-    let cmd = report_command("--claude-hook");
     let mut hooks = Map::new();
     for (event, matcher) in CLAUDE_EVENTS {
         let mut group = Map::new();
         if let Some(m) = matcher {
             group.insert("matcher".into(), json!(m));
         }
-        group.insert("hooks".into(), json!([{"type": "command", "command": cmd}]));
+        let hook = if event == "PermissionRequest" {
+            json!({"type": "command", "command": report_command("--claude-permission"), "timeout": PERMISSION_TIMEOUT_S})
+        } else {
+            json!({"type": "command", "command": report_command("--claude-hook")})
+        };
+        group.insert("hooks".into(), json!([hook]));
         hooks.insert(event.into(), json!([Value::Object(group)]));
     }
     json!({"hooks": hooks})
@@ -539,7 +603,13 @@ mod tests {
     fn hook_payloads_give_the_turns_context() {
         let ctx = |j: &str| claude_hook_context(&serde_json::from_str(j).unwrap());
         // The prompt's first non-empty line, bounded; injected prompts give "" (no prompt).
-        assert_eq!(ctx(r#"{"hook_event_name":"UserPromptSubmit","prompt":"\n  fix the build\nand test"}"#).1, vec![("prompt", "fix the build".to_string())]);
+        assert_eq!(ctx(r#"{"hook_event_name":"UserPromptSubmit","prompt":"\n  fix the build\nand test"}"#).1, vec![("prompt", "fix the build".to_string()), ("retire", "all".to_string())]);
+        // A call that ran retires its permission request (same name and input as the request);
+        // the turn's end retires them all.
+        let post = ctx(r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}"#).1;
+        assert_eq!(post, vec![("retire", tool_key("Bash", &json!({"command": "npm test"})))]);
+        assert_ne!(tool_key("Bash", &json!({"command": "npm test"})), tool_key("Bash", &json!({"command": "npm test "})));
+        assert_eq!(ctx(r#"{"hook_event_name":"Stop","last_assistant_message":"ok"}"#).1, vec![("retire", "all".to_string())]);
         assert_eq!(user_prompt(&"é".repeat(500)).chars().count(), PROMPT_MAX);
         for injected in ["Another Claude session sent a message:\n<cross-session-message from=\"x\">hi</cross-session-message>", "<task-notification>\n<task-id>b1</task-id>", "<command-name>/compact</command-name>"] {
             assert_eq!(user_prompt(injected), "", "{injected}");

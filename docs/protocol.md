@@ -94,7 +94,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
-                  "pane.search", "agent.history"],
+                  "pane.search", "agent.history", "agent.decide"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -115,7 +115,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
   [Settings](#settings)), `service` (`service.*`, see [Start at login](#start-at-login)) and
   `agent.mute` (the agent's `muted` field and the `agent.mute` request, see [Agents](#agents)),
   `pane.search` ([Searching scrollback](#searching-scrollback), since 0.1.11) and
-  `agent.history` ([Agent history](#agent-history), since 0.1.11).
+  `agent.history` ([Agent history](#agent-history), since 0.1.11), `agent.decide`
+  ([Permission requests](#permission-requests), the agent's `requests`, since 0.1.13).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -306,6 +307,8 @@ encodings, but it tracks flags an application sets anyway, so `pane.keys` stays 
 INPUT frames for a pane that doesn't exist are dropped silently. There is no reply for an INPUT
 frame.
 
+| `agent.decide` | `pane`, `request` (an id from the agent's `requests`), `decision` (`"allow"` or `"deny"`), `message?` (for deny: told to the agent, at most 300 chars) | `{}`. Answers that request only, once: `stale` if it was already answered, retired (answered in the terminal, the turn ended, its hook went away) or never existed. See [Permission requests](#permission-requests) |
+| `agent.permission` | `pane`, `pid`, `tool`, `tool_input?`, `key`, `kind?`, `session?` | Sent by `clothod report --claude-permission` (Claude Code's PermissionRequest hook), not by apps. The reply waits until a client decides: `{"decision": "allow"\|"deny", "message"?}`, or `{"retired": true}` |
 | `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both) | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
 | `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it) |
 | `agent.history` | `pane`; optional `limit` (1–200, default 200), `since` (unix seconds: entries after it), `session` | `{"pane", "entries": [..], "max": 200}`, oldest first; see [Agent history](#agent-history) |
@@ -462,6 +465,7 @@ and otherwise:
 | `message` | what the agent says, or `null`. For `waiting`, the prompt it shows ("Claude needs your permission to use Bash"); for `done`, the start of the reply its turn ended with (Claude Code's `last_assistant_message`, Codex's `last-assistant-message`: whitespace collapsed to one line, at most 300 chars); for `error`, the error |
 | `prompt` | the first line of the prompt the user typed for the current turn (at most 120 chars), or `null`: no prompt yet, or a turn the user didn't type (started by another agent's message or a finished background task; the wrapper text is never shown) |
 | `tool`, `tool_input` | the last tool the agent used in this turn (`"Bash"`) and its key input (`"npm test"`, at most 160 chars: Bash's command, the file of Read/Write/Edit, the pattern of Glob/Grep, the URL, the query, a task's description, else the first text field), or `null`. Cleared by a new turn and by a wait that isn't a permission prompt, so while `waiting` they say what the permission is for |
+| `requests` | permission requests the agent is waiting on, oldest first: `[{"id", "tool", "summary"}]` (`"Bash"`, `"npm test"` or `null`). A client can answer one with `agent.decide` (Allow/Deny from the phone or the app). Empty when none. See [Permission requests](#permission-requests). Feature flag: `agent.decide` |
 | `turn_started` | unix seconds (float) when the current turn started (its prompt, or work resuming after the turn ended), or `null`. For `done` and `error`, `since - turn_started` is how long the turn took |
 | `since` | when `state` last changed, in **unix seconds as a float** |
 | `attention` | the agent needs the user. **Raised** only by exact signals: a hook-reported transition into `waiting`, `done` or `error` (including a hook report that takes over from detection in the same state, e.g. detection guessed `waiting` and then the hook reports `waiting`; that also sends an `agent` event whose `from` equals the state), or a terminal bell (BEL) from a detected agent. **Cleared** only when the agent works again (a transition into `running` or `starting` reported by a hook, or shown by Claude Code's title spinner), by `agent.ack` (the user resolved it), or when the agent goes away. Input never clears it: opening a pane makes a client send focus and mouse reports, and looking is not resolving. A typed reply clears it through the agent going back to work. Detection's guesses from output alone (busy read as `running`, quiet as `waiting`) neither raise nor clear it, since an app's redraw after a resize would read as work. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions**, unless `quiet` is true. Pushes (`push`) follow the same rises, except quiet ones |
@@ -505,7 +509,9 @@ clothod report --claude-hook      # reads Claude Code's hook JSON on stdin and m
 clothod report --codex-notify JSON # Codex's notify payload (agent-turn-complete -> done)
 ```
 
-Claude Code hook mapping: `SessionStart` → starting, `UserPromptSubmit`, `PreToolUse` and
+Claude Code hook mapping (the installed hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+`PostToolUse`, `PermissionRequest`, `Notification`, `Stop`, `SessionEnd`): `PermissionRequest` →
+a permission request (above); `SessionStart` → starting, `UserPromptSubmit`, `PreToolUse` and
 `PostToolUse` → running, `Notification` → waiting (with its message), `Stop` → done,
 `SessionEnd` → clear. Events that say nothing new about whether the agent needs the user are
 ignored (the state and `attention` stay as they are), decided by `clothod report` from the hook's
@@ -547,6 +553,36 @@ clothod hooks status                   # installed or not, per agent
 the user's existing hooks. It backs the file up to
 `<file>.clotho-backup-<unix time>` before changing it. For Codex, which allows only one `notify`
 program, an existing one is kept and called after clotho's. `uninstall` puts it back.
+
+### Permission requests
+
+Claude Code asks before it runs a tool, in a dialog in the terminal. With the hooks installed,
+its PermissionRequest hook (`clothod report --claude-permission`) also tells the daemon, so a
+client can answer from anywhere:
+
+1. The hook sends `agent.permission` with the tool, its key input and `key` (a hash of the tool
+   call: name and input). The agent becomes `waiting` with `tool`/`tool_input` set, and the
+   request is added to its `requests` with a fresh `id`. Attention and pushes follow the usual
+   rules (a permission wait is never `quiet`); the push names the request (`rq`, docs/push.md)
+   so it can be answered from the notification. A second request while the agent already
+   waits raises nothing new: it shows in `requests`.
+2. A client calls `agent.decide` with that id. The daemon passes the decision to the waiting
+   hook, which prints it for Claude Code (`allow`, or `deny` with the message) and exits. The
+   request leaves `requests`. A second `agent.decide` for the same id answers `stale`; an id
+   only ever names its own request, so a decision can never reach another one.
+3. Claude's own dialog shows the whole time, and the user can answer it in the terminal first.
+   Claude does not stop the hook then, so the daemon retires requests itself. The hook prints
+   nothing and exits, and a later `agent.decide` answers `stale`:
+   - a `PostToolUse` for the same call (same tool name and input) retires that request only,
+     so a subagent's or a parallel call's other tool leaves it alone;
+   - `UserPromptSubmit` and `Stop` (the turn moved on or ended) retire all of the agent's
+     requests, and so do `SessionEnd` and the agent going away;
+   - the hook's connection closing retires its request: Claude ends the hook at its timeout
+     (3600 s in the installed hook), and its dialog stays.
+   A call the user denied in the terminal has no `PostToolUse`; its request stays until the turn
+   moves on. Answering it from the phone then prints a decision Claude no longer reads.
+
+Codex has no such hook: its agents never have `requests`.
 
 ### Agent history
 
