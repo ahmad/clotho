@@ -86,8 +86,9 @@ struct PaneScreen: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) { actionsMenu.disabled(store.isSaved) }
             // In the navigation bar, so it doesn't resize the pane for the two seconds it shows.
-            ToolbarItem(placement: .primaryAction) { copiedBadge }
-            ToolbarItem(placement: .primaryAction) { resumeBadge }
+            // Short notes on the leading side, so the actions button never moves while they come and go.
+            ToolbarItem(placement: .topBarLeading) { copiedBadge }
+            ToolbarItem(placement: .topBarLeading) { resumeBadge }
         }
         .background { ShortcutButtons(screen: self) }
         // The find bar follows the pane on screen.

@@ -42,7 +42,10 @@ final class FilesUITests: XCTestCase {
         let text = app.textViews["fileText"]
         XCTAssertTrue(text.waitForExistence(timeout: 10))
         XCTAssertTrue((text.value as? String ?? "").contains("hello from the mac"))
+        // In a sheet the first tap can land while it's still settling: tap until the keyboard is up.
         text.tap()
+        if !app.keyboards.firstMatch.waitForExistence(timeout: 3) { text.tap() }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 3), "the editor never took the focus")
         text.typeText("edited on ios")
         app.buttons["Save"].tap()
         let saved = expectation(for: NSPredicate { _, _ in
