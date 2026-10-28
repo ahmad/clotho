@@ -392,6 +392,10 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("agent.mute", ["pane": pane, "muted": muted])
     }
 
+    public func paneText(_ pane: PaneID) async throws -> PaneText {
+        try Self.decode(PaneText.self, from: try await request("pane.text", ["pane": pane]))
+    }
+
     public func decide(pane: PaneID, request: String, decision: PermissionDecision, message: String?) async throws {
         var params: [String: Any] = ["pane": pane, "request": request, "decision": decision.rawValue]
         if decision == .deny, let message, !message.isEmpty { params["message"] = String(message.prefix(300)) }

@@ -51,6 +51,35 @@ final class SearchHistoryDecodingTests: XCTestCase {
 extension ClothodBackendTests {
     /// pane.search finds lines in a real pane's scrollback, newest first, pages with `before`, and refuses
     /// a bad regex; agent.history answers for a pane with no agent.
+    func testPaneText() async throws {
+        let backend = makeBackend()
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        try await waitFor("hello") { collector.all.contains { if case .connected = $0 { return true }; return false } }
+        let created = try await backend.createWorkspace(name: "text", spawn: SpawnOptions(command: ["/bin/sh"], cwd: "/tmp", cols: 60, rows: 12))
+        _ = try await backend.subscribe(created.pane, haveSeq: nil, scrollback: 0, viewport: Size(cols: 60, rows: 12))
+        backend.sendInput(created.pane, Data("echo \"pre\"\"view-ok\"\n".utf8))
+        try await waitFor("output") { collector.output(of: created.pane).contains("preview-ok") }
+        let text = try await backend.paneText(created.pane)
+        XCTAssertEqual(text.cols, 60)
+        XCTAssertEqual(text.rows, 12)
+        XCTAssertEqual(text.lines.count, 12)
+        XCTAssertTrue(text.lines.contains("preview-ok"), "\(text.lines)")
+        XCTAssertTrue((0..<12).contains(text.cursorRow))
+        XCTAssertGreaterThan(text.seq, 0)
+        XCTAssertFalse(text.text.hasSuffix("\n"))
+    }
+
+    func testPaneTextDecodes() throws {
+        let json = #"{"lines":["$ ls","a  b",""],"cursor":[2,1],"cols":80,"rows":3,"seq":42,"modes":{"bracketed_paste":true}}"#
+        let text = try JSONDecoder().decode(PaneText.self, from: Data(json.utf8))
+        XCTAssertEqual(text, PaneText(lines: ["$ ls", "a  b", ""], cursorCol: 2, cursorRow: 1, cols: 80, rows: 3, seq: 42))
+        XCTAssertEqual(text.text, "$ ls\na  b")
+        XCTAssertEqual(try JSONDecoder().decode(PaneText.self, from: JSONEncoder().encode(text)), text)
+    }
+
     func testSearchAndHistory() async throws {
         let backend = makeBackend()
         let collector = FakeBackendTests.Collector()

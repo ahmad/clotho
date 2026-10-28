@@ -233,6 +233,55 @@ public enum SessionEvent: Sendable {
     case agent(PaneID, AgentInfo?)
 }
 
+/// A pane's visible screen as plain text (`pane.text`): one string per row, trailing blanks trimmed.
+public struct PaneText: Codable, Equatable, Sendable {
+    public var lines: [String]
+    public var cursorCol: Int
+    public var cursorRow: Int
+    public var cols: Int
+    public var rows: Int
+    /// The output position the text reflects.
+    public var seq: UInt64
+
+    public init(lines: [String], cursorCol: Int = 0, cursorRow: Int = 0, cols: Int, rows: Int, seq: UInt64 = 0) {
+        self.lines = lines
+        self.cursorCol = cursorCol
+        self.cursorRow = cursorRow
+        self.cols = cols
+        self.rows = rows
+        self.seq = seq
+    }
+
+    /// The lines joined, with trailing empty rows dropped.
+    public var text: String {
+        var lines = lines
+        while lines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { lines.removeLast() }
+        return lines.joined(separator: "\n")
+    }
+
+    enum CodingKeys: String, CodingKey { case lines, cursor, cols, rows, seq }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lines = try c.decode([String].self, forKey: .lines)
+        let cursor = try c.decodeIfPresent([Int].self, forKey: .cursor) ?? []
+        cursorCol = cursor.first ?? 0
+        cursorRow = cursor.dropFirst().first ?? 0
+        cols = try c.decode(Int.self, forKey: .cols)
+        rows = try c.decode(Int.self, forKey: .rows)
+        seq = try c.decodeIfPresent(UInt64.self, forKey: .seq) ?? 0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(lines, forKey: .lines)
+        try c.encode([cursorCol, cursorRow], forKey: .cursor)
+        try c.encode(cols, forKey: .cols)
+        try c.encode(rows, forKey: .rows)
+        try c.encode(seq, forKey: .seq)
+    }
+}
+
 public struct BackendError: Error, LocalizedError, Equatable, Sendable {
     /// One of the protocol's error codes, such as `not_found` or `spawn_failed`.
     public var code: String
@@ -295,6 +344,10 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Mutes or unmutes a pane's agent (`agent.mute`), when hello's `features` contains `.agentMute`.
     func muteAgent(_ pane: PaneID, muted: Bool) async throws
 
+    /// The visible screen of a pane as plain text (`pane.text`), e.g. a preview for a pane this client
+    /// never opened. Every clothod has it.
+    func paneText(_ pane: PaneID) async throws -> PaneText
+
     /// Answers one of an agent's permission `requests` (`agent.decide`), when hello's `features` contains
     /// `.agentDecide`. `message` (deny only, at most 300 characters) is told to the agent. Fails with a
     /// `BackendError` whose `isStale` is true when the request was already answered or retired.
@@ -344,6 +397,10 @@ public extension SessionBackend {
 
     func searchPane(_ pane: PaneID, query: String, options: PaneSearchOptions) async throws -> PaneSearchResult {
         throw BackendError(code: "unknown_method", message: "this backend can't search scrollback")
+    }
+
+    func paneText(_ pane: PaneID) async throws -> PaneText {
+        throw BackendError(code: "unknown_method", message: "this backend can't read a pane's text")
     }
 
     func decide(pane: PaneID, request: String, decision: PermissionDecision, message: String?) async throws {
