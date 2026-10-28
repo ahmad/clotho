@@ -360,3 +360,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
   push.activity (in-place upgrades on all three machines, after test-all), then upload a TestFlight
   build with LIVE_ACTIVITY=YES after the full iPhone suite and the iPad test. The Mac app is
   reinstalled with 0.1.16.
+
+## clothod 0.1.17 (user decision, 2026-10-28)
+
+- "ship it": clothod 0.1.17 (a chained Codex notify reads as installed or outdated "(chained)";
+  install and uninstall edit only clotho's part), the Mac app's matching fix (67f583f), and a
+  TestFlight build bundling 0.1.17 after the full iPhone suite and the iPad test. In-place upgrades
+  on all three machines.
+- Updating macbook's outdated chained Codex hook still needs the user's OK.
