@@ -393,3 +393,13 @@ clothod release, app install or TestFlight upload still needs the user's go when
   Follow. Those never leave the phone.
 - Ship when verified (Shipping rule): clothod release with in-place upgrades, relay deploy if needed,
   TestFlight after the full iPhone suite and the iPad test.
+
+## Mac downloads (user decision, 2026-10-28)
+
+- New users download the Mac app from clotho.app/downloads (the user wrote "clothoc.app", read as a
+  typo: clothoc.app doesn't resolve, and clotho.app is the live Vercel site). The Sparkle feed is
+  clotho.app/appcast.xml, as release.sh and the app already expect.
+- Signing is ready on macbook: the Developer ID certificate (expires 2027-02-01, G1 CA), the
+  `clotho-notary` profile, and the Sparkle key pair (public key in mac/Resources/SparklePublicKey).
+- The first public release follows the sidebar work: a notarized build, the zip in /downloads, the
+  appcast, and a Download button on the landing page.
