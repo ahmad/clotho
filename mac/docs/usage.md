@@ -218,6 +218,7 @@ For scripted testing, `-RunShortcuts "Split Right,New Tab"` fires menu items by 
 | A file transfer fails | The transfer toast shows the machine's error (for example a full disk or no permission). Copying again resumes files that were cut short. |
 | An upload can't find the pane's folder | The daemon hasn't learned the folder yet. Wait a moment after `cd`, or use the file browser. |
 | Desktop, Documents or Downloads is inaccessible | Review Clotho under System Settings → Privacy & Security → Files and Folders. |
+| Claude Code or another app looks dark-themed in light mode (dark diff rows, pale text) | The app draws its own theme. In Claude Code, run `/theme` and pick **Auto**. With clothod 0.1.20 or later, Clotho tells each machine's daemon the colours it shows panes in, so apps that ask the terminal (Auto in Claude Code, vim's background detection) follow Clotho's light or dark mode. Pick **Light** on older daemons. |
 
 The app's log is `~/Library/Logs/Clotho.log`. The daemon's command-line client, `clotho` (build it with `cargo build` in `clotho/clothod`; it lands in `target/debug/`), shows the daemon's view: `clotho ls` lists workspaces, tabs and panes, and `clotho text <pane>` prints a pane's screen.
 

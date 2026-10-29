@@ -1301,11 +1301,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         log("appearance: \(mode.rawValue)")
     }
 
+    /// The colours panes show in now, for the daemons to report to apps that ask (`client.colors`).
+    var terminalColors: TerminalColors { TerminalColors(Theme.palette(for: NSApp.effectiveAppearance)) }
+
     /// Light and dark: dynamic colours follow by themselves; what was resolved into layers is set again,
     /// and the chrome is rebuilt. Overlays close (reopening them draws them in the new colours).
     func appearanceChanged() {
         guard let content = window.contentView else { return }
         Theme.followAppAppearance()
+        // Apps in panes that ask (Claude Code's "auto" theme and others) learn the new background.
+        let colors = terminalColors
+        connections.values.forEach { $0.store.backend.setTerminalColors(colors) }
         content.withAppearance {
             container.layer?.backgroundColor = Theme.background.cgColor
             notchExtension.layer?.backgroundColor = Theme.sidebar.cgColor

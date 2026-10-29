@@ -1,3 +1,5 @@
+import Foundation
+
 /// Clotho's colours for both appearances, as 0xRRGGBB values, shared so the Mac and iOS apps match.
 /// Dark is Warp's Adeberry, toned down; light keeps the same hues at text-safe contrast on its
 /// background (the accent and every ANSI colour from 1 to 6 are at least 4.5:1 on `background`).
@@ -53,6 +55,39 @@ public struct ClothoPalette: Equatable, Sendable {
         }
         let (x, y) = (luminance(a), luminance(b))
         return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+    }
+}
+
+/// The colours a client shows terminals in, as the daemon reports them to applications that ask
+/// (`client.colors`, docs/protocol.md): Claude Code's "auto" theme, vim's background detection and so on
+/// then match a light or dark pane.
+public struct TerminalColors: Equatable, Sendable {
+    public var foreground: UInt32
+    public var background: UInt32
+    public var cursor: UInt32?
+    /// ANSI 0–15; exactly 16 when set.
+    public var ansi: [UInt32]?
+
+    public init(foreground: UInt32, background: UInt32, cursor: UInt32? = nil, ansi: [UInt32]? = nil) {
+        precondition(ansi == nil || ansi!.count == 16, "ANSI colours are 16")
+        self.foreground = foreground
+        self.background = background
+        self.cursor = cursor
+        self.ansi = ansi
+    }
+
+    /// The colours a pane shows in `palette`.
+    public init(_ palette: ClothoPalette) {
+        self.init(foreground: palette.foreground, background: palette.background, cursor: palette.caret, ansi: palette.ansi)
+    }
+
+    /// `client.colors`' `colors` object: "#rrggbb" strings.
+    public var json: [String: Any] {
+        func hex(_ value: UInt32) -> String { String(format: "#%06x", value & 0xFFFFFF) }
+        var object: [String: Any] = ["foreground": hex(foreground), "background": hex(background)]
+        if let cursor { object["cursor"] = hex(cursor) }
+        if let ansi { object["ansi"] = ansi.map(hex) }
+        return object
     }
 }
 

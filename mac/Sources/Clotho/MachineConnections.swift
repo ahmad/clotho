@@ -61,6 +61,7 @@ extension AppDelegate {
 
     func addSession(_ session: MachineConnection) {
         connections[session.key] = session
+        session.store.backend.setTerminalColors(terminalColors)
         session.store.onChange = { [weak self] in ClickTrace.measure("sync") { self?.sync() } }
         session.store.onBell = { [weak self] pane in self?.bell(pane) }
         session.store.onSettings = { [weak self] _ in self?.settingsWindow?.reload() }

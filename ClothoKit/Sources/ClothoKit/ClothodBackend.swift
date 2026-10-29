@@ -72,6 +72,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     private var replyHooks: [Int: (Any) -> Void] = [:]
     /// The latest hello, for `supportsFiles` and `homeDirectory`.
     var lastHello: Hello?
+    /// The colours this client shows panes in, sent after every hello (`setTerminalColors`).
+    private var terminalColors: TerminalColors?
 
     private let writeQueue = DispatchQueue(label: "clotho.clothod.write")
 
@@ -119,6 +121,20 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
 
     /// Drops the current connection and reconnects right away, skipping any backoff wait. For after
     /// sleep or a network change, when a remote link is likely dead but hasn't timed out yet.
+    public func setTerminalColors(_ colors: TerminalColors?) {
+        let send: Bool = locked {
+            guard terminalColors != colors else { return false }
+            terminalColors = colors
+            return connection != nil && lastHello?.features.contains(.clientColors) == true
+        }
+        guard send else { return }
+        Task { [weak self] in
+            do { _ = try await self?.request("client.colors", ["colors": colors.map { $0.json } ?? NSNull()]) } catch {
+                self?.configuration.log?("client.colors failed: \(error)")
+            }
+        }
+    }
+
     public func reconnectNow() {
         let current: ByteStream? = locked {
             skipBackoff = true
@@ -216,6 +232,12 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             return subscriptions.map { ($0.key, deliveredSeq[$0.key], $0.value.scrollback, $0.value.viewport) }
         }
         configuration.log?("connected to clothod \(hello.version) pid \(hello.pid ?? 0) instance \(hello.instance)")
+        // Before any pane is subscribed again, so apps that ask get this client's colours from the start.
+        if hello.features.contains(.clientColors), let colors = locked({ terminalColors }) {
+            do { _ = try await request("client.colors", ["colors": colors.json]) } catch {
+                configuration.log?("client.colors failed: \(error)")
+            }
+        }
         _ = try await request("events.subscribe", nil)
         for (pane, have, scrollback, viewport) in resubscribe {
             do {

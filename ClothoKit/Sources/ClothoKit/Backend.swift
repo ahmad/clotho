@@ -89,6 +89,9 @@ public struct Hello: Codable, Equatable, Sendable {
         case settings
         /// `service.status` / `install` / `uninstall` and `service` events: start clothod at login (0.1.7).
         case service
+        /// `client.colors`: the client's terminal colours, which the daemon reports to apps that ask (OSC
+        /// 10/11/12, OSC 4, mode 2031), so they draw for a light or dark background as shown (0.1.20).
+        case clientColors = "client.colors"
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -400,6 +403,10 @@ public extension SessionBackend {
     /// Drops the connection and reconnects at once (after sleep or a network change). A no-op for
     /// backends without a connection.
     func reconnectNow() {}
+
+    /// Remembers the colours this client shows panes in and tells the daemon (`client.colors`), now and
+    /// after every reconnect, when it announces `.clientColors`. Nil clears them. A no-op elsewhere.
+    func setTerminalColors(_ colors: TerminalColors?) {}
 
     func ackAgent(_ pane: PaneID) async throws {}
 
