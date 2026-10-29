@@ -38,7 +38,7 @@ final class WorkspaceRowTests: XCTestCase {
         // Constraints place the alignment rect, which NSTextField keeps a little inside its frame.
         XCTAssertEqual(workspace.label.alignmentRect(forFrame: workspace.label.frame).minX, MachineHeader.nameInset, accuracy: 1,
                        "in line with the machine's name")
-        XCTAssertGreaterThan(tab.label.frame.minX, workspace.label.frame.minX + s(8))
+        XCTAssertGreaterThan(tab.label.frame.minX, workspace.label.frame.minX + s(6), "past the guide's arm")
         XCTAssertLessThan(tab.label.font!.pointSize, workspace.label.font!.pointSize, "tabs a touch smaller")
         XCTAssertNotNil(workspace.chevron)
         XCTAssertNil(tab.chevron)

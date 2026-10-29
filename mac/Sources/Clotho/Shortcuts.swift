@@ -264,6 +264,24 @@ extension AppDelegate {
         run { _ = try await $0.createTab(in: workspace.id, spawn: options) }
     }
 
+    /// The sidebar's + on a workspace row: that workspace comes forward, and a new tab opens in it (in
+    /// its focused pane's folder), as ⌘T would there.
+    func newTab(in workspace: WorkspaceID, on key: MachineKey) {
+        guard let store = connections[key]?.store, store.state.workspaces.contains(where: { $0.id == workspace }) else { return }
+        focusNow(.workspace(workspace), on: key, trace: "new tab button")
+        let shown = store.state.focusing(.workspace(workspace))
+        let cwd = shown.flatMap { $0.pane($0.focus.pane)?.cwd }
+        let options = spawnOptions(cwd: cwd)
+        let backend = store.backend
+        Task { @MainActor in
+            do {
+                _ = try await backend.createTab(in: workspace, spawn: options)
+            } catch {
+                log("new tab in workspace \(workspace) on \(key) failed: \(error)")
+            }
+        }
+    }
+
     @objc func closeActiveTab(_ sender: Any?) {
         guard let tab = store.focusedTab else { return }
         closeTab(tab.id)

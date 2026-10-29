@@ -77,26 +77,4 @@ final class SidebarFooterTests: XCTestCase {
             XCTAssertEqual(sidebar.footer.frame.width, 220)
         }
     }
-
-    func testOutlineButtonStyle() {
-        let button = OutlineButton(title: "Create Workspace", symbol: "plus")
-        button.frame = NSRect(x: 0, y: 0, width: 180, height: OutlineButton.height)
-        button.layoutSubtreeIfNeeded()
-        XCTAssertEqual(button.layer?.borderWidth, 1)
-        XCTAssertEqual(button.layer?.cornerRadius ?? 0, s(6), accuracy: 0.01)
-        XCTAssertEqual(button.layer?.backgroundColor, nil, "no fill")
-        XCTAssertEqual(button.label.font?.pointSize ?? 0, s(12), accuracy: 0.01)
-        let rest = button.layer?.borderColor
-        button.setHovering(true)
-        XCTAssertNotEqual(button.layer?.borderColor, rest, "hover brightens the border")
-        XCTAssertEqual(button.label.textColor, Theme.foreground)
-    }
-
-    func testOutlineButtonScalesWithZoom() {
-        let saved = UIScale.factor
-        defer { UIScale.factor = saved }
-        UIScale.factor = 1.4
-        XCTAssertEqual(OutlineButton.height, 26 * 1.4, accuracy: 0.001)
-        XCTAssertEqual(OutlineButton(title: "x", symbol: "plus").label.font?.pointSize ?? 0, 12 * 1.4, accuracy: 0.01)
-    }
 }

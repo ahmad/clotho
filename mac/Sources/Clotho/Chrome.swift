@@ -506,6 +506,8 @@ final class SidebarView: NSView {
     private var tabRows: [String: (row: TabRow, name: String)] = [:]
     /// A tab row was clicked, renamed in place, or closed.
     var onSelectTab: ((MachineKey, TabID) -> Void)?
+    /// A workspace row's + (a new tab in that workspace).
+    var onNewTab: ((MachineKey, WorkspaceID) -> Void)?
     var onRenameTab: ((MachineKey, TabID, String) -> Void)?
     var onCloseTab: ((MachineKey, TabID) -> Void)?
     /// Esc in the sidebar: the terminal takes the keyboard back.
@@ -550,10 +552,9 @@ final class SidebarView: NSView {
     /// The latest update, held back while a name is being edited so the field isn't rebuilt away.
     private var pending: (() -> Void)?
     var onClose: ((MachineKey, WorkspaceID) -> Void)?
-    var onNewWorkspace: ((MachineKey) -> Void)?
     var onConnect: ((MachineKey) -> Void)?
     var onAddMachine: (() -> Void)?
-    /// A machine's Create Workspace button.
+    /// A machine's New Workspace (the header's +, or the row of a machine with none).
     var onCreateWorkspace: ((MachineKey) -> Void)?
     /// The footer's Manage Machines….
     var onManageMachines: (() -> Void)?
@@ -769,9 +770,9 @@ final class SidebarView: NSView {
             // Every machine's group collapses, connected or not, so all names line up after the chevron.
             let isCollapsed = collapsed.contains(key)
             let header = MachineHeader(title: group.title, status: group.status,
-                                       newWorkspaceTooltip: nil,
+                                       newWorkspaceTooltip: Self.createWorkspaceTooltip(group),
                                        collapsed: isCollapsed, count: group.isConnected ? group.workspaces.count : 0)
-            header.onNewWorkspace = { [weak self] in self?.onNewWorkspace?(key) }
+            header.onNewWorkspace = { [weak self] in self?.onCreateWorkspace?(key) }
             header.onToggle = { [weak self, weak header] in
                 header?.chevron?.setExpanded(isCollapsed, animated: true) { self?.toggleCollapsed(key) }
             }
@@ -787,13 +788,13 @@ final class SidebarView: NSView {
                                  inset: MachineHeader.nameInset - 2) { [weak self] in
                     self?.onConnect?(key)
                 })
-                addCreateWorkspace(for: group)
                 continue
             }
             for workspace in group.workspaces {
                 addWorkspace(workspace, of: group)
             }
-            addCreateWorkspace(for: group)
+            // The header's + makes workspaces; a machine with none also says so in its list.
+            if group.workspaces.isEmpty { addCreateWorkspace(for: group) }
         }
         if let cursor, !order.contains(cursor) { self.cursor = selectedItem ?? order.first }
         updateCursor()
@@ -875,6 +876,8 @@ final class SidebarView: NSView {
         let expanded = !collapsedWorkspaces.contains(rowKey)
         let tabs = group.tabs[workspace.id] ?? []
         let row = WorkspaceRow(expanded: expanded)
+        row.hasChildren = expanded && !tabs.isEmpty
+        row.onNewTab = { [weak self] in self?.onNewTab?(key, workspace.id) }
         let name = heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name
         row.label.stringValue = name
         row.toolTip = tabs.count == 1 ? "1 tab" : "\(tabs.count) tabs"
@@ -908,6 +911,7 @@ final class SidebarView: NSView {
             tabRow.onDoubleClick = { [weak self] in self?.beginRenameTab(key, tab.id) }
             tabRow.onClose = { [weak self] in self?.onCloseTab?(key, tab.id) }
             tabRow.isSelected = tab.id == group.selectedTab
+            tabRow.isLastChild = tab.id == tabs.last?.id
             tabRow.setBadge(tab.badge)
             tabRows[tabKey] = (tabRow, tab.custom ?? title)
             add(tabRow, height: Self.tabRowHeight)
@@ -1042,29 +1046,25 @@ final class SidebarView: NSView {
         }
     }
 
-    /// The outline "Create Workspace" button at the end of a machine's list, in line with the workspace
-    /// titles. On a machine that isn't connected it connects first.
+    static func createWorkspaceTooltip(_ group: SidebarGroup) -> String {
+        group.isConnected
+            ? (group.isLocal ? "New Workspace on this Mac (⌘N)" : "New Workspace on \(group.title)")
+            : "Connect to \(group.title) and make a workspace there"
+    }
+
+    /// A quiet "New Workspace" row, for a machine that has none: dim text in line with the workspace
+    /// names, brightening under the pointer.
     private func addCreateWorkspace(for group: SidebarGroup) {
         let key = group.key
-        let button = OutlineButton(title: "Create Workspace", symbol: "plus")
-        button.toolTip = group.isConnected
-            ? (group.isLocal ? "Create a workspace on this Mac (⌘N)" : "Create a workspace on \(group.title)")
-            : "Connect to \(group.title) and create a workspace there"
-        button.onClick = { [weak self] in self?.onCreateWorkspace?(key) }
-        let wrapper = NSView()
-        button.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(button)
-        NSLayoutConstraint.activate([
-            // The plus lines up with the workspace titles; the border starts just before it.
-            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: MachineHeader.nameInset - OutlineButton.iconInset),
-            button.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: s(-4)),
-            button.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: s(4)),
-            button.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
-            button.heightAnchor.constraint(equalToConstant: OutlineButton.height),
-        ])
-        if let last = column.arrangedSubviews.last { column.setCustomSpacing(s(4), after: last) }
-        add(wrapper)
-        if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title): Create Workspace (\(group.isConnected ? "connected" : "connects first"))") }
+        let row = ChromeItem(closable: false)
+        row.label.stringValue = "New Workspace"
+        row.label.font = NSFont.systemFont(ofSize: s(12))
+        row.constraints.filter { $0.firstItem === row.label && $0.firstAttribute == .leading }.forEach { $0.constant = MachineHeader.nameInset }
+        row.toolTip = Self.createWorkspaceTooltip(group)
+        row.onClick = { [weak self] in self?.onCreateWorkspace?(key) }
+        row.setAccessibilityLabel("New Workspace")
+        add(row, height: Self.tabRowHeight)
+        if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title): New Workspace row") }
     }
 
     private func runPending() {
@@ -1186,6 +1186,8 @@ final class MachineHeader: NSView {
     var onToggle: (() -> Void)?
     /// The group's disclosure chevron (machines that can collapse).
     private(set) var chevron: DisclosureChevron?
+    /// The quiet + that makes a workspace on this machine (shown when there's a tooltip for it).
+    private(set) var newWorkspaceButton: QuietButton?
     /// Where a machine's name starts: after its chevron (10 pt in, 14 pt wide) and 6 pt of space. Its
     /// workspace rows and buttons line up with it.
     static var nameInset: CGFloat { s(30) }
@@ -1212,14 +1214,10 @@ final class MachineHeader: NSView {
         detail.maximumNumberOfLines = 3
         detail.isHidden = status.text == nil
         detail.toolTip = status.text
-        let add = ClosureButton(title: "") { [weak self] in self?.onNewWorkspace?() }
-        add.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Workspace")?
-            .withSymbolConfiguration(.init(pointSize: s(11), weight: .medium))
-        add.isBordered = false
-        add.contentTintColor = Theme.dimText
+        let add = QuietButton(symbol: "plus", label: "New Workspace", pointSize: s(11)) { [weak self] in self?.onNewWorkspace?() }
+        newWorkspaceButton = add
         add.toolTip = newWorkspaceTooltip
         add.isHidden = newWorkspaceTooltip == nil
-        toolTip = newWorkspaceTooltip
         // A machine's chevron comes first, in the Quiet header's column; the name, its rows and their
         // buttons all start at nameInset after it.
         let chevron = DisclosureChevron(expanded: collapsed == false)
@@ -1319,25 +1317,33 @@ private final class FlippedView: NSView {
     override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
-/// A row of the sidebar's workspace list: an optional disclosure chevron in the machine headers' chevron
+/// A row of the sidebar's workspace list: an optional [+]/[−] toggle in the machine headers' chevron
 /// column, the title at `indent`, and a status dot pinned to the trailing edge, where every row's dot
 /// lines up. The close button shows only under the pointer, in the dot's place, so hovering moves nothing.
+/// Workspaces and their tabs are drawn as a tree: thin guide lines run from the toggle to each tab
+/// (SidebarTree).
 class SidebarRow: ChromeItem {
     let badge = NSView()
     /// Set for rows that collapse (workspaces).
-    let chevron: DisclosureChevron?
-    /// The chevron was clicked; `all` with Option (every workspace follows).
+    let chevron: TreeToggle?
+    /// The toggle was clicked; `all` with Option (every workspace follows).
     var onToggle: ((_ all: Bool) -> Void)?
     /// Where the dot's centre (and the close button's) sits, from the row's trailing edge.
     static var dotInset: CGFloat { s(13) }
+    /// The tree's guide lines through this row.
+    let guides = CAShapeLayer()
 
-    /// `expanded` nil: no chevron.
-    init(indent: CGFloat, expanded: Bool?, fontSize: CGFloat, closable: Bool = true) {
-        chevron = expanded.map { DisclosureChevron(expanded: $0) }
+    /// `expanded` nil: no toggle. `trailingSpace`: what the title leaves free at the end, for the dot
+    /// and any hover buttons.
+    init(indent: CGFloat, expanded: Bool?, fontSize: CGFloat, closable: Bool = true, trailingSpace: CGFloat = s(12)) {
+        chevron = expanded.map { TreeToggle(expanded: $0) }
         super.init(closable: closable)
         label.font = NSFont.systemFont(ofSize: s(fontSize))
         selectionStyle = .row
         closeShowsWhenSelected = false
+        // The guides reach up into the gap between rows, to meet the row above.
+        layer?.masksToBounds = false
+        layer?.addSublayer(guides)
         badge.wantsLayer = true
         badge.layer?.cornerRadius = s(3.5)
         badge.isHidden = true
@@ -1355,16 +1361,16 @@ class SidebarRow: ChromeItem {
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.widthAnchor.constraint(equalToConstant: s(7)),
             badge.heightAnchor.constraint(equalToConstant: s(7)),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Self.dotInset + s(12))),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Self.dotInset + trailingSpace)),
         ])
         if let chevron {
             chevron.translatesAutoresizingMaskIntoConstraints = false
             addSubview(chevron)
             NSLayoutConstraint.activate([
-                chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
+                chevron.centerXAnchor.constraint(equalTo: leadingAnchor, constant: SidebarTree.columnX),
                 chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
-                chevron.widthAnchor.constraint(equalToConstant: DisclosureChevron.size),
-                chevron.heightAnchor.constraint(equalToConstant: DisclosureChevron.size),
+                chevron.widthAnchor.constraint(equalToConstant: TreeToggle.size),
+                chevron.heightAnchor.constraint(equalToConstant: TreeToggle.size),
             ])
         }
     }
@@ -1385,35 +1391,133 @@ class SidebarRow: ChromeItem {
         badge.isHidden = badgeColor == nil || !closeButton.isHidden
     }
 
-    /// The chevron's column (everything before the title) toggles instead of selecting.
+    /// The toggle's column (everything before the title) toggles instead of selecting.
     override func mouseDown(with event: NSEvent) {
         if let onToggle, chevron != nil, convert(event.locationInWindow, from: nil).x < MachineHeader.nameInset - s(2) {
             return onToggle(event.modifierFlags.contains(.option))
         }
         super.mouseDown(with: event)
     }
+
+    /// The guide segments this row draws, in its own coordinates.
+    var guideRects: [NSRect] { [] }
+
+    override func layout() {
+        super.layout()
+        redrawGuides()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        redrawGuides()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        redrawGuides()
+    }
+
+    /// Snapping depends on where the row sits in the window, and a row that only moves isn't laid out
+    /// again, so moving it redraws too.
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        needsLayout = true
+    }
+
+    func redrawGuides() {
+        chevron?.redraw()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        guides.frame = bounds
+        guides.contentsScale = window?.backingScaleFactor ?? 2
+        guides.path = SidebarTree.path(guideRects)
+        var color = SidebarTree.lineColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { color = SidebarTree.lineColor.cgColor }
+        guides.fillColor = color
+        CATransaction.commit()
+    }
 }
 
-/// A workspace: chevron, name, and (collapsed) its most urgent tab's dot.
+/// A workspace: [+]/[−], name, and (collapsed) its most urgent tab's dot. Under the pointer it offers a
+/// new tab (+) beside close.
 final class WorkspaceRow: SidebarRow {
+    /// Its tabs are listed under it, so the guide line starts below the toggle.
+    var hasChildren = false { didSet { needsLayout = true } }
+    /// The + that makes a tab in this workspace (hover only, beside close).
+    let newTabButton = NSButton()
+    var onNewTab: (() -> Void)?
+
     init(expanded: Bool = true, closable: Bool = true) {
-        super.init(indent: MachineHeader.nameInset, expanded: expanded, fontSize: 13, closable: closable)
+        super.init(indent: MachineHeader.nameInset, expanded: expanded, fontSize: 13, closable: closable,
+                   trailingSpace: s(12) + Self.buttonSpacing)
         restingTextColor = Theme.foreground
+        newTabButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
+            .withSymbolConfiguration(.init(pointSize: s(10), weight: .semibold))
+        newTabButton.isBordered = false
+        newTabButton.contentTintColor = Theme.dimText
+        newTabButton.target = self
+        newTabButton.action = #selector(newTabTapped)
+        newTabButton.toolTip = "New Tab"
+        newTabButton.isHidden = true
+        newTabButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(newTabButton)
+        NSLayoutConstraint.activate([
+            newTabButton.centerXAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.dotInset + Self.buttonSpacing)),
+            newTabButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            newTabButton.widthAnchor.constraint(equalToConstant: s(16)),
+            newTabButton.heightAnchor.constraint(equalToConstant: s(16)),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// From the close button's centre to the + button's.
+    static var buttonSpacing: CGFloat { s(18) }
+
+    @objc private func newTabTapped() { onNewTab?() }
+
+    /// The + shows with close: under the pointer, and not while renaming.
+    override func closeVisibilityChanged() {
+        super.closeVisibilityChanged()
+        newTabButton.isHidden = closeButton.isHidden || onNewTab == nil
+    }
+
+    override var guideRects: [NSRect] {
+        guard hasChildren, chevron?.isExpanded == true else { return [] }
+        let (box, _) = SidebarTree.box(in: self, center: NSPoint(x: SidebarTree.columnX, y: bounds.midY))
+        return [SidebarTree.vertical(in: self, from: 0, to: box.minY)]
+    }
 }
 
-/// A tab under its workspace: indented past the chevron, a touch smaller and lighter, with its own dot.
+/// A tab under its workspace: on a guide line from the workspace's toggle, a touch smaller and lighter,
+/// with its own dot.
 final class TabRow: SidebarRow {
-    /// Where tab titles start: in from the workspace names.
-    static var indent: CGFloat { MachineHeader.nameInset + s(12) }
+    /// Where tab titles start: a little in from the workspace names, past the guide's arm.
+    static var indent: CGFloat { MachineHeader.nameInset + s(8) }
+    /// The last tab ends its line at its arm (└); the others carry it on (├).
+    var isLastChild = true { didSet { needsLayout = true } }
 
     init(closable: Bool = true) {
         super.init(indent: Self.indent, expanded: nil, fontSize: 12, closable: closable)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override var guideRects: [NSRect] {
+        // The arm, from the line to just short of the title; the last tab's line ends on it (└).
+        let arm = SidebarTree.horizontal(in: self, at: bounds.midY, to: Self.indent - s(5))
+        return [SidebarTree.vertical(in: self, from: isLastChild ? arm.minY : 0, to: aboveBottom), arm]
+    }
+
+    /// Where the row above ends, in this row's coordinates: the line runs up to exactly there, so both
+    /// rows snap their shared edge from the same coordinate and meet without a gap at any zoom.
+    private var aboveBottom: CGFloat {
+        guard let stack = superview as? NSStackView, let index = stack.arrangedSubviews.firstIndex(of: self), index > 0 else {
+            return bounds.maxY + SidebarView.rowSpacing
+        }
+        let above = stack.arrangedSubviews[index - 1]
+        return convert(above.bounds, from: above).minY
+    }
 }
 
 /// A strip under the tab bar for things that need the user's attention but shouldn't block anything,
@@ -1574,74 +1678,6 @@ final class DisclosureRow: ChromeItem {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-
-/// A subtle outline button in the sidebar ("Create Workspace"): a 1 pt low-contrast border, no fill,
-/// 12 pt secondary text after a small plus. Hover brightens the border and the text.
-final class OutlineButton: NSView {
-    static var height: CGFloat { s(26) }
-    /// The plus's distance from the button's leading edge.
-    static var iconInset: CGFloat { s(9) }
-    static let border = Theme.border
-    static let borderHover = Theme.borderHover
-    var onClick: (() -> Void)?
-    let label: NSTextField
-    private let icon = NSImageView()
-    private(set) var hovering = false { didSet { updateColors() } }
-
-    init(title: String, symbol: String) {
-        label = NSTextField(labelWithString: title)
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer?.borderWidth = 1
-        layer?.cornerRadius = s(6)
-        label.font = NSFont.systemFont(ofSize: s(12))
-        label.lineBreakMode = .byTruncatingTail
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: s(10), weight: .semibold))
-        for view in [icon, label] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(view)
-        }
-        NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.iconInset),
-            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: s(6)),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: s(-9)),
-        ])
-        setAccessibilityRole(.button)
-        setAccessibilityLabel(title)
-        updateColors()
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        withAppearance { updateColors() }
-    }
-
-    private func updateColors() {
-        layer?.borderColor = (hovering ? Self.borderHover : Self.border).cgColor
-        label.textColor = hovering ? Theme.foreground : Theme.dimText
-        icon.contentTintColor = label.textColor
-    }
-
-    func setHovering(_ on: Bool) { hovering = on }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
-    }
-
-    override func mouseEntered(with event: NSEvent) { hovering = true }
-    override func mouseExited(with event: NSEvent) { hovering = false }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) { onClick?() }
-    override func accessibilityPerformPress() -> Bool { onClick?(); return true }
-}
 
 /// The sidebar's footer row (Manage Machines…): pinned under the lists, a thin separator on top, an icon
 /// and secondary text, highlighted on hover.

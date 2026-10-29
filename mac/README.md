@@ -96,7 +96,7 @@ It writes `build/release/Clotho-<version>-<build>.zip` and `build/release/appcas
 
 1. Open Clotho. The first launch starts the daemon and opens a workspace with one shell.
 2. Press **⌘T** for a new tab, **⌘D** to split right, or **⇧⌘D** to split down.
-3. Press **⌘N** for another workspace; the sidebar lists them all.
+3. Press **⌘N** for another workspace, or click the **+** beside a machine's name. The sidebar lists every workspace with its tabs under it: click **[−]** to fold a workspace (Option-click folds them all), and hover over a workspace for **+** (a new tab there) and close. **⌥⌘S** moves the keyboard to the sidebar: the arrow keys walk it, Return renames, and Esc goes back to the terminal.
 4. Press **⇧⌘O** to browse files, or drop files onto a terminal to copy them into that pane's folder.
 5. Press **⌘/** for every shortcut.
 
@@ -111,6 +111,8 @@ Read the [usage guide](docs/usage.md) for all shortcuts, file transfers, remote 
 | [`Sources/Clotho/PaneView.swift`](Sources/Clotho/PaneView.swift) | One pane: a terminal view fed by the daemon, its size, and the reply filter |
 | [`Sources/Clotho/SplitLayoutView.swift`](Sources/Clotho/SplitLayoutView.swift) | Lays out a tab's split tree, with draggable dividers |
 | [`Sources/Clotho/Chrome.swift`](Sources/Clotho/Chrome.swift) | Tab bar and sidebar |
+| [`Sources/Clotho/SidebarTree.swift`](Sources/Clotho/SidebarTree.swift) | The sidebar's tree: guide lines, the [+]/[−] toggle, quiet + buttons |
+| [`Sources/Clotho/ClickTrace.swift`](Sources/Clotho/ClickTrace.swift) | Times clicks to their result (`-TraceClicks YES`) |
 | [`Sources/Clotho/Shortcuts.swift`](Sources/Clotho/Shortcuts.swift) | Menus, the shortcuts overlay, and the actions behind them |
 | [`Sources/Clotho/MachineConnections.swift`](Sources/Clotho/MachineConnections.swift) | One daemon connection per machine, keyed views, reconnects on wake and network changes |
 | [`Sources/Clotho/LocalDaemon.swift`](Sources/Clotho/LocalDaemon.swift) | Installs and starts this Mac's clothod, and upgrades it |

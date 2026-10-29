@@ -365,7 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self?.focus(machine: key)
             self?.closeWorkspace(id)
         }
-        sidebar.onNewWorkspace = { [weak self] key in self?.newWorkspace(on: key) }
+        sidebar.onNewTab = { [weak self] key, workspace in self?.newTab(in: workspace, on: key) }
         sidebar.onConnect = { [weak self] key in
             guard let self, let machine = remoteMachines.first(where: { $0.key == key }) else { return }
             // Shows the machine's workspaces; a first one only if it has none.
@@ -684,6 +684,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     log("TypeText: \(step) hits '\(row.label.stringValue)' at \(Int(point.x)),\(Int(point.y))"
                         + (row.visibleRect.height < row.bounds.height ? " (scrolled out of view)" : ""))
                     return postTestClick("\(point.x),\(point.y)" + (mods.isEmpty ? "" : "," + mods))
+                }
+                // "headerplus:on" / "headerplus:off": the machine headers' + as if under the pointer.
+                if step.hasPrefix("headerplus:") {
+                    func headers(in view: NSView) -> [MachineHeader] {
+                        view.subviews.flatMap { ($0 as? MachineHeader).map { [$0] } ?? headers(in: $0) }
+                    }
+                    headers(in: sidebar).forEach { $0.newWorkspaceButton?.setHovering(step.hasSuffix(":on")) }
+                    return
+                }
+                // "logguides": each sidebar row's frame and tree guide segments, in window points.
+                if step == "logguides" {
+                    func rows(in view: NSView) -> [SidebarRow] {
+                        view.subviews.flatMap { ($0 as? SidebarRow).map { [$0] } ?? rows(in: $0) }
+                    }
+                    for row in rows(in: sidebar) {
+                        let f = { (r: NSRect) in String(format: "%.2f-%.2f", r.minY, r.maxY) }
+                        log("guides \(row.label.stringValue): row \(f(row.convert(row.bounds, to: nil))) lines "
+                            + row.guideRects.map { f(row.convert($0, to: nil)) }.joined(separator: " ")
+                            + " layer " + (row.guides.path.map { f(row.convert($0.boundingBox, to: nil)) } ?? "none"))
+                    }
+                    return
                 }
                 if step == "focussidebar" { return focusSidebar(nil) }
                 // "machine:devbox" focuses that saved machine, connecting first if needed ("machine:local").
