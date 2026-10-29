@@ -406,3 +406,12 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - Hosting (user decision, 2026-10-29): the zip is a static file in the clotho.app Vercel project
   (~/Projects/clotho.app), beside /downloads and /appcast.xml. Work starts now, in parallel. The
   first public build waits for the sidebar fixes and a Developer ID-signed clothod (0.1.19).
+
+## Sidebar and command bar (user decision, 2026-10-29)
+
+- Tabs come out of the sidebar again: workspace rows only (no tree, toggles or guide lines). The row
+  keeps its most urgent agent dot on the right, a hover "+" for New Tab, Close in the right-click menu
+  (and ⇧⌘W), and New Workspace opening the inline rename.
+- ⌘P becomes a quick command bar. Empty, it lists the current workspace's tabs with the current tab
+  selected; ↑/↓ and Return switch. Typing filters across all machines' workspaces, tabs and agents,
+  with waiting agents first. It's instant, from the model in memory.
