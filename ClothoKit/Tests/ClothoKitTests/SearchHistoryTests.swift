@@ -209,4 +209,47 @@ extension ClothodBackendTests {
             XCTAssertEqual(state.focusing(.workspace(gone.id))?.focus.tab, nil)
         }
     }
+
+    /// ModelState.moving mirrors clothod's model.rs move_workspace / move_tab. One sequence of moves runs
+    /// through both, and every step must agree: the order of workspaces and tabs, active tabs and the focus.
+    func testLocalMovesMatchTheDaemon() async throws {
+        let backend = makeBackend()
+        defer { backend.stop() }
+        try await backend.start()
+        let hello = try XCTUnwrap(backend.lastHello)
+        try XCTSkipUnless(hello.features.contains(.move), "this clothod predates move")
+        let sh = SpawnOptions(command: ["/bin/sh"], cwd: "/tmp")
+        let one = try await backend.createWorkspace(name: "one", spawn: sh)
+        let b = try await backend.createTab(in: one.workspace, spawn: sh)
+        let c = try await backend.createTab(in: one.workspace, spawn: sh)
+        let two = try await backend.createWorkspace(name: "two", spawn: sh)
+        let three = try await backend.createWorkspace(name: "three", spawn: sh)
+        try await backend.focus(.tab(b.tab))
+        let moves: [MoveRequest] = [
+            .workspace(three.workspace, index: 0),                          // to the front
+            .workspace(one.workspace, index: 99),                           // clamped to the end
+            .workspace(one.workspace, index: 2),                            // no-op
+            .tab(c.tab, workspace: nil, index: 0, focus: false),            // reorder within one
+            .tab(one.tab, workspace: two.workspace, index: 0, focus: false),// across, not focused, not active
+            .tab(b.tab, workspace: two.workspace, index: 5, focus: false),  // across, focused and active: focus follows
+            .tab(c.tab, workspace: three.workspace, index: 1, focus: true), // across with focus: one is now empty
+            .tab(two.tab, workspace: one.workspace, index: 0, focus: false),// into the empty workspace: becomes its active tab
+            .tab(b.tab, workspace: nil, index: 0, focus: true),             // reorder with focus
+            .tab(three.tab, workspace: two.workspace, index: 1, focus: false),
+        ]
+        func shape(_ state: ModelState) -> String {
+            "focus \(state.focus.workspace.map(String.init) ?? "-")/\(state.focus.tab.map(String.init) ?? "-")/\(state.focus.pane.map(String.init) ?? "-") "
+                + state.workspaces.map { w in "w\(w.id):\(w.activeTab.map(String.init) ?? "-")[" + w.tabs.map { "t\($0.id)" }.joined(separator: ",") + "]" }
+                    .joined(separator: " ")
+        }
+        var state = try await backend.getState()
+        for move in moves {
+            let local = try XCTUnwrap(state.moving(move), "\(move)")
+            try await backend.move(move)
+            state = try await backend.getState()
+            XCTAssertEqual(shape(local), shape(state), "after \(move)")
+        }
+        XCTAssertNil(state.moving(.tab(9999, workspace: nil, index: 0, focus: false)))
+        XCTAssertNil(state.moving(.workspace(one.workspace, index: -1)))
+    }
 }

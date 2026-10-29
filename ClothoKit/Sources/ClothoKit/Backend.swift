@@ -94,6 +94,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case clientColors = "client.colors"
         /// Panes come back after a restart, marked `restored`; `pane.dismiss_restored` clears the mark (0.1.21).
         case restore
+        /// `workspace.move` and `tab.move`: reorder workspaces, reorder or move tabs (0.1.22).
+        case move
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -354,6 +356,10 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// `features` contains `.restore`. The daemon also clears it on the pane's first typing.
     func dismissRestored(_ pane: PaneID) async throws
 
+    /// Applies a move on the daemon (`workspace.move` or `tab.move`), when hello's `features` contains
+    /// `.move`. The rules are `ModelState.moving`'s.
+    func move(_ move: MoveRequest) async throws
+
     /// Acknowledges a pane's agent state (`agent.ack`), clearing its `attention`.
     func ackAgent(_ pane: PaneID) async throws
 
@@ -420,6 +426,10 @@ public extension SessionBackend {
 
     func dismissRestored(_ pane: PaneID) async throws {
         throw BackendError(code: "unknown_method", message: "this backend doesn't restore panes")
+    }
+
+    func move(_ move: MoveRequest) async throws {
+        throw BackendError(code: "unknown_method", message: "this backend can't move tabs or workspaces")
     }
 
     func ackAgent(_ pane: PaneID) async throws {}

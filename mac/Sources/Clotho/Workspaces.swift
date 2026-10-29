@@ -71,6 +71,8 @@ extension AppDelegate {
             (id: $0.id, title: store.displayTitle(of: $0), custom: $0.title, maximized: maximized[tabKey($0.id)] != nil,
              badge: agentBadge(machine: focusedMachine, panes: $0.layout.panes))
         }
+        tabBar.machine = focusedMachine
+        tabBar.workspace = workspace?.id
         tabBar.update(tabs: tabs, selected: tab?.id)
 
         // One view per pane on every connected machine, kept while the pane exists so its screen survives
@@ -176,6 +178,15 @@ extension AppDelegate {
     }
 
     // MARK: Renaming (in place, in the sidebar and the tab bar)
+
+    /// A dropped workspace or tab: shown at once, then made on the daemon; a refused move goes back.
+    func move(_ request: MoveRequest, on key: MachineKey) {
+        guard let store = connections[key]?.store, let id = store.showMove(request) else { return }
+        log("move \(request) on \(key)")
+        Task { @MainActor in
+            do { try await store.sendMove(request, id: id) } catch { log("move \(request) on \(key) failed: \(error)") }
+        }
+    }
 
     func renameWorkspace(_ id: WorkspaceID) {
         sidebar.beginRename(focusedMachine, id)

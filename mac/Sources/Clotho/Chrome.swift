@@ -51,7 +51,7 @@ enum Pointer {
 }
 
 /// A clickable row or tab: highlights on hover and when selected, with an optional close button.
-class ChromeItem: NSView, HoverRefreshing {
+class ChromeItem: NSView, HoverRefreshing, NSDraggingSource {
     var onClick: (() -> Void)?
     var onDoubleClick: (() -> Void)?
     var onClose: (() -> Void)?
@@ -173,12 +173,58 @@ class ChromeItem: NSView, HoverRefreshing {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        mouseDownAt = event.locationInWindow
         if event.clickCount == 2 { onDoubleClick?() } else { onClick?() }
+    }
+
+    // MARK: Dragging (Drag.swift has the drop side)
+
+    /// What dragging this item carries (a tab or a workspace); nil: it doesn't drag.
+    var dragPayload: (() -> ChromeDrag.Payload?)?
+    private var mouseDownAt: NSPoint?
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = mouseDownAt, !ChromeDrag.isActive, !isEditing, let payload = dragPayload?() else { return }
+        let point = event.locationInWindow
+        guard hypot(point.x - start.x, point.y - start.y) > 4 else { return }
+        mouseDownAt = nil
+        let item = NSPasteboardItem()
+        item.setString(payload.encoded, forType: ChromeDrag.type)
+        let dragging = NSDraggingItem(pasteboardWriter: item)
+        dragging.setDraggingFrame(bounds, contents: snapshot())
+        ChromeDrag.begin(payload)
+        beginDraggingSession(with: [dragging], event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) { mouseDownAt = nil }
+
+    /// The item as it looks now, for the drag image.
+    private func snapshot() -> NSImage {
+        let image = NSImage(size: bounds.size)
+        if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
+            cacheDisplay(in: bounds, to: rep)
+            image.addRepresentation(rep)
+        }
+        return image
     }
 
     @objc private func closeTapped() { onClose?() }
 
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .withinApplication ? .move : []
+    }
+
+    func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+        session.animatesToStartingPositionsOnCancelOrFail = true
+        alphaValue = 0.35
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        alphaValue = 1
+        ChromeDrag.end()
+    }
 
     // MARK: Inline rename
 
@@ -378,6 +424,18 @@ final class TabBarView: NSView {
     /// After an inline edit ends, so the terminal can take focus back.
     var onEditingEnded: (() -> Void)?
 
+    // Dragging tabs (Drag.swift): to reorder in the bar, or onto a workspace in the sidebar.
+    /// The machine and workspace the bar shows, which a dragged tab carries.
+    var machine: MachineKey = AppDelegate.localKey
+    var workspace: WorkspaceID?
+    /// Whether tabs can be dragged now (the machine's daemon has `move`).
+    var canDrag: () -> Bool = { false }
+    /// A tab dropped at `index` among the others.
+    var onMoveTab: ((TabID, Int) -> Void)?
+    /// The tabs in order, for drop positions.
+    private(set) var order: [TabID] = []
+    let dropLine = DropIndicator()
+
     private let stack = NSStackView()
     private var items: [TabID: (item: ChromeItem, title: String, custom: String?)] = [:]
     /// The latest update, held back while a title is being edited so the field isn't rebuilt away.
@@ -436,16 +494,33 @@ final class TabBarView: NSView {
         NSLayoutConstraint.activate(scaled.map(\.0) + [
             addButton.centerYAnchor.constraint(equalTo: stack.centerYAnchor),
         ])
+        addSubview(dropLine)
+        registerForDraggedTypes([ChromeDrag.type])
+        NotificationCenter.default.addObserver(forName: ChromeDrag.ended, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.dropLine.hide()
+                self?.runPending()
+            }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?) {
         latest = { [weak self] in self?.update(tabs: tabs, selected: selected) }
-        if items.values.contains(where: { $0.item.isEditing }) {
+        // Held while a title is edited, or a drag is in flight (rebuilding would remove what's dragged).
+        if items.values.contains(where: { $0.item.isEditing }) || ChromeDrag.isActive {
             pending = latest
             return
         }
+        // Only the selection changed (a click): the tabs stay, so one being pressed can still be dragged.
+        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, badge: $0.badge) }
+        if shape == lastShape, !items.isEmpty {
+            for (id, entry) in items { entry.item.isSelected = id == selected }
+            return
+        }
+        lastShape = shape
+        order = tabs.map(\.id)
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         items = [:]
         widths = []
@@ -465,6 +540,10 @@ final class TabBarView: NSView {
             item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
             item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
+            item.dragPayload = { [weak self] in
+                guard let self, canDrag(), let workspace else { return nil }
+                return ChromeDrag.Payload(kind: .tab, machine: machine, id: tab.id, workspace: workspace)
+            }
             item.onDoubleClick = { [weak self] in self?.beginRename(tab.id) }
             item.onClose = { [weak self] in self?.onClose?(tab.id) }
             item.isSelected = tab.id == selected
@@ -497,10 +576,16 @@ final class TabBarView: NSView {
         }
     }
 
-    private func runPending() {
+    func runPending() {
         let update = pending
         pending = nil
         update?()
+    }
+
+    /// The last tabs built, to tell a selection-only update apart.
+    private var lastShape: [TabShape]?
+    private struct TabShape: Equatable {
+        var id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?
     }
 
     /// Every tab's width: the bar shared equally, between a minimum and a maximum. It depends only on
@@ -530,6 +615,11 @@ final class TabBarView: NSView {
         let width = Self.tabWidth(count: widths.count, barWidth: bounds.width)
         guard let current = widths.first?.constant, current != width else { return }
         widths.forEach { $0.constant = width }
+    }
+
+    /// A tab's frame in the bar's coordinates (drops).
+    func frameOfTab(_ id: TabID) -> NSRect? {
+        items[id].map { convert($0.item.frame, from: $0.item.superview) }
     }
 
     /// The tabs' frames (tests and the LogSidebar aid).
@@ -584,6 +674,18 @@ final class SidebarView: NSView {
     static let topInset: CGFloat = 34
 
     var onSelect: ((MachineKey, WorkspaceID) -> Void)?
+
+    // Dragging (Drag.swift): workspaces reorder within their machine; a tab from the bar drops on another
+    // workspace of its machine.
+    /// Whether this machine's workspaces and tabs can be dragged (its daemon has `move`).
+    var canDrag: (MachineKey) -> Bool = { _ in false }
+    /// A workspace dropped at `index` among its machine's others.
+    var onMoveWorkspace: ((MachineKey, WorkspaceID, Int) -> Void)?
+    /// A tab dropped on a workspace.
+    var onMoveTab: ((MachineKey, TabID, WorkspaceID) -> Void)?
+    let dropLine = DropIndicator()
+    let dropTarget = DropTargetHighlight()
+
     /// A workspace's name was edited in place.
     var onRename: ((MachineKey, WorkspaceID, String) -> Void)?
     /// After an inline edit ends, so the terminal can take focus back.
@@ -696,6 +798,16 @@ final class SidebarView: NSView {
             footer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
+        for overlay in [dropTarget, dropLine] as [NSView] { addSubview(overlay) }
+        registerForDraggedTypes([ChromeDrag.type])
+        NotificationCenter.default.addObserver(forName: ChromeDrag.ended, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.dropLine.hide()
+                self?.dropTarget.hide()
+                self?.runPending()
+            }
+        }
+
         let handle = ResizeHandle()
         handle.onDrag = { [weak self] x in self?.onResize?(x) }
         handle.onEnd = { [weak self] in self?.onResizeEnd?() }
@@ -775,7 +887,8 @@ final class SidebarView: NSView {
 
     func update(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) {
         latest = { [weak self] in self?.update(agents: agents, unreachable: unreachable, groups: groups) }
-        if isEditing {
+        // Held while a name is edited, or a drag is in flight (rebuilding would remove what's dragged).
+        if isEditing || ChromeDrag.isActive {
             pending = latest
             return
         }
@@ -1025,6 +1138,10 @@ final class SidebarView: NSView {
         row.label.stringValue = name
         row.toolTip = workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
         row.onClick = { [weak self] in self?.onSelect?(key, workspace.id) }
+        row.dragPayload = { [weak self] in
+            guard let self, canDrag(key) else { return nil }
+            return ChromeDrag.Payload(kind: .workspace, machine: key, id: workspace.id, workspace: workspace.id)
+        }
         row.onDoubleClick = { [weak self] in self?.beginRename(key, workspace.id) }
         row.onClose = { [weak self] in self?.onClose?(key, workspace.id) }
         row.contextMenu = { [weak self] in self?.workspaceMenu(key, workspace.id) }
@@ -1138,6 +1255,14 @@ final class SidebarView: NSView {
         let update = pending
         pending = nil
         update?()
+    }
+
+    /// A machine's workspace rows, top to bottom (drops; collapsed machines have none).
+    func workspaceRows(of machine: MachineKey) -> [(id: WorkspaceID, row: SidebarRow)] {
+        order.compactMap { item in
+            guard case .workspace(let key, let id) = item, key == machine, let row = itemRows[item] else { return nil }
+            return (id, row)
+        }
     }
 
     private static func rowKey(_ machine: MachineKey, _ id: WorkspaceID) -> String { "\(machine)/\(id)" }

@@ -75,6 +75,14 @@ public final class ModelStore: ObservableObject {
     public static var localFocusTimeout: TimeInterval = 3
     public static var localFocusGrace: TimeInterval = 0.5
 
+    /// Moves shown before the daemon confirmed them (`move(_:)`), oldest first: re-applied to the daemon's
+    /// states until their reply plus `localFocusGrace`, or `localFocusTimeout`. Re-applying a move the daemon
+    /// already made changes nothing, so a state with it in is safe to apply it to again.
+    private var localMoves: [(id: Int, move: MoveRequest, until: Date)] = []
+    private var nextLocalMove = 0
+    /// The daemon's latest state, before local moves and focus: what a refused move goes back to.
+    private var daemonState: ModelState?
+
     public init(backend: SessionBackend) {
         self.backend = backend
     }
@@ -203,6 +211,52 @@ public final class ModelStore: ObservableObject {
         }
     }
 
+    // MARK: Moves
+
+    /// Moves a workspace or tab now, in `state` (by the daemon's rules, `ModelState.moving`), and in the
+    /// daemon: a drop shows on the frame it happens in. States that arrive before the daemon has it keep
+    /// the move. If the daemon refuses, the daemon's state comes back and the error is thrown.
+    public func move(_ move: MoveRequest) async throws {
+        guard let id = showMove(move) else { throw BackendError(code: "not_found", message: "nothing to move: \(move)") }
+        try await sendMove(move, id: id)
+    }
+
+    /// The local half of `move(_:)`: `state` shows it at once (with `onChange`). Returns its id for
+    /// `sendMove`, or nil when it isn't in the model.
+    @discardableResult
+    public func showMove(_ move: MoveRequest) -> Int? {
+        guard phase == .live, let moved = state.moving(move) else { return nil }
+        nextLocalMove += 1
+        localMoves.append((nextLocalMove, move, Date().addingTimeInterval(Self.localFocusTimeout)))
+        if moved != state {
+            state = moved
+            onChange?()
+        }
+        return nextLocalMove
+    }
+
+    /// The daemon's half of `move(_:)`.
+    public func sendMove(_ move: MoveRequest, id: Int) async throws {
+        do {
+            try await backend.move(move)
+            if let index = localMoves.firstIndex(where: { $0.id == id }) {
+                localMoves[index].until = min(localMoves[index].until, Date().addingTimeInterval(Self.localFocusGrace))
+            }
+        } catch {
+            localMoves.removeAll { $0.id == id }
+            if var shown = daemonState {
+                for local in localMoves { shown = shown.moving(local.move) ?? shown }
+                if let local = localFocus, let focused = shown.focusing(local.target) { shown = focused }
+                state = shown
+                onChange?()
+            }
+            throw error
+        }
+    }
+
+    /// Whether a move is shown that the daemon hasn't confirmed yet.
+    public var isMoveLocal: Bool { !localMoves.isEmpty }
+
     /// Whether `state.focus` is a local one the daemon hasn't confirmed yet.
     public var isFocusLocal: Bool { localFocus != nil }
 
@@ -228,12 +282,17 @@ public final class ModelStore: ObservableObject {
         case .disconnected(let reason):
             if connection.isConnected { lostAt = Date() }
             localFocus = nil
+            localMoves.removeAll()
             connection = .reconnecting(reason)
             onChange?()
         case .progress(let step):
             connection = .connecting(step)
             onChange?()
         case .state(var newState):
+            daemonState = newState
+            let now = Date()
+            localMoves.removeAll { now >= $0.until }
+            for local in localMoves { newState = newState.moving(local.move) ?? newState }
             if let local = localFocus {
                 daemonFocus = (newState.focus, Self.activeTabs(newState))
                 if newState.focus == local.focus || Date() >= local.until {

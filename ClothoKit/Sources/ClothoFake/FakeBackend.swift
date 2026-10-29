@@ -52,7 +52,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        hello.featureNames = ["pane.keys", "agents", "fs", "restore"]
+        hello.featureNames = ["pane.keys", "agents", "fs", "restore", "move"]
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -334,6 +334,20 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
             guard let p = state.panes.firstIndex(where: { $0.id == pane }) else { return }
             state.panes[p].restored = restored
             publishPane(at: p)
+        }
+    }
+
+    /// Moves by the daemon's rules (`ModelState.moving`). A move that changes nothing sends no state.
+    public func move(_ move: MoveRequest) async throws {
+        try locked {
+            guard let moved = state.moving(move) else {
+                if case .workspace(_, let index) = move, index < 0 { throw BackendError(code: "bad_request", message: "negative index") }
+                if case .tab(_, _, let index, _) = move, index < 0 { throw BackendError(code: "bad_request", message: "negative index") }
+                throw notFound("\(move)")
+            }
+            guard moved != state else { return }
+            state = moved
+            publishState()
         }
     }
 

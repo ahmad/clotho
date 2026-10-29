@@ -427,6 +427,18 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("agent.ack", ["pane": pane])
     }
 
+    public func move(_ move: MoveRequest) async throws {
+        switch move {
+        case .workspace(let id, let index):
+            _ = try await request("workspace.move", ["workspace": id, "index": index])
+        case .tab(let id, let workspace, let index, let focus):
+            var params: [String: Any] = ["tab": id, "index": index]
+            if let workspace { params["workspace"] = workspace }
+            if focus { params["focus"] = true }
+            _ = try await request("tab.move", params)
+        }
+    }
+
     public func dismissRestored(_ pane: PaneID) async throws {
         _ = try await request("pane.dismiss_restored", ["pane": pane])
     }

@@ -461,6 +461,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         sidebar = SidebarView()
         sidebar.translatesAutoresizingMaskIntoConstraints = false
+        // Drag to reorder (Drag.swift), against daemons with `move`; optimistic, like focus.
+        sidebar.canDrag = { [weak self] key in self?.connections[key]?.store.features.contains(.move) == true }
+        sidebar.onMoveWorkspace = { [weak self] key, id, index in self?.move(.workspace(id, index: index), on: key) }
+        sidebar.onMoveTab = { [weak self] key, tab, workspace in
+            // To the end of the workspace it's dropped on; the user stays where they are.
+            let count = self?.connections[key]?.store.state.workspace(workspace)?.tabs.count ?? 0
+            self?.move(.tab(tab, workspace: workspace, index: count, focus: false), on: key)
+        }
         sidebar.onSelect = { [weak self] key, id in
             self?.focusNow(.workspace(id), on: key, trace: "workspace \(id)")
         }
@@ -514,6 +522,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         tabBar = TabBarView()
         tabBar.translatesAutoresizingMaskIntoConstraints = false
+        // Dragging tabs to reorder them (Drag.swift), against daemons with `move`.
+        tabBar.canDrag = { [weak self] in self.map { $0.store.features.contains(.move) } ?? false }
+        tabBar.onMoveTab = { [weak self] tab, index in
+            guard let self else { return }
+            move(.tab(tab, workspace: nil, index: index, focus: false), on: focusedMachine)
+        }
         tabBar.onSelect = { [weak self] id in
             guard let self else { return }
             focusNow(.tab(id), on: focusedMachine, trace: "tab bar \(id)")
@@ -781,6 +795,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // "hoverrow:1" hovers the sidebar's second workspace row (top down), as the pointer would (-1:
                 // none). "clickrow:2" posts a real click at the middle of the third row. "focussidebar" gives
                 // the sidebar the keyboard (then "key:down" … walk it).
+                // Drops, as a real drag's end makes them (Drag.swift): the same drop decision and callback, without
+                // AppKit's drag session (which needs the real pointer). "dragtab:N" drops the focused tab on this
+                // machine's Nth workspace row; "dragbar:N" drops it before the tab now at position N (N past the end:
+                // last); "dragws:F:T" drops workspace row F below row T. A trailing ":hold" only shows the line or
+                // highlight; "dragend" clears it.
+                if step == "dragend" {
+                    sidebar.dropTarget.hide()
+                    sidebar.dropLine.hide()
+                    tabBar.dropLine.hide()
+                    return
+                }
+                if step.hasPrefix("dragtab:") || step.hasPrefix("dragbar:") || step.hasPrefix("dragws:") {
+                    let parts = step.split(separator: ":").map(String.init)
+                    let hold = parts.last == "hold"
+                    let rows = sidebar.workspaceRows(of: focusedMachine)
+                    func middle(_ view: NSView, dy: CGFloat = 0) -> NSPoint {
+                        view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY + dy), to: nil)
+                    }
+                    if parts[0] == "dragws", parts.count >= 3, let from = Int(parts[1]), let to = Int(parts[2]), from < rows.count, to < rows.count {
+                        let payload = ChromeDrag.Payload(kind: .workspace, machine: focusedMachine, id: rows[from].id, workspace: rows[from].id)
+                        let row = rows[to].row
+                        // A third of a row below the target's middle (flipped rows: +y is down).
+                        let drop = sidebar.drop(payload, at: middle(row, dy: (row.isFlipped ? 1 : -1) * row.bounds.height / 3))
+                        log("TypeText: \(step) → \(drop.map { "\($0)" } ?? "no drop")")
+                        if case .reorder(let machine, let id, let index, let y, let minX, let maxX)? = drop {
+                            if hold { sidebar.dropLine.show(NSRect(x: minX, y: y - 1, width: maxX - minX, height: 2)) } else { sidebar.onMoveWorkspace?(machine, id, index) }
+                        }
+                        return
+                    }
+                    guard let tab = store.focusedTab, let workspace = store.focusedWorkspace, parts.count >= 2, let n = Int(parts[1]) else {
+                        return log("TypeText: nothing to drag for \(step)")
+                    }
+                    let payload = ChromeDrag.Payload(kind: .tab, machine: focusedMachine, id: tab.id, workspace: workspace.id)
+                    if parts[0] == "dragtab" {
+                        guard n < rows.count else { return log("TypeText: no workspace row \(n)") }
+                        let drop = sidebar.drop(payload, at: middle(rows[n].row))
+                        log("TypeText: \(step) → \(drop.map { "\($0)" } ?? "no drop")")
+                        if case .moveTab(let machine, let id, let target, let frame)? = drop {
+                            if hold { sidebar.dropTarget.show(frame, workspace: target) } else { sidebar.onMoveTab?(machine, id, target) }
+                        }
+                    } else {
+                        let frames = tabBar.order.compactMap { tabBar.frameOfTab($0) }
+                        guard let last = frames.last else { return }
+                        let x = n < frames.count ? frames[n].minX + 2 : last.maxX - 2
+                        let drop = tabBar.tabDrop(payload, at: tabBar.convert(NSPoint(x: x, y: tabBar.bounds.midY), to: nil))
+                        log("TypeText: \(step) → \(drop.map { "tab \($0.tab) to \($0.index)" } ?? "no drop")")
+                        if let drop, let frame = tabBar.frameOfTab(drop.tab) {
+                            if hold { tabBar.dropLine.show(NSRect(x: drop.lineX - 1, y: frame.minY + 2, width: 2, height: frame.height - 4)) } else { tabBar.onMoveTab?(drop.tab, drop.index) }
+                        }
+                    }
+                    return
+                }
                 if step.hasPrefix("hoverrow:") || step.hasPrefix("clickrow:") {
                     func rows(in view: NSView) -> [SidebarRow] {
                         view.subviews.flatMap { ($0 as? SidebarRow).map { [$0] } ?? rows(in: $0) }
