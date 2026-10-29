@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-29, updated after Mac 1.0.5 and clothod 0.1.24)
+# Status and handoff (2026-10-29, updated after Mac 1.0.6 and clothod 0.1.24)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
@@ -23,7 +23,8 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.5, build 202610292040 (c59bc9c, with clothod 0.1.23): git
+- **The Mac app is public:** Clotho 1.0.6, build 202610292330 (184f933, with clothod 0.1.24): a "Restart
+  Shells…" notice when a machine's shells run outside the login session. 1.0.5 git
   branch, worktree and PR in the tab bar, sidebar, pane strip and ⌘P. 1.0.4 drag to
   reorder and move tabs. 1.0.3 restore note, 1.0.2 rename focus and ⇧⌘ shortcuts, 1.0.1 light mode; 1.0.0 was
   build 202610291513 (at ee15de6). The user updated 1.0.0 → 1.0.1 through Sparkle (first real update, OK).
@@ -49,8 +50,6 @@ rule. This file has where things stand. The orchestrator keeps it current.
   Live Activity.
 - **TestFlight:** the orchestrator uploads with scripts/testflight-remote. The key ids are in
   ~/.config/clotho/asc.env on devbox.
-- **Next Mac release, 1.0.6:** bundles clothod 0.1.24 plus a notice when a machine's shells lack
-  system services ("Restart Shells…", with a confirmation). In progress with mac.
 - **The Mac's disk:** about 27 GiB free (it dipped to ~12 GiB during 0.1.24; one dip was approved). test-all, dist, build.sh test and testflight-remote all
   clean up after themselves.
 
