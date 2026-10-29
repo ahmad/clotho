@@ -196,6 +196,18 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     let store: ModelStore
     /// The find bar and its highlights, while open (PaneSearch.swift).
     var search: PaneSearchController?
+    /// The "Restored after restart" note, while the pane is marked restored (RestoredNote.swift).
+    var restoredNote: RestoredNote?
+    /// Set once × is clicked, so the note doesn't flash back before the daemon's update arrives.
+    var dismissedRestore = false
+    /// The pane's `restored` mark, from the model on every sync.
+    var restored: PaneRestore? {
+        didSet {
+            guard restored != oldValue else { return }
+            if restored == nil { dismissedRestore = false }
+            showRestored(dismissedRestore ? nil : restored)
+        }
+    }
     private var backend: SessionBackend { store.backend }
 
     /// The seq this view's terminal has applied up to; nil until the first snapshot.

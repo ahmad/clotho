@@ -427,6 +427,10 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("agent.ack", ["pane": pane])
     }
 
+    public func dismissRestored(_ pane: PaneID) async throws {
+        _ = try await request("pane.dismiss_restored", ["pane": pane])
+    }
+
     public func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         _ = try await request("agent.mute", ["pane": pane, "muted": muted])
     }

@@ -377,6 +377,7 @@ extension PaneHostView {
             let controller = PaneSearchController(host: self, store: store)
             controller.onClose = { [weak self] in self?.hideFind() }
             search = controller
+            showRestored(nil)
             controller.highlights.frame = terminal.frame
             addSubview(controller.highlights)
             controller.bar.translatesAutoresizingMaskIntoConstraints = false
@@ -399,6 +400,7 @@ extension PaneHostView {
         controller.bar.removeFromSuperview()
         controller.highlights.removeFromSuperview()
         terminal.clearSearch()
+        showRestored(dismissedRestore ? nil : restored)
         window?.makeFirstResponder(terminal)
     }
 

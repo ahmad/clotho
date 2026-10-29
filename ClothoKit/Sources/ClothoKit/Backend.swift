@@ -92,6 +92,8 @@ public struct Hello: Codable, Equatable, Sendable {
         /// `client.colors`: the client's terminal colours, which the daemon reports to apps that ask (OSC
         /// 10/11/12, OSC 4, mode 2031), so they draw for a light or dark background as shown (0.1.20).
         case clientColors = "client.colors"
+        /// Panes come back after a restart, marked `restored`; `pane.dismiss_restored` clears the mark (0.1.21).
+        case restore
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -348,6 +350,10 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// an extension method) so calls through `SessionBackend` reach the backend's own.
     func setTerminalColors(_ colors: TerminalColors?)
 
+    /// Clears a pane's `restored` mark on the daemon, for every client (`pane.dismiss_restored`), when hello's
+    /// `features` contains `.restore`. The daemon also clears it on the pane's first typing.
+    func dismissRestored(_ pane: PaneID) async throws
+
     /// Acknowledges a pane's agent state (`agent.ack`), clearing its `attention`.
     func ackAgent(_ pane: PaneID) async throws
 
@@ -411,6 +417,10 @@ public extension SessionBackend {
 
     /// Backends without a daemon have no apps to tell.
     func setTerminalColors(_ colors: TerminalColors?) {}
+
+    func dismissRestored(_ pane: PaneID) async throws {
+        throw BackendError(code: "unknown_method", message: "this backend doesn't restore panes")
+    }
 
     func ackAgent(_ pane: PaneID) async throws {}
 

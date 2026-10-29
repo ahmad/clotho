@@ -52,7 +52,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        hello.featureNames = ["pane.keys", "agents", "fs"]
+        hello.featureNames = ["pane.keys", "agents", "fs", "restore"]
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -327,6 +327,25 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     /// What `decide` was told, in order (tests).
     public private(set) var decisions: [(pane: PaneID, request: String, decision: PermissionDecision, message: String?)] = []
 
+    /// Marks a pane as restored after a restart (nil clears it), as clothod's `restore` does, for building
+    /// and testing the note without rebooting anything.
+    public func setRestored(_ pane: PaneID, _ restored: PaneRestore?) {
+        locked {
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }) else { return }
+            state.panes[p].restored = restored
+            publishPane(at: p)
+        }
+    }
+
+    public func dismissRestored(_ pane: PaneID) async throws {
+        try locked {
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }) else { throw notFound("pane \(pane)") }
+            guard state.panes[p].restored != nil else { return }
+            state.panes[p].restored = nil
+            publishPane(at: p)
+        }
+    }
+
     public func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         try locked {
             guard let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].agent != nil else {
@@ -379,8 +398,22 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     }
 
     public func sendInput(_ pane: PaneID, _ bytes: Data) {
-        let fake = locked { panes[pane] }
+        let fake: FakePane? = locked {
+            // Typing clears a restored mark, as clothod does; focus and mouse reports don't count.
+            if !Self.isReport(bytes), let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].restored != nil {
+                state.panes[p].restored = nil
+                publishPane(at: p)
+            }
+            return panes[pane]
+        }
         fake?.send(bytes)
+    }
+
+    /// A focus report (ESC [ I, ESC [ O) or a mouse report (ESC [ <…, ESC [ M…), which aren't typing.
+    static func isReport(_ bytes: Data) -> Bool {
+        let b = [UInt8](bytes)
+        guard b.count >= 3, b[0] == 0x1b, b[1] == UInt8(ascii: "[") else { return false }
+        return [UInt8(ascii: "I"), UInt8(ascii: "O"), UInt8(ascii: "<"), UInt8(ascii: "M")].contains(b[2])
     }
 
     // MARK: Called by panes, on their own queues

@@ -103,6 +103,7 @@ extension AppDelegate {
         for (id, host) in shown {
             host.isFocusedPane = id == focusedPane
             host.showsFocusRing = shown.count > 1 && maximizedPane == nil
+            host.restored = state.pane(id)?.restored
         }
 
         let machineName = focusedConnection.title

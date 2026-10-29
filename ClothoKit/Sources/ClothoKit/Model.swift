@@ -237,9 +237,12 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
     /// Nil while the process runs.
     public var exited: PaneExit?
     public var agent: AgentInfo?
+    /// Set when the daemon brought this pane back after a restart (`restore`); nil for a normal pane, and
+    /// once dismissed (`pane.dismiss_restored`, or the user's first typing in it).
+    public var restored: PaneRestore?
 
     public init(id: PaneID, cols: Int, rows: Int, pid: Int32? = nil, command: [String]? = nil, title: String? = nil,
-                cwd: String? = nil, seq: UInt64 = 0, exited: PaneExit? = nil, agent: AgentInfo? = nil) {
+                cwd: String? = nil, seq: UInt64 = 0, exited: PaneExit? = nil, agent: AgentInfo? = nil, restored: PaneRestore? = nil) {
         self.id = id
         self.cols = cols
         self.rows = rows
@@ -250,6 +253,30 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
         self.seq = seq
         self.exited = exited
         self.agent = agent
+        self.restored = restored
+    }
+}
+
+/// How a pane came back after a restart: a fresh shell in its folder, and the agent conversation the
+/// daemon resumed in it, if any (`claude --resume <id>` or `codex resume <id>`).
+public struct PaneRestore: Codable, Equatable, Sendable {
+    /// When it was restored, unix seconds.
+    public var at: Double
+    /// "claude" or "codex" when a conversation was resumed.
+    public var agent: String?
+    public var session: String?
+
+    public init(at: Double, agent: String? = nil, session: String? = nil) {
+        self.at = at
+        self.agent = agent
+        self.session = session
+    }
+
+    /// "Restored after restart", plus "· resumed Claude session" when one was.
+    public var note: String {
+        let names = ["claude": "Claude", "codex": "Codex"]
+        guard let agent else { return "Restored after restart" }
+        return "Restored after restart · resumed \(names[agent] ?? agent) session"
     }
 }
 
