@@ -431,3 +431,6 @@ clothod release, app install or TestFlight upload still needs the user's go when
   restart" note.
 - Getting session ids must not need new kinds of hooks or other changes to the user's config without
   asking.
+- A full shutdown (`clothod shutdown`, "restart sessions") keeps the layout, so the next start brings it
+  back (user confirmed). `clothod shutdown --forget` also clears the saved layout. Closing a workspace
+  is how to forget it.
