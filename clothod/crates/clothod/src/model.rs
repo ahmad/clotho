@@ -342,6 +342,59 @@ impl Model {
         true
     }
 
+    /// Put workspace `ws` at `index` (counted after taking it out; past the end means last).
+    /// Returns its final index and whether anything changed, or `None` for an unknown id.
+    pub fn move_workspace(&mut self, ws: u64, index: usize) -> Option<(usize, bool)> {
+        let from = self.workspaces.iter().position(|w| w.id == ws)?;
+        let w = self.workspaces.remove(from);
+        let to = index.min(self.workspaces.len());
+        self.workspaces.insert(to, w);
+        Some((to, to != from))
+    }
+
+    /// Move `tab` to workspace `dest` (default: its own) at `index` (counted after taking it
+    /// out; past the end means last), with its split tree and panes as they are. Returns the
+    /// destination, the final index and whether anything changed, or `None` for an unknown id.
+    ///
+    /// The rules (docs/protocol.md, "Moving tabs and workspaces"; the Mac mirrors them):
+    /// - the source's active tab, if it was this one, becomes the tab before it, else the new
+    ///   first (tab.close's rule), or none when the source is left empty (which stays);
+    /// - if the focus was on this tab, or `focus` is asked for, the destination's active tab
+    ///   becomes this one and the focus goes to it (its active pane); otherwise the
+    ///   destination's active tab is unchanged, unless it had none, and focus doesn't move.
+    pub fn move_tab(&mut self, tab: u64, dest: Option<u64>, index: usize, focus: bool) -> Option<(u64, usize, bool)> {
+        let (src, from) = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(wi, w)| w.tabs.iter().position(|t| t.id == tab).map(|ti| (wi, ti)))?;
+        let src_id = self.workspaces[src].id;
+        let dest_id = dest.unwrap_or(src_id);
+        let dst = self.workspaces.iter().position(|w| w.id == dest_id)?;
+        let focused = self.focus.tab == Some(tab);
+        let t = self.workspaces[src].tabs.remove(from);
+        let pane = t.active_pane;
+        let to = index.min(self.workspaces[dst].tabs.len());
+        self.workspaces[dst].tabs.insert(to, t);
+        let moved = dst != src || to != from;
+        if dst != src {
+            let s = &mut self.workspaces[src];
+            if s.active_tab == Some(tab) {
+                s.active_tab = s.tabs.get(from.saturating_sub(1)).map(|t| t.id);
+            }
+        }
+        let before = (self.workspaces[dst].active_tab, self.focus.clone());
+        let d = &mut self.workspaces[dst];
+        if focused || focus {
+            d.active_tab = Some(tab);
+            self.focus = Focus { workspace: Some(dest_id), tab: Some(tab), pane: Some(pane) };
+        } else if d.active_tab.is_none() {
+            d.active_tab = Some(tab);
+        }
+        let changed = moved || before != (self.workspaces[dst].active_tab, self.focus.clone());
+        Some((dest_id, to, changed))
+    }
+
     /// Give the panes new ids (`map`, old to new), as after a restore; a pane not in `map` is
     /// removed first, as if it had exited. Focus, active tabs and active panes follow.
     pub fn remap_panes(&mut self, map: &std::collections::HashMap<u64, u64>) {
@@ -397,6 +450,79 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Workspace ids and their tab ids, in order.
+    fn order(m: &Model) -> Vec<(u64, Vec<u64>)> {
+        m.workspaces.iter().map(|w| (w.id, w.tabs.iter().map(|t| t.id).collect())).collect()
+    }
+
+    /// Three workspaces: w1 with tabs a, b, c (panes 1, 2, 3), w2 with d (pane 4), w3 empty.
+    fn three() -> (Model, [u64; 3], [u64; 4]) {
+        let mut m = Model::default();
+        let (w1, a) = m.create_workspace(Some("one".into()), 1);
+        let b = m.create_tab(w1, 2).unwrap();
+        let c = m.create_tab(w1, 3).unwrap();
+        let (w2, d) = m.create_workspace(Some("two".into()), 4);
+        let (w3, e) = m.create_workspace(Some("three".into()), 5);
+        m.close_tab(e);
+        (m, [w1, w2, w3], [a, b, c, d])
+    }
+
+    #[test]
+    fn move_workspace_reorders_and_clamps() {
+        let (mut m, [w1, w2, w3], _) = three();
+        let focus = m.focus.clone();
+        assert_eq!(m.move_workspace(w1, 99), Some((2, true)));
+        assert_eq!(order(&m).iter().map(|o| o.0).collect::<Vec<_>>(), vec![w2, w3, w1]);
+        assert_eq!(m.move_workspace(w1, 2), Some((2, false)), "same place");
+        assert_eq!(m.move_workspace(w3, 0), Some((0, true)));
+        assert_eq!(order(&m).iter().map(|o| o.0).collect::<Vec<_>>(), vec![w3, w2, w1]);
+        assert_eq!(m.move_workspace(999, 0), None);
+        assert_eq!(m.focus, focus, "focus never moves");
+    }
+
+    #[test]
+    fn move_tab_within_a_workspace() {
+        let (mut m, [w1, ..], [a, b, c, _]) = three();
+        m.focus_tab(b);
+        assert_eq!(m.move_tab(a, None, 99, false), Some((w1, 2, true)));
+        assert_eq!(order(&m)[0].1, vec![b, c, a]);
+        assert_eq!(m.move_tab(a, Some(w1), 2, false), Some((w1, 2, false)), "same place");
+        assert_eq!(m.move_tab(c, None, 0, false), Some((w1, 0, true)));
+        assert_eq!(order(&m)[0].1, vec![c, b, a]);
+        assert_eq!((m.workspaces[0].active_tab, m.focus.tab), (Some(b), Some(b)), "a reorder changes no focus");
+        assert_eq!(m.move_tab(a, None, 1, true), Some((w1, 1, true)));
+        assert_eq!((m.workspaces[0].active_tab, m.focus.clone()), (Some(a), Focus { workspace: Some(w1), tab: Some(a), pane: Some(1) }));
+        assert_eq!(m.move_tab(999, None, 0, false), None);
+        assert_eq!(m.move_tab(a, Some(999), 0, false), None);
+        assert_eq!(order(&m)[0].1, vec![c, a, b], "nothing moved by the failures");
+    }
+
+    #[test]
+    fn move_tab_across_workspaces() {
+        let (mut m, [w1, w2, w3], [a, b, c, d]) = three();
+        // Focus is in w2 (d); move w1's active tab b, unfocused, to w2's front.
+        m.focus_tab(b);
+        m.focus_tab(d);
+        assert_eq!(m.workspaces[0].active_tab, Some(b));
+        assert_eq!(m.move_tab(b, Some(w2), 0, false), Some((w2, 0, true)));
+        assert_eq!(order(&m)[0..2], [(w1, vec![a, c]), (w2, vec![b, d])]);
+        assert_eq!(m.workspaces[0].active_tab, Some(a), "the tab before it");
+        assert_eq!(m.workspaces[1].active_tab, Some(d), "destination unchanged");
+        assert_eq!(m.focus.tab, Some(d), "focus stays");
+        // The first tab, active, moves out: the new first takes over.
+        m.focus_tab(a);
+        assert_eq!(m.move_tab(a, Some(w3), 5, false), Some((w3, 0, true)));
+        assert_eq!(m.workspaces[2].active_tab, Some(a), "an empty destination gets it");
+        assert_eq!(m.focus, Focus { workspace: Some(w3), tab: Some(a), pane: Some(1) }, "focus followed the tab");
+        assert_eq!(m.workspaces[0].active_tab, Some(c));
+        // The last tab out: the workspace stays, empty.
+        assert_eq!(m.move_tab(c, Some(w2), 1, true), Some((w2, 1, true)));
+        assert!(m.workspaces[0].tabs.is_empty() && m.workspaces[0].active_tab.is_none());
+        assert_eq!(m.workspaces[1].active_tab, Some(c));
+        assert_eq!(m.focus, Focus { workspace: Some(w2), tab: Some(c), pane: Some(3) });
+        assert_eq!(m.panes(), vec![2, 3, 4, 1], "panes untouched, in their tabs");
+    }
 
     #[test]
     fn remap_panes_keeps_the_layout() {

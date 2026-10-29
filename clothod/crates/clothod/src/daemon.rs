@@ -339,6 +339,32 @@ fn agent_kind(names: &[String]) -> Option<&'static str> {
 }
 
 impl Agent {
+    /// A hook-reported agent as `json` stored it in the pane meta. Its permission requests are
+    /// not kept: their hooks were connected to the previous process, and have given up.
+    fn from_saved(v: &Value) -> Option<Agent> {
+        let text = |k: &str| v.get(k).and_then(Value::as_str).map(String::from);
+        let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
+        let state = text("state").filter(|s| AGENT_STATES.contains(&s.as_str()))?;
+        Some(Agent {
+            kind: text("kind")?,
+            state,
+            source: "hook",
+            message: text("message"),
+            since: v.get("since").and_then(Value::as_f64).unwrap_or_else(unix_now),
+            attention: flag("attention"),
+            session: text("session").filter(|s| crate::layout::safe_session(s)),
+            pid: v.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()),
+            guess: false,
+            muted: flag("muted"),
+            quiet: flag("quiet"),
+            prompt: text("prompt"),
+            tool: text("tool"),
+            tool_input: text("tool_input"),
+            turn_started: v.get("turn_started").and_then(Value::as_f64),
+            requests: Vec::new(),
+        })
+    }
+
     fn json(&self) -> Value {
         json!({
             "kind": self.kind,
@@ -724,6 +750,12 @@ impl SpawnOpts {
 
 fn param_u64(p: &Value, key: &str) -> std::result::Result<u64, RpcError> {
     p.get(key).and_then(Value::as_u64).ok_or_else(|| err("bad_request", format!("missing integer param `{key}`")))
+}
+
+/// A position (`index`): a non-negative integer; past the end is clamped by the caller.
+fn param_index(p: &Value) -> std::result::Result<usize, RpcError> {
+    let i = p.get("index").and_then(Value::as_u64).ok_or_else(|| err("bad_request", "index must be a non-negative integer"))?;
+    Ok(usize::try_from(i).unwrap_or(usize::MAX))
 }
 
 fn param_size(p: &Value) -> std::result::Result<(u16, u16), RpcError> {
@@ -1181,7 +1213,12 @@ impl Daemon {
                 let muted = p.agent.as_ref().filter(|a| a.muted).map(|a| json!({"kind": a.kind, "pid": a.pid, "session": a.session}))
                     .or_else(|| p.muted_agent.as_ref().map(|(k, pid, s)| json!({"kind": k, "pid": pid, "session": s})));
                 (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback,
-                    "agent_muted": muted, "agent_history": p.history, "restored": p.restored}))
+                    "agent_muted": muted, "agent_history": p.history, "restored": p.restored,
+                    "agent": p.agent.as_ref().filter(|a| a.source == "hook" && a.pid.is_some()).map(|a| {
+                        let mut j = a.json();
+                        j["pid"] = json!(a.pid);
+                        j
+                    })}))
             })
             .collect();
         if let Some(w) = &self.layout {
@@ -1288,6 +1325,17 @@ impl Daemon {
                     p.cwd = m.get("cwd").and_then(Value::as_str).map(String::from);
                 }
                 p.restored = m.get("restored").filter(|r| r.is_object()).cloned();
+                // The hook-reported agent, while its process lives: a restart (an upgrade) keeps
+                // what it reported, its session above all, instead of waiting for its next hook.
+                // Taken back as it was, without events or pushes: nothing changed.
+                if p.agent.is_none() {
+                    if let Some(a) = m.get("agent").and_then(Agent::from_saved).filter(|a| a.pid.is_some_and(platform::process_alive)) {
+                        if a.muted {
+                            p.muted_agent = None;
+                        }
+                        p.agent = Some(a);
+                    }
+                }
                 if let Some(a) = m.get("agent_muted").filter(|a| a.is_object()) {
                     if let Some(kind) = a.get("kind").and_then(Value::as_str) {
                         let pid = a.get("pid").and_then(Value::as_u64).map(|v| v as u32);
@@ -2303,7 +2351,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -2387,6 +2435,37 @@ impl Daemon {
                 let (ws, tab) = self.model.lock().unwrap().create_workspace(name, pane);
                 self.model_changed();
                 Ok(json!({"workspace": ws, "tab": tab, "pane": pane}))
+            }
+            "workspace.move" => {
+                let ws = param_u64(p, "workspace")?;
+                let index = param_index(p)?;
+                let r = self.model.lock().unwrap().move_workspace(ws, index);
+                let (index, changed) = r.ok_or_else(|| err("not_found", format!("no workspace {ws}")))?;
+                if changed {
+                    self.model_changed();
+                }
+                Ok(json!({"index": index}))
+            }
+            "tab.move" => {
+                let tab = param_u64(p, "tab")?;
+                let dest = match p.get("workspace") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_u64().ok_or_else(|| err("bad_request", "workspace must be an id"))?),
+                };
+                let index = param_index(p)?;
+                let focus = match p.get("focus") {
+                    None | Some(Value::Null) => false,
+                    Some(v) => v.as_bool().ok_or_else(|| err("bad_request", "focus must be a boolean"))?,
+                };
+                let r = self.model.lock().unwrap().move_tab(tab, dest, index, focus);
+                let (ws, index, changed) = r.ok_or_else(|| match dest {
+                    Some(w) => err("not_found", format!("no tab {tab} or workspace {w}")),
+                    None => err("not_found", format!("no tab {tab}")),
+                })?;
+                if changed {
+                    self.model_changed();
+                }
+                Ok(json!({"workspace": ws, "index": index}))
             }
             "workspace.rename" => {
                 let ws = param_u64(p, "workspace")?;

@@ -95,7 +95,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
-                  "restore"],
+                  "restore", "move"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -124,7 +124,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   notifications carry, as one line of at most 64, 200 and 300 characters),
   `client.colors` (hello's `colors` and the `client.colors` request, see
   [Client colors](#client-colors); since 0.1.20), `restore` (panes' `restored` and
-  `pane.dismiss_restored`, see [Restore after restart](#restore-after-restart); since 0.1.21).
+  `pane.dismiss_restored`, see [Restore after restart](#restore-after-restart); since 0.1.21),
+  `move` (`workspace.move` and `tab.move`, see
+  [Moving tabs and workspaces](#moving-tabs-and-workspaces); since 0.1.22).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -251,6 +253,36 @@ the life of the object and never reused within an `instance`.
   `active_pane` (or to its first tab if none). `focus` with only a `tab` goes to its
   `active_pane`.
 
+## Moving tabs and workspaces
+
+For drag to reorder (feature `move`, since 0.1.22). A move changes only where things are: ids,
+panes, their shells, split trees, subscriptions and seqs are untouched, so an open pane needs
+nothing new. Clients that apply a move before the reply (as the Mac does) mirror these rules
+exactly.
+
+- **`workspace.move {workspace, index}`.** Take the workspace out of the list, then insert it at
+  `min(index, len)`, where `len` counts the list without it. Focus and active tabs don't change.
+- **`tab.move {tab, index, workspace?, focus?}`.** `workspace` is the destination and defaults
+  to the tab's own (a reorder within it). Take the tab out of its workspace S, at position `i`,
+  then insert it into the destination W at `min(index, len)`, where `len` counts W's tabs
+  without it. Then:
+  1. Source. Only when W is not S, and only if S's `active_tab` was the moved tab: S's
+     `active_tab` becomes the tab now at `max(i - 1, 0)` (the one before it, or the new first
+     if it was first), or `null` if S has no tabs left. This is `tab.close`'s rule. An emptied
+     workspace stays, as after closing its last tab.
+  2. Destination. If the global focus was on the moved tab (`focus.tab`), or `focus` is
+     `true`: W's `active_tab` becomes the tab, and `focus` becomes
+     `{workspace: W, tab, pane: <its active_pane>}`. So `focus.tab` is always its workspace's
+     active tab. Otherwise focus doesn't move, and W's `active_tab` is unchanged, unless W had
+     none (it was empty), in which case it becomes the moved tab.
+- **No-ops.** A move whose result is the state as it was (same place, nothing for focus to do)
+  changes nothing: no `state` event, `rev` unchanged. The reply still gives the place.
+- **Errors.** `not_found` for an unknown workspace or tab. `bad_request` for a missing,
+  negative or non-integer `index`, a `workspace` that isn't an id, or a non-boolean `focus`.
+  An index past the end is not an error: it means last.
+- Every effective move sends one `state` event to every event subscriber, and the saved layout
+  ([Restore after restart](#restore-after-restart)) follows it.
+
 ## Restore after restart
 
 The holder keeps every shell across serve restarts and upgrades. When the holder itself goes
@@ -330,9 +362,11 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `workspace.create` | `name?`, spawn options | `{"workspace", "tab", "pane"}` |
 | `workspace.rename` | `workspace`, `name` | `{}` |
 | `workspace.close` | `workspace` | `{}` (hangs up all its panes) |
+| `workspace.move` | `workspace`, `index` | `{"index"}`: its final place; see [Moving tabs and workspaces](#moving-tabs-and-workspaces) |
 | `tab.create` | `workspace`, spawn options | `{"tab", "pane"}` |
 | `tab.rename` | `tab`, `title` (null clears it) | `{}` |
 | `tab.close` | `tab` | `{}` |
+| `tab.move` | `tab`, `index`, `workspace?`, `focus?` | `{"workspace", "index"}`: the tab's final place; see [Moving tabs and workspaces](#moving-tabs-and-workspaces) |
 | `pane.split` | `pane`, `direction` (`right`, `down`, `left`, `up`), `ratio?` (default 0.5), spawn options | `{"pane", "split"}` |
 | `pane.close` | `pane` | `{}`: sends SIGHUP to the pane's process group and removes the pane from the layout |
 | `split.set_ratio` | `split`, `ratio` | `{}` |
@@ -524,7 +558,7 @@ and otherwise:
 |---|---|
 | `kind` | `"claude"`, `"codex"` or `"other"` (more may be added) |
 | `state` | `"starting"`, `"running"`, `"waiting"` (needs the user: a permission prompt, a question, idle after being asked something), `"done"` (the turn finished), `"error"`. Clients treat unknown values as unknown |
-| `source` | `"hook"` (the agent reports through `clothod report`) or `"detected"` (inferred from the pane's processes and output) |
+| `source` | `"hook"` (the agent reports through `clothod report`) or `"detected"` (inferred from the pane's processes and output). Since 0.1.22 a hook-reported agent, with its session, state and turn, is kept across serve restarts and upgrades while its process lives, without new events; before, it reappeared only with its next hook report. Its `requests` are not kept: their hooks were connected to the previous process |
 | `message` | what the agent says, or `null`. For `waiting`, the prompt it shows ("Claude needs your permission to use Bash"); for `done`, the start of the reply its turn ended with (Claude Code's `last_assistant_message`, Codex's `last-assistant-message`: whitespace collapsed to one line, at most 300 chars); for `error`, the error |
 | `prompt` | the first line of the prompt the user typed for the current turn (at most 120 chars), or `null`: no prompt yet, or a turn the user didn't type (started by another agent's message or a finished background task; the wrapper text is never shown) |
 | `tool`, `tool_input` | the last tool the agent used in this turn (`"Bash"`) and its key input (`"npm test"`, at most 160 chars: Bash's command, the file of Read/Write/Edit, the pattern of Glob/Grep, the URL, the query, a task's description, else the first text field), or `null`. Cleared by a new turn and by a wait that isn't a permission prompt, so while `waiting` they say what the permission is for |
