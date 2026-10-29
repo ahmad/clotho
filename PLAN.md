@@ -417,3 +417,17 @@ clothod release, app install or TestFlight upload still needs the user's go when
   with waiting agents first. It's instant, from the model in memory.
 - Search ranks workspaces first once you type (a name match beats tabs that match), and choosing a
   workspace goes to the tab last active in it, falling back to its first tab (user, 2026-10-29).
+
+## Restore after a restart (user decision, 2026-10-29)
+
+- When a machine restarts (or the holder dies), clothod brings back the workspaces, tabs and panes:
+  names, order, split tree, focus and each pane's folder. It saves this layout to the user's data dir
+  on every change. It restores only when there's no holder to adopt, never on an in-place upgrade.
+- Claude Code and Codex conversations come back: a pane that had an agent session runs
+  `claude --resume <id>` (or Codex's resume) in a fresh shell in that folder. Plain resume only, so
+  flags like --dangerously-skip-permissions are not carried over.
+- Scrollback isn't needed ("don't care about scrollback that much").
+- Running programs other than the agents don't come back. The apps show a small "Restored after
+  restart" note.
+- Getting session ids must not need new kinds of hooks or other changes to the user's config without
+  asking.
