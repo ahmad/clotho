@@ -131,6 +131,116 @@ final class FramelessWindow: NSWindow {
         frameBeforeMinimize = nil
         styleMask.remove([.titled, .fullSizeContentView])
         setFrame(frame, display: true)
+        keepOnScreen()
+    }
+
+    // MARK: Staying on screen
+
+    // AppKit keeps titled windows below the menu bar and on a screen, but not borderless ones. Unplugging
+    // or adding a display could leave this window with its tab bar (and the window buttons, and the
+    // strip that drags it) under the menu bar, out of reach. So the window fits itself to a screen
+    // whenever the screens change, when it moves to another, on wake and at launch.
+
+    /// A screen as the window sees it: its whole frame and the part not under the menu bar or Dock.
+    struct ScreenArea: Equatable {
+        var frame: NSRect
+        var visible: NSRect
+    }
+
+    /// The screens, main first. Tests replace it with fake geometry.
+    var screenAreas: () -> [ScreenArea] = {
+        NSScreen.screens.map { ScreenArea(frame: $0.frame, visible: $0.visibleFrame) }
+    }
+
+    /// While filling a display (Clotho's own full screen), a screen change calls this instead, to fill
+    /// the screen it's on now.
+    var onScreensChangedWhileFilling: (() -> Void)?
+    private var screenObservers: [NSObjectProtocol] = []
+
+    /// `frame` fitted to the screen it's mostly on: the same size when that fits, smaller when not, its top
+    /// edge below the menu bar and all of it within the screen's visible area. A frame that's mostly off
+    /// every screen goes to the middle of the main one.
+    static func fitted(_ frame: NSRect, to screens: [ScreenArea]) -> NSRect {
+        guard let main = screens.first else { return frame }
+        func overlap(_ screen: ScreenArea) -> CGFloat {
+            let common = frame.intersection(screen.frame)
+            return common.isNull ? 0 : common.width * common.height
+        }
+        let best = screens.max { overlap($0) < overlap($1) } ?? main
+        let mostlyOff = overlap(best) < frame.width * frame.height / 4
+        let visible = mostlyOff ? main.visible : best.visible
+        var fitted = frame
+        fitted.size.width = min(frame.width, visible.width)
+        fitted.size.height = min(frame.height, visible.height)
+        if mostlyOff {
+            fitted.origin = NSPoint(x: visible.midX - fitted.width / 2, y: visible.midY - fitted.height / 2)
+        } else {
+            fitted.origin.x = min(max(frame.minX, visible.minX), visible.maxX - fitted.width)
+            // Keep the top where it was if it's below the menu bar, otherwise bring it down to it.
+            let top = min(frame.maxY, visible.maxY)
+            fitted.origin.y = max(top - fitted.height, visible.minY)
+        }
+        // Whole points, without growing it: round the size down and the origin down, then stay inside.
+        fitted.size = NSSize(width: fitted.width.rounded(.down), height: fitted.height.rounded(.down))
+        fitted.origin = NSPoint(x: max(fitted.minX.rounded(.down), visible.minX.rounded(.up)),
+                                y: max(fitted.minY.rounded(.down), visible.minY.rounded(.up)))
+        return fitted
+    }
+
+    /// Moves the window back within a screen if it isn't. Not while minimized, filling a display, or being
+    /// dragged or resized (it tries again once the mouse is up).
+    func keepOnScreen() {
+        guard !isMiniaturized else { return }
+        if fillsScreen { return onScreensChangedWhileFilling?() ?? () }
+        if NSEvent.pressedMouseButtons != 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.keepOnScreen() }
+            return
+        }
+        let fitted = Self.fitted(frame, to: screenAreas())
+        guard fitted != frame else { return }
+        log("window: moved from \(NSStringFromRect(frame)) to \(NSStringFromRect(fitted)) to stay on screen")
+        setFrame(fitted, display: true)
+    }
+
+    /// Starts fitting the window to a screen whenever the screens change or the Mac wakes. macOS can still
+    /// be rearranging displays when the notice arrives, so it looks again a moment later.
+    func startKeepingOnScreen() {
+        guard screenObservers.isEmpty else { return }
+        let check: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.keepOnScreen()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.keepOnScreen() }
+            }
+        }
+        screenObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                                      object: nil, queue: .main, using: check))
+        screenObservers.append(NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification,
+                                                                      object: self, queue: .main, using: check))
+        screenObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
+                                                                                 object: nil, queue: .main, using: check))
+        keepOnScreen()
+    }
+
+    /// Zoom: fills the screen's visible area, or goes back to the frame from before. A window that's off
+    /// its screen comes back onto it first, so Zoom (and a double-click on the tab bar) always gets the
+    /// window back within reach.
+    private var frameBeforeZoom: NSRect?
+
+    func toggleZoom() {
+        let screens = screenAreas()
+        let fitted = Self.fitted(frame, to: screens)
+        if fitted != frame {
+            frameBeforeZoom = nil
+            return setFrame(fitted, display: true, animate: true)
+        }
+        let visible = screens.first { $0.frame.intersects(frame) && $0.visible.contains(frame) }?.visible ?? screens.first?.visible ?? frame
+        if let before = frameBeforeZoom, frame.equalTo(visible.integral) {
+            frameBeforeZoom = nil
+            setFrame(Self.fitted(before, to: screens), display: true, animate: true)
+        } else {
+            frameBeforeZoom = frame
+            setFrame(visible.integral, display: true, animate: true)
+        }
     }
 }
 
@@ -322,6 +432,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !window.setFrameUsingName("ClothoMainWindow") {
             window.center()
         }
+        // A frame saved on another display arrangement may be off screen or under the menu bar now.
+        window.onScreensChangedWhileFilling = { [weak self] in
+            guard let self, windowedFrame != nil, let screen = window.screen ?? NSScreen.main else { return }
+            window.setFrame(screen.frame, display: true)
+            setNotchExtension(for: screen)
+        }
+        window.startKeepingOnScreen()
 
         container = NSView(frame: frame)
         container.wantsLayer = true
@@ -1066,6 +1183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             window.hasShadow = true
             setNotchExtension(for: nil)
             window.setFrame(frame, display: true)
+            // The displays may have changed while it filled one.
+            window.keepOnScreen()
             window.setFrameAutosaveName("ClothoMainWindow")
         } else {
             guard let screen = window.screen ?? NSScreen.main else { return }
@@ -1112,7 +1231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func zoomWindow(_ sender: Any?) {
         guard windowedFrame == nil else { return }
-        window.zoom(nil)
+        window.toggleZoom()
     }
 
     func windowDidDeminiaturize(_ notification: Notification) {
