@@ -18,6 +18,7 @@ final class WindowOnScreenTests: XCTestCase {
         let window = FramelessWindow(contentRect: frame, styleMask: [.borderless, .resizable], backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
         window.screenAreas = { screens }
+        window.mouseIsDown = { false }
         window.setFrame(frame, display: false)
         return window
     }
@@ -34,6 +35,20 @@ final class WindowOnScreenTests: XCTestCase {
         XCTAssertEqual(window.frame.maxY, 949, "the top edge is just below the menu bar")
         XCTAssertEqual(window.frame.size, stuck.size, "the size is kept when it fits")
         XCTAssertEqual(window.frame.minX, 100)
+        window.close()
+    }
+
+    /// While a button is down (a drag), it waits, then fits once the button is up.
+    func testWaitsWhileTheMouseIsDown() {
+        let stuck = NSRect(x: 100, y: 200, width: 1200, height: 760)
+        let window = window(stuck, screens: [laptop])
+        var down = true
+        window.mouseIsDown = { down }
+        window.keepOnScreen()
+        XCTAssertEqual(window.frame, stuck, "not during a drag")
+        down = false
+        RunLoop.current.run(until: Date().addingTimeInterval(0.7))
+        XCTAssertEqual(window.frame.maxY, 949, "once the button is up")
         window.close()
     }
 

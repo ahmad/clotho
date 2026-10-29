@@ -152,6 +152,10 @@ final class FramelessWindow: NSWindow {
         NSScreen.screens.map { ScreenArea(frame: $0.frame, visible: $0.visibleFrame) }
     }
 
+    /// Whether a mouse button is down (a drag may be moving the window). Tests replace it, so the person
+    /// using the Mac during a test run can't change the result.
+    var mouseIsDown: () -> Bool = { NSEvent.pressedMouseButtons != 0 }
+
     /// While filling a display (Clotho's own full screen), a screen change calls this instead, to fill
     /// the screen it's on now.
     var onScreensChangedWhileFilling: (() -> Void)?
@@ -192,7 +196,7 @@ final class FramelessWindow: NSWindow {
     func keepOnScreen() {
         guard !isMiniaturized else { return }
         if fillsScreen { return onScreensChangedWhileFilling?() ?? () }
-        if NSEvent.pressedMouseButtons != 0 {
+        if mouseIsDown() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.keepOnScreen() }
             return
         }
