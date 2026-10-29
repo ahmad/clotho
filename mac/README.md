@@ -122,7 +122,7 @@ Read the [usage guide](docs/usage.md) for all shortcuts, file transfers, remote 
 | [`Sources/Clotho/LocalDaemon.swift`](Sources/Clotho/LocalDaemon.swift) | Installs and starts this Mac's clothod, and upgrades it |
 | [`Sources/Clotho/Machines.swift`](Sources/Clotho/Machines.swift) | Saved machines: add, edit, remove, connection checks and the machine menu |
 | [`Sources/Clotho/Files.swift`](Sources/Clotho/Files.swift) | The saved machine list, SSH, the file browser and transfers |
-| [`Sources/Clotho/Onboarding.swift`](Sources/Clotho/Onboarding.swift) | First-run welcome window (Help › Welcome to Clotho), and the SSH connection check that explains failures |
+| [`Sources/Clotho/Onboarding.swift`](Sources/Clotho/Onboarding.swift) | First-run welcome window (Help › Welcome to Clotho; ←/→ move between pages), and the SSH connection check that explains failures |
 | [`Sources/Clotho/Updates.swift`](Sources/Clotho/Updates.swift) | In-app updates with Sparkle: Check for Updates… and the automatic check |
 | [`../ClothoKit`](../ClothoKit) | Shared with the future iOS app: the model, the clothod protocol client, and a fake backend for UI work |
 | [`build-app.sh`](build-app.sh) | Build, bundle, sign and install (`--dev`, `--release`) |

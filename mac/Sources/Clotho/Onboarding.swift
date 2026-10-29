@@ -2,10 +2,11 @@ import AppKit
 import ClothoKit
 import Combine
 
-// First-run onboarding: a welcome window for someone new to Clotho. It explains Workspace, Tab and Pane,
-// shows this Mac being set up (that happens anyway, at launch), offers adding a remote machine with a
-// connection check that explains what's wrong, and offers agent status and start at login. Every step can
-// be skipped, and Help › Welcome to Clotho opens it again.
+// First-run onboarding: a welcome window for someone new to Clotho, one idea per page. It names Workspace,
+// Tab and Pane, shows this Mac being set up (that happens anyway, at launch) with start at login, offers
+// adding a remote machine with a connection check that explains what's wrong, and offers agent status.
+// Every step can be skipped; ←/→ move between pages, Return continues, and Help › Welcome to Clotho
+// opens it again. Each page is an icon, a short title, a line of text and only the controls it needs.
 
 // MARK: SSH problems, in words
 
@@ -149,12 +150,13 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     private let skipButton = NSButton(title: "Skip Setup", target: nil, action: nil)
     private let dots = NSStackView()
     private var watchers: [AnyCancellable] = []
+    private var keyMonitor: Any?
 
     // The remote step.
     private let nameField = NSTextField()
     private let targetField = NSTextField()
     private let checkButton = NSButton(title: "Check Connection", target: nil, action: nil)
-    private let connectButton = NSButton(title: "Install clothod and Connect", target: nil, action: nil)
+    private let connectButton = NSButton(title: "Connect", target: nil, action: nil)
     private let remoteStatus = NSTextField(wrappingLabelWithString: "")
     private let remoteAdvice = NSTextField(wrappingLabelWithString: "")
     private let remoteSpinner = NSProgressIndicator()
@@ -165,14 +167,20 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     private let localStatus = NSTextField(wrappingLabelWithString: "")
     private let hooksStatus = NSTextField(wrappingLabelWithString: "")
     private var setUpButton: NSButton?
-    private let loginBox = NSButton(checkboxWithTitle: "Start clothod at login", target: nil, action: nil)
+    private let loginBox = NSButton(checkboxWithTitle: "Start at login", target: nil, action: nil)
     private let loginNote = NSTextField(wrappingLabelWithString: "")
 
-    init(app: AppDelegate) {
+    /// Page width; the window is this plus the side margins.
+    static let pageWidth: CGFloat = 464
+
+    init(app: AppDelegate?) {
         self.app = app
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 470),
-                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.pageWidth + 96, height: 460),
+                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "Welcome to Clotho"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
         super.init(window: window)
         window.delegate = self
 
@@ -182,37 +190,39 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         nextButton.target = self
         nextButton.action = #selector(advance)
         nextButton.keyEquivalent = "\r"
+        nextButton.controlSize = .large
+        backButton.controlSize = .large
         skipButton.target = self
         skipButton.action = #selector(skip)
         skipButton.bezelStyle = .inline
         skipButton.isBordered = false
         skipButton.contentTintColor = .secondaryLabelColor
         dots.orientation = .horizontal
-        dots.spacing = 6
+        dots.spacing = 8
 
         for view in [page, backButton, nextButton, skipButton, dots] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
         NSLayoutConstraint.activate([
-            page.topAnchor.constraint(equalTo: content.topAnchor, constant: 28),
-            page.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 36),
-            page.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -36),
+            page.topAnchor.constraint(equalTo: content.topAnchor, constant: 40),
+            page.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            page.widthAnchor.constraint(equalToConstant: Self.pageWidth),
             page.bottomAnchor.constraint(equalTo: nextButton.topAnchor, constant: -16),
-            nextButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            nextButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            nextButton.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            nextButton.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -22),
             backButton.trailingAnchor.constraint(equalTo: nextButton.leadingAnchor, constant: -8),
             backButton.centerYAnchor.constraint(equalTo: nextButton.centerYAnchor),
-            skipButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            skipButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
             skipButton.centerYAnchor.constraint(equalTo: nextButton.centerYAnchor),
             dots.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             dots.centerYAnchor.constraint(equalTo: nextButton.centerYAnchor),
         ])
         window.contentView = content
 
-        nameField.placeholderString = "Name, for example Studio"
-        targetField.placeholderString = "user@host, an ssh alias or a Tailscale name"
-        nameField.nextKeyView = targetField
+        nameField.placeholderString = "Name (optional)"
+        targetField.placeholderString = "user@host or an ssh alias"
+        targetField.nextKeyView = nameField
         checkButton.target = self
         checkButton.action = #selector(checkConnection)
         connectButton.target = self
@@ -225,10 +235,17 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         remoteAdvice.font = .systemFont(ofSize: 12)
         loginBox.target = self
         loginBox.action = #selector(toggleLogin)
-        for label in [localStatus, hooksStatus, remoteStatus] { label.font = .systemFont(ofSize: 13) }
-        loginNote.font = .systemFont(ofSize: 11)
+        for label in [localStatus, hooksStatus, remoteStatus] {
+            label.font = .systemFont(ofSize: 13, weight: .medium)
+            label.alignment = .center
+        }
+        loginNote.font = .systemFont(ofSize: 11.5)
         loginNote.textColor = .secondaryLabelColor
+        loginNote.alignment = .center
         NotificationCenter.default.addObserver(self, selector: #selector(targetEdited), name: NSControl.textDidChangeNotification, object: targetField)
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            (self?.handleArrow(event) ?? false) ? nil : event
+        }
 
         show(.welcome)
     }
@@ -259,12 +276,16 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         page.subviews.forEach { $0.removeFromSuperview() }
         let stack = NSStackView()
         stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
+        stack.alignment = .centerX
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         page.addSubview(stack)
+        // Centred in the page, a little above the middle, as a dialog sits.
+        let middle = stack.centerYAnchor.constraint(equalTo: page.centerYAnchor, constant: -10)
+        middle.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: page.topAnchor),
+            middle,
+            stack.topAnchor.constraint(greaterThanOrEqualTo: page.topAnchor),
             stack.leadingAnchor.constraint(equalTo: page.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: page.trailingAnchor),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: page.bottomAnchor),
@@ -276,8 +297,9 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         case .agents: buildAgents(stack)
         case .done: buildDone(stack)
         }
-        for view in stack.arrangedSubviews where !(view is NSButton) && !(view is NSStackView && (view as! NSStackView).orientation == .horizontal) {
-            view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        // Wrapping text takes the page's width, so it wraps there and centres.
+        for case let label as NSTextField in stack.arrangedSubviews where label.cell?.wraps == true && !label.isEditable {
+            label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         backButton.isHidden = next == .welcome
         skipButton.isHidden = next == .done
@@ -288,18 +310,42 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         default: "Continue"
         }
         updateDots()
+        if window?.isVisible == true {
+            page.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                page.animator().alphaValue = 1
+            }
+        }
         log("onboarding: step \(next)")
+    }
+
+    /// ← and → move between pages, unless a text field has something to move through. Returns whether it
+    /// took the key.
+    func handleArrow(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window, window.attachedSheet == nil,
+              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else { return false }
+        if let editor = window.firstResponder as? NSTextView, editor.isFieldEditor, !editor.string.isEmpty { return false }
+        switch event.keyCode {
+        case 123:
+            guard step != .welcome else { return true }
+            back()
+            return true
+        case 124:
+            guard step != .done else { return true }
+            advance()
+            return true
+        default:
+            return false
+        }
     }
 
     private func updateDots() {
         dots.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for each in Step.allCases {
-            let dot = NSView()
-            dot.wantsLayer = true
-            dot.layer?.cornerRadius = 3
-            dot.layer?.backgroundColor = (each == step ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).cgColor
-            dot.widthAnchor.constraint(equalToConstant: 6).isActive = true
-            dot.heightAnchor.constraint(equalToConstant: 6).isActive = true
+            let dot = Tile(fill: each == step ? .controlAccentColor : .tertiaryLabelColor, radius: 3.5)
+            dot.widthAnchor.constraint(equalToConstant: each == step ? 18 : 7).isActive = true
+            dot.heightAnchor.constraint(equalToConstant: 7).isActive = true
             dots.addArrangedSubview(dot)
         }
     }
@@ -327,6 +373,8 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         // Closing it any way counts as done; Help › Welcome to Clotho brings it back.
         UserDefaults.standard.set(true, forKey: Self.doneKey)
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
         watchers.removeAll()
         app?.onboarding = nil
         app?.window.makeKeyAndOrderFront(nil)
@@ -334,68 +382,139 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
 
     // MARK: Pages
 
-    private func heading(_ text: String) -> NSTextField {
+    /// A page's picture: an SF Symbol on a soft tile of its colour.
+    private func hero(_ symbol: String, tint: NSColor = .controlAccentColor) -> NSView {
+        let tile = Tile(fill: tint.withAlphaComponent(0.16), radius: 18)
+        let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+        image.symbolConfiguration = .init(pointSize: 32, weight: .medium)
+        image.contentTintColor = tint
+        image.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(image)
+        NSLayoutConstraint.activate([
+            tile.widthAnchor.constraint(equalToConstant: 72), tile.heightAnchor.constraint(equalToConstant: 72),
+            image.centerXAnchor.constraint(equalTo: tile.centerXAnchor), image.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+        ])
+        return tile
+    }
+
+    private func title(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 22, weight: .semibold)
+        label.font = .systemFont(ofSize: 26, weight: .bold)
+        label.alignment = .center
         return label
     }
 
-    private func body(_ text: String, color: NSColor = .labelColor, size: CGFloat = 13) -> NSTextField {
+    private func subtitle(_ text: String) -> NSTextField {
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: size)
-        label.textColor = color
+        label.font = .systemFont(ofSize: 14)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .center
         return label
     }
 
-    private func symbol(_ name: String) -> NSImageView {
-        let view = NSImageView(image: NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage())
-        view.symbolConfiguration = .init(pointSize: 22, weight: .regular)
-        view.contentTintColor = .controlAccentColor
-        view.widthAnchor.constraint(equalToConstant: 34).isActive = true
-        return view
+    private func note(_ text: String) -> NSTextField {
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: 11.5)
+        label.textColor = .tertiaryLabelColor
+        label.alignment = .center
+        return label
     }
 
-    /// An icon, a bold term and a line of explanation, side by side.
-    private func explainer(_ icon: String, _ term: String, _ text: String) -> NSView {
-        let title = NSTextField(labelWithString: term)
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
-        let detail = body(text, color: .secondaryLabelColor)
-        let words = NSStackView(views: [title, detail])
-        words.orientation = .vertical
-        words.alignment = .leading
-        words.spacing = 2
-        let row = NSStackView(views: [symbol(icon), words])
+    /// A shortcut, drawn as a key.
+    private func keycap(_ text: String) -> NSView {
+        let tile = Tile(fill: .quaternaryLabelColor, radius: 5)
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11.5, weight: .medium)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        tile.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: tile.leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: tile.trailingAnchor, constant: -7),
+            label.topAnchor.constraint(equalTo: tile.topAnchor, constant: 2),
+            label.bottomAnchor.constraint(equalTo: tile.bottomAnchor, constant: -2),
+        ])
+        return tile
+    }
+
+    /// One of Workspace, Tab and Pane: an icon, its name, a few words and its shortcut, on a card.
+    private func card(_ symbol: String, _ name: String, _ words: String, _ key: String) -> NSView {
+        let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+        image.symbolConfiguration = .init(pointSize: 24, weight: .regular)
+        image.contentTintColor = .controlAccentColor
+        let label = NSTextField(labelWithString: name)
+        label.font = .systemFont(ofSize: 14, weight: .semibold)
+        let detail = NSTextField(labelWithString: words)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        let column = NSStackView(views: [image, label, detail, keycap(key)])
+        column.orientation = .vertical
+        column.alignment = .centerX
+        column.spacing = 6
+        column.setCustomSpacing(10, after: image)
+        column.setCustomSpacing(10, after: detail)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        let card = Tile(fill: .labelColor.withAlphaComponent(0.05), radius: 12)
+        card.addSubview(column)
+        NSLayoutConstraint.activate([
+            card.widthAnchor.constraint(equalToConstant: 140),
+            column.centerXAnchor.constraint(equalTo: card.centerXAnchor),
+            column.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
+            column.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+        ])
+        return card
+    }
+
+    /// A shortcut and what it does, in a line.
+    private func tip(_ key: String, _ text: String) -> NSView {
+        let cap = keycap(key)
+        cap.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 13)
+        let row = NSStackView(views: [cap, label])
         row.orientation = .horizontal
-        row.alignment = .top
         row.spacing = 12
-        detail.widthAnchor.constraint(equalTo: words.widthAnchor).isActive = true
         return row
     }
 
     private func buildWelcome(_ stack: NSStackView) {
-        stack.addArrangedSubview(heading("Welcome to Clotho"))
-        stack.addArrangedSubview(body("Clotho keeps your shells and coding agents running on each machine, even when the app is closed, and shows them all in one window.",
-                                      color: .secondaryLabelColor))
-        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(explainer("sidebar.left", "1. Workspaces",
-            "One per project or task, listed in the sidebar under its machine. ⌘N makes a new one."))
-        stack.addArrangedSubview(explainer("rectangle.topthird.inset.filled", "2. Tabs",
-            "A workspace holds tabs, shown across the top. ⌘T opens a tab, ⌘1…⌘9 switch between them."))
-        stack.addArrangedSubview(explainer("rectangle.split.2x1", "3. Panes",
-            "Split a tab into panes, each its own shell. ⌘D splits right, ⇧⌘D splits down, ⌘W closes one."))
-        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(body("Next: this Mac, another machine if you have one, and agent status. Each takes a moment, and you can skip any of them.",
-                                      color: .secondaryLabelColor, size: 12))
+        let icon = NSImageView(image: NSApp.applicationIconImage ?? NSImage())
+        icon.widthAnchor.constraint(equalToConstant: 84).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 84).isActive = true
+        stack.addArrangedSubview(icon)
+        stack.setCustomSpacing(14, after: icon)
+        stack.addArrangedSubview(title("Welcome to Clotho"))
+        stack.addArrangedSubview(subtitle("Shells and agents that keep running, on every machine."))
+        stack.setCustomSpacing(26, after: stack.arrangedSubviews.last!)
+        let cards = NSStackView(views: [card("sidebar.left", "Workspaces", "One per project", "⌘N"),
+                                        card("rectangle.topthird.inset.filled", "Tabs", "Across the top", "⌘T"),
+                                        card("rectangle.split.2x1", "Panes", "Split a tab", "⌘D")])
+        cards.orientation = .horizontal
+        cards.alignment = .top
+        cards.distribution = .equalSpacing
+        cards.spacing = 12
+        stack.addArrangedSubview(cards)
     }
 
     private func buildThisMac(_ stack: NSStackView) {
-        stack.addArrangedSubview(heading("This Mac"))
-        stack.addArrangedSubview(body("Clotho runs clothod, a small background program, to keep this Mac's shells alive while the window is closed. It comes with the app; there's nothing to install."))
+        stack.addArrangedSubview(hero("desktopcomputer"))
+        stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(title("This Mac"))
+        stack.addArrangedSubview(subtitle("clothod keeps this Mac's shells running while Clotho is closed."))
+        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
         stack.addArrangedSubview(localStatus)
+        stack.setCustomSpacing(26, after: localStatus)
+        stack.addArrangedSubview(loginBox)
+        stack.setCustomSpacing(4, after: loginBox)
+        stack.addArrangedSubview(loginNote)
+        loginBox.isEnabled = false
+        loginNote.stringValue = "So your workspaces are running before you open Clotho."
         guard let store = app?.connections[AppDelegate.localKey]?.store else { return }
         store.$connection.combineLatest(store.$hello).receive(on: DispatchQueue.main).sink { [weak self] state, hello in
             self?.showLocal(state, hello: hello)
         }.store(in: &watchers)
+        store.$service.receive(on: DispatchQueue.main).sink { [weak self] service in self?.showService(service) }.store(in: &watchers)
+        Task { _ = try? await store.loadService() }
     }
 
     private func showLocal(_ state: ConnectionState, hello: Hello?) {
@@ -403,35 +522,37 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         switch state {
         case .idle: text = "Starting clothod…"
         case .connecting(let what): text = "\(what)…"
-        case .connected: text = "✓  This Mac is ready, running clothod \(hello?.version ?? "")."
+        case .connected: text = "✓  Ready, running clothod \(hello?.version ?? "")"
         case .reconnecting(let error): text = "clothod isn't answering yet: \(error)"
         }
         localStatus.stringValue = text
-        localStatus.textColor = state.isConnected ? .systemGreen : .labelColor
+        localStatus.textColor = state.isConnected ? .systemGreen : .secondaryLabelColor
         log("onboarding: this Mac: \(text)")
     }
 
     private func buildRemote(_ stack: NSStackView) {
-        stack.addArrangedSubview(heading("Another machine (optional)"))
-        stack.addArrangedSubview(body("Clotho can run workspaces on a Linux box or another Mac you reach over SSH. It installs clothod there for you, in your home folder, without sudo.",
-                                      color: .secondaryLabelColor))
-        for field in [nameField, targetField] {
+        stack.addArrangedSubview(hero("server.rack", tint: .systemTeal))
+        stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(title("Add a machine"))
+        stack.addArrangedSubview(subtitle("Run workspaces on a Linux box or another Mac over SSH."))
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+        for field in [targetField, nameField] {
             field.font = .systemFont(ofSize: 13)
-            field.widthAnchor.constraint(equalToConstant: 360).isActive = true
+            field.controlSize = .large
+            field.bezelStyle = .roundedBezel
+            field.widthAnchor.constraint(equalToConstant: 300).isActive = true
+            stack.addArrangedSubview(field)
         }
-        let grid = NSGridView(views: [[NSTextField(labelWithString: "Name:"), nameField],
-                                      [NSTextField(labelWithString: "SSH target:"), targetField]])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowSpacing = 8
-        stack.addArrangedSubview(grid)
+        stack.setCustomSpacing(14, after: nameField)
         let buttons = NSStackView(views: [checkButton, connectButton, remoteSpinner])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         stack.addArrangedSubview(buttons)
         stack.addArrangedSubview(remoteStatus)
         stack.addArrangedSubview(remoteAdvice)
+        stack.addArrangedSubview(note("Clotho installs clothod in your home folder there, without sudo."))
         if let machine = addedMachine { watchRemote(machine) }
-        window?.makeFirstResponder(addedMachine == nil ? (nameField.stringValue.isEmpty ? nameField : targetField) : nil)
+        window?.makeFirstResponder(addedMachine == nil ? (targetField.stringValue.isEmpty ? targetField : nameField) : nil)
     }
 
     @objc private func targetEdited() {
@@ -515,38 +636,33 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildAgents(_ stack: NSStackView) {
-        stack.addArrangedSubview(heading("Agent status"))
-        stack.addArrangedSubview(body("When Claude Code or Codex runs in a pane, Clotho can show in the sidebar when it's working, waiting for you, done or stuck, and notify you. On its own it guesses from the terminal; with agent status set up, the agents report it themselves, exactly."))
-        stack.addArrangedSubview(body("Setting it up adds Clotho's hooks to ~/.claude/settings.json and sets notify in ~/.codex/config.toml, keeping what's there and a backup of each file. You'll see every change before anything is written, and `clothod hooks uninstall` undoes it.",
-                                      color: .secondaryLabelColor, size: 12))
+        stack.addArrangedSubview(hero("bell.badge", tint: .systemOrange))
+        stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(title("Agent status"))
+        stack.addArrangedSubview(subtitle("See when Claude Code or Codex is working, waiting for you, or done."))
+        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
         setUpButton = ClosureButton(title: "Set Up Agent Status…") { [weak self] in
             guard let self, let app, let window else { return }
             app.setUpAgentHooks(on: AppDelegate.localKey, in: window)
         }
+        setUpButton?.controlSize = .large
         stack.addArrangedSubview(setUpButton!)
         stack.addArrangedSubview(hooksStatus)
+        stack.setCustomSpacing(18, after: hooksStatus)
+        stack.addArrangedSubview(note("Adds hooks to ~/.claude and ~/.codex. You see every change first."))
         refreshHooks()
-        stack.setCustomSpacing(24, after: hooksStatus)
-
-        stack.addArrangedSubview(loginBox)
-        stack.addArrangedSubview(loginNote)
-        loginBox.isEnabled = false
-        loginNote.stringValue = "Starts clothod when you log in, so this Mac's workspaces are running before you open Clotho. Without it, clothod starts with the app and keeps running after it quits."
-        guard let store = app?.connections[AppDelegate.localKey]?.store else { return }
-        store.$service.receive(on: DispatchQueue.main).sink { [weak self] service in self?.showService(service) }.store(in: &watchers)
-        Task { _ = try? await store.loadService() }
     }
 
     func refreshHooks() {
         guard let app else { return }
         let installed = app.hookStatus[AppDelegate.localKey] ?? [:]
         if !installed.isEmpty, installed.values.allSatisfy({ $0 }) {
-            hooksStatus.stringValue = "✓  Already set up for Claude Code and Codex on this Mac."
+            hooksStatus.stringValue = "✓  Set up for Claude Code and Codex"
             hooksStatus.textColor = .systemGreen
             setUpButton?.isEnabled = false
         } else {
             let done = installed.filter(\.value).keys.map { $0 == "claude" ? "Claude Code" : "Codex" }.sorted()
-            hooksStatus.stringValue = done.isEmpty ? "Not set up yet." : "Set up for \(done.joined(separator: " and ")) so far."
+            hooksStatus.stringValue = done.isEmpty ? "" : "Set up for \(done.joined(separator: " and ")) so far"
             hooksStatus.textColor = .secondaryLabelColor
             setUpButton?.isEnabled = true
         }
@@ -575,13 +691,20 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
     }
 
     private func buildDone(_ stack: NSStackView) {
-        stack.addArrangedSubview(heading("You're set"))
-        stack.addArrangedSubview(body("A few things worth knowing:", color: .secondaryLabelColor))
-        stack.addArrangedSubview(explainer("command", "Shortcuts", "⌘/ shows every shortcut. ⇧⌘O opens the file browser, for copying files between machines."))
-        stack.addArrangedSubview(explainer("bell.badge", "Agents", "The Agents section of the sidebar lists every agent across your machines; the ones waiting for you come first."))
-        stack.addArrangedSubview(explainer("server.rack", "Machines", "Add more any time from the sidebar's Manage Machines, or File › Add Machine."))
-        stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
-        stack.addArrangedSubview(body("Help › Welcome to Clotho shows this again.", color: .secondaryLabelColor, size: 12))
+        stack.addArrangedSubview(hero("checkmark", tint: .systemGreen))
+        stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
+        stack.addArrangedSubview(title("You're all set"))
+        stack.addArrangedSubview(subtitle("Three shortcuts worth knowing:"))
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+        let tips = NSStackView(views: [tip("⌘P", "Go to any workspace, tab or agent"),
+                                       tip("⇧⌘O", "Browse and copy files between machines"),
+                                       tip("⌘/", "See every shortcut")])
+        tips.orientation = .vertical
+        tips.alignment = .leading
+        tips.spacing = 12
+        stack.addArrangedSubview(tips)
+        stack.setCustomSpacing(24, after: tips)
+        stack.addArrangedSubview(note("Help › Welcome to Clotho shows this again."))
     }
 
     // MARK: Testing aid
@@ -605,6 +728,30 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
                 else if step.hasPrefix("shot:"), let view = window?.contentView { saveSnapshot(of: view, to: String(step.dropFirst(5))) }
             }
         }
+    }
+}
+
+/// A rounded fill that follows the appearance (light, dark, accent colour), unlike a layer colour set once.
+final class Tile: NSView {
+    var fill: NSColor { didSet { needsDisplay = true } }
+    private let radius: CGFloat
+
+    init(fill: NSColor, radius: CGFloat) {
+        self.fill = fill
+        self.radius = radius
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = radius
+        layer?.cornerCurve = .continuous
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = fill.cgColor }
     }
 }
 
