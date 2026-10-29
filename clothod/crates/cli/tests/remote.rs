@@ -449,3 +449,46 @@ async fn upload_resumes_after_the_ssh_link_is_cut() {
     assert_eq!(lines.next(), Some(want.as_str()), "{out}");
     assert_eq!(lines.next(), Some("0"), "no part file left: {out}");
 }
+
+/// macOS: a daemon started from an SSH session must not live in that session's launchd
+/// namespace, or its shells lose DNS, user lookups, TLS trust and the keychain once the session
+/// is torn down. `start` launches serve through a one-off launchd job in the login session's
+/// domain: serve, the holder and every shell are in "Aqua", also after the session ended, and the
+/// job is gone. Skipped elsewhere, and on a Mac nobody is logged in to.
+#[tokio::test]
+async fn macos_shells_get_the_login_sessions_namespace() {
+    let h = need_host!();
+    let probe = h.r.probe().await.unwrap();
+    if !probe.platform().starts_with("macos") {
+        eprintln!("not macOS; skipping");
+        return;
+    }
+    let Session { client: c, child: mut ssh, path, .. } = h.r.connect().await.unwrap();
+    let (_, gui, _) = h.r.clothod(&path, "version >/dev/null; launchctl print gui/$(id -u) >/dev/null 2>&1 && echo gui").await.unwrap();
+    if gui.trim() != "gui" {
+        eprintln!("nobody logged in at the Mac; skipping");
+        return;
+    }
+    let first = new_pane(&c).await;
+    drop(c);
+    // The session that started the daemon ends.
+    tokio::time::timeout(T, ssh.wait()).await.unwrap().unwrap();
+
+    let Session { client: c, .. } = h.r.bridge(&path).await.unwrap();
+    assert_eq!(c.hello["namespace"], "Aqua", "serve: {}", c.hello);
+    assert_eq!(c.hello["holder"]["namespace"], "Aqua", "holder: {}", c.hello);
+    let check = b"echo ns=$(launchctl managername 2>&1); echo dns=$(scutil --dns 2>&1 | grep -c nameserver); echo user=$(id -un 2>&1); echo checked\r";
+    for p in [first, new_pane(&c).await] {
+        c.input(p, check);
+        let lines = wait_for_text(&c, p, T, |l| l.iter().any(|l| l == "checked")).await.unwrap();
+        let get = |k: &str| lines.iter().find_map(|l| l.strip_prefix(k)).unwrap_or_default().to_string();
+        assert_eq!(get("ns="), "Aqua", "pane {p}: {lines:?}");
+        assert!(get("dns=").parse::<u32>().is_ok_and(|n| n > 0), "pane {p}: no DNS configuration: {lines:?}");
+        let user = get("user=");
+        assert!(!user.is_empty() && !user.chars().all(|c| c.is_ascii_digit()) && !user.contains("No user"), "pane {p}: {lines:?}");
+    }
+    // The launch job and its plist are gone.
+    let (_, jobs, _) = h.r.clothod(&path, "version >/dev/null; launchctl list | grep -c nyc.amin.clotho.clothod.start; ls $CLOTHOD_RUNTIME_DIR/*.plist 2>/dev/null | wc -l").await.unwrap();
+    let counts: Vec<&str> = jobs.split_whitespace().collect();
+    assert_eq!(counts, vec!["0", "0"], "launch jobs or plists left: {jobs}");
+}

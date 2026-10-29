@@ -131,6 +131,8 @@ fn run() -> Result<()> {
             Ok(())
         }
         "start" => rt.block_on(start(dir, false)),
+        // macOS, internal: what `start`'s launchd job runs (clothod::launchd).
+        "spawn-serve" => spawn_serve(&dir).map(|_| ()),
         "bridge" => rt.block_on(bridge(dir)),
         "build-id" => {
             let file = flags.iter().find(|f| !f.starts_with("--")).map(PathBuf::from);
@@ -195,10 +197,25 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
     platform::check_socket_path(&clothod::daemon::socket_path(&dir)).map_err(anyhow::Error::msg)?;
     platform::check_instance_allowed(&dir).map_err(anyhow::Error::msg)?;
     if connect(&dir).await.is_ok() {
-        if !quiet {
-            println!("clothod already running ({})", clothod::daemon::socket_path(&dir).display());
+        // macOS: a serve started from an SSH session with nobody logged in at the Mac is stuck in
+        // that session's namespace. Started in the login session (the login unit at console
+        // login, the app), move it here: stop it and start again, as an upgrade does (the
+        // holder and its shells stay where they are).
+        let ours = platform::launchd_namespace();
+        let theirs = hello_value(&dir).and_then(|h| h["namespace"].as_str().map(String::from));
+        match (ours.as_deref(), theirs.as_deref()) {
+            (Some("Aqua"), Some(ns)) if ns != "Aqua" => {
+                eprintln!("clothod: the running daemon is in launchd namespace {ns}; restarting it in this login session (shells are kept)");
+                std::env::set_var(UPGRADING_ENV, "1");
+                call(dir.clone(), "daemon.stop", json!({})).await?;
+            }
+            _ => {
+                if !quiet {
+                    println!("clothod already running ({})", clothod::daemon::socket_path(&dir).display());
+                }
+                return Ok(());
+            }
         }
-        return Ok(());
     }
     // An upgrade is switching this instance to another build: its own `start` comes through
     // (CLOTHOD_UPGRADING), anything else (a client reconnecting, a login unit) waits for the
@@ -253,11 +270,14 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
     let log_dir = platform::log_dir(&dir);
     platform::ensure_private_dir(&log_dir)?;
     let log_path = log_dir.join("clothod.log");
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path)?;
-    let mut cmd = clothod::session_independent_command(&std::env::current_exe()?);
-    cmd.arg("serve").arg("--runtime-dir").arg(&dir);
     let log_start = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-    clothod::detach(&mut cmd, log)?;
+    // macOS, from an SSH session: through launchd, into the login session's namespace.
+    match clothod::launchd::how() {
+        clothod::launchd::Launch::Launchd => return start_via_launchd(&dir, &log_path, log_start, quiet).await,
+        clothod::launchd::Launch::Stuck(warning) => eprintln!("clothod: warning: {warning}"),
+        clothod::launchd::Launch::Direct => {}
+    }
+    let mut cmd = serve_command(&dir, &log_path)?;
     // With a systemd unit, the command we run is systemd-run, which exits once the unit started
     // (and the daemon's output goes to the journal, not our log).
     let via_systemd = platform::needs_systemd_unit();
@@ -292,6 +312,47 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     bail!("clothod did not start; see {}", log_path.display())
+}
+
+/// `clothod serve --runtime-dir dir`, detached (own session, output to the log).
+fn serve_command(dir: &std::path::Path, log_path: &std::path::Path) -> Result<std::process::Command> {
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path)?;
+    let mut cmd = clothod::session_independent_command(&std::env::current_exe()?);
+    cmd.arg("serve").arg("--runtime-dir").arg(dir);
+    clothod::detach(&mut cmd, log)?;
+    Ok(cmd)
+}
+
+/// The launchd job's side: detach serve and exit (the job is unloaded right after).
+fn spawn_serve(dir: &std::path::Path) -> Result<std::process::Child> {
+    let log_dir = platform::log_dir(dir);
+    platform::ensure_private_dir(&log_dir)?;
+    Ok(serve_command(dir, &log_dir.join("clothod.log"))?.spawn()?)
+}
+
+/// `start` through a one-off launchd job in the login session's domain: wait for the socket as
+/// usual; the job and its plist go whatever happens.
+async fn start_via_launchd(dir: &std::path::Path, log_path: &std::path::Path, log_start: u64, quiet: bool) -> Result<()> {
+    let job = clothod::launchd::Job::launch(&std::env::current_exe()?, dir, log_path).context("starting clothod through launchd")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if connect(dir).await.is_ok() {
+            drop(job);
+            if !quiet {
+                println!("clothod started ({})", clothod::daemon::socket_path(dir).display());
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    drop(job);
+    let log = std::fs::read(log_path).unwrap_or_default();
+    let tail = String::from_utf8_lossy(&log[(log_start as usize).min(log.len())..]).trim().to_string();
+    if tail.contains(clothod::daemon::INCOMPATIBLE) {
+        eprintln!("{tail}");
+        std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
+    }
+    bail!("clothod did not start through launchd; see {}:\n{tail}", log_path.display())
 }
 
 async fn call(dir: PathBuf, method: &str, params: Value) -> Result<()> {
@@ -729,30 +790,32 @@ fn clothod_processes() -> Vec<platform::ProcInfo> {
 /// What an instance's daemon says about its own processes: pid -> build, from `hello`
 /// (serve's own build, and the holder's as it reported it). Unlike hashing the file on disk,
 /// this is right after the file was replaced or the holder upgraded in place.
-fn reported_builds(runtime: &std::path::Path) -> HashMap<u32, String> {
+/// A running instance's `hello` reply, if it answers within half a second.
+fn hello_value(runtime: &std::path::Path) -> Option<Value> {
     use std::io::{Read, Write};
-    let mut out = HashMap::new();
-    let Ok(mut s) = std::os::unix::net::UnixStream::connect(runtime.join("clothod.sock")) else { return out };
+    let mut s = std::os::unix::net::UnixStream::connect(runtime.join("clothod.sock")).ok()?;
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
-    let hello = json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "clothod-ps"}});
-    if s.write_all(&Frame::Json(hello).encode()).is_err() {
-        return out;
-    }
+    let hello = json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "clothod-cli"}});
+    s.write_all(&Frame::Json(hello).encode()).ok()?;
     let mut len = [0u8; 4];
-    if s.read_exact(&mut len).is_err() {
-        return out;
-    }
+    s.read_exact(&mut len).ok()?;
     let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
-    if s.read_exact(&mut body).is_err() {
-        return out;
-    }
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body[1..]) {
-        let r = &v["result"];
+    s.read_exact(&mut body).ok()?;
+    let v: Value = serde_json::from_slice(body.get(1..)?).ok()?;
+    Some(v["result"].clone())
+}
+
+/// What a running instance says about its processes: pid -> (build, launchd namespace).
+fn reported_builds(runtime: &std::path::Path) -> HashMap<u32, (String, Option<String>)> {
+    let mut out = HashMap::new();
+    if let Some(r) = hello_value(runtime) {
+        let r = &r;
+        let ns = |v: &Value| v.as_str().map(String::from);
         if let (Some(pid), Some(b)) = (r["pid"].as_u64(), r["build"].as_str()) {
-            out.insert(pid as u32, b.to_string());
+            out.insert(pid as u32, (b.to_string(), ns(&r["namespace"])));
         }
         if let (Some(pid), Some(b)) = (r["holder"]["pid"].as_u64(), r["holder"]["build"].as_str()) {
-            out.insert(pid as u32, b.to_string());
+            out.insert(pid as u32, (b.to_string(), ns(&r["holder"]["namespace"])));
         }
     }
     out
@@ -761,7 +824,7 @@ fn reported_builds(runtime: &std::path::Path) -> HashMap<u32, String> {
 /// `clothod ps`.
 fn ps() {
     let default = platform::default_runtime_dir();
-    let mut reported: HashMap<PathBuf, HashMap<u32, String>> = HashMap::new();
+    let mut reported: HashMap<PathBuf, HashMap<u32, (String, Option<String>)>> = HashMap::new();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut rows = Vec::new();
     for p in clothod_processes() {
@@ -778,8 +841,11 @@ fn ps() {
             .unwrap_or_else(|| default.clone());
         let exe = p.exe.clone().unwrap_or_default();
         let known = reported.entry(runtime.clone()).or_insert_with(|| reported_builds(&runtime));
+        // macOS: the launchd namespace it reported. Anything but Aqua means its shells (holder)
+        // or its gh lookups (serve) can lose system services.
+        let ns = known.get(&p.pid).and_then(|k| k.1.clone()).map(|n| format!("  launchd: {n}")).unwrap_or_default();
         let build = match known.get(&p.pid) {
-            Some(b) => b.clone(),
+            Some((b, _)) => b.clone(),
             // Nobody answered for it: all we know is where it lives (an install dir names the
             // build) or what the file holds now.
             None => match exe.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()) {
@@ -790,7 +856,7 @@ fn ps() {
         let age = p.started.map(|s| now.saturating_sub(s)).unwrap_or(0);
         let age = if age >= 3600 { format!("{}h{:02}m", age / 3600, age % 3600 / 60) } else { format!("{}m{:02}s", age / 60, age % 60) };
         let extra = if runtime == default { "" } else { "  EXTRA" };
-        rows.push(format!("{:>7}  {:<7} {:>7}  {:<30} {}  {}{extra}", p.pid, role, age, build, runtime.display(), exe.display()));
+        rows.push(format!("{:>7}  {:<7} {:>7}  {:<30} {}  {}{ns}{extra}", p.pid, role, age, build, runtime.display(), exe.display()));
     }
     println!("{:>7}  {:<7} {:>7}  {:<30} {}  {}", "PID", "ROLE", "AGE", "BUILD", "RUNTIME", "EXE");
     for r in rows {

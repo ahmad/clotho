@@ -322,6 +322,26 @@ pub fn ephemeral() -> Option<Ephemeral> {
     })
 }
 
+/// macOS: the launchd namespace this process lives in, as `launchctl managername` names it:
+/// "Aqua" (the console login session), "Background" (an SSH session's, which goes away with
+/// it), or another. Asked once per process. `None` elsewhere or if it can't tell.
+pub fn launchd_namespace() -> Option<String> {
+    static NS: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NS.get_or_init(|| {
+        // Tests: pretend to be in this namespace (any platform).
+        if let Some(v) = std::env::var("CLOTHOD_TEST_NAMESPACE").ok().filter(|v| !v.is_empty()) {
+            return Some(v);
+        }
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let out = std::process::Command::new("/bin/launchctl").arg("managername").stdin(std::process::Stdio::null()).output().ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Some(if out.status.success() && !s.is_empty() { s } else { "none".to_string() })
+    })
+    .clone()
+}
+
 /// Only the default runtime dir may hold a persistent instance; anything else must be
 /// ephemeral (one instance per machine).
 pub fn check_instance_allowed(runtime_dir: &Path) -> Result<(), String> {

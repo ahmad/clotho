@@ -393,6 +393,7 @@ async fn serve_conn(holder: &Arc<Holder>, conn: u64, abort: tokio::task::AbortHa
         version: test_override(&holder.dir, "CLOTHOD_TEST_HOLDER_VERSION").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
         exe: std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
         instance: holder.instance.clone(),
+        namespace: clotho_proto::platform::launchd_namespace(),
         pid: std::process::id(),
         state: holder.state.lock().unwrap().clone(),
     };

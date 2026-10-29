@@ -80,6 +80,10 @@ pub enum FromHolder {
         /// State formats this holder can hand over in an in-place `Upgrade` (empty: it can't).
         #[serde(default)]
         upgrade_formats: Vec<u32>,
+        /// macOS: the holder's launchd namespace (`platform::launchd_namespace`); its shells
+        /// inherit it.
+        #[serde(default)]
+        namespace: Option<String>,
         /// Random id for this holder's lifetime (the client protocol's `instance`).
         instance: String,
         pid: u32,

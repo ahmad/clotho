@@ -9,6 +9,7 @@ pub mod fs;
 pub mod push;
 pub mod service;
 pub mod git;
+pub mod launchd;
 pub mod layout;
 pub mod model;
 

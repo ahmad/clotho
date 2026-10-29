@@ -891,12 +891,12 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
 
     let (instance, state, holder_info) = match Some(first) {
         Some(Frame::Json(v)) => match serde_json::from_value::<FromHolder>(v)? {
-            FromHolder::Welcome { instance, state, pid, protocol, version, exe, build, upgrade_formats } => {
+            FromHolder::Welcome { instance, state, pid, protocol, version, exe, build, upgrade_formats, namespace } => {
                 // Outdated: not this build. Legacy holders (no in-place upgrade) stay so until
                 // a full restart; the apps ask the user for it.
                 let outdated = build.as_deref() != Some(own_build.as_str());
                 let info = json!({"pid": pid, "version": version, "protocol": protocol, "exe": exe, "build": build,
-                    "can_upgrade": !upgrade_formats.is_empty(), "outdated": outdated});
+                    "can_upgrade": !upgrade_formats.is_empty(), "outdated": outdated, "namespace": namespace});
                 if !(HOLDER_PROTOCOL_MIN..=HOLDER_PROTOCOL).contains(&protocol) {
                     // Leave the holder and its shells alone: dropping the connection without
                     // sending anything else changes nothing there.
@@ -911,6 +911,9 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
                     );
                 }
                 eprintln!("clothod: connected to holder {pid} version {version} protocol {protocol} (instance {instance})");
+                if let Some(ns) = platform::launchd_namespace() {
+                    eprintln!("clothod: launchd namespace: serve {ns}, holder {}", namespace.as_deref().unwrap_or("unknown"));
+                }
                 (instance, state, info)
             }
             other => bail!("expected welcome from holder, got {other:?}"),
@@ -2533,6 +2536,8 @@ impl Daemon {
                     "exe": std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned()),
                     "holder": self.holder_info,
                     "holder_outdated": self.holder_info["outdated"],
+                    // macOS: serve's launchd namespace; `holder.namespace` is the shells'.
+                    "namespace": platform::launchd_namespace(),
                     "build": self.build,
                 }))
             }

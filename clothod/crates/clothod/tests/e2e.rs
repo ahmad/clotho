@@ -3076,7 +3076,11 @@ async fn login_unit_adopts_the_daemon_never_fights_upgrades_and_uninstall_keeps_
     // The unit runs <install dir>/current/clothod, as on a real machine.
     let out = unit.cmd(&env, &test_bin(), &["install"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    env.start_with(&test_bin(), &unit.vars());
+    // A healthy daemon (in the login session): the unit adopts it. (Started from an SSH session
+    // on macOS it would be moved instead; see a_start_in_the_login_session_moves_a_stuck_serve.)
+    let mut vars = unit.vars();
+    vars.push(("CLOTHOD_TEST_NAMESPACE", "Aqua"));
+    env.start_with(&test_bin(), &vars);
     let c = env.client().await;
     assert!(c.hello["features"].as_array().unwrap().contains(&json!("service")), "{}", c.hello);
     let (p, shell) = live_shell(&c).await;
@@ -4826,4 +4830,52 @@ esac
 
 fn r_log_has(env: &Env, s: &str) -> bool {
     env.log().contains(s)
+}
+
+/// macOS: a serve started from an SSH session with nobody logged in at the Mac is stuck in that
+/// session's launchd namespace. A `start` from the login session (the login unit at console
+/// login) moves serve there, keeping the holder and its shells; one from anywhere else, or
+/// finding serve already in the login session, leaves it alone. (Namespaces are faked, so this
+/// runs everywhere.)
+#[tokio::test]
+async fn a_start_in_the_login_session_moves_a_stuck_serve() {
+    let mut env = Env::empty();
+    env.start_with(&test_bin(), &[("CLOTHOD_TEST_NAMESPACE", "Background")]);
+    env.daemon.take(); // replaced below
+    let c = env.client().await;
+    assert_eq!(c.hello["namespace"], "Background");
+    let (serve, holder) = (c.hello["pid"].clone(), c.hello["holder"]["pid"].clone());
+    let (p, shell) = live_shell(&c).await;
+    drop(c);
+    let start = |ns: &str| {
+        Command::new(test_bin())
+            .args(["start", "--runtime-dir"])
+            .arg(env.path())
+            .env("CLOTHOD_STATE_DIR", env.state())
+            .env("CLOTHOD_RUNTIME_DIR", env.path())
+            .env("CLOTHOD_REGISTRY_DIR", env.dir.path().join("registry"))
+            .env("CLOTHOD_CONFIG", env.dir.path().join("config.toml"))
+            .env("CLOTHOD_TEST_NAMESPACE", ns)
+            .output()
+            .unwrap()
+    };
+    // From another SSH session: nothing to gain, left alone.
+    let out = start("Background");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(env.client().await.hello["pid"], serve, "a start from elsewhere leaves it");
+    // From the login session: serve moves; the holder and the shell stay.
+    let out = start("Aqua");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("restarting it in this login session"), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = env.client().await;
+    assert_ne!(c.hello["pid"], serve, "serve moved");
+    assert_eq!(c.hello["namespace"], "Aqua");
+    assert_eq!(c.hello["holder"]["pid"], holder, "the holder stays");
+    assert_shell_alive(&c, p, &shell).await;
+    // Now healthy: the next start from the login session adopts it.
+    let moved = c.hello["pid"].clone();
+    drop(c);
+    let out = start("Aqua");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(env.client().await.hello["pid"], moved, "adopted");
 }

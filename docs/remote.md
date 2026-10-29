@@ -162,7 +162,8 @@ your `hello`. Everything human-readable goes to stderr.
 ### Keeping sessions alive after logout
 
 The daemon detaches into its own session (`setsid`) and doesn't depend on the SSH session that
-started it. That is enough on macOS and on Linux with logind's default `KillUserProcesses=no`.
+started it. That is enough on Linux with logind's default `KillUserProcesses=no`; macOS needs
+more (below).
 If a Linux machine sets `KillUserProcesses=yes`, clothod starts itself as a transient systemd
 user unit (`systemd-run --user`) instead, outside the session scope. That survives logout only
 with lingering enabled (`loginctl enable-linger $USER`), and `clothod start`/`bridge` print a
@@ -175,6 +176,47 @@ after a few days without access). The daemon and holder touch their files hourly
 deleted socket within 10 s, or at once on `SIGUSR1`. `clothod start`/`bridge` find a running
 instance through `<state dir>/clothod.live` and `holder.live` and signal it instead of starting
 a second one. So a deleted runtime dir costs nothing.
+
+### macOS sessions
+
+On macOS a process started from an SSH session lives in that session's launchd bootstrap
+namespace (`launchctl managername` says `Background`). When that namespace is torn down,
+everything still running in it loses the system services it reaches through it:
+- DNS (`scutil --dns`: "No DNS configuration available");
+- user lookups (`id -un` prints a number);
+- TLS trust (curl and git fail);
+- the keychain (`gh` reads its token from there).
+
+A daemon started that way would pass all of this on to the holder and every shell. So since
+0.1.24, `clothod start` (and with it `bridge`'s autostart and `upgrade`) checks its own
+namespace:
+- **In the login session (`Aqua`)**, for example when the app or the login unit starts it: it
+  detaches serve as on Linux.
+- **In another namespace, with someone logged in at the Mac** (`gui/<uid>` exists): it
+  bootstraps a one-off launchd job into `gui/<uid>`.
+  - The job runs `clothod spawn-serve`, which detaches serve inside the login session and
+    exits.
+  - `start` waits for the socket, then boots the job out and deletes its plist, also on failure
+    or timeout. The plist sits in the state dir.
+  - The job has `KeepAlive` false and `AbandonProcessGroup` true, the same as the login unit.
+    Booting it out leaves serve running.
+  - Its label is unique per attempt (`nyc.amin.clotho.clothod.start.<pid>.<time>`), never the
+    login unit's.
+  - The job gets the `CLOTHOD_*`, `PATH`, `SHELL`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*` and
+    `TMPDIR` variables, and nothing of the SSH session's own (such as `SSH_AUTH_SOCK`).
+- **In another namespace, with nobody logged in at the Mac**: without root, no durable domain is
+  reachable. Bootstrapping into `user/<uid>` and `launchctl asuser` both need root. `start`
+  detaches serve as before and prints a warning. When the user later logs in at the Mac, the
+  login unit's `clothod start` (running in `Aqua`) finds the daemon's serve in another
+  namespace and restarts serve there (`daemon.stop`, then start). The holder and shells stay,
+  still in the old namespace.
+
+The holder is spawned by serve, and every shell by the holder, so they inherit serve's
+namespace. A holder keeps the namespace it was started in for life, including across in-place
+upgrades. Only a restart (`clothod shutdown`, then start; the layout and agents are restored)
+moves it. `hello` reports `namespace` for serve and `holder.namespace` for the holder and its
+shells, and `clothod ps` shows them (`launchd: Aqua`). Clients can warn when the holder's isn't
+`Aqua`.
 
 ### Socket location
 

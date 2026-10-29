@@ -105,7 +105,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "holder": {"pid": 4100, "version": "0.1.1", "protocol": 1, "build": "0.1.1-3f2a9c1b7d4e",
                 "can_upgrade": true, "outdated": false,
                 "exe": "/Users/me/Library/Application Support/clothod/bin/0.1.1-3f2a9c1b7d4e/clothod"},
-     "holder_outdated": false
+     "holder_outdated": false,
+     "namespace": "Aqua"
    }}
 ```
 
@@ -140,6 +141,13 @@ The first request on a connection must be `hello`. Any other request gets `hands
   shells are new and pane IDs may be reused. **A client must drop all cached seqs and pane state
   when `instance` changes.**
 
+- `namespace` (macOS, since 0.1.24) is serve's launchd namespace, and `holder.namespace` is
+  the holder's, which every shell inherits. Each is `"Aqua"` (the login session), `"Background"`
+  (an SSH session's), another name, `"none"` (launchctl couldn't tell, for example because the
+  namespace was torn down) or `null` (not macOS, or an older holder). A holder outside `Aqua`
+  means the shells may lose DNS, user lookups, TLS trust and the keychain once that SSH session's
+  namespace goes. Clients can offer a restart (`clothod shutdown`, then start), which brings the
+  layout and agents back. See docs/remote.md, "macOS sessions".
 - `exe` and `build` (install id, `<version>-<hash>`) describe the daemon. `holder` describes the
   PTY holder process, where the shells live. Normally both run the same build: a daemon that
   starts against a holder running another build upgrades it in place if it can
