@@ -118,9 +118,10 @@ extension AppDelegate {
         let place = focusedMachine == Self.localKey ? workspace?.name : workspace.map { "\($0.name) on \(machineName)" }
         window.title = tab.map { "\(store.displayTitle(of: $0)) — \(place ?? "")" } ?? "Clotho"
 
-        // Keyboard focus follows the daemon's focus, unless an overlay or sheet has it.
+        // Keyboard focus follows the daemon's focus, unless an overlay, a sheet, the sidebar or a name being
+        // edited in it has it (the rename that follows New Workspace starts before the workspace's focus lands).
         if let focusedPane, let host = shown[focusedPane], shortcutsOverlay == nil, fileBrowser == nil,
-           window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard {
+           window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard, !sidebar.isEditing {
             window.makeFirstResponder(host.terminal)
         }
     }

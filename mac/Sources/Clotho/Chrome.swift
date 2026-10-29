@@ -215,7 +215,7 @@ class ChromeItem: NSView, HoverRefreshing {
 
     // MARK: Inline rename
 
-    private var editor: NSTextField?
+    private(set) var editor: NSTextField?
     private var commitEdit: ((String) -> Void)?
     private var clickMonitor: Any?
     /// Called once an edit ends, committed or not.
@@ -911,6 +911,7 @@ final class SidebarView: NSView {
             }.joined(separator: " | "))
         }
         refreshHoverSoon()
+        startArrivedRename()
     }
 
     /// Everything the rows show, apart from which one is selected.
@@ -1047,9 +1048,11 @@ final class SidebarView: NSView {
         updateCursor()
         if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: selection moved") }
         refreshHoverSoon()
+        startArrivedRename()
     }
 
-    private var isEditing: Bool {
+    /// A name is being edited in place (the sidebar holds its updates until it ends).
+    var isEditing: Bool {
         rows.values.contains { $0.row.isEditing } || tabRows.values.contains { $0.row.isEditing }
     }
 
@@ -1273,11 +1276,37 @@ final class SidebarView: NSView {
 
     private static func rowKey(_ machine: MachineKey, _ id: WorkspaceID) -> String { "\(machine)/\(id)" }
 
-    /// Edits a workspace's name in place.
-    func beginRename(_ machine: MachineKey, _ id: WorkspaceID) {
+    /// A workspace just made here, renamed as soon as its row is listed (New Workspace is make + rename
+    /// in one action). It waits for the daemon's model rather than a placeholder row, so a rebuild in
+    /// between, or a remote machine's round trip, can't take the field away.
+    private var renameOnArrival: (machine: MachineKey, id: WorkspaceID)?
+
+    /// Starts the inline rename of a new workspace once its row is in the sidebar (now, if it already is).
+    /// Return names it, Esc or an empty name keeps the default, and either way the terminal gets the keyboard.
+    func renameWhenListed(_ machine: MachineKey, _ id: WorkspaceID) {
+        renameOnArrival = (machine, id)
+        startArrivedRename()
+    }
+
+    /// Called after every update: begins a waiting rename once its row exists. One turn of the run loop
+    /// later, so the window's own focus changes for the new workspace have happened first.
+    private func startArrivedRename() {
+        guard let target = renameOnArrival, rows[Self.rowKey(target.machine, target.id)] != nil, !isEditing else { return }
+        renameOnArrival = nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: renaming new workspace \(target.id)") }
+            beginRename(target.machine, target.id, thenTerminal: true)
+        }
+    }
+
+    /// Edits a workspace's name in place. `thenTerminal`: the terminal takes the keyboard afterwards even
+    /// if the sidebar had it.
+    func beginRename(_ machine: MachineKey, _ id: WorkspaceID, thenTerminal: Bool = false) {
         expand(machine)
         guard let (row, name) = rows[Self.rowKey(machine, id)] else { return }
-        let keyboard = hasKeyboard
+        row.scrollToVisible(row.bounds)
+        let keyboard = hasKeyboard && !thenTerminal
         row.onEditingEnded = { [weak self] in
             guard let self else { return }
             if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: editing ended, showing \(row.label.stringValue)") }

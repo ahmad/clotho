@@ -204,11 +204,19 @@ extension AppDelegate {
     var focusedPaneID: PaneID? { store.focusedPane?.id }
 
     // On the focused machine.
+    /// New Workspace makes one and starts renaming it in the sidebar, with the default name selected
+    /// (Return keeps what's typed, Esc the default), then the terminal takes the keyboard. Every way of
+    /// making a workspace comes here. A hidden sidebar is shown for the rename.
     @objc func newWorkspace(_ sender: Any?) {
         let name = "Workspace \(store.state.workspaces.count + 1)"
         let options = spawnOptions()
-        sidebar.expand(focusedMachine)
-        run { _ = try await $0.createWorkspace(name: name, spawn: options) }
+        let machine = focusedMachine
+        sidebar.expand(machine)
+        if sidebarWidth.constant == 0 { toggleSidebar(nil) }
+        run { [weak self] backend in
+            let created = try await backend.createWorkspace(name: name, spawn: options)
+            self?.sidebar.renameWhenListed(machine, created.workspace)
+        }
     }
 
     func newWorkspace(on key: MachineKey) {

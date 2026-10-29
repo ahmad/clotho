@@ -98,7 +98,7 @@ It writes `build/release/Clotho-<version>-<build>.zip` and `build/release/appcas
 
 1. Open Clotho. The first launch starts the daemon and opens a workspace with one shell.
 2. Press **⌘T** for a new tab, **⌘D** to split right, or **⇧⌘D** to split down.
-3. Press **⌘N** for another workspace, or click the **+** beside a machine's name. The sidebar lists every workspace with its tabs under it: click **[−]** to fold a workspace (Option-click folds them all), and hover over a workspace for **+** (a new tab there). To close a workspace, right-click it and choose **Close Workspace…**, or press **⇧⌘W** for the current one; a tab closes with the **×** that replaces its dot on hover. **⌥⌘S** moves the keyboard to the sidebar: the arrow keys walk it, Return renames, and Esc goes back to the terminal.
+3. Press **⌘N** for another workspace, or click the **+** beside a machine's name. Its name opens for editing in the sidebar straight away: type one and press Return, or Esc to keep the default; then the new terminal has the keyboard. The sidebar lists every workspace with its tabs under it: click **[−]** to fold a workspace (Option-click folds them all), and hover over a workspace for **+** (a new tab there). To close a workspace, right-click it and choose **Close Workspace…**, or press **⇧⌘W** for the current one; a tab closes with the **×** that replaces its dot on hover. **⌥⌘S** moves the keyboard to the sidebar: the arrow keys walk it, Return renames, and Esc goes back to the terminal.
 4. Press **⇧⌘O** to browse files, or drop files onto a terminal to copy them into that pane's folder.
 5. Press **⌘/** for every shortcut.
 

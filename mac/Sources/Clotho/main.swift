@@ -708,6 +708,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return
                 }
                 // "logguides": each sidebar row's frame and tree guide segments, in window points.
+                // "logfocus": what has the keyboard (the active terminal, a field being edited, the sidebar).
+                if step == "logfocus" {
+                    let responder = window.firstResponder
+                    let what = responder === activeTerminal ? "the active terminal"
+                        : (responder as? NSTextView)?.isFieldEditor == true ? "a field editor (\(((responder as? NSTextView)?.string) ?? ""))"
+                        : responder === sidebar ? "the sidebar" : String(describing: responder.map { type(of: $0) })
+                    return log("focus: \(what), workspace \(store.focusedWorkspace?.name ?? "none")")
+                }
                 if step == "logguides" {
                     func rows(in view: NSView) -> [SidebarRow] {
                         view.subviews.flatMap { ($0 as? SidebarRow).map { [$0] } ?? rows(in: $0) }
@@ -881,7 +889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let keys: [String: (code: UInt16, char: String)] = [
             "return": (36, "\r"), "enter": (76, "\u{3}"), "tab": (48, "\t"), "esc": (53, "\u{1b}"), "delete": (51, "\u{7f}"),
             "left": (123, String(UnicodeScalar(NSLeftArrowFunctionKey)!)), "right": (124, String(UnicodeScalar(NSRightArrowFunctionKey)!)),
-            "a": (0, "a"), "c": (8, "c"), "v": (9, "v"),
+            "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "n": (45, "n"),
         ]
         let flags: [String: NSEvent.ModifierFlags] = ["shift": .shift, "cmd": .command, "ctrl": .control, "alt": .option]
         guard let key = keys[name], parts.allSatisfy({ flags[$0] != nil }) else { return log("TypeText: unknown key \(spec)") }
