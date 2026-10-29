@@ -442,3 +442,15 @@ clothod release, app install or TestFlight upload still needs the user's go when
   pane's shell lives on its machine.
 - clothod adds `workspace.move` and `tab.move` (feature "move") in 0.1.22. The Mac app does the drag UI,
   and the iPhone follows later.
+
+## Git info per pane (user decision, 2026-10-29)
+
+- clothod reports each pane's repo, branch (or detached sha), linked worktree and PR. It finds the
+  repo by reading files, never by running the repo's own code, and updates within a second of a
+  branch switch.
+- The PR comes from `gh pr view` on that machine (user: "Yes, via gh"). It's looked up when the branch
+  changes, refreshed at most every 5 minutes, and cached. Machines without `gh` signed in show the
+  branch only.
+- The Mac shows it in all four places the user chose: the tab bar, the sidebar workspace row, a status
+  strip in the focused pane (the PR opens in the browser) and ⌘P search. It ships as clothod 0.1.23
+  with a Mac update.
