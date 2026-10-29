@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-28, updated after clothod 0.1.17)
+# Status and handoff (2026-10-29, updated after the public Mac 1.0.0)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
@@ -15,7 +15,14 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app:** build 202610282002, with 0.1.17.
+- **The Mac app is public:** Clotho 1.0.0, build 202610291513 (at ee15de6), Developer ID signed,
+  notarized and stapled, at https://clotho.app/downloads (Clotho.zip redirects to the newest zip).
+  Sparkle updates are live from https://clotho.app/appcast.xml (EdDSA key in macbook's keychain;
+  sign_update works over SSH after unlocking). The user's installed app is that exact release.
+  - Next release: mac runs release.sh with CLOTHO_APPCAST_IN set to the site's appcast.xml
+    (~/Projects/clotho.app/appcast.xml), then the orchestrator runs
+    `scripts/publish-mac.sh <zip> <appcast> --deploy` in ~/Projects/clotho.app and pushes that repo.
+  - UPDATES_LIVE=true (93b3da6): every non-dev build checks the feed.
 - **iOS:** TestFlight build 202610282014, with 0.1.17. It has the whole redesign: saved state, the
   one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
@@ -37,8 +44,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
     issued under the G1 CA, so it expires 2027-02-01; make a G2 one before then. The notary profile
     `clotho-notary` (app-specific password, Apple ID apple-id@example.com) is in macbook's login keychain
     and validated. Nothing has been notarized yet.
-  - Sparkle `generate_keys`, then commit mac/Resources/SparklePublicKey and host appcast.xml on
-    the site
+  - Back up the Sparkle private key (`generate_keys -x`) to a password manager.
 - **Website leftovers:** remove orchestrator-test@example.com from Upstash; optionally set
   WAITLIST_ADMIN_TOKEN.
 - **Untested by agents:**
