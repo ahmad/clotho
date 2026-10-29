@@ -454,3 +454,13 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The Mac shows it in all four places the user chose: the tab bar, the sidebar workspace row, a status
   strip in the focused pane (the PR opens in the browser) and ⌘P search. It ships as clothod 0.1.23
   with a Mac update.
+
+## macOS: the daemon must not live in an SSH session's namespace (2026-10-29)
+
+- Bug: on macOS, a daemon started over SSH stays in that SSH session's bootstrap namespace, which
+  dies when the SSH connection closes. Its shells then can't reach DNS, user lookup, TLS trust or the
+  keychain. imac's holder after the 14:28 reboot hit this, and so does macbook's SSH-upgraded serve
+  (gh_auth).
+- Fix: clothod starts serve and holder on macOS through launchd in the user's durable domain. The user
+  approved restarting imac's daemon once that fix is in. Its shells end, and restore brings back the
+  layout and agent conversations. macbook's serve is not restarted for now.
