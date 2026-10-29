@@ -407,7 +407,7 @@ final class TabBarView: NSView {
         layer?.backgroundColor = Theme.sidebar.cgColor
         stack.orientation = .horizontal
         stack.spacing = s(4)
-        stack.distribution = .fillEqually
+        stack.distribution = .fill
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
@@ -447,6 +447,8 @@ final class TabBarView: NSView {
         }
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         items = [:]
+        widths = []
+        let width = Self.tabWidth(count: tabs.count, barWidth: bounds.width)
         for (index, var tab) in tabs.enumerated() {
             if let held = heldTitles.title(for: tab.id, model: tab.custom) { (tab.title, tab.custom) = (held, held) }
             let item = ChromeItem(closable: true)
@@ -455,24 +457,24 @@ final class TabBarView: NSView {
             item.label.stringValue = (tab.maximized ? "⤢ " : "") + tab.title
             item.label.alignment = .center
             item.label.font = NSFont.systemFont(ofSize: s(13))
-            // A little more room around the title than other rows.
-            item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = s(14) }
+            // The title fills the space between the dot's slot and the ×'s, both always kept, and truncates
+            // there: nothing in a tab moves when a dot or the × comes and goes.
+            item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = Self.dotSlot }
+            item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
+            item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
             item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
-            item.isSelected = tab.id == selected
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
             item.onDoubleClick = { [weak self] in self?.beginRename(tab.id) }
             item.onClose = { [weak self] in self?.onClose?(tab.id) }
             item.isSelected = tab.id == selected
             if let badge = tab.badge {
-                // An agent in this tab: a dot at the tab's leading edge.
+                // An agent in this tab: a dot in the slot at the tab's leading edge.
                 let dot = NSView()
                 dot.wantsLayer = true
                 dot.layer?.cornerRadius = s(3)
                 dot.layer?.backgroundColor = badge.cgColor
                 dot.translatesAutoresizingMaskIntoConstraints = false
                 item.addSubview(dot)
-                // The title moves over to make room for the dot at the tab's leading edge.
-                item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = s(22) }
                 NSLayoutConstraint.activate([
                     dot.leadingAnchor.constraint(equalTo: item.leadingAnchor, constant: s(9)),
                     dot.centerYAnchor.constraint(equalTo: item.centerYAnchor),
@@ -481,11 +483,16 @@ final class TabBarView: NSView {
                 ])
             }
             stack.addArrangedSubview(item)
-            item.widthAnchor.constraint(lessThanOrEqualToConstant: s(240)).isActive = true
-            item.widthAnchor.constraint(greaterThanOrEqualToConstant: s(72)).isActive = true
+            let constraint = item.widthAnchor.constraint(equalToConstant: width)
+            // Below the window's own resize priorities, so tabs never hold the window wide; layout() sets
+            // the new width as soon as the bar's changes.
+            constraint.priority = NSLayoutConstraint.Priority(490)
+            constraint.isActive = true
+            widths.append(constraint)
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
-            log("tabs: " + stack.arrangedSubviews.compactMap { ($0 as? ChromeItem)?.label.stringValue }.joined(separator: ", "))
+            log("tabs: " + stack.arrangedSubviews.compactMap { ($0 as? ChromeItem)?.label.stringValue }.joined(separator: ", ")
+                + " at \(Int(Self.tabWidth(count: tabs.count, barWidth: bounds.width))) pt each")
         }
     }
 
@@ -494,6 +501,38 @@ final class TabBarView: NSView {
         pending = nil
         update?()
     }
+
+    /// Every tab's width: the bar shared equally, between a minimum and a maximum. It depends only on
+    /// the number of tabs and the bar's width, never on titles, dots, hover or selection, so tabs don't
+    /// jump when an agent retitles its pane or a tab is selected.
+    static func tabWidth(count: Int, barWidth: CGFloat) -> CGFloat {
+        guard count > 0 else { return maxTabWidth }
+        // The stack's leading inset, then the + button with its spacing and the trailing margin.
+        let available = barWidth - s(6) - s(6) - s(24) - s(8) - s(4) * CGFloat(count - 1)
+        return min(maxTabWidth, max(minTabWidth, (available / CGFloat(count)).rounded(.down)))
+    }
+    static var maxTabWidth: CGFloat { s(240) }
+    static var minTabWidth: CGFloat { s(72) }
+    /// Room at a tab's leading edge for its agent dot, kept whether or not there is one.
+    static var dotSlot: CGFloat { s(22) }
+    private var widths: [NSLayoutConstraint] = []
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let widthChanged = newSize.width != frame.width
+        super.setFrameSize(newSize)
+        if widthChanged { needsLayout = true }
+    }
+
+    /// Tabs keep their width until the bar's width changes (the window or sidebar resizing).
+    override func layout() {
+        super.layout()
+        let width = Self.tabWidth(count: widths.count, barWidth: bounds.width)
+        guard let current = widths.first?.constant, current != width else { return }
+        widths.forEach { $0.constant = width }
+    }
+
+    /// The tabs' frames (tests and the LogSidebar aid).
+    var tabFrames: [NSRect] { stack.arrangedSubviews.map(\.frame) }
 
     /// Edits a tab's title in place, starting from the title it shows.
     func beginRename(_ id: TabID) {
