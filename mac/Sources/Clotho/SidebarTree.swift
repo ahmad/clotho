@@ -65,7 +65,7 @@ enum SidebarTree {
 
 /// A workspace's [+] / [−]: a small square with a minus, plus a bar when closed. It replaces the
 /// chevron in workspace rows and keeps its interface.
-final class TreeToggle: NSView {
+final class TreeToggle: NSView, HoverRefreshing {
     static var size: CGFloat { DisclosureChevron.size }
     private let shape = CAShapeLayer()
     private(set) var isExpanded: Bool
@@ -112,11 +112,14 @@ final class TreeToggle: NSView {
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
 
-    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseEntered(with event: NSEvent) { refreshHover() }
     override func mouseExited(with event: NSEvent) { hovering = false }
+    /// Hover from where the pointer is now (see ChromeItem.refreshHover).
+    func refreshHover() { hovering = Pointer.isOver(self) }
 
     /// For tests and screenshots: as if the pointer came over it or left.
     func setHovering(_ on: Bool) { hovering = on }
+    var isHovering: Bool { hovering }
 
     /// The stroke in points (whole pixels).
     var stroke: CGFloat {
@@ -168,7 +171,7 @@ final class TreeToggle: NSView {
 
 /// A borderless symbol button that rests dim and brightens under the pointer, like the machine headers'
 /// quiet + (New Workspace).
-final class QuietButton: NSButton {
+final class QuietButton: NSButton, HoverRefreshing {
     private let handler: () -> Void
     private var hovering = false { didSet { updateTint() } }
 
@@ -196,15 +199,25 @@ final class QuietButton: NSButton {
         addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
     }
 
-    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseEntered(with event: NSEvent) { refreshHover() }
     override func mouseExited(with event: NSEvent) { hovering = false }
+    /// Hover from where the pointer is now (see ChromeItem.refreshHover).
+    func refreshHover() { hovering = Pointer.isOver(self) }
 
     /// For tests and screenshots: as if the pointer came over it or left.
     func setHovering(_ on: Bool) { hovering = on }
 
     var isBright: Bool { hovering }
+    var isHovering: Bool { hovering }
 
     private func updateTint() {
         contentTintColor = hovering ? Theme.foreground : Theme.dimText.withAlphaComponent(0.7)
     }
+}
+
+/// A view whose hover look the sidebar recomputes from the pointer (rows, toggles, quiet buttons).
+@MainActor
+protocol HoverRefreshing: NSView {
+    func refreshHover()
+    var isHovering: Bool { get }
 }

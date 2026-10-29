@@ -4,8 +4,54 @@ import ClothoKit
 // The native chrome around the panes: a sidebar of workspaces and a tab
 // bar for the focused workspace. Both redraw from the model on every change.
 
+/// Where the pointer is, for hover. Hover state is always recomputed from this, so it can't go stale.
+@MainActor
+enum Pointer {
+    enum Simulation: Equatable {
+        /// The real pointer.
+        case off
+        /// Tests and the TypeText aids: the pointer is here, in screen coordinates, over our window.
+        case at(NSPoint)
+        /// Tests: the pointer is outside every window of ours.
+        case away
+    }
+    static var simulation = Simulation.off
+
+    /// Whether the pointer is over `view`'s visible part, in its window, with no other app's window (or
+    /// one of ours at the same level) on top.
+    static func isOver(_ view: NSView) -> Bool {
+        guard let window = view.window, !view.isHiddenOrHasHiddenAncestor else { return false }
+        let screen: NSPoint
+        switch simulation {
+        case .away:
+            return false
+        case .at(let point):
+            screen = point
+        case .off:
+            guard window.isVisible else { return false }
+            screen = NSEvent.mouseLocation
+            guard isOnTop(window, at: screen) else { return false }
+        }
+        return visiblePart(of: view).contains(view.convert(window.convertPoint(fromScreen: screen), from: nil))
+    }
+
+    /// The part of `view` that can be seen. Since macOS 14 a view that doesn't clip to its bounds (the
+    /// default) reports a visibleRect reaching past them, over everything visible in its scroll view, so it
+    /// is cut back to the bounds here. Without that, every row counted as "under the pointer" whenever the
+    /// pointer was anywhere over the sidebar, and the rows that never got an enter event never got an exit.
+    static func visiblePart(of view: NSView) -> NSRect { view.visibleRect.intersection(view.bounds) }
+
+    /// Our window is the top one at `point`, or only our own tooltips and expansion tips are above it.
+    private static func isOnTop(_ window: NSWindow, at point: NSPoint) -> Bool {
+        let top = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+        if top == window.windowNumber { return true }
+        guard let above = NSApp.window(withWindowNumber: top) else { return false }
+        return above.level > window.level
+    }
+}
+
 /// A clickable row or tab: highlights on hover and when selected, with an optional close button.
-class ChromeItem: NSView {
+class ChromeItem: NSView, HoverRefreshing {
     var onClick: (() -> Void)?
     var onDoubleClick: (() -> Void)?
     var onClose: (() -> Void)?
@@ -17,9 +63,40 @@ class ChromeItem: NSView {
     /// A keyboard cursor ring (the sidebar has keyboard focus and this is its current row).
     var showsCursor = false {
         didSet {
-            layer?.borderWidth = showsCursor ? s(1.5) : 0
-            layer?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor
+            highlight?.borderWidth = showsCursor ? s(1.5) : 0
+            highlight?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor
         }
+    }
+    /// Where the highlight (hover, selection, cursor ring) starts, from the leading edge: tab rows start
+    /// it after the tree's arm, so the guide lines stay clear. 0: the whole item.
+    var highlightLeading: CGFloat = 0 {
+        didSet {
+            guard highlightLeading != oldValue else { return }
+            markerLeading?.constant = highlightLeading + s(3)
+            if highlightLeading > 0, inset.superlayer == nil {
+                inset.cornerRadius = s(6)
+                layer?.insertSublayer(inset, at: 0)
+            }
+            needsLayout = true
+            updateColors()
+        }
+    }
+    /// The highlight when it doesn't span the whole item.
+    private let inset = CALayer()
+    /// The layer that shows the highlight.
+    private var highlight: CALayer? { highlightLeading > 0 ? inset : layer }
+    private var markerLeading: NSLayoutConstraint?
+    /// The highlight's rectangle and colour (for tests).
+    var highlightRect: NSRect { highlightLeading > 0 ? inset.frame : bounds }
+    var highlightColor: CGColor? { highlight?.backgroundColor }
+    var markerFrame: NSRect? { marker.isHidden ? nil : marker.frame }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        inset.frame = NSRect(x: highlightLeading, y: 0, width: max(0, bounds.width - highlightLeading), height: bounds.height)
+        CATransaction.commit()
     }
     /// The title's color when not selected (nil: dim, as before), and when selected.
     var restingTextColor: NSColor?
@@ -104,22 +181,23 @@ class ChromeItem: NSView {
         // An item that appears or scrolls under a pointer that isn't moving gets no mouseEntered (or
         // mouseExited), so where the pointer is now decides. AppKit calls this when the view enters a
         // window and when its visible rect changes.
-        hovering = pointerIsOver()
+        refreshHover()
     }
 
     /// Whether the pointer is over the visible part of this item, in its window, with no other window on top.
-    func pointerIsOver() -> Bool {
-        guard let window, window.isVisible, !isHiddenOrHasHiddenAncestor else { return false }
-        let screenPoint = NSEvent.mouseLocation
-        guard NSWindow.windowNumber(at: screenPoint, belowWindowWithWindowNumber: 0) == window.windowNumber else { return false }
-        return visibleRect.contains(convert(window.convertPoint(fromScreen: screenPoint), from: nil))
-    }
+    func pointerIsOver() -> Bool { Pointer.isOver(self) }
 
-    override func mouseEntered(with event: NSEvent) { hovering = true }
+    /// Hover follows where the pointer is now, never the event history: a mouseEntered that arrives late
+    /// (the row moved, the pointer left) is checked against the pointer, and the sidebar calls this on
+    /// every row whenever rows move, scroll, or the window or app loses focus.
+    func refreshHover() { hovering = pointerIsOver() }
+
+    override func mouseEntered(with event: NSEvent) { refreshHover() }
     override func mouseExited(with event: NSEvent) { hovering = false }
 
     /// For tests: hover as if the pointer came over the item or left it.
     func setHovering(_ on: Bool) { hovering = on }
+    var isHovering: Bool { hovering }
 
     /// A click on a row or tab acts even when the window is in the background, the way Finder's
     /// sidebar does, instead of only bringing the window forward (which felt like a missed click).
@@ -211,7 +289,7 @@ class ChromeItem: NSView {
         closeButton.isHidden = !(hovering || (isSelected && closeShowsWhenSelected)) || onClose == nil || editor != nil
         closeVisibilityChanged()
         guard selectionStyle != .plain else {
-            layer?.backgroundColor = (isSelected ? selectedColor : hovering ? hoverColor : .clear).cgColor
+            setHighlight(isSelected ? selectedColor : hovering ? hoverColor : .clear)
             if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
             return
         }
@@ -221,14 +299,29 @@ class ChromeItem: NSView {
         let fill: NSColor = isSelected ? tint.withAlphaComponent(active ? Self.tintAlpha : 0.16)
             : holdsSelection ? tint.withAlphaComponent(active ? Self.holdTintAlpha : 0.08)
             : hovering ? hoverColor : .clear
-        layer?.backgroundColor = fill.cgColor
-        marker.isHidden = !isSelected
+        setHighlight(fill)
+        // An inset highlight (tab rows) is too narrow before the title for the bar; its tint says enough.
+        marker.isHidden = !isSelected || highlightLeading > 0
         marker.layer?.backgroundColor = tint.cgColor
         if !colorsOwnTitle { label.textColor = isSelected || holdsSelection ? Theme.foreground : restingTextColor ?? Theme.dimText }
         if selectionStyle == .row, let size = label.font?.pointSize {
             label.font = NSFont.systemFont(ofSize: size, weight: isSelected || holdsSelection ? .semibold : .regular)
         }
-        if showsCursor { layer?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor }
+        if showsCursor { highlight?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor }
+    }
+
+    private func setHighlight(_ color: NSColor) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if highlightLeading > 0 {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = 0
+            inset.backgroundColor = color.cgColor
+            inset.borderWidth = showsCursor ? s(1.5) : 0
+        } else {
+            layer?.backgroundColor = color.cgColor
+        }
+        CATransaction.commit()
     }
 
     /// The selection tint's opacity over the sidebar and tab bar.
@@ -245,8 +338,10 @@ class ChromeItem: NSView {
         case .row:
             // A 3 pt bar on the leading edge, inside the rounded highlight.
             marker.layer?.cornerRadius = s(1.5)
+            let leading = marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: highlightLeading + s(3))
+            markerLeading = leading
             NSLayoutConstraint.activate([
-                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(3)),
+                leading,
                 marker.widthAnchor.constraint(equalToConstant: s(3)),
                 marker.topAnchor.constraint(equalTo: topAnchor, constant: s(6)),
                 marker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: s(-6)),
@@ -590,6 +685,13 @@ final class SidebarView: NSView {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
+        // Rows that scroll under a still pointer get no enter or exit events.
+        for clip in [scroll.contentView, agentsScroll.contentView] {
+            clip.postsBoundsChangedNotifications = true
+            hoverObservers.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshHover() }
+            })
+        }
         let saved = CGFloat(UserDefaults.standard.double(forKey: "AgentsPanelHeight"))
         agentsHeight = agentsScroll.heightAnchor.constraint(equalToConstant: saved > 0 ? saved : 220)
         // The workspaces panel keeps some room even when the window is short.
@@ -806,10 +908,92 @@ final class SidebarView: NSView {
                 return (row is TabRow ? "  " : "") + row.label.stringValue + marks
             }.joined(separator: " | "))
         }
+        refreshHoverSoon()
     }
 
     /// Everything the rows show, apart from which one is selected.
     private var lastSignature = ""
+
+    // MARK: Hover
+
+    private var hoverObservers: [NSObjectProtocol] = []
+    private var windowObservers: [NSObjectProtocol] = []
+    private var hoverCheck: Timer?
+
+    /// Every hover look in the sidebar (rows, toggles, the headers' +), from where the pointer is now:
+    /// only what is under it, and nothing once it has left. Enter and exit events alone can't be trusted:
+    /// rows move, scroll and are rebuilt under a pointer that isn't moving, and an exit can go missing.
+    func refreshHover() {
+        var any = false
+        func walk(_ view: NSView) {
+            for sub in view.subviews {
+                if let item = sub as? HoverRefreshing {
+                    item.refreshHover()
+                    any = any || item.isHovering
+                }
+                walk(sub)
+            }
+        }
+        walk(self)
+        // While anything shows hover, look again twice a second, so a hover can never outlive the pointer.
+        if any, hoverCheck == nil {
+            hoverCheck = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshHover() }
+            }
+        } else if !any {
+            hoverCheck?.invalidate()
+            hoverCheck = nil
+        }
+    }
+
+    /// Rows were rebuilt, moved or reselected: once they are laid out, hover follows the pointer.
+    private func refreshHoverSoon() {
+        DispatchQueue.main.async { [weak self] in self?.refreshHover() }
+    }
+
+    override func layout() {
+        super.layout()
+        refreshHover()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { refreshHover() }
+    override func mouseMoved(with event: NSEvent) { refreshHover() }
+    override func mouseExited(with event: NSEvent) { refreshHover() }
+
+    // The window losing focus, hiding, resizing or changing spaces, or the app going to the background,
+    // can each swallow an exit.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+        windowObservers = []
+        guard let window else {
+            hoverCheck?.invalidate()
+            hoverCheck = nil
+            return
+        }
+        let windowNames: [Notification.Name] = [
+            NSWindow.didResignKeyNotification, NSWindow.didBecomeKeyNotification, NSWindow.didResizeNotification,
+            NSWindow.didMiniaturizeNotification, NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification,
+        ]
+        let appNames: [Notification.Name] = [
+            NSApplication.didResignActiveNotification, NSApplication.didBecomeActiveNotification, NSApplication.didHideNotification,
+        ]
+        for (names, object) in [(windowNames, window as AnyObject), (appNames, NSApp as AnyObject)] {
+            for name in names {
+                windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.refreshHover() }
+                })
+            }
+        }
+        refreshHover()
+    }
 
     private func layoutSignature(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) -> String {
         var parts: [String] = ["\(UIScale.factor) \(effectiveAppearance.name.rawValue)", collapsed.sorted().joined(separator: ","), collapsedWorkspaces.sorted().joined(separator: ","),
@@ -860,6 +1044,7 @@ final class SidebarView: NSView {
         if let cursor, !order.contains(cursor) { self.cursor = selectedItem ?? order.first }
         updateCursor()
         if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: selection moved") }
+        refreshHoverSoon()
     }
 
     private var isEditing: Bool {
@@ -1497,15 +1682,19 @@ final class TabRow: SidebarRow {
     /// The last tab ends its line at its arm (└); the others carry it on (├).
     var isLastChild = true { didSet { needsLayout = true } }
 
+    /// Where the highlight starts: just past the end of the arm, a few points before the title.
+    static var highlightStart: CGFloat { indent - s(7) }
+
     init(closable: Bool = true) {
         super.init(indent: Self.indent, expanded: nil, fontSize: 12, closable: closable)
+        highlightLeading = Self.highlightStart
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override var guideRects: [NSRect] {
         // The arm, from the line to just short of the title; the last tab's line ends on it (└).
-        let arm = SidebarTree.horizontal(in: self, at: bounds.midY, to: Self.indent - s(5))
+        let arm = SidebarTree.horizontal(in: self, at: bounds.midY, to: Self.highlightStart - s(2))
         return [SidebarTree.vertical(in: self, from: isLastChild ? arm.minY : 0, to: aboveBottom), arm]
     }
 

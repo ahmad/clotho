@@ -672,8 +672,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let all = rows(in: sidebar).sorted { $0.convert(NSPoint.zero, to: nil).y > $1.convert(NSPoint.zero, to: nil).y }
                     let parts = step.split(separator: ":")[1].split(separator: ",")
                     guard let index = Int(parts[0]) else { return log("TypeText: bad row \(step)") }
+                    // Hover follows the pointer (Pointer), so the aid moves a simulated one.
                     if step.hasPrefix("hoverrow:") {
-                        for (i, row) in all.enumerated() { row.setHovering(i == index) }
+                        if all.indices.contains(index), let window = sidebar.window {
+                            let row = all[index]
+                            let point = row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY), to: nil)
+                            Pointer.simulation = .at(window.convertPoint(toScreen: point))
+                        } else {
+                            Pointer.simulation = .away
+                        }
+                        sidebar.refreshHover()
                         return
                     }
                     guard index < all.count else { return log("TypeText: no row \(index)") }
@@ -682,7 +690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let point = row.convert(NSPoint(x: x, y: row.bounds.midY), to: nil)
                     let mods = parts.dropFirst().joined(separator: ",")
                     log("TypeText: \(step) hits '\(row.label.stringValue)' at \(Int(point.x)),\(Int(point.y))"
-                        + (row.visibleRect.height < row.bounds.height ? " (scrolled out of view)" : ""))
+                        + (Pointer.visiblePart(of: row).height < row.bounds.height ? " (scrolled out of view)" : ""))
                     return postTestClick("\(point.x),\(point.y)" + (mods.isEmpty ? "" : "," + mods))
                 }
                 // "headerplus:on" / "headerplus:off": the machine headers' + as if under the pointer.
@@ -690,7 +698,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     func headers(in view: NSView) -> [MachineHeader] {
                         view.subviews.flatMap { ($0 as? MachineHeader).map { [$0] } ?? headers(in: $0) }
                     }
-                    headers(in: sidebar).forEach { $0.newWorkspaceButton?.setHovering(step.hasSuffix(":on")) }
+                    if step.hasSuffix(":on"), let button = headers(in: sidebar).first?.newWorkspaceButton, let window = sidebar.window {
+                        let point = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+                        Pointer.simulation = .at(window.convertPoint(toScreen: point))
+                    } else {
+                        Pointer.simulation = .away
+                    }
+                    sidebar.refreshHover()
                     return
                 }
                 // "logguides": each sidebar row's frame and tree guide segments, in window points.

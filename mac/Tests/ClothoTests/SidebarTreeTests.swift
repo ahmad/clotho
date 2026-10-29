@@ -204,4 +204,29 @@ final class SidebarTreeTests: XCTestCase {
                                                               clickCount: 1, pressure: 1)))
         XCTAssertEqual(asked, ["local", "local"])
     }
+
+    /// A tab's highlight (selection and hover) starts after the tree's arm, a few points before its
+    /// title, so the guide lines stay clear; a workspace's spans the row.
+    func testTabHighlightStartsAfterTheArm() throws {
+        for zoom: CGFloat in [0.8, 1, 1.3] {
+            UIScale.factor = zoom
+            update()
+            let tab = try XCTUnwrap(rows.first { $0.label.stringValue == "tab 11" } as? TabRow)
+            XCTAssertTrue(tab.isSelected)
+            let arm = tab.guideRects[1]
+            XCTAssertGreaterThan(tab.highlightRect.minX, arm.maxX, "past the arm at \(zoom)")
+            XCTAssertLessThan(tab.highlightRect.minX, tab.label.frame.minX - s(4), "a few points before the title at \(zoom)")
+            XCTAssertEqual(tab.highlightRect.maxX, tab.bounds.maxX, accuracy: 0.01)
+            XCTAssertNotEqual(tab.highlightColor.map { NSColor(cgColor: $0)?.alphaComponent ?? 0 } ?? 0, 0, "the tint is drawn")
+            XCTAssertEqual(tab.layer?.backgroundColor.map { NSColor(cgColor: $0)?.alphaComponent ?? 0 } ?? 0, 0, "nothing under the guides")
+            XCTAssertNil(tab.markerFrame, "no bar on the narrower tab highlight")
+            let hovered = try XCTUnwrap(rows.first { $0.label.stringValue == "tab 12" } as? TabRow)
+            hovered.setHovering(true)
+            XCTAssertEqual(hovered.highlightRect.minX, tab.highlightRect.minX, "hover starts in the same place")
+            let workspace = try XCTUnwrap(rows.first as? WorkspaceRow)
+            XCTAssertEqual(workspace.highlightRect, workspace.bounds, "workspaces keep the full width")
+            workspace.isSelected = true
+            XCTAssertNotNil(workspace.markerFrame, "and their bar")
+        }
+    }
 }
