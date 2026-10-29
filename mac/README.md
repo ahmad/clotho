@@ -34,6 +34,8 @@ open ~/Applications/Clotho.app
 
 The script builds the app in release mode, bundles the released clothod (`../clothod/dist`, macOS and Linux, x86_64 and ARM; the Linux ones go to remote machines), generates the icon, signs everything ad hoc, and installs `~/Applications/Clotho.app` (bundle id `app.clotho.desktop`). Running it again replaces the installed copy.
 
+Installing over SSH: `build-app.sh` works there, but relaunching the app doesn't. `open` fails with -600 because an SSH login has no access to the Mac's GUI session, and `launchctl asuser` isn't permitted. Run `open ~/Applications/Clotho.app` from a shell that belongs to the GUI session instead: a temporary pane in the user's own clothod on that Mac (its shells run under the logged-in session), closed again afterwards. Quit the old app by pid first, never with `osascript`.
+
 The installed app bundles only a released clothod: a dist whose version is `clothod/RELEASED`, made by `clothod/scripts/dist.sh`. It never builds one itself, and it refuses a dev dist (`clothod/target/dist-dev`), because whatever it bundles reaches every machine through "Update clothod". `--dev` may bundle a dev dist of the current version. [`scripts/clothod-dist.sh`](scripts/clothod-dist.sh) makes the choice; `./build-app.sh --check-dist` reports what a plain build would bundle (version and build ids) without building, and `scripts/test-clothod-dist.sh` tests the rules. `CLOTHOD_DIST` names another dist directory, which the same checks apply to.
 
 For a compile-only check, run `swift build`. `swift test` here runs the app's own tests (key encoding, inline rename); the shared package's tests run with `swift test` in `../ClothoKit`.

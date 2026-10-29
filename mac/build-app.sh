@@ -97,6 +97,9 @@ if ! $DEV && [[ -s Resources/SparklePublicKey ]] && { $UPDATES_LIVE || $RELEASE 
   <key>SUPublicEDKey</key><string>$(tr -d '[:space:]' < Resources/SparklePublicKey)</string>
   <key>SUEnableAutomaticChecks</key><true/>
   <key>SUScheduledCheckInterval</key><integer>86400</integer>"
+elif ! $DEV && [[ -s Resources/SparklePublicKey ]]; then
+  # The key is there but the feed isn't live: the app says so rather than "no signing key".
+  UPDATE_KEYS="<key>ClothoUpdateFeedNotLive</key><true/>"
 fi
 
 # App icon ("Panes", Resources/AppIcon): every size drawn from the vector at its exact pixel size, the

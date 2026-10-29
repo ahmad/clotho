@@ -7,7 +7,8 @@ import Sparkle
 // leaves the release Mac's keychain (scripts/release.sh, README "Releases").
 //
 // The dev build has no feed and never updates; a build without SUPublicEDKey (the key isn't made yet)
-// has updates turned off rather than accepting unsigned ones.
+// has updates turned off rather than accepting unsigned ones. Until the appcast is hosted, plain installs
+// get no feed either (UPDATES_LIVE in build-app.sh), and Info.plist says so (ClothoUpdateFeedNotLive).
 
 @MainActor
 final class Updates: NSObject {
@@ -22,6 +23,8 @@ final class Updates: NSObject {
         let key = info["SUPublicEDKey"] as? String ?? ""
         if isDevBuild {
             unavailableReason = "Clotho Dev doesn't update itself."
+        } else if info["ClothoUpdateFeedNotLive"] as? Bool == true {
+            unavailableReason = "Clotho's update feed isn't online yet, so this build doesn't check for updates."
         } else if feed.isEmpty || key.isEmpty {
             unavailableReason = "This build of Clotho was made without an update signing key, so it can't check for updates."
         } else {
@@ -29,7 +32,8 @@ final class Updates: NSObject {
         }
         super.init()
         guard unavailableReason == nil else {
-            log("updates: off (\(unavailableReason!))")
+            log("updates: off (\(unavailableReason!))"
+                + (info["ClothoUpdateFeedNotLive"] as? Bool == true ? " [UPDATES_LIVE is false in build-app.sh]" : ""))
             return
         }
         controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
