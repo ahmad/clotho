@@ -24,6 +24,9 @@ final class AppearanceUITests: XCTestCase {
         let light = background(app)
         attach(app, "pane light")
         XCTAssertGreaterThan(light, 0.9, "the light terminal isn't light (#F7F7F5)")
+        // And apps that ask the terminal its background (OSC 11, as Claude Code's "auto" theme and vim do) hear
+        // the light one: the pane told the daemon its colours (client.colors, clothod 0.1.20).
+        XCTAssertEqual(askBackground(app), "rgb:f7/f7/f5", "OSC 11 in a light pane")
 
         // Switch to Dark from the pane's menu; the open terminal changes with it.
         actions.tap()
@@ -36,6 +39,7 @@ final class AppearanceUITests: XCTestCase {
         let dark = background(app)
         attach(app, "pane dark")
         XCTAssertLessThan(dark, 0.2, "the dark terminal isn't dark (#1D2022)")
+        XCTAssertEqual(askBackground(app), "rgb:1d/20/22", "OSC 11 after switching to dark")
 
         // Back to the system's appearance for later tests, then close what the test made.
         actions.tap()
@@ -44,6 +48,34 @@ final class AppearanceUITests: XCTestCase {
         sleep(1)
         actions.tap()
         app.buttons["Close tab"].tap()
+    }
+
+    /// Asks the pane's terminal for its background colour (OSC 11) from its shell, the way an app does, and
+    /// returns the reply's colour ("rgb:f7/f7/f5"). The shell writes it to a file on the Mac, where the daemon
+    /// and the simulator both are; the terminal's own text isn't readable from a UI test.
+    private func askBackground(_ app: XCUIApplication) -> String? {
+        let file = "/tmp/cki-ios-osc11"
+        try? FileManager.default.removeItem(atPath: file)
+        defer { try? FileManager.default.removeItem(atPath: file) }
+        // Echo and line buffering off so `read` sees the reply as it comes; it ends at the reply's ESC \.
+        app.typeText("clear; stty -echo -icanon; printf '\\033]11;?\\033\\\\'; read -r -t 3 -d '\\' r; stty sane; "
+                     + "printf '%s' \"${r#*;}\" | tr -d '\\033' > \(file).tmp && mv \(file).tmp \(file)\n")
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline {
+            if let reply = try? String(contentsOfFile: file, encoding: .utf8) { return Self.shortRGB(reply) }
+            usleep(200_000)
+        }
+        return nil
+    }
+
+    /// "rgb:f7f7/f7f7/f5f5" (xterm's 4-digit form, which clothod answers with) or "rgb:f7/f7/f5" as
+    /// "rgb:f7/f7/f5": the first two hex digits of each channel. Anything else is returned as it came.
+    static func shortRGB(_ reply: String) -> String {
+        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("rgb:") else { return text }
+        let channels = text.dropFirst(4).split(separator: "/")
+        guard channels.count == 3, channels.allSatisfy({ $0.count >= 2 && $0.allSatisfy(\.isHexDigit) }) else { return text }
+        return "rgb:" + channels.map { $0.prefix(2).lowercased() }.joined(separator: "/")
     }
 
     /// The brightness (0…1) of the pane's background, sampled in its lower part, below any text.

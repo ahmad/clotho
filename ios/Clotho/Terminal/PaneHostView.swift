@@ -132,7 +132,7 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
 
         terminal.terminalDelegate = self
         terminal.font = Theme.font
-        TerminalPalette.current(traitCollection).apply(to: terminal)
+        applyPalette()
         terminal.optionAsMetaKey = true
         keyBar.terminal = terminal
         terminal.inputAccessoryView = keyBar
@@ -142,10 +142,19 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         terminal.addInteraction(UIPointerInteraction(delegate: self))
         // Light and dark (the system's, or the app's own choice) each have their own palette.
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: PaneHostView, _: UITraitCollection) in
-            TerminalPalette.current(self.traitCollection).apply(to: self.terminal)
+            self.applyPalette()
         }
         store.register(self, for: pane.id)
         addGestures()
+    }
+
+    /// Shows the palette for the current appearance, and tells the machine, so apps that ask the terminal
+    /// its colours (Claude Code's "auto" theme, vim's background) match a light pane (`client.colors`,
+    /// clothod 0.1.20; the backend sends it only to a daemon that has it, and only when it changes).
+    private func applyPalette() {
+        let palette = TerminalPalette.current(traitCollection)
+        palette.apply(to: terminal)
+        backend.setTerminalColors(TerminalColors(palette))
     }
 
     // MARK: Gestures
