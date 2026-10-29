@@ -84,10 +84,15 @@ for nested in Versions/B/Autoupdate Versions/B/Updater.app ""; do
 done
 
 # Updates: the feed and the public half of the EdDSA key (Resources/SparklePublicKey, made by Sparkle's
-# generate_keys at the release Mac). Without the key the app has updates turned off. The dev build never
+# generate_keys at the release Mac). Without them the app has updates turned off. The dev build never
 # updates.
+#
+# UPDATES_LIVE is the one switch for hosting: set it to true once https://clotho.app/appcast.xml is
+# published. Until then only --release and --package builds (the ones release.sh ships) get the feed,
+# so the user's plain installs never check a feed that isn't there and never show an update error.
+UPDATES_LIVE=false
 UPDATE_KEYS=""
-if ! $DEV && [[ -s Resources/SparklePublicKey ]]; then
+if ! $DEV && [[ -s Resources/SparklePublicKey ]] && { $UPDATES_LIVE || $RELEASE || $PACKAGE; }; then
   UPDATE_KEYS="<key>SUFeedURL</key><string>https://clotho.app/appcast.xml</string>
   <key>SUPublicEDKey</key><string>$(tr -d '[:space:]' < Resources/SparklePublicKey)</string>
   <key>SUEnableAutomaticChecks</key><true/>
