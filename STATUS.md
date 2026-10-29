@@ -33,7 +33,10 @@ rule. This file has where things stand. The orchestrator keeps it current.
 ## Waiting on the user
 
 - **Optional:**
-  - a Developer ID certificate and notary profile
+  - Developer ID: done 2026-10-28. "Developer ID Application: Ahmad Amin (TEAMID0000)" is on macbook,
+    issued under the G1 CA, so it expires 2027-02-01; make a G2 one before then. The notary profile
+    `clotho-notary` (app-specific password, Apple ID apple-id@example.com) is in macbook's login keychain
+    and validated. Nothing has been notarized yet.
   - Sparkle `generate_keys`, then commit mac/Resources/SparklePublicKey and host appcast.xml on
     the site
 - **Website leftovers:** remove orchestrator-test@example.com from Upstash; optionally set
