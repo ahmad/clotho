@@ -113,14 +113,27 @@ final class SidebarTreeTests: XCTestCase {
                 let line = try XCTUnwrap(guides(row).first), upper = try XCTUnwrap(guides(above).first)
                 XCTAssertEqual(line.maxY * scale, upper.minY * scale, accuracy: 0.01, "zoom \(zoom): \(row.label.stringValue) joins")
             }
+            // (view, rect, thickness in pixels): the guides are 1 px; the toggle a point's worth.
+            var lines: [(NSView, NSRect, CGFloat)] = []
             for row in rows {
-                for rect in row.guideRects + (row.chevron?.rects ?? []) {
-                    let pixels = row.convertToBacking(rect)
-                    XCTAssertEqual(min(pixels.width, pixels.height), 1, accuracy: 0.01, "zoom \(zoom): 1 px lines")
-                    let inWindow = row.convert(rect, to: nil)
-                    XCTAssertEqual((inWindow.minX * scale).rounded(), inWindow.minX * scale, accuracy: 0.01, "zoom \(zoom): on whole pixels")
-                    XCTAssertEqual((inWindow.minY * scale).rounded(), inWindow.minY * scale, accuracy: 0.01, "zoom \(zoom): on whole pixels")
+                lines += row.guideRects.map { (row, $0, 1) }
+                if let toggle = row.chevron {
+                    lines += toggle.rects.map { (toggle, $0, SidebarTree.strokePixels(scale: scale)) }
+                    // About 11–12 pt at 100%, and the guide runs through the middle of its sign.
+                    let box = toggle.convert(toggle.rects[0].union(toggle.rects[1]), to: nil)
+                    XCTAssertEqual(box.width, s(11.5), accuracy: 1.5 * UIScale.factor, "zoom \(zoom): toggle size")
+                    let sign = toggle.convert(toggle.rects[4], to: nil)
+                    XCTAssertEqual(sign.midY, box.midY, accuracy: 0.01, "zoom \(zoom): the minus is centred")
+                    if let stem = guides(row).first {
+                        XCTAssertEqual(stem.midX, box.midX, accuracy: 0.5 / scale + 0.01, "zoom \(zoom): the guide under the toggle's middle")
+                    }
                 }
+            }
+            for (view, rect, thickness) in lines {
+                let inWindow = view.convert(rect, to: nil)
+                XCTAssertEqual(min(inWindow.width, inWindow.height) * scale, thickness, accuracy: 0.01, "zoom \(zoom): stroke")
+                XCTAssertEqual((inWindow.minX * scale).rounded(), inWindow.minX * scale, accuracy: 0.01, "zoom \(zoom): on whole pixels")
+                XCTAssertEqual((inWindow.minY * scale).rounded(), inWindow.minY * scale, accuracy: 0.01, "zoom \(zoom): on whole pixels")
             }
         }
     }
@@ -131,6 +144,19 @@ final class SidebarTreeTests: XCTestCase {
         XCTAssertEqual(toggle.rects.count, 5, "the box and a minus")
         toggle.setExpanded(false, animated: false)
         XCTAssertEqual(toggle.rects.count, 6, "and the plus's bar")
+        let minus = toggle.rects[4], bar = toggle.rects[5]
+        XCTAssertEqual(bar.midX, minus.midX, accuracy: 0.01, "a symmetric plus")
+        XCTAssertEqual(bar.height, minus.width, accuracy: 0.01)
+    }
+
+    /// Secondary text at rest; the title colour under the pointer.
+    func testToggleBrightensUnderThePointer() {
+        XCTAssertEqual(SidebarTree.toggleColor(hovering: false), Theme.dimText)
+        XCTAssertEqual(SidebarTree.toggleColor(hovering: true), Theme.foreground)
+        let toggle = TreeToggle(expanded: true)
+        toggle.setHovering(true)
+        XCTAssertTrue(toggle.hovering)
+        XCTAssertGreaterThan(SidebarTree.strokePixels(scale: 2), 1, "bolder than the 1 px guides on Retina")
     }
 
     /// A workspace row's + shows under the pointer, beside close, and makes a tab in that workspace.

@@ -7,25 +7,34 @@ import AppKit
 /// at every zoom level and on any display, and every row computes the same pixel column for the vertical
 /// line (the toggle's centre), so the segments of separate rows join up.
 enum SidebarTree {
-    /// The guide lines' and the toggle's colour: secondary text, quieter still.
+    /// The guide lines' colour: secondary text, quieter still.
     static var lineColor: NSColor { Theme.dimText.withAlphaComponent(0.6) }
+    /// The toggle's colour: secondary text at rest, the title colour under the pointer. It reads clearly
+    /// without competing with the workspace name.
+    static func toggleColor(hovering: Bool) -> NSColor { hovering ? Theme.foreground : Theme.dimText }
+
+    /// The toggle's stroke, in pixels: a point's worth (2 px on a Retina display at 100%), never less
+    /// than one.
+    static func strokePixels(scale: CGFloat) -> CGFloat { max(1, (s(1) * scale).rounded()) }
 
     /// The centre of the toggle column, from a row's leading edge (the machine chevrons' column too).
     static var columnX: CGFloat { s(10) + DisclosureChevron.size / 2 }
 
-    /// The toggle box around `center`, snapped to pixels, an odd number of pixels wide so its +/− has a
-    /// middle pixel. Returns the box and one pixel's size in points.
+    /// The toggle box around `center` (about 11.5 pt), snapped to pixels. Its width leaves the same
+    /// number of pixels either side of the +/−'s stroke, so the sign sits exactly in the middle. Returns
+    /// the box and one pixel's size in points.
     static func box(in view: NSView, center: NSPoint) -> (rect: NSRect, pixel: CGFloat) {
         let scale = view.window?.backingScaleFactor ?? 2
-        var pixels = (s(9) * scale).rounded()
-        if Int(pixels) % 2 == 0 { pixels -= 1 }
+        var pixels = (s(11.5) * scale).rounded()
+        if Int(pixels - strokePixels(scale: scale)) % 2 != 0 { pixels -= 1 }
         let side = pixels / scale
         let rect = view.backingAlignedRect(NSRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side),
                                            options: .alignAllEdgesNearest)
         return (rect, 1 / scale)
     }
 
-    /// The pixel column of the vertical guide in `view`: the toggle box's middle pixel.
+    /// The pixel column of the vertical guide in `view`: the toggle box's middle pixel (inside the sign's
+    /// stroke).
     static func column(in view: NSView) -> (x: CGFloat, pixel: CGFloat) {
         let (box, pixel) = box(in: view, center: NSPoint(x: columnX, y: view.bounds.midY))
         let middle = ((box.width / pixel - 1) / 2).rounded(.down)
@@ -60,6 +69,8 @@ final class TreeToggle: NSView {
     static var size: CGFloat { DisclosureChevron.size }
     private let shape = CAShapeLayer()
     private(set) var isExpanded: Bool
+    /// Under the pointer: it brightens.
+    private(set) var hovering = false { didSet { if hovering != oldValue { redraw() } } }
 
     init(expanded: Bool) {
         isExpanded = expanded
@@ -95,22 +106,41 @@ final class TreeToggle: NSView {
         redraw()
     }
 
-    /// The box's rectangles: four edges, the minus, and the plus's bar while closed.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+
+    /// For tests and screenshots: as if the pointer came over it or left.
+    func setHovering(_ on: Bool) { hovering = on }
+
+    /// The stroke in points (whole pixels).
+    var stroke: CGFloat {
+        let scale = window?.backingScaleFactor ?? 2
+        return SidebarTree.strokePixels(scale: scale) / scale
+    }
+
+    /// The box's rectangles: four edges, the minus, and the plus's bar while closed, each `stroke` thick.
     var rects: [NSRect] {
         let (box, pixel) = SidebarTree.box(in: self, center: NSPoint(x: bounds.midX, y: bounds.midY))
-        let n = (box.width / pixel).rounded()
-        let middle = ((n - 1) / 2).rounded(.down) * pixel
-        let inset = 2 * pixel
+        let t = stroke
+        // The sign: centred (the box leaves an even number of pixels around it), a gap in from the edges.
+        let gap = max(pixel, (s(2) / pixel).rounded() * pixel)
+        let middle = ((box.width - t) / 2 / pixel).rounded() * pixel
+        let length = box.width - 2 * (t + gap)
         var rects = [
-            NSRect(x: box.minX, y: box.minY, width: box.width, height: pixel),
-            NSRect(x: box.minX, y: box.maxY - pixel, width: box.width, height: pixel),
-            NSRect(x: box.minX, y: box.minY + pixel, width: pixel, height: box.height - 2 * pixel),
-            NSRect(x: box.maxX - pixel, y: box.minY + pixel, width: pixel, height: box.height - 2 * pixel),
-            // The minus, two pixels in from the sides.
-            NSRect(x: box.minX + pixel + inset, y: box.minY + middle, width: box.width - 2 * (pixel + inset), height: pixel),
+            NSRect(x: box.minX, y: box.minY, width: box.width, height: t),
+            NSRect(x: box.minX, y: box.maxY - t, width: box.width, height: t),
+            NSRect(x: box.minX, y: box.minY + t, width: t, height: box.height - 2 * t),
+            NSRect(x: box.maxX - t, y: box.minY + t, width: t, height: box.height - 2 * t),
+            NSRect(x: box.minX + t + gap, y: box.minY + middle, width: length, height: t),
         ]
         if !isExpanded {
-            rects.append(NSRect(x: box.minX + middle, y: box.minY + pixel + inset, width: pixel, height: box.height - 2 * (pixel + inset)))
+            rects.append(NSRect(x: box.minX + middle, y: box.minY + t + gap, width: t, height: length))
         }
         return rects
     }
@@ -121,8 +151,8 @@ final class TreeToggle: NSView {
         shape.frame = bounds
         shape.contentsScale = window?.backingScaleFactor ?? 2
         shape.path = SidebarTree.path(rects)
-        var color = SidebarTree.lineColor.cgColor
-        effectiveAppearance.performAsCurrentDrawingAppearance { color = SidebarTree.lineColor.cgColor }
+        var color = SidebarTree.toggleColor(hovering: hovering).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance { color = SidebarTree.toggleColor(hovering: self.hovering).cgColor }
         shape.fillColor = color
         CATransaction.commit()
     }
