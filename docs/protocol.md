@@ -293,8 +293,11 @@ saves the layout to a file and brings it back on the next start.
   active pane), split trees (axes, ratios) and focus. For each pane it saves the cwd, the
   command, the size, and the agent session: the pane's agent, if it is Claude Code or Codex and
   its hooks reported a session id. Claude's hooks send `session_id`; Codex's notify payload
-  sends `thread-id`. Scrollback, screen contents and pane titles (set by applications) are not
-  saved.
+  sends `thread-id`. Since 0.1.22 the session also survives serve restarts and upgrades (see
+  `source` under [Agents](#agents)). A serve that adopts a holder keeps the sessions the file
+  already had, for panes where an agent of that kind still runs, until the agent's hooks
+  report its own. That covers upgrading from 0.1.21, which didn't keep them. Scrollback, screen
+  contents and pane titles (set by applications) are not saved.
 - **Where.** `layout.json` in the state dir: `~/.local/state/clothod/` (or
   `$XDG_STATE_HOME/clothod/`) on Linux, and `~/Library/Application Support/clothod/` on macOS.
   It is written atomically (temp file, fsync, rename) with mode 0600, 0.5 s after the layout

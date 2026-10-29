@@ -4633,3 +4633,45 @@ async fn tabs_and_workspaces_move_and_every_client_sees_it() {
     })
     .await;
 }
+
+/// Upgrading from a serve that didn't keep agents across restarts (0.1.21): the adopted holder
+/// knows no sessions, only layout.json does. They stay in the file while that kind of agent
+/// still runs in the pane, and go where it doesn't.
+#[tokio::test]
+async fn an_adopting_serve_keeps_the_files_sessions_for_running_agents() {
+    let mut r = RestoreEnv::new();
+    let c = r.env.client().await;
+    let w = c.request("workspace.create", sh()).await.unwrap();
+    let (p, tab) = (w["pane"].as_u64().unwrap(), w["tab"].as_u64().unwrap());
+    let q = c.request("pane.split", with(sh(), json!({"pane": p, "direction": "right"}))).await.unwrap()["pane"].as_u64().unwrap();
+    // A "claude" that detection sees (no hook, so no session).
+    let sleepy = r.env.dir.path().join("sleepy");
+    std::fs::create_dir_all(&sleepy).unwrap();
+    std::fs::write(sleepy.join("claude"), "sleep 120\n").unwrap();
+    c.input(p, format!("sh '{}'\r", sleepy.join("claude").display()).as_bytes());
+    wait_agent(&c, p, "a detected claude", |a| a["kind"] == "claude" && a["source"] == "detected").await;
+    r.wait_layout("saved", |l| l["panes"].get(p.to_string()).is_some() && l["panes"].get(q.to_string()).is_some()).await;
+    drop(c);
+
+    // What a 0.1.21 serve left: sessions in the file for both panes, none in the holder.
+    r.env.kill();
+    let path = r.env.dir.path().join("data/layout.json");
+    let mut l: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    l["panes"][p.to_string()]["agent"] = json!({"kind": "claude", "session": "hint-1"});
+    l["panes"][q.to_string()]["agent"] = json!({"kind": "claude", "session": "hint-2"});
+    std::fs::write(&path, l.to_string()).unwrap();
+    r.start();
+    let c = r.env.client().await;
+    tokio::time::sleep(Duration::from_millis(5500)).await;
+    // Any change saves the layout again.
+    c.request("tab.rename", json!({"tab": tab, "title": "x"})).await.unwrap();
+    let l = r
+        .wait_layout("kept p's session, dropped q's", |l| l["model"]["workspaces"][0]["tabs"][0]["title"] == "x" && l["panes"][q.to_string()]["agent"].is_null())
+        .await;
+    assert_eq!(l["panes"][p.to_string()]["agent"], json!({"kind": "claude", "session": "hint-1"}), "{l}");
+    // Once the agent leaves, so does its session.
+    c.input(p, b"\x03");
+    wait_agent(&c, p, "no agent", |a| a.is_null()).await;
+    c.request("tab.rename", json!({"tab": tab, "title": "y"})).await.unwrap();
+    r.wait_layout("dropped p's session", |l| l["model"]["workspaces"][0]["tabs"][0]["title"] == "y" && l["panes"][p.to_string()]["agent"].is_null()).await;
+}

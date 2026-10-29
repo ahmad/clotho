@@ -631,6 +631,13 @@ struct LayoutState {
     written: Option<crate::layout::Saved>,
     pending: Option<(crate::layout::Saved, Instant)>,
     last_exit: Option<Instant>,
+    /// Agent sessions the file had for panes of an adopted holder, by pane: kept while an agent
+    /// of that kind without a session of its own (a detected one) is in the pane. A serve
+    /// before 0.1.22 didn't keep agents across restarts, so after upgrading from one this is
+    /// all that knows them until each agent's next hook.
+    hints: HashMap<u64, crate::layout::SavedAgent>,
+    /// Until then a pane without an agent keeps its hint: detection hasn't looked yet.
+    hints_until: Option<Instant>,
 }
 
 /// A layout change is written once nothing changed for this long.
@@ -955,6 +962,13 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         },
         _ => None,
     };
+    if let (Some(w), false) = (&d.layout, fresh) {
+        if let crate::layout::Loaded::Ok(s) = crate::layout::load(&w.path, &w.host, Path::new(&w.runtime_dir)) {
+            let mut st = w.st.lock().unwrap();
+            st.hints = s.panes.into_iter().filter_map(|(id, p)| Some((id.parse().ok()?, p.agent?))).collect();
+            st.hints_until = Some(Instant::now() + Duration::from_secs(5));
+        }
+    }
     d.restore_model(state);
     // Replay may end inside a synchronized update. Apply it now and drop what it produced:
     // replies to replayed queries were answered by the previous process (or never will be),
@@ -1236,11 +1250,34 @@ impl Daemon {
             let Some(p) = self.pane(id) else { continue };
             let p = p.lock().unwrap();
             let cwd = p.cwd.clone().or_else(|| p.polled_cwd.clone()).or_else(|| platform::process_cwd(p.pid).map(|c| c.to_string_lossy().into_owned()));
-            let agent = p
+            let mut agent = p
                 .agent
                 .as_ref()
                 .filter(|a| matches!(a.kind.as_str(), "claude" | "codex"))
                 .and_then(|a| Some(crate::layout::SavedAgent { kind: a.kind.clone(), session: a.session.clone().filter(|s| crate::layout::safe_session(s))? }));
+            {
+                let mut st = w.st.lock().unwrap();
+                if !st.hints.is_empty() {
+                    let early = st.hints_until.is_some_and(|t| Instant::now() < t);
+                    match (&p.agent, agent.is_some()) {
+                        // Its own session (a hook reported one): the hint is done.
+                        (Some(_), true) => {
+                            st.hints.remove(&id);
+                        }
+                        (Some(a), false) => {
+                            if st.hints.get(&id).is_some_and(|h| h.kind == a.kind) {
+                                agent = st.hints.get(&id).cloned();
+                            } else {
+                                st.hints.remove(&id);
+                            }
+                        }
+                        (None, _) if early => agent = st.hints.get(&id).cloned(),
+                        (None, _) => {
+                            st.hints.remove(&id);
+                        }
+                    }
+                }
+            }
             panes.insert(id.to_string(), crate::layout::SavedPane { cwd, command: p.command.clone(), cols: p.cols, rows: p.rows, agent });
         }
         crate::layout::Saved {
