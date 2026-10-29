@@ -343,6 +343,11 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// Keys, paste, mouse and focus reports. Never the local emulator's automatic replies.
     func sendInput(_ pane: PaneID, _ bytes: Data)
 
+    /// Remembers the colours this client shows panes in and tells the daemon (`client.colors`), now and
+    /// after every reconnect, when it announces `.clientColors`. Nil clears them. A requirement (not only
+    /// an extension method) so calls through `SessionBackend` reach the backend's own.
+    func setTerminalColors(_ colors: TerminalColors?)
+
     /// Acknowledges a pane's agent state (`agent.ack`), clearing its `attention`.
     func ackAgent(_ pane: PaneID) async throws
 
@@ -404,8 +409,7 @@ public extension SessionBackend {
     /// backends without a connection.
     func reconnectNow() {}
 
-    /// Remembers the colours this client shows panes in and tells the daemon (`client.colors`), now and
-    /// after every reconnect, when it announces `.clientColors`. Nil clears them. A no-op elsewhere.
+    /// Backends without a daemon have no apps to tell.
     func setTerminalColors(_ colors: TerminalColors?) {}
 
     func ackAgent(_ pane: PaneID) async throws {}

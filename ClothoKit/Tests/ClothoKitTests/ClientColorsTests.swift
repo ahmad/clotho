@@ -26,7 +26,10 @@ final class ClientColorsTests: XCTestCase {
         let daemon = ScriptedDaemon(features: ["client.colors"])
         let backend = ClothodBackend(configuration: .init(transport: daemon, clientName: "test"))
         defer { backend.stop() }
-        backend.setTerminalColors(TerminalColors(ClothoPalette.dark))
+        // Through the protocol, as the apps call it (ModelStore.backend is a SessionBackend): an
+        // extension-only method would dispatch statically to the no-op default here.
+        let session: SessionBackend = backend
+        session.setTerminalColors(TerminalColors(ClothoPalette.dark))
         try await backend.start()
         try await daemon.waitFor { $0.contains { $0.method == "client.colors" } }
         var calls = daemon.calls
@@ -39,8 +42,8 @@ final class ClientColorsTests: XCTestCase {
         XCTAssertEqual((calls[first].params?["colors"] as? [String: Any])?["background"] as? String, "#1d2022")
 
         // The appearance flips: sent again. The same colours again: not.
-        backend.setTerminalColors(TerminalColors(ClothoPalette.light))
-        backend.setTerminalColors(TerminalColors(ClothoPalette.light))
+        session.setTerminalColors(TerminalColors(ClothoPalette.light))
+        session.setTerminalColors(TerminalColors(ClothoPalette.light))
         try await daemon.waitFor { $0.filter { $0.method == "client.colors" }.count >= 2 }
         try await Task.sleep(nanoseconds: 200_000_000)
         calls = daemon.calls.filter { $0.method == "client.colors" }
@@ -139,7 +142,8 @@ final class FakeBackendColorsTests: XCTestCase {
     func testRecordsTheLastColours() {
         let fake = FakeBackend()
         XCTAssertNil(fake.terminalColors)
-        fake.setTerminalColors(TerminalColors(ClothoPalette.light))
+        let session: SessionBackend = fake
+        session.setTerminalColors(TerminalColors(ClothoPalette.light))
         XCTAssertEqual(fake.terminalColors, TerminalColors(ClothoPalette.light))
         fake.setTerminalColors(nil)
         XCTAssertNil(fake.terminalColors)
