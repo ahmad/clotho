@@ -142,9 +142,13 @@ pub fn forget(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// A session id safe to type into a shell: what Claude Code and Codex use (UUIDs).
+/// A session id safe to type into a shell: what Claude Code and Codex use (UUIDs). It starts
+/// with a letter or digit, so it can never read as a flag (`--dangerously-skip-permissions`).
+/// Ids that fail this are never stored (agents::report, the daemon's agent.report).
 pub fn safe_session(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    s.len() <= 128
+        && s.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// The line that resumes `agent` in a shell, if it is one we know how to resume.
@@ -153,8 +157,10 @@ pub fn resume_line(agent: &SavedAgent) -> Option<String> {
         return None;
     }
     match agent.kind.as_str() {
-        "claude" => Some(format!("claude --resume {}\r", agent.session)),
-        "codex" => Some(format!("codex resume {}\r", agent.session)),
+        // Bound to its flag (`--resume` takes an optional value), and after `--` for Codex: the
+        // id is never parsed as anything but the session.
+        "claude" => Some(format!("claude --resume={}\r", agent.session)),
+        "codex" => Some(format!("codex resume -- {}\r", agent.session)),
         _ => None,
     }
 }
@@ -247,10 +253,10 @@ mod tests {
     #[test]
     fn resume_lines() {
         let a = |k: &str, s: &str| SavedAgent { kind: k.into(), session: s.into() };
-        assert_eq!(resume_line(&a("claude", "24e0052b-aa")).as_deref(), Some("claude --resume 24e0052b-aa\r"));
-        assert_eq!(resume_line(&a("codex", "0199a-b")).as_deref(), Some("codex resume 0199a-b\r"));
+        assert_eq!(resume_line(&a("claude", "24e0052b-aa")).as_deref(), Some("claude --resume=24e0052b-aa\r"));
+        assert_eq!(resume_line(&a("codex", "0199a-b")).as_deref(), Some("codex resume -- 0199a-b\r"));
         assert_eq!(resume_line(&a("other", "x")), None);
-        for bad in ["", "a b", "x;rm -rf ~", "$(id)", "a\rb", &"x".repeat(129)] {
+        for bad in ["", "a b", "x;rm -rf ~", "$(id)", "a\rb", &"x".repeat(129), "--dangerously-skip-permissions", "-c", "-", "_x", "--"] {
             assert_eq!(resume_line(&a("claude", bad)), None, "{bad:?}");
         }
         assert!(is_shell(&["/bin/zsh".into(), "-l".into()]) && is_shell(&["-bash".into()]) && is_shell(&["fish".into()]));

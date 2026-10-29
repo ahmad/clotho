@@ -284,11 +284,12 @@ saves the layout to a file and brings it back on the next start.
 - **How.** Each saved pane gets a fresh shell in its saved cwd (`$HOME` if that is gone). The
   shell is the saved command if it was a shell, else the user's login shell. Workspace, tab and
   split ids are the saved ones; pane ids are new, and so is `instance`. A pane whose agent had a
-  session gets one line typed into the shell once it is up: `claude --resume <id>` or
-  `codex resume <id>`. Flags from the original run are not carried over. The agent runs from the
+  session gets one line typed into the shell once it is up: `claude --resume=<id>` or
+  `codex resume -- <id>`, so the id can only be read as the session. Flags from the original run are not carried over. The agent runs from the
   shell, so the shell stays when it exits. If the resume fails (unknown session, agent not
-  installed), the shell shows the error; nothing is retried. Session ids that are not
-  `[A-Za-z0-9_-]{1,128}` are never typed. A pane that fails to spawn is left out.
+  installed), the shell shows the error; nothing is retried. Only session ids matching
+  `[A-Za-z0-9][A-Za-z0-9_-]{0,127}` are kept at all: one from `agent.report` or a hook that
+  doesn't match (it could read as a flag, say) counts as no session. A pane that fails to spawn is left out.
 - **Marking.** A restored pane carries
   `"restored": {"at": <unix secs>, "agent": "claude"|"codex"|null, "session": <id>|null}`.
   `agent` and `session` are set when a resume line was typed. The field stays, also across

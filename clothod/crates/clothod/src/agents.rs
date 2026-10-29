@@ -10,6 +10,8 @@ use anyhow::{bail, Context, Result};
 use clotho_proto::{platform, Frame};
 use serde_json::{json, Map, Value};
 
+use crate::layout::safe_session;
+
 /// Marks the hook entries `clothod hooks install` adds, so they can be found and removed.
 const MARKER: &str = "# clotho-agent-status";
 /// `$0` of the Codex notify wrapper; marks it as ours.
@@ -39,7 +41,7 @@ fn try_report(args: &[String]) -> Result<()> {
         match a.as_str() {
             "--agent" => kind = it.next().cloned(),
             "--message" => message = it.next().cloned(),
-            "--session" => session = it.next().cloned(),
+            "--session" => session = it.next().cloned().filter(|s| safe_session(s)),
             "--claude-hook" => {
                 let mut input = String::new();
                 std::io::stdin().take(1 << 20).read_to_string(&mut input)?;
@@ -48,7 +50,7 @@ fn try_report(args: &[String]) -> Result<()> {
                 state = Some(s.into());
                 kind = Some("claude".into());
                 message = v["message"].as_str().map(String::from);
-                session = v["session_id"].as_str().map(String::from);
+                session = v["session_id"].as_str().filter(|s| safe_session(s)).map(String::from);
                 let (m, e) = claude_hook_context(&v);
                 if m.is_some() {
                     message = m;
@@ -64,7 +66,7 @@ fn try_report(args: &[String]) -> Result<()> {
                 kind = Some("codex".into());
                 // The thread is the session `codex resume <id>` takes (Codex 0.164's payload
                 // carries it as "thread-id").
-                session = v["thread-id"].as_str().map(String::from);
+                session = v["thread-id"].as_str().filter(|s| safe_session(s)).map(String::from);
                 message = v["last-assistant-message"].as_str().map(|m| one_line(m, RESULT_MAX));
                 // The user's messages in this turn, oldest first: the last one is what they asked.
                 let asked = v["input-messages"].as_array().and_then(|m| m.last()).and_then(Value::as_str).map(user_prompt);
@@ -106,7 +108,7 @@ fn try_permission() -> Result<()> {
     if let Some(i) = tool_input(tool, &v["tool_input"]) {
         params["tool_input"] = json!(i);
     }
-    if let Some(s) = v["session_id"].as_str() {
+    if let Some(s) = v["session_id"].as_str().filter(|s| safe_session(s)) {
         params["session"] = json!(s);
     }
     for sock in daemon_sockets() {

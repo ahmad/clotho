@@ -2054,7 +2054,9 @@ impl Daemon {
             message: p.get("message").and_then(Value::as_str).filter(|m| !m.is_empty()).map(|m| m.chars().take(500).collect()),
             since: 0.0,
             attention: prev.as_ref().map(|a| a.attention).unwrap_or(false),
-            session: p.get("session").and_then(Value::as_str).map(|s| s.chars().take(200).collect()).or(prev.and_then(|a| a.session)),
+            // Only ids that are safe to type back as a resume line (layout::safe_session) are
+            // kept; anything else is as if none was sent.
+            session: p.get("session").and_then(Value::as_str).filter(|s| crate::layout::safe_session(s)).map(String::from).or(prev.and_then(|a| a.session)),
             pid,
             guess: false,
             muted: false,

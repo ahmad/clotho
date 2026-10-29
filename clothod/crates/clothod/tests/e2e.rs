@@ -4360,7 +4360,7 @@ async fn a_restart_restores_the_layout_and_resumes_agents() {
     rec.sort();
     assert_eq!(
         rec,
-        vec![format!("claude --resume 1f0e5d2c-claude-session in {}", real(&dirs[0])), format!("codex resume 019a2b3c-codex-thread in {}", real(&dirs[1]))]
+        vec![format!("claude --resume=1f0e5d2c-claude-session in {}", real(&dirs[0])), format!("codex resume -- 019a2b3c-codex-thread in {}", real(&dirs[1]))]
     );
     // The shell stays when the agent exits.
     c.input(n1, b"echo still-here\r");
@@ -4422,8 +4422,19 @@ async fn adopting_the_holder_never_restores() {
     let c = r.env.client().await;
     let p = new_pane(&c, sh()).await;
     let q = c.request("pane.split", with(sh(), json!({"pane": p, "direction": "down"}))).await.unwrap()["pane"].as_u64().unwrap();
+    // An id that could read as a flag is never stored, from a hook or from agent.report.
+    let f = r.env.dir.path().join("bad-hook.json");
+    std::fs::write(&f, json!({"session_id": "--dangerously-skip-permissions", "hook_event_name": "UserPromptSubmit", "prompt": "hi"}).to_string()).unwrap();
+    c.input(q, format!("'{}' report --claude-hook < '{}'\r", test_bin(), f.display()).as_bytes());
+    let a = wait_agent(&c, q, "the hook's report", |a| a["state"] == "running").await;
+    assert!(a["session"].is_null(), "{a}");
+    c.request("agent.report", json!({"pane": q, "state": "waiting", "kind": "codex", "session": "-c"})).await.unwrap();
+    let a = wait_agent(&c, q, "agent.report", |a| a["state"] == "waiting").await;
+    assert!(a["session"].is_null(), "{a}");
+    c.request("agent.report", json!({"pane": q, "state": "clear"})).await.unwrap();
     r.agent(&c, p, "claude", "aaaa-bbbb").await;
     r.wait_layout("saved", |l| l.to_string().contains("aaaa-bbbb")).await;
+    assert!(!r.layout().unwrap().to_string().contains("dangerously"));
     let instance = c.hello["instance"].clone();
     let before = c.request("state.get", json!({})).await.unwrap();
     drop(c);
