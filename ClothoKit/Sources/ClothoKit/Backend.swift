@@ -117,15 +117,29 @@ public struct Hello: Codable, Equatable, Sendable {
         public var build: String?
         public var canUpgrade: Bool?
         public var outdated: Bool?
+        /// The macOS launchd namespace the holder (and so every shell) runs in: "Aqua", "Background",
+        /// "none", or nil (not macOS, or an older holder). See `Hello.shellsLackSystemServices`.
+        public var namespace: String?
 
         enum CodingKeys: String, CodingKey {
-            case pid, version, `protocol`, exe, build, canUpgrade = "can_upgrade", outdated
+            case pid, version, `protocol`, exe, build, canUpgrade = "can_upgrade", outdated, namespace
         }
+    }
+
+    /// The daemon's own launchd namespace (macOS; nil elsewhere or on older daemons).
+    public var namespace: String?
+
+    /// Whether this machine's shells run outside the user's login session (a holder namespace other than
+    /// "Aqua"), where they can lose DNS, the keychain and user lookups. Restarting the machine's sessions
+    /// fixes it; the layout and agents come back (restore).
+    public var shellsLackSystemServices: Bool {
+        guard let namespace = holder?.namespace else { return false }
+        return namespace != "Aqua"
     }
 
     enum CodingKeys: String, CodingKey {
         case `protocol`, protocolMin = "protocol_min", protocolMax = "protocol_max", daemon, version, instance, pid, machine, exe, holder
-        case build, holderOutdated = "holder_outdated"
+        case build, holderOutdated = "holder_outdated", namespace
         case featureNames = "features"
     }
 

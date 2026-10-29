@@ -19,7 +19,9 @@ extension AppDelegate {
         // The hello arrives through the event stream, just after start() returns.
         Task { @MainActor in
             for _ in 0..<20 where session.store.hello == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
-            guard let hello = session.store.hello, hello.holderOutdated == true else { return }
+            guard let hello = session.store.hello else { return }
+            offerShellRestartIfNeeded(session, hello: hello)
+            guard hello.holderOutdated == true else { return }
             var shown = UserDefaults.standard.stringArray(forKey: "HolderRestartOffered") ?? []
             guard !shown.contains(hello.instance) else { return }
             shown.append(hello.instance)
@@ -67,6 +69,84 @@ extension AppDelegate {
                         await MainActor.run { session.store.backend.reconnectNow() }
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: Shells outside the login session
+
+    /// Shells whose holder runs outside the user's login session (hello's `holder.namespace` isn't "Aqua")
+    /// can lose DNS, the keychain and user lookups. Restarting the machine's sessions starts them inside it,
+    /// and the layout and agents come back (restore). Offered once per daemon instance; the user decides.
+    func offerShellRestartIfNeeded(_ session: MachineConnection, hello: Hello) {
+        guard hello.shellsLackSystemServices else {
+            if pendingShellRestarts.remove(session.key) != nil { showShellRestartNotice() }
+            return
+        }
+        var shown = UserDefaults.standard.stringArray(forKey: "ShellRestartOffered") ?? []
+        guard !shown.contains(hello.instance) else { return }
+        shown.append(hello.instance)
+        UserDefaults.standard.set(Array(shown.suffix(50)), forKey: "ShellRestartOffered")
+        log("\(session.title): shells run in launchd namespace \(hello.holder?.namespace ?? "?"); offering a restart")
+        pendingShellRestarts.insert(session.key)
+        showShellRestartNotice()
+    }
+
+    /// The notice's text for `names` (machines whose shells can't reach system services).
+    static func shellRestartNotice(_ names: [String]) -> String {
+        let which = names.count == 1 ? names[0] : names.dropLast().joined(separator: ", ") + " and " + names.last!
+        return "Shells on \(which) can't reach some system services (DNS, the keychain). Restarting them fixes it; "
+            + "your workspaces and agents come back."
+    }
+
+    private func showShellRestartNotice() {
+        let names = pendingShellRestarts.compactMap { connections[$0]?.title }.sorted()
+        guard !names.isEmpty else { return }
+        showNotice(Self.shellRestartNotice(names), detail: "The shells' launchd namespace isn't your login session (Aqua).",
+                   action: "Restart Shells…") { [weak self] in self?.confirmShellRestarts() }
+    }
+
+    /// The confirmation's title and text for `names`.
+    static func shellRestartConfirmation(_ names: [String]) -> (title: String, text: String) {
+        let title = names.count == 1 ? "Restart the shells on \(names[0])?" : "Restart the shells on \(names.count) machines?"
+        let text = "Every shell and program running in Clotho on \(names.joined(separator: ", ")) ends, and clothod starts again "
+            + "inside your login session. Your workspaces, tabs and panes come back in their folders, and Claude Code and "
+            + "Codex conversations resume. Scrollback and anything else running in the shells don't come back."
+        return (title, text)
+    }
+
+    private func confirmShellRestarts() {
+        let keys = pendingShellRestarts.filter { connections[$0] != nil }
+        let names = keys.compactMap { connections[$0]?.title }.sorted()
+        guard !names.isEmpty, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        let words = Self.shellRestartConfirmation(names)
+        alert.messageText = words.title
+        alert.informativeText = words.text
+        alert.addButton(withTitle: "End shells and restart")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            hideNotice()
+            pendingShellRestarts.subtract(keys)
+            for key in keys { restartSessions(on: key) }
+        }
+    }
+
+    /// Ends a machine's shells and starts its clothod again (a plain shutdown, so the saved layout restores).
+    private func restartSessions(on key: MachineKey) {
+        guard let session = connections[key] else { return }
+        log("\(session.title): restarting its sessions (restore brings the layout back)")
+        if key == Self.localKey, let daemon = localDaemon {
+            Task.detached {
+                do { try daemon.restartClothod() } catch { log("clothod: restarting failed: \(error.localizedDescription)") }
+                await MainActor.run { session.store.backend.reconnectNow() }
+            }
+        } else if let installer = remoteInstallers[key] {
+            // The bridge starts the machine's daemon again when Clotho reconnects.
+            Task.detached {
+                do { try installer.shutdownSessions() } catch { log("\(session.machine.label): restarting failed: \(error.localizedDescription)") }
+                await MainActor.run { session.store.backend.reconnectNow() }
             }
         }
     }

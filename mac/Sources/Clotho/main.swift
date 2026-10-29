@@ -366,6 +366,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var pendingDaemonUpdates: Set<MachineKey> = []
     /// Machines whose legacy holder needs a clothod restart to finish an update, waiting for the user.
     var pendingHolderRestarts: Set<MachineKey> = []
+    /// Machines whose shells run outside the login session, waiting for the user's OK to restart them.
+    var pendingShellRestarts: Set<MachineKey> = []
     var agentClock: Timer?
     var upgradeNoticeMachines: Set<MachineKey> = []
     var noticeBar: NoticeBar?
@@ -738,6 +740,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 // "shot:/path.png" saves an image of the main window alone; "shot:panel:/path.png" the other
                 // visible window (Settings, a history panel).
+                // "notice:Title" presses the notice bar's button with that title.
+                if step.hasPrefix("notice:") {
+                    let title = String(step.dropFirst(7))
+                    func find(_ view: NSView) -> NSButton? {
+                        if let button = view as? NSButton, button.title == title { return button }
+                        return view.subviews.lazy.compactMap(find).first
+                    }
+                    guard let button = noticeBar.flatMap(find) else { return log("TypeText: no notice button \(title)") }
+                    return button.performClick(nil)
+                }
                 if step.hasPrefix("shot:") {
                     let rest = String(step.dropFirst(5))
                     if rest.hasPrefix("panel:") {
@@ -1159,12 +1171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func upgradeLocalLogicProcessIfNeeded(_ local: MachineConnection) async {
         // The hello arrives through the event stream, just after start() returns.
         for _ in 0..<20 where local.store.hello == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        // Whatever build runs (in place, or with no bundled build to compare), its holder may need a restart.
+        offerHolderRestartIfNeeded(local)
         guard let daemon = localDaemon, !daemon.runInPlace, local.store.hello != nil,
               let bundledID = await Task.detached(operation: { daemon.bundledID }).value else { return }
         // Only a provable upgrade: a hello without `exe` predates the install scheme, or the running
         // version is lower. Never a downgrade, and never between builds of the same version. `current`
         // resolves to the build it points at.
-        offerHolderRestartIfNeeded(local)
         let running = local.store.hello?.exe.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
         // The daemon's reported build decides, by version; daemons that don't report one fall back to `exe`.
         let outdated = local.store.hello?.build.map { RemoteSetup.isOlder($0, than: bundledID) }
