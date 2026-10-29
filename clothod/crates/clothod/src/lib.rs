@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod fs;
 pub mod push;
 pub mod service;
+pub mod git;
 pub mod layout;
 pub mod model;
 

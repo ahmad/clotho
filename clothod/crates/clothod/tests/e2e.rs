@@ -31,6 +31,8 @@ impl Env {
             // Test instances are temporary: they end themselves when unused (and are shut down
             // by Drop). Everything started from here inherits this.
             std::env::set_var("CLOTHOD_EPHEMERAL", "60");
+            // Never the user's real gh (and GitHub login): tests that want one use a stub.
+            std::env::set_var("CLOTHOD_GH", "/nonexistent/gh");
             sweep_stale_test_instances();
         });
         // Short path: Unix socket paths are limited to ~104 bytes.
@@ -1764,8 +1766,12 @@ async fn color_queries_follow_the_clients_colors() {
 
     // A types in the pane: its colours again.
     a.request("pane.input", json!({"pane": p, "data": "x"})).await.unwrap();
-    let all = wait_for(&rec, &mut seen, "\x1b[?997;2n".into()).await;
-    assert!(all.contains('x'), "{all:?}");
+    // The report (switching to A's colours) reaches the PTY just before the "x": wait for both.
+    let from = seen;
+    wait_for(&rec, &mut seen, "\x1b[?997;2n".into()).await;
+    let mut again = from;
+    wait_for(&rec, &mut again, "x".into()).await;
+    seen = seen.max(again);
     ask(2);
     wait_for(&rec, &mut seen, light_answer).await;
 
@@ -4674,4 +4680,150 @@ async fn an_adopting_serve_keeps_the_files_sessions_for_running_agents() {
     wait_agent(&c, p, "no agent", |a| a.is_null()).await;
     c.request("tab.rename", json!({"tab": tab, "title": "y"})).await.unwrap();
     r.wait_layout("dropped p's session", |l| l["model"]["workspaces"][0]["tabs"][0]["title"] == "y" && l["panes"][p.to_string()]["agent"].is_null()).await;
+}
+
+// ---- git ---------------------------------------------------------------------------------
+
+const GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn put(p: &std::path::Path, s: &str) {
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, s).unwrap();
+}
+
+async fn pane_git(c: &Client, pane: u64) -> Value {
+    let s = c.request("state.get", json!({})).await.unwrap();
+    pane_of(&s, pane)["git"].clone()
+}
+
+async fn wait_git(c: &Client, pane: u64, what: &str, cond: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + T;
+    loop {
+        let g = pane_git(c, pane).await;
+        if cond(&g) {
+            return g;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}; git is {g}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Git info from files: a repo, a branch switch seen live (also as a `pane` event), detached,
+/// the default branch, a linked worktree sharing the repo's PR lookup, cd out of the repo; PRs
+/// from a stub gh, with its failures, cached and refreshed only while a client shows the pane.
+#[tokio::test]
+async fn panes_show_git_and_pull_requests() {
+    let mut env = Env::empty();
+    let root = env.dir.path().join("work");
+    let main = root.join("proj");
+    put(&main.join(".git/HEAD"), "ref: refs/heads/feature\n");
+    // As a shell's cwd reads (macOS: /tmp is /private/tmp).
+    let main = std::fs::canonicalize(&main).unwrap();
+    put(&main.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:ahmad/clotho.git\n");
+    for b in ["feature", "nopr", "broken", "main"] {
+        put(&main.join(".git/refs/heads").join(b), &format!("{GIT_SHA}\n"));
+    }
+    std::fs::create_dir_all(main.join("src")).unwrap();
+    let calls = env.dir.path().join("gh.calls");
+    let stub = env.dir.path().join("gh");
+    put(
+        &stub,
+        &format!(
+            r#"#!/bin/sh
+echo "$*" >> '{}'
+for a; do b=$a; done
+case "$b" in
+  feature) echo '{{"number": 42, "state": "OPEN", "isDraft": false, "url": "https://github.com/ahmad/clotho/pull/42", "title": "Fix the\u001b[31m login"}}' ;;
+  broken) echo "error connecting to api.github.com" >&2; exit 1 ;;
+  *) echo "no pull requests found for branch \"$b\"" >&2; exit 1 ;;
+esac
+"#,
+            calls.display()
+        ),
+    );
+    std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let n_calls = || std::fs::read_to_string(&calls).unwrap_or_default().lines().count();
+    env.start_with(&test_bin(), &[("CLOTHOD_GH", &stub.display().to_string()), ("CLOTHOD_TEST_PR_REFRESH_MS", "1500")]);
+    let c = env.client().await;
+    let mut ev = env.client().await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": main.join("src").display().to_string()}))).await;
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("git")));
+
+    let g = wait_git(&c, p, "the PR", |g| g["pr"].is_object()).await;
+    assert_eq!(
+        (g["repo"].clone(), g["root"].clone(), g["remote"].clone(), g["branch"].clone(), g["head"].clone(), g["worktree"].clone(), g["pr_reason"].clone()),
+        (json!("proj"), json!(main.display().to_string()), json!("ahmad/clotho"), json!("feature"), json!("0123456"), Value::Null, Value::Null)
+    );
+    assert_eq!(g["pr"], json!({"number": 42, "state": "open", "draft": false, "url": "https://github.com/ahmad/clotho/pull/42", "title": "Fix the[31m login"}));
+    let first = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(first.trim(), "pr view --repo ahmad/clotho --json number,state,isDraft,url,title -- feature");
+    // Nobody shows the pane: no refresh, however long.
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(n_calls(), 1, "refreshed without a client showing the pane");
+    // A client shows it: refreshed, but at most once per interval.
+    c.request("pane.subscribe", json!({"pane": p})).await.unwrap();
+    let t0 = Instant::now();
+    tokio::time::sleep(Duration::from_millis(4500)).await;
+    let n = n_calls();
+    let max = 2 + (t0.elapsed().as_millis() / 1500) as usize;
+    assert!((2..=max).contains(&n), "{n} lookups in {:?} (at most {max})", t0.elapsed());
+    c.request("pane.unsubscribe", json!({"pane": p})).await.unwrap();
+
+    // A branch switch is seen within about a second, and sent as a pane event.
+    ev.request("events.subscribe", json!({})).await.unwrap();
+    put(&main.join(".git/HEAD"), "ref: refs/heads/nopr\n");
+    let switched = Instant::now();
+    let deadline = Instant::now() + T;
+    loop {
+        let f = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), ev.recv()).await.expect("no pane event").unwrap();
+        if let Frame::Json(v) = f {
+            if v["event"] == "pane" && v["data"]["id"] == p && v["data"]["git"]["branch"] == "nopr" {
+                break;
+            }
+        }
+    }
+    assert!(switched.elapsed() < Duration::from_millis(2500), "took {:?}", switched.elapsed());
+    wait_git(&c, p, "no PR for nopr", |g| g["pr_reason"] == "none" && g["pr"].is_null()).await;
+    put(&main.join(".git/HEAD"), "ref: refs/heads/broken\n");
+    wait_git(&c, p, "gh failing", |g| g["pr_reason"] == "gh_error").await;
+    put(&main.join(".git/HEAD"), "ref: refs/heads/main\n");
+    wait_git(&c, p, "the default branch", |g| g["branch"] == "main" && g["pr_reason"] == "default_branch").await;
+    put(&main.join(".git/HEAD"), &format!("{GIT_SHA}\n"));
+    wait_git(&c, p, "detached", |g| g["branch"].is_null() && g["head"] == "0123456" && g["pr_reason"] == "detached").await;
+    // A commit moves the branch's ref, not HEAD: head follows.
+    put(&main.join(".git/HEAD"), "ref: refs/heads/feature\n");
+    put(&main.join(".git/refs/heads/feature"), "fedcba9876543210fedcba9876543210fedcba98\n");
+    wait_git(&c, p, "the new commit", |g| g["head"] == "fedcba9" && g["pr"]["number"] == 42).await;
+
+    // A linked worktree: same repo name, its own root and branch, the cached PR (no lookup).
+    let before = n_calls();
+    let wt = root.join("proj-fix");
+    put(&main.join(".git/worktrees/fix/HEAD"), "ref: refs/heads/feature\n");
+    put(&main.join(".git/worktrees/fix/commondir"), "../..\n");
+    put(&wt.join(".git"), "gitdir: ../proj/.git/worktrees/fix\n");
+    let wt = std::fs::canonicalize(&wt).unwrap();
+    let q = new_pane(&c, with(sh(), json!({"cwd": wt.display().to_string()}))).await;
+    let g = wait_git(&c, q, "the worktree", |g| g["pr"].is_object()).await;
+    assert_eq!((g["repo"].clone(), g["root"].clone(), g["branch"].clone()), (json!("proj"), json!(wt.display().to_string()), json!("feature")));
+    assert_eq!(g["worktree"], json!({"name": "fix", "path": "../proj-fix"}));
+    assert_eq!(n_calls(), before, "the PR came from the cache");
+    assert!(!std::fs::read_to_string(&calls).unwrap().contains(" main"), "the default branch is never looked up");
+
+    // cd out of the repo.
+    c.input(p, b"cd /\r");
+    wait_git(&c, p, "no repo", |g| g.is_null()).await;
+    assert!(!r_log_has(&env, "panicked"));
+    drop(c);
+    drop(ev);
+    env.kill();
+
+    // No gh at all: the reason says so.
+    let plain = Env::new();
+    let c = plain.client().await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": main.display().to_string()}))).await;
+    wait_git(&c, p, "no gh", |g| g["pr_reason"] == "no_gh").await;
+}
+
+fn r_log_has(env: &Env, s: &str) -> bool {
+    env.log().contains(s)
 }

@@ -95,7 +95,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
-                  "restore", "move"],
+                  "restore", "move", "git"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -126,7 +126,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
   [Client colors](#client-colors); since 0.1.20), `restore` (panes' `restored` and
   `pane.dismiss_restored`, see [Restore after restart](#restore-after-restart); since 0.1.21),
   `move` (`workspace.move` and `tab.move`, see
-  [Moving tabs and workspaces](#moving-tabs-and-workspaces); since 0.1.22).
+  [Moving tabs and workspaces](#moving-tabs-and-workspaces); since 0.1.22), `git` (panes'
+  `git` field, see [Git](#git); since 0.1.23).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -243,6 +244,7 @@ the life of the object and never reused within an `instance`.
   - `scrollback_lines` is the history the daemon keeps for the pane (spawn options).
   - `restored` is `null`, or `{"at", "agent", "session"}` for a pane brought back after a
     restart; see [Restore after restart](#restore-after-restart).
+  - `git` is `null` outside a git work tree; see [Git](#git).
 - When a tab's active pane closes or exits, the new `active_pane` is the first pane of the
   sibling subtree that takes its place (as in tmux).
 - A pane is removed from the layout when its process exits. A tab with no panes closes, but a
@@ -282,6 +284,78 @@ exactly.
   An index past the end is not an error: it means last.
 - Every effective move sends one `state` event to every event subscriber, and the saved layout
   ([Restore after restart](#restore-after-restart)) follows it.
+
+## Git
+
+Each pane's `git` field (feature `git`, since 0.1.23) describes the work tree its cwd is in, or
+is `null` outside one:
+
+```json
+"git": {
+  "repo": "clotho",
+  "root": "/Users/ahmad/Projects/clotho-fix",
+  "remote": "ahmad/clotho",
+  "branch": "fix-login",
+  "head": "a1b2c3d",
+  "worktree": {"name": "fix-login", "path": "../clotho-fix"},
+  "pr": {"number": 42, "state": "open", "draft": false,
+         "url": "https://github.com/ahmad/clotho/pull/42", "title": "Fix the login page"},
+  "pr_reason": null
+}
+```
+
+- `repo` is the main worktree's top-level folder name, shared by all its linked worktrees. For
+  a bare repository with linked worktrees, it is the bare folder's name without `.git`.
+- `root` is this work tree's top level.
+- `remote` is origin's `owner/name` when origin is on github.com, else `null`.
+- `branch` is `null` when HEAD is detached or unreadable.
+- `head` is the 7-character short sha HEAD resolves to (through the branch's loose ref or
+  `packed-refs`), or `null` (an unborn branch, or an unreadable ref).
+- `worktree` is `null` for a main worktree. For a linked one, `name` is its folder under
+  `.git/worktrees` and `path` is its root relative to the main worktree's root (absolute when
+  there is none, as with a bare repo).
+- `pr` is the pull request for the branch, or `null`:
+  - `state` is `"open"`, `"draft"` (an open draft), `"merged"` or `"closed"`, and `draft` says
+    the same as a bool.
+  - `url` always starts with `https://github.com/`.
+  - `title` is one line with no control characters, at most 120 characters.
+- `pr_reason` says why `pr` is `null`:
+  - `"none"`: gh says the branch has no PR.
+  - `"pending"`: the first lookup is still running.
+  - `"default_branch"`: main, master or origin/HEAD's target, never looked up.
+  - `"detached"`
+  - `"no_remote"`: origin isn't on GitHub.
+  - `"no_gh"`: gh isn't installed.
+  - `"gh_auth"`: gh isn't logged in.
+  - `"gh_error"`: offline or any other failure.
+  - `"timeout"`
+
+  Treat unknown values as unknown.
+- A submodule is its own repo. A cwd inside a bare repository, which has no work tree, gives
+  `null`.
+
+**How it is read.** Git info comes from plain file reads only, and git is never run, so nothing
+a repository configures (hooks, fsmonitor, aliases, includes) can execute. The daemon walks up
+from the cwd to `.git`. A `.git` file's `gitdir:` leads to a linked worktree (its git dir has a
+`commondir`) or a submodule's or a separate git dir (one without, read as its own repo). It
+reads HEAD, the branch's ref, origin's URL in `config`, and `refs/remotes/origin/HEAD`. The
+lookup runs again when a pane's cwd changes: at once with OSC 7, else through the once-a-second
+cwd poll. Every work tree that some pane is in is read once a second, shared by all its panes:
+a branch switch or a commit, made anywhere, shows within about a second. Branch names, paths and
+repo names are untrusted: they have control characters stripped and are capped at 255
+characters (paths 4096).
+
+**Pull requests.** The daemon runs
+`gh pr view --repo <owner/name> --json number,state,isDraft,url,title -- <branch>`. It finds gh
+on its PATH, then in `/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin`. The command runs
+from `/` (never the repo) with `GH_PROMPT_DISABLED=1`, no stdin and a 5 s timeout. gh uses its
+own login, and the daemon never handles a token. Lookups are cached per repo and branch,
+failures included, and run at most two at once. A branch is looked up the first time a pane is
+on it. After that it is refreshed at most every 5 minutes, and only while a client is
+subscribed to a pane on it. Input never triggers a lookup. The default branch, a detached HEAD
+and non-GitHub remotes are never looked up.
+
+Changes come as `pane` events, as for any pane field. `git` is not saved in the layout file.
 
 ## Restore after restart
 

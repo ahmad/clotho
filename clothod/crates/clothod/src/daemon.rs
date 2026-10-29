@@ -429,6 +429,11 @@ struct Pane {
     /// Brought back after a restart (`{at, agent, session}`, docs/protocol.md "Restore after
     /// restart") until a client dismisses it or the user types in the pane.
     restored: Option<Value>,
+    /// The cwd git info was last looked up for, where its work tree is, and the `git` field
+    /// (docs/protocol.md, "Git").
+    git_cwd: Option<String>,
+    git_loc: Option<crate::git::Location>,
+    git: Option<Value>,
 }
 
 /// A client that sent input to a pane it shows within this long means the user is at that pane:
@@ -550,6 +555,9 @@ impl Pane {
             polled_cwd: None,
             history: VecDeque::new(),
             restored: None,
+            git_cwd: None,
+            git_loc: None,
+            git: None,
         }
     }
 
@@ -571,6 +579,7 @@ impl Pane {
             "scrollback_lines": self.vt.scrollback(),
             "agent": self.agent.as_ref().map(Agent::json),
             "restored": self.restored,
+            "git": self.git,
         })
     }
 }
@@ -612,7 +621,33 @@ pub struct Daemon {
     places: Mutex<HashMap<u64, (Option<u64>, Option<String>, Option<String>)>>,
     /// The saved layout file, if this instance keeps one.
     layout: Option<LayoutWriter>,
+    git: Mutex<GitCache>,
+    /// At most this many `gh` lookups at once.
+    gh_slots: Arc<tokio::sync::Semaphore>,
 }
+
+/// Work trees panes are in, and pull request lookups, shared by every pane on them.
+#[derive(Default)]
+struct GitCache {
+    /// By git dir: what was last read.
+    repos: HashMap<PathBuf, crate::git::Info>,
+    /// By (owner/name, branch).
+    prs: HashMap<(String, String), PrEntry>,
+}
+
+struct PrEntry {
+    /// `None` until the first lookup ends.
+    result: Option<Result<Option<crate::git::Pr>, &'static str>>,
+    at: Instant,
+    running: bool,
+}
+
+/// A branch's PR is looked up again at most this often, and only while a client shows a pane
+/// on it.
+fn pr_refresh() -> Duration {
+    std::env::var("CLOTHOD_TEST_PR_REFRESH_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(Duration::from_secs(300))
+}
+const GH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Writes the layout file (`crate::layout`) when it changes: debounced, and held back for a
 /// while after a pane exits, so a shutdown that ends the shells before clothod doesn't save an
@@ -923,6 +958,8 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         // Ephemeral (test) instances keep registrations with themselves, so they go away together.
         places: Mutex::new(HashMap::new()),
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
+        git: Mutex::new(GitCache::default()),
+        gh_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         layout: crate::layout::path().map(|path| LayoutWriter {
             path,
             host: platform::hostname(),
@@ -2162,7 +2199,7 @@ impl Daemon {
         Ok(json!({}))
     }
 
-    fn tick(&self, snapshot_check: bool) {
+    fn tick(self: &Arc<Self>, snapshot_check: bool) {
         let panes: Vec<_> = self.panes.lock().unwrap().values().cloned().collect();
         for p in panes {
             let mut p = p.lock().unwrap();
@@ -2193,12 +2230,110 @@ impl Daemon {
                 }
             }
         }
+        if snapshot_check && self.live.load(Ordering::Relaxed) {
+            self.refresh_git();
+        }
         if snapshot_check && self.dirty.load(Ordering::Relaxed) {
             self.persist();
         }
         if let Some(w) = &self.layout {
             w.flush(false);
         }
+    }
+
+    /// Once a second: find each pane's work tree when its cwd changed, read every work tree in
+    /// use once (HEAD, the branch's ref, origin), start PR lookups that are due, and send a
+    /// `pane` event for every pane whose `git` changed.
+    fn refresh_git(self: &Arc<Self>) {
+        use crate::git;
+        // Panes: (id, location, shown by a client).
+        let mut panes: Vec<(u64, Option<git::Location>, bool)> = Vec::new();
+        for p in self.panes.lock().unwrap().values().cloned().collect::<Vec<_>>() {
+            let mut p = p.lock().unwrap();
+            if p.exited.is_some() {
+                continue;
+            }
+            let cwd = p.cwd.clone().or_else(|| p.polled_cwd.clone());
+            if cwd != p.git_cwd {
+                p.git_loc = cwd.as_deref().and_then(|c| git::locate(Path::new(c)));
+                p.git_cwd = cwd;
+            }
+            panes.push((p.id, p.git_loc.clone(), !p.subs.is_empty()));
+        }
+        let mut views: HashMap<PathBuf, Value> = HashMap::new();
+        {
+            let mut cache = self.git.lock().unwrap();
+            let mut seen = std::collections::HashSet::new();
+            for (_, loc, _) in &panes {
+                let Some(loc) = loc else { continue };
+                if !seen.insert(loc.gitdir.clone()) {
+                    continue;
+                }
+                let head = std::fs::read_to_string(loc.gitdir.join("HEAD")).unwrap_or_default();
+                let info = git::info(loc, &head);
+                cache.repos.insert(loc.gitdir.clone(), info.clone());
+                let shown = panes.iter().any(|(_, l, shown)| *shown && l.as_ref().is_some_and(|l| l.gitdir == loc.gitdir));
+                let (pr, reason) = match (&info.remote, &info.branch) {
+                    (None, _) => (None, Some("no_remote")),
+                    (_, None) => (None, Some("detached")),
+                    _ if info.default_branch => (None, Some("default_branch")),
+                    (Some(remote), Some(branch)) => {
+                        let key = (remote.clone(), branch.clone());
+                        let due = match cache.prs.get(&key) {
+                            None => true,
+                            Some(e) => !e.running && shown && e.at.elapsed() >= pr_refresh(),
+                        };
+                        if due {
+                            let entry = cache.prs.entry(key.clone()).or_insert(PrEntry { result: None, at: Instant::now(), running: false });
+                            entry.running = true;
+                            let d = self.clone();
+                            tokio::spawn(async move { d.lookup_pr(key).await });
+                        }
+                        match cache.prs.get(&(remote.clone(), branch.clone())).and_then(|e| e.result.clone()) {
+                            None => (None, Some("pending")),
+                            Some(Ok(Some(pr))) => (Some(pr.json()), None),
+                            Some(Ok(None)) => (None, Some("none")),
+                            Some(Err(r)) => (None, Some(r)),
+                        }
+                    }
+                };
+                views.insert(
+                    loc.gitdir.clone(),
+                    json!({
+                        "repo": info.repo, "root": info.root, "remote": info.remote, "branch": info.branch, "head": info.head,
+                        "worktree": info.worktree.as_ref().map(|(name, path)| json!({"name": name, "path": path})),
+                        "pr": pr, "pr_reason": reason,
+                    }),
+                );
+            }
+            cache.repos.retain(|k, _| seen.contains(k));
+            // Lookups nobody has needed for an hour go (results only: a running one stays).
+            cache.prs.retain(|_, e| e.running || e.at.elapsed() < Duration::from_secs(3600));
+        }
+        for (id, loc, _) in panes {
+            let view = loc.and_then(|l| views.get(&l.gitdir).cloned());
+            let Some(p) = self.pane(id) else { continue };
+            let mut p = p.lock().unwrap();
+            if p.git != view {
+                p.git = view;
+                self.pane_event(&p);
+            }
+        }
+    }
+
+    /// One `gh` lookup (at most two at once); the next refresh_git shows its result.
+    async fn lookup_pr(self: Arc<Self>, key: (String, String)) {
+        let result = match self.gh_slots.clone().acquire_owned().await {
+            Ok(_slot) => crate::git::lookup_pr(&key.0, &key.1, GH_TIMEOUT).await,
+            Err(_) => Err("gh_error"),
+        };
+        // No gh at all is the normal case on many machines: not worth a line every refresh.
+        match &result {
+            Err(r) if *r != "no_gh" => log(format_args!("git: no PR for {} {}: {r}", key.0, clotho_vt::printable(&key.1, 80))),
+            _ => {}
+        }
+        let mut cache = self.git.lock().unwrap();
+        cache.prs.insert(key, PrEntry { result: Some(result), at: Instant::now(), running: false });
     }
 
     // ---- clients -----------------------------------------------------------------------
@@ -2388,7 +2523,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
