@@ -1,11 +1,13 @@
-# Status and handoff (2026-10-29, updated after Mac 1.0.1 and clothod 0.1.20)
+# Status and handoff (2026-10-29, updated after Mac 1.0.4 and clothod 0.1.22)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.20** runs on devbox, macbook and imac, upgraded in place (0.1.20: client.colors, so
+- **clothod 0.1.22** runs on devbox, macbook and imac, upgraded in place. 0.1.22: workspace.move and
+  tab.move, and agent sessions kept in the holder meta. 0.1.21: restore after restart (layout.json in
+  the state dir; `shutdown --forget` clears it). 0.1.20: client.colors (so
   OSC 10/11/4 and mode 2031 follow the app's light/dark palette). Earlier: 0.1.17 The holders (1799611, 9573
   and 27331) have kept their pids since 0.1.6.
   - 0.1.13: pushes only when needed, notification detail, Allow/Deny (agent.decide).
@@ -16,7 +18,8 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.1, build 202610291708 (3885099, with clothod 0.1.20); 1.0.0 was
+- **The Mac app is public:** Clotho 1.0.4, build 202610291948 (1beeb43, with clothod 0.1.22): drag to
+  reorder and move tabs. 1.0.3 restore note, 1.0.2 rename focus and ⇧⌘ shortcuts, 1.0.1 light mode; 1.0.0 was
   build 202610291513 (at ee15de6). The user updated 1.0.0 → 1.0.1 through Sparkle (first real update, OK).
   Both are Developer ID signed,
   notarized and stapled, at https://clotho.app/downloads (Clotho.zip redirects to the newest zip).
@@ -28,7 +31,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
   - The site deploys ONLY from the CLI (vercel.json git.deploymentEnabled=false). The zips are
     gitignored, so a git-built deploy 404s every download; that broke the first 1.0.1 update.
   - UPDATES_LIVE=true (93b3da6): every non-dev build checks the feed.
-- **iOS:** TestFlight build 202610282014, with 0.1.17. It has the whole redesign: saved state, the
+- **iOS:** TestFlight build 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
   one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
   failed; iPad passed.
