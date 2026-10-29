@@ -119,8 +119,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         failFileStreams(BackendError(code: "disconnected", message: "the backend was stopped"))
     }
 
-    /// Drops the current connection and reconnects right away, skipping any backoff wait. For after
-    /// sleep or a network change, when a remote link is likely dead but hasn't timed out yet.
+    /// Remembers the colours panes show in, and sends them (`client.colors`) now if connected to a daemon
+    /// that has the feature; `connect()` sends them after every hello.
     public func setTerminalColors(_ colors: TerminalColors?) {
         let send: Bool = locked {
             guard terminalColors != colors else { return false }
@@ -135,6 +135,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
+    /// Drops the current connection and reconnects right away, skipping any backoff wait. For after
+    /// sleep or a network change, when a remote link is likely dead but hasn't timed out yet.
     public func reconnectNow() {
         let current: ByteStream? = locked {
             skipBackoff = true

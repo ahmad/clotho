@@ -1,4 +1,5 @@
 @testable import ClothoKit
+import ClothoFake
 import Darwin
 import XCTest
 
@@ -130,5 +131,18 @@ final class ScriptedDaemon: ClothodTransport, @unchecked Sendable {
             frame += reply
             _ = frame.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         }
+    }
+}
+
+/// FakeBackend keeps what it was given, for app tests.
+final class FakeBackendColorsTests: XCTestCase {
+    func testRecordsTheLastColours() {
+        let fake = FakeBackend()
+        XCTAssertNil(fake.terminalColors)
+        fake.setTerminalColors(TerminalColors(ClothoPalette.light))
+        XCTAssertEqual(fake.terminalColors, TerminalColors(ClothoPalette.light))
+        fake.setTerminalColors(nil)
+        XCTAssertNil(fake.terminalColors)
+        XCTAssertEqual(fake.terminalColorsCalls, 2)
     }
 }

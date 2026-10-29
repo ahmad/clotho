@@ -25,6 +25,11 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     private var nextID: UInt64 = 1
     private var panes: [PaneID: FakePane] = [:]
     private var cwdTimer: DispatchSourceTimer?
+    private var colors: TerminalColors?
+    /// The colours last given to `setTerminalColors`, for tests (the fake has no apps to report them to).
+    public var terminalColors: TerminalColors? { locked { colors } }
+    /// How many times `setTerminalColors` was called.
+    public private(set) var terminalColorsCalls = 0
 
     public init() {
         (events, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
@@ -32,6 +37,13 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
 
     deinit {
         stop()
+    }
+
+    public func setTerminalColors(_ colors: TerminalColors?) {
+        locked {
+            self.colors = colors
+            terminalColorsCalls += 1
+        }
     }
 
     // MARK: Lifecycle
