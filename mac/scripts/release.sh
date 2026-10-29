@@ -5,8 +5,8 @@
 #
 #   scripts/release.sh [notes.html]
 #
-# Run it at the Mac itself: sign_update reads the private key from the login keychain, which is locked
-# over SSH. The key never goes anywhere else (README, "Releases"). Output, in build/release/:
+# sign_update reads the private key from the login keychain. Over SSH, unlock that first from ~/.keychain_pw
+# (README, "Releases"). The key never goes anywhere else (README, "Releases"). Output, in build/release/:
 #   Clotho-<version>-<build>.zip   upload to $CLOTHO_DOWNLOADS (default https://clotho.app/downloads/)
 #   appcast.xml                    replaces https://clotho.app/appcast.xml
 #
@@ -27,7 +27,7 @@ die() { print -u2 "release: $*"; exit 1; }
 TOOLS=$(scripts/sparkle-tools.sh)
 
 # The keychain's key must be the one the app trusts, or every update would be refused.
-KEYCHAIN_PUBLIC=$("$TOOLS/generate_keys" -p 2>/dev/null) || die "no Sparkle key in this Mac's keychain (or the keychain is locked: run this at the Mac, not over SSH)"
+KEYCHAIN_PUBLIC=$("$TOOLS/generate_keys" -p 2>/dev/null) || die "no Sparkle key in this Mac's keychain (or the keychain is locked: over SSH, unlock it from ~/.keychain_pw first)"
 [[ "$KEYCHAIN_PUBLIC" == "$(tr -d '[:space:]' < Resources/SparklePublicKey)" ]] \
   || die "the keychain's Sparkle key doesn't match Resources/SparklePublicKey"
 

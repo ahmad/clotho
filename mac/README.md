@@ -72,7 +72,9 @@ mac/build-app.sh --release
 
 Clotho updates itself with [Sparkle 2](https://sparkle-project.org): **Clotho › Check for Updates…**, plus a daily automatic check (Settings › Updates turns it off). It reads the appcast at `https://clotho.app/appcast.xml` and installs an update only if its zip is signed with Clotho's EdDSA key. The public key is in [`Resources/SparklePublicKey`](Resources) and goes into Info.plist as `SUPublicEDKey`. The private key exists only in the release Mac's login keychain, never in the repo. A build without `Resources/SparklePublicKey` has updates turned off, and Clotho Dev never updates.
 
-One-time setup, at the Mac itself (the keychain is locked over SSH):
+The key pair is made: [`Resources/SparklePublicKey`](Resources) holds the public half, and the private key is in macbook's login keychain. Over SSH the keychain is locked, but it can be unlocked for the session from `~/.keychain_pw`, as the TestFlight uploads do: `security unlock-keychain -p "$(cat ~/.keychain_pw)" ~/Library/Keychains/login.keychain-db`. After that, `generate_keys -p` and `scripts/release.sh`'s key check work over SSH too.
+
+How the key pair was made (one time, at the Mac):
 
 1. Make the key pair. This stores the private key in the login keychain and prints the public key:
    `"$(mac/scripts/sparkle-tools.sh)/generate_keys"`
