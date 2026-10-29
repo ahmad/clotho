@@ -240,9 +240,12 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
     /// Set when the daemon brought this pane back after a restart (`restore`); nil for a normal pane, and
     /// once dismissed (`pane.dismiss_restored`, or the user's first typing in it).
     public var restored: PaneRestore?
+    /// The git work tree the pane's folder is in (feature `git`); nil outside one.
+    public var git: PaneGit?
 
     public init(id: PaneID, cols: Int, rows: Int, pid: Int32? = nil, command: [String]? = nil, title: String? = nil,
-                cwd: String? = nil, seq: UInt64 = 0, exited: PaneExit? = nil, agent: AgentInfo? = nil, restored: PaneRestore? = nil) {
+                cwd: String? = nil, seq: UInt64 = 0, exited: PaneExit? = nil, agent: AgentInfo? = nil, restored: PaneRestore? = nil,
+                git: PaneGit? = nil) {
         self.id = id
         self.cols = cols
         self.rows = rows
@@ -254,7 +257,104 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
         self.exited = exited
         self.agent = agent
         self.restored = restored
+        self.git = git
     }
+}
+
+/// Where a pane is in git: its repo, branch (or detached commit), linked worktree and pull request.
+public struct PaneGit: Codable, Equatable, Sendable {
+    /// The repo's name, shared by all its worktrees.
+    public var repo: String
+    /// This worktree's top-level folder.
+    public var root: String?
+    /// "owner/name" when origin is on GitHub.
+    public var remote: String?
+    /// Nil when detached; `head` says where.
+    public var branch: String?
+    /// The short commit; nil for an unborn branch.
+    public var head: String?
+    /// A linked worktree; nil for the main one.
+    public var worktree: Worktree?
+    public var pr: PullRequest?
+    /// Why `pr` is nil: "none", "pending", "default_branch", "detached", "no_remote", "no_gh", "gh_auth",
+    /// "gh_error", "timeout"; others mean unknown.
+    public var prReason: String?
+
+    public struct Worktree: Codable, Equatable, Sendable {
+        /// Its dir name under .git/worktrees.
+        public var name: String
+        /// Its root, relative to the main worktree's (absolute when that can't be said).
+        public var path: String?
+
+        public init(name: String, path: String? = nil) {
+            self.name = name
+            self.path = path
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case repo, root, remote, branch, head, worktree, pr
+        case prReason = "pr_reason"
+    }
+
+    public struct PullRequest: Codable, Equatable, Sendable {
+        public enum State: String, Codable, Sendable { case open, draft, merged, closed }
+        public var number: Int
+        /// Unknown states read as nil, so a newer daemon's don't break decoding. "draft" wins over open.
+        public var state: State?
+        public var url: String?
+        /// One line, at most 120 characters.
+        public var title: String?
+
+        public init(number: Int, state: State?, url: String? = nil, title: String? = nil) {
+            self.number = number
+            self.state = state
+            self.url = url
+            self.title = title
+        }
+
+        enum CodingKeys: String, CodingKey { case number, state, url, title }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(number, forKey: .number)
+            try c.encodeIfPresent(state?.rawValue, forKey: .state)
+            try c.encodeIfPresent(url, forKey: .url)
+            try c.encodeIfPresent(title, forKey: .title)
+        }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            number = try c.decode(Int.self, forKey: .number)
+            state = (try? c.decodeIfPresent(String.self, forKey: .state)).flatMap { State(rawValue: $0) }
+            url = try c.decodeIfPresent(String.self, forKey: .url)
+            title = try c.decodeIfPresent(String.self, forKey: .title)
+        }
+    }
+
+    public init(repo: String, root: String? = nil, remote: String? = nil, branch: String?, head: String? = nil,
+                worktree: Worktree? = nil, pr: PullRequest? = nil, prReason: String? = nil) {
+        self.repo = repo
+        self.root = root
+        self.remote = remote
+        self.branch = branch
+        self.head = head
+        self.worktree = worktree
+        self.pr = pr
+        self.prReason = prReason
+    }
+
+    /// The branch, or the detached commit ("@a1b2c3d").
+    public var place: String { branch ?? head.map { "@\($0)" } ?? "detached" }
+
+    /// Compact, for a tab or a sidebar row: "main · #42".
+    public var short: String { [place, pr.map { "#\($0.number)" }].compactMap { $0 }.joined(separator: " · ") }
+
+    /// For the pane's status strip, without the PR (shown on its own): "clotho · main · fix-login".
+    public var summary: String { [repo, place, worktree?.name].compactMap { $0 }.joined(separator: " · ") }
+
+    /// What ⌘P matches and shows as a subtitle: branch, worktree and PR number ("#42").
+    public var searchText: String { [place, worktree?.name, pr.map { "#\($0.number)" }].compactMap { $0 }.joined(separator: " ") }
 }
 
 /// How a pane came back after a restart: a fresh shell in its folder, and the agent conversation the

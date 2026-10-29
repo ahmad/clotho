@@ -96,6 +96,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case restore
         /// `workspace.move` and `tab.move`: reorder workspaces, reorder or move tabs (0.1.22).
         case move
+        /// Panes carry `git`: repo, branch, worktree and pull request (0.1.23).
+        case git
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.

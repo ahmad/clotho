@@ -200,6 +200,16 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     var restoredNote: RestoredNote?
     /// Set once × is clicked, so the note doesn't flash back before the daemon's update arrives.
     var dismissedRestore = false
+    /// The git strip at the bottom (GitStrip.swift), while the pane is in a repo.
+    var gitStrip: GitStrip?
+    /// The pane's git info (nil outside a repo, or without the daemon's `git`), from the model on every sync.
+    var git: PaneGit? {
+        didSet {
+            guard git != oldValue else { return }
+            updateGitStrip()
+        }
+    }
+
     /// The pane's `restored` mark, from the model on every sync.
     var restored: PaneRestore? {
         didSet {
@@ -221,7 +231,10 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     private var flushScheduled = false
 
     var isFocusedPane = false {
-        didSet { updateBorder() }
+        didSet {
+            updateBorder()
+            if oldValue != isFocusedPane, git != nil { updateGitStrip() }
+        }
     }
     var showsFocusRing = false {
         didSet { updateBorder() }
@@ -406,7 +419,8 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         let reserve = NSScroller.preferredScrollerStyle == .legacy
             ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
         let width = bounds.width - Self.padding * 2 - reserve
-        let height = bounds.height - Self.padding * 2
+        // A pane in a repo keeps room for the git strip, whether or not it's focused.
+        let height = bounds.height - Self.padding * 2 - (size == nil ? gitStripHeight : 0)
         return Size(cols: max(2, Int(width / cell.width)), rows: max(1, Int(height / cell.height)))
     }
 
@@ -435,6 +449,7 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         // Anchored top-left, so a pane sized by another client lines up like a normal terminal.
         let frame = NSRect(origin: CGPoint(x: Self.padding, y: Self.padding), size: size)
         if terminal.frame != frame { terminal.frame = frame }
+        gitStrip?.frame = NSRect(x: 0, y: bounds.height - GitStrip.height, width: bounds.width, height: GitStrip.height)
         searchLayoutChanged()
         if wantsSubscription, bounds.width > 0, bounds.height > 0 { subscribe() }
         sendViewportIfNeeded()

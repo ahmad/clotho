@@ -52,7 +52,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        hello.featureNames = ["pane.keys", "agents", "fs", "restore", "move"]
+        hello.featureNames = ["pane.keys", "agents", "fs", "restore", "move", "git"]
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -348,6 +348,15 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
             guard moved != state else { return }
             state = moved
             publishState()
+        }
+    }
+
+    /// Sets a pane's git info (nil: outside a repo), as clothod's `git` reports it.
+    public func setGit(_ pane: PaneID, _ git: PaneGit?) {
+        locked {
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }) else { return }
+            state.panes[p].git = git
+            publishPane(at: p)
         }
     }
 

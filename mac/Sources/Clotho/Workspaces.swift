@@ -73,7 +73,9 @@ extension AppDelegate {
         }
         tabBar.machine = focusedMachine
         tabBar.workspace = workspace?.id
-        tabBar.update(tabs: tabs, selected: tab?.id)
+        var gits: [TabID: String] = [:]
+        for each in workspace?.tabs ?? [] { if let git = git(of: each, in: store) { gits[each.id] = git.short } }
+        tabBar.update(tabs: tabs, selected: tab?.id, gits: gits)
 
         // One view per pane on every connected machine, kept while the pane exists so its screen survives
         // tab and machine switches.
@@ -106,6 +108,7 @@ extension AppDelegate {
             host.isFocusedPane = id == focusedPane
             host.showsFocusRing = shown.count > 1 && maximizedPane == nil
             host.restored = state.pane(id)?.restored
+            host.git = git(id, in: store)
         }
 
         let machineName = focusedConnection.title

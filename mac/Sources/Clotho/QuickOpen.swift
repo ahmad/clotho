@@ -143,7 +143,13 @@ extension AppDelegate {
             for workspace in state.workspaces {
                 let here = key == focusedMachine && workspace.id == currentWorkspace
                 let workspaceID = "ws|\(key)|\(workspace.id)"
-                all.append(CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: workspace.name, subtitle: session.title, id: workspaceID),
+                // Git (feature `git`): the active tab's branch on the workspace's row, and each tab's branch,
+                // worktree and PR number on its own, all searchable ("#42" or "42" finds the PR's tab).
+                let activeTab = workspace.tabs.first { $0.id == workspace.activeTab } ?? workspace.tabs.first
+                let workspaceGit = activeTab.flatMap { git(of: $0, in: store) }
+                all.append(CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: workspace.name,
+                                                               subtitle: [session.title, workspaceGit?.place].compactMap { $0 }.joined(separator: " · "),
+                                                               id: workspaceID),
                                            tier: here ? 1 : 2,
                                            dot: agentBadge(machine: key, panes: workspace.tabs.flatMap(\.layout.panes))))
                 // Its last active tab, by the model's rules (LocalFocus), as a sidebar click.
@@ -153,7 +159,7 @@ extension AppDelegate {
                     let panes = tab.layout.panes
                     let agent = Self.mostUrgent(panes.compactMap { state.pane($0)?.agent })
                     let entry = CommandBarEntry(item: QuickOpenItem(kind: .tab, title: store.displayTitle(of: tab),
-                                                                    subtitle: "\(session.title) · \(workspace.name)", id: id),
+                                                                    subtitle: ([session.title, workspace.name] + [git(of: tab, in: store)?.searchText].compactMap { $0 }).joined(separator: " · "), id: id),
                                                 tier: here ? 1 : 2, dot: agentBadge(machine: key, panes: panes),
                                                 detail: agent.map(Self.agentDetail), panes: panes.count)
                     all.append(entry)

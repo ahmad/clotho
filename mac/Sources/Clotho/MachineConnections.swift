@@ -262,18 +262,41 @@ extension AppDelegate {
 
     // MARK: Sidebar
 
+    // MARK: Git (feature `git`; nothing shows against daemons without it)
+
+    /// A pane's git info, when its daemon has the feature.
+    func git(_ pane: PaneID?, in store: ModelStore) -> PaneGit? {
+        guard store.features.contains(.git), let pane else { return nil }
+        return store.state.pane(pane)?.git
+    }
+
+    /// A tab's git info: its active pane's.
+    func git(of tab: Tab, in store: ModelStore) -> PaneGit? { git(tab.activePane, in: store) }
+
+    /// Each workspace's branch, from its active tab (else its first).
+    func workspaceBranches(_ store: ModelStore) -> [WorkspaceID: String] {
+        var branches: [WorkspaceID: String] = [:]
+        for workspace in store.state.workspaces {
+            guard let tab = workspace.tabs.first(where: { $0.id == workspace.activeTab }) ?? workspace.tabs.first,
+                  let git = git(of: tab, in: store) else { continue }
+            branches[workspace.id] = git.place
+        }
+        return branches
+    }
+
     /// The sidebar's groups: this Mac, then each saved machine, connected or not.
     func sidebarGroups() -> [SidebarGroup] {
         var groups: [SidebarGroup] = []
         let local = connections[Self.localKey]!
         groups.append(SidebarGroup(key: Self.localKey, title: local.title, status: connectionStatus(local.store.connection, isLocal: true),
                                    workspaces: local.store.state.workspaces, selected: selectedWorkspace(in: local),
-                                   isConnected: true, isLocal: true, badges: workspaceBadges(local)))
+                                   isConnected: true, isLocal: true, badges: workspaceBadges(local), branches: workspaceBranches(local.store)))
         for machine in remoteMachines {
             if let session = connections[machine.key] {
                 groups.append(SidebarGroup(key: machine.key, title: machine.label, status: connectionStatus(session.store.connection, isLocal: false),
                                            workspaces: session.store.state.workspaces, selected: selectedWorkspace(in: session),
-                                           isConnected: true, isLocal: false, badges: workspaceBadges(session)))
+                                           isConnected: true, isLocal: false, badges: workspaceBadges(session),
+                                           branches: workspaceBranches(session.store)))
             } else {
                 // Not connected: a grey dot when ssh works, red with ssh's message when it doesn't.
                 let check = machine.id.flatMap { machineStatus[$0] } ?? .unknown
@@ -325,6 +348,8 @@ struct SidebarGroup {
     let isLocal: Bool
     /// Agent badges for workspaces: each one's most urgent agent's.
     let badges: [WorkspaceID: NSColor]
+    /// Each workspace's branch, from its active tab's active pane (feature `git`).
+    var branches: [WorkspaceID: String] = [:]
 }
 
 /// The network path the monitor saw last (its handler runs on one serial queue).

@@ -179,6 +179,9 @@ class ChromeItem: NSView, HoverRefreshing, NSDraggingSource {
 
     // MARK: Dragging (Drag.swift has the drop side)
 
+    /// A tab's git suffix, when it has one (tests).
+    var gitSuffix: NSTextField?
+
     /// What dragging this item carries (a tab or a workspace); nil: it doesn't drag.
     var dragPayload: (() -> ChromeDrag.Payload?)?
     private var mouseDownAt: NSPoint?
@@ -506,15 +509,17 @@ final class TabBarView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?) {
-        latest = { [weak self] in self?.update(tabs: tabs, selected: selected) }
+    /// `gits`: each tab's git suffix ("main · #42"), shown dim after its title.
+    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?,
+                gits: [TabID: String] = [:]) {
+        latest = { [weak self] in self?.update(tabs: tabs, selected: selected, gits: gits) }
         // Held while a title is edited, or a drag is in flight (rebuilding would remove what's dragged).
         if items.values.contains(where: { $0.item.isEditing }) || ChromeDrag.isActive {
             pending = latest
             return
         }
         // Only the selection changed (a click): the tabs stay, so one being pressed can still be dragged.
-        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, badge: $0.badge) }
+        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, badge: $0.badge, git: gits[$0.id]) }
         if shape == lastShape, !items.isEmpty {
             for (id, entry) in items { entry.item.isSelected = id == selected }
             return
@@ -537,7 +542,26 @@ final class TabBarView: NSView {
             // there: nothing in a tab moves when a dot or the × comes and goes.
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = Self.dotSlot }
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
-            item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
+            if let git = gits[tab.id] {
+                // The git suffix keeps up to 45% of the tab; the title truncates first. Neither moves the tab's width.
+                let suffix = NSTextField(labelWithString: git)
+                suffix.font = NSFont.systemFont(ofSize: s(11))
+                suffix.textColor = Theme.faintText
+                suffix.lineBreakMode = .byTruncatingTail
+                suffix.translatesAutoresizingMaskIntoConstraints = false
+                suffix.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
+                item.label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                item.addSubview(suffix)
+                NSLayoutConstraint.activate([
+                    suffix.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)),
+                    suffix.centerYAnchor.constraint(equalTo: item.label.centerYAnchor),
+                    suffix.widthAnchor.constraint(lessThanOrEqualTo: item.widthAnchor, multiplier: 0.45),
+                    item.label.trailingAnchor.constraint(equalTo: suffix.leadingAnchor, constant: s(-6)),
+                ])
+                item.gitSuffix = suffix
+            } else {
+                item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
+            }
             item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
             item.dragPayload = { [weak self] in
@@ -585,7 +609,7 @@ final class TabBarView: NSView {
     /// The last tabs built, to tell a selection-only update apart.
     private var lastShape: [TabShape]?
     private struct TabShape: Equatable {
-        var id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?
+        var id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?, git: String?
     }
 
     /// Every tab's width: the bar shared equally, between a minimum and a maximum. It depends only on
@@ -1099,7 +1123,7 @@ final class SidebarView: NSView {
             for workspace in group.workspaces {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 parts.append("w \(workspace.id) \(heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name) "
-                             + "\(String(describing: group.badges[workspace.id]))")
+                             + "\(String(describing: group.badges[workspace.id])) \(group.branches[workspace.id] ?? "")")
             }
         }
         return parts.joined(separator: "\n")
@@ -1148,6 +1172,7 @@ final class SidebarView: NSView {
         rows[rowKey] = (row, name)
         row.isSelected = workspace.id == group.selected
         row.setBadge(group.badges[workspace.id])
+        row.setBranch(group.branches[workspace.id])
         add(row, height: Self.rowHeight)
         let item = Item.workspace(key, workspace.id)
         order.append(item)
@@ -1588,6 +1613,35 @@ final class WorkspaceRow: SidebarRow {
     @objc private func newTabTapped() { onNewTab?() }
 
     override var hasTrailingAction: Bool { onNewTab != nil }
+
+    /// The workspace's branch, small and grey after its name; it truncates before the name does.
+    private(set) var branch: NSTextField?
+
+    func setBranch(_ text: String?) {
+        guard let text, !text.isEmpty else {
+            branch?.removeFromSuperview()
+            branch = nil
+            return
+        }
+        let field = branch ?? {
+            let field = NSTextField(labelWithString: "")
+            field.font = NSFont.systemFont(ofSize: s(11))
+            field.textColor = Theme.faintText
+            field.lineBreakMode = .byTruncatingTail
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            label.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+            addSubview(field)
+            NSLayoutConstraint.activate([
+                field.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: s(6)),
+                field.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+                field.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Self.dotInset + s(10))),
+            ])
+            branch = field
+            return field
+        }()
+        field.stringValue = text
+    }
 }
 
 /// A strip under the tab bar for things that need the user's attention but shouldn't block anything,
