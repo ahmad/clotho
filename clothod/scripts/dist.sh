@@ -39,6 +39,15 @@ if [ -f RELEASED ] && { [ "$(wc -l < RELEASED)" -ne 1 ] || ! grep -qx '[0-9][0-9
     cat RELEASED >&2
     exit 1
 fi
+# dist/ holds the last release (clotho-mac never syncs it); RELEASED older than that means a sync
+# from a clone that never got the new RELEASED put an old one back. Comparing against it would
+# allow re-releasing a version.
+last=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "${DIST_DIR:-dist}/manifest.json" 2>/dev/null || true)
+if [ "$dev" = 0 ] && [ -n "$last" ] && newer "$last" "$released"; then
+    echo "dist: RELEASED says $released, but ${DIST_DIR:-dist}/ holds release $last. Copy RELEASED from where" >&2
+    echo "dist: $last was built (or write it from ${DIST_DIR:-dist}/manifest.json) and commit it first." >&2
+    exit 1
+fi
 if [ "$dev" = 0 ] && ! newer "$version" "$released"; then
     echo "dist: version $version is not newer than the last release ($released)." >&2
     echo "dist: bump [workspace.package] version in Cargo.toml for a release, or pass --dev for a test build." >&2
@@ -110,6 +119,8 @@ cat "$final/manifest.json"
 if [ "$dev" = 0 ]; then
     echo "$version" > RELEASED
     echo "dist: released $version (recorded in RELEASED)"
+    echo "dist: copy RELEASED into the clone and commit it now: a clotho-mac sync from a clone that" >&2
+    echo "dist: still says $released puts that back here." >&2
 else
     echo "dist: dev build of $version (not a release)"
 fi
