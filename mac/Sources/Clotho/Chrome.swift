@@ -121,6 +121,10 @@ class ChromeItem: NSView {
     /// For tests: hover as if the pointer came over the item or left it.
     func setHovering(_ on: Bool) { hovering = on }
 
+    /// A click on a row or tab acts even when the window is in the background, the way Finder's
+    /// sidebar does, instead of only bringing the window forward (which felt like a missed click).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 { onDoubleClick?() } else { onClick?() }
     }
@@ -693,6 +697,14 @@ final class SidebarView: NSView {
             pending = latest
             return
         }
+        // A click changes only the selection: move it on the rows there are rather than building them
+        // all again (a rebuild costs tens of milliseconds, and it delayed the click's highlight).
+        let signature = layoutSignature(agents: agents, unreachable: unreachable, groups: groups)
+        if signature == lastSignature, column.arrangedSubviews.count > 0 {
+            applySelection(groups)
+            return
+        }
+        lastSignature = signature
         rows = [:]
         tabRows = [:]
         order = []
@@ -793,6 +805,60 @@ final class SidebarView: NSView {
                 return (row is TabRow ? "  " : "") + row.label.stringValue + marks
             }.joined(separator: " | "))
         }
+    }
+
+    /// Everything the rows show, apart from which one is selected.
+    private var lastSignature = ""
+
+    private func layoutSignature(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) -> String {
+        var parts: [String] = ["\(UIScale.factor) \(effectiveAppearance.name.rawValue)", collapsed.sorted().joined(separator: ","), collapsedWorkspaces.sorted().joined(separator: ","),
+                               "\(UserDefaults.standard.bool(forKey: "AgentsOthersExpanded"))"]
+        for agent in agents {
+            parts.append("a \(agent.machine) \(agent.machineName) \(agent.pane) \(agent.paneTitle ?? "") \(agent.tabTitle ?? "") "
+                         + "\(agent.workspace?.name ?? "") \(agent.canReply) \(agent.canMute) \(agent.info)")
+        }
+        for machine in unreachable { parts.append("u \(machine.name) \(machine.reason)") }
+        for group in groups {
+            parts.append("g \(group.key) \(group.title) \(String(describing: group.status.color)) \(group.status.text ?? "") "
+                         + "\(group.isConnected) \(group.isLocal)")
+            for workspace in group.workspaces {
+                let rowKey = Self.rowKey(group.key, workspace.id)
+                parts.append("w \(workspace.id) \(heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name) "
+                             + "\(String(describing: group.badges[workspace.id]))")
+                for tab in group.tabs[workspace.id] ?? [] {
+                    let title = heldNames.title(for: Self.tabKey(group.key, tab.id), model: tab.title) ?? tab.title
+                    parts.append("t \(tab.id) \(title) \(tab.custom ?? "") \(String(describing: tab.badge))")
+                }
+            }
+        }
+        return parts.joined(separator: "\n")
+    }
+
+    /// The selection rules of `addWorkspace`, applied to the rows already there.
+    private func applySelection(_ groups: [SidebarGroup]) {
+        selectedItem = nil
+        for group in groups where !collapsed.contains(group.key) && group.isConnected {
+            for workspace in group.workspaces {
+                let rowKey = Self.rowKey(group.key, workspace.id)
+                guard let row = rows[rowKey]?.row else { continue }
+                let expanded = !collapsedWorkspaces.contains(rowKey)
+                let tabs = group.tabs[workspace.id] ?? []
+                let focused = workspace.id == group.selected
+                let tabShown = expanded && tabs.contains { $0.id == group.selectedTab }
+                row.isSelected = focused && !tabShown
+                row.holdsSelection = focused && tabShown
+                if row.isSelected { selectedItem = .workspace(group.key, workspace.id) }
+                guard expanded else { continue }
+                for tab in tabs {
+                    guard let tabRow = tabRows[Self.tabKey(group.key, tab.id)]?.row else { continue }
+                    tabRow.isSelected = tab.id == group.selectedTab
+                    if tabRow.isSelected { selectedItem = .tab(group.key, workspace.id, tab.id) }
+                }
+            }
+        }
+        if let cursor, !order.contains(cursor) { self.cursor = selectedItem ?? order.first }
+        updateCursor()
+        if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: selection moved") }
     }
 
     private var isEditing: Bool {
@@ -1191,6 +1257,8 @@ final class MachineHeader: NSView {
 
     override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
         guard let onToggle else { return window?.performDrag(with: event) ?? () }
         onToggle()
@@ -1570,6 +1638,7 @@ final class OutlineButton: NSView {
 
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseDown(with event: NSEvent) { onClick?() }
     override func accessibilityPerformPress() -> Bool { onClick?(); return true }
 }

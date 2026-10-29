@@ -25,10 +25,19 @@ final class WorkspaceRowTests: XCTestCase {
         XCTAssertEqual(tab.badge.frame.midY, tab.bounds.midY, accuracy: 0.5)
     }
 
+    /// The first click into a background window selects, as in Finder's sidebar, instead of only
+    /// bringing the window forward.
+    func testRowsTakeTheFirstClick() {
+        XCTAssertTrue(WorkspaceRow().acceptsFirstMouse(for: nil))
+        XCTAssertTrue(TabRow().acceptsFirstMouse(for: nil))
+    }
+
     func testTabsIndentPastTheWorkspaceName() {
         let workspace = laidOut(WorkspaceRow(), "Platform")
         let tab = laidOut(TabRow(), "zsh")
-        XCTAssertEqual(workspace.label.frame.minX, MachineHeader.nameInset, accuracy: 1, "in line with the machine's name")
+        // Constraints place the alignment rect, which NSTextField keeps a little inside its frame.
+        XCTAssertEqual(workspace.label.alignmentRect(forFrame: workspace.label.frame).minX, MachineHeader.nameInset, accuracy: 1,
+                       "in line with the machine's name")
         XCTAssertGreaterThan(tab.label.frame.minX, workspace.label.frame.minX + s(8))
         XCTAssertLessThan(tab.label.font!.pointSize, workspace.label.font!.pointSize, "tabs a touch smaller")
         XCTAssertNotNil(workspace.chevron)

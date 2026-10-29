@@ -681,6 +681,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let x = step.hasPrefix("chevron:") ? s(17) : row.bounds.midX
                     let point = row.convert(NSPoint(x: x, y: row.bounds.midY), to: nil)
                     let mods = parts.dropFirst().joined(separator: ",")
+                    log("TypeText: \(step) hits '\(row.label.stringValue)' at \(Int(point.x)),\(Int(point.y))"
+                        + (row.visibleRect.height < row.bounds.height ? " (scrolled out of view)" : ""))
                     return postTestClick("\(point.x),\(point.y)" + (mods.isEmpty ? "" : "," + mods))
                 }
                 if step == "focussidebar" { return focusSidebar(nil) }
@@ -810,6 +812,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard numbers.count == 2, parts.dropFirst(2).allSatisfy({ flags[$0] != nil }) else { return log("TypeText: bad click \(spec)") }
         let modifiers = parts.dropFirst(2).reduce(into: NSEvent.ModifierFlags()) { $0.formUnion(flags[$1]!) }
         window.makeKey()
+        if UserDefaults.standard.bool(forKey: "TraceClicks"), let content = window.contentView {
+            let hit = content.hitTest(content.convert(NSPoint(x: numbers[0], y: numbers[1]), from: nil))
+            log("TypeText: click lands on \(hit.map { String(describing: type(of: $0)) } ?? "nothing"), key \(window.isKeyWindow), active \(NSApp.isActive)")
+        }
         for type in right ? [NSEvent.EventType.rightMouseDown, .rightMouseUp] : [.leftMouseDown, .leftMouseUp] {
             guard let event = NSEvent.mouseEvent(with: type, location: NSPoint(x: numbers[0], y: numbers[1]), modifierFlags: modifiers,
                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
@@ -1198,13 +1204,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let row = all(WorkspaceRow.self, in: sidebar).first
         let tabRow = all(TabRow.self, in: sidebar).first
         let tab = all(ChromeItem.self, in: tabBar).first
-        let fmt = { (v: CGFloat) in String(format: "%.1f", v) }
-        log("frames at \(Int((UIScale.factor * 100).rounded()))%: tab bar h \(fmt(tabBar.frame.height)), tab h \(fmt(tab?.frame.height ?? 0)) "
-            + "font \(fmt(tab?.label.font?.pointSize ?? 0)), header h \(fmt(header?.frame.height ?? 0)), "
-            + "workspace row h \(fmt(row?.frame.height ?? 0)) font \(fmt(row?.label.font?.pointSize ?? 0)) x \(fmt(row?.label.frame.minX ?? 0)), "
-            + "tab row h \(fmt(tabRow?.frame.height ?? 0)) font \(fmt(tabRow?.label.font?.pointSize ?? 0)) x \(fmt(tabRow?.label.frame.minX ?? 0)), "
-            + "dots \(fmt(row.map { $0.bounds.width - $0.badge.frame.midX } ?? 0))/\(fmt(tabRow.map { $0.bounds.width - $0.badge.frame.midX } ?? 0)) from the edge, "
-            + "terminal \(fmt(terminalFontSize)) pt")
+        let fmt = { (v: CGFloat) -> String in String(format: "%.1f", v) }
+        func h(_ v: NSView?) -> String { fmt(v?.frame.height ?? 0) }
+        func font(_ v: ChromeItem?) -> String { fmt(v?.label.font?.pointSize ?? 0) }
+        func x(_ v: ChromeItem?) -> String { fmt(v?.label.frame.minX ?? 0) }
+        func dot(_ v: SidebarRow?) -> String { fmt(v.map { $0.bounds.width - $0.badge.frame.midX } ?? 0) }
+        var parts: [String] = []
+        parts.append("frames at \(Int((UIScale.factor * 100).rounded()))%: tab bar h \(fmt(tabBar.frame.height)), tab h \(h(tab)) font \(font(tab))")
+        parts.append("header h \(h(header))")
+        parts.append("workspace row h \(h(row)) font \(font(row)) x \(x(row))")
+        parts.append("tab row h \(h(tabRow)) font \(font(tabRow)) x \(x(tabRow))")
+        parts.append("dots \(dot(row))/\(dot(tabRow)) from the edge")
+        parts.append("terminal \(fmt(terminalFontSize)) pt")
+        log(parts.joined(separator: ", "))
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

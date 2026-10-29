@@ -65,6 +65,26 @@ final class SidebarTabsTests: XCTestCase {
         XCTAssertTrue(rows[1].badge.isHidden, "a tab with nothing running has no dot")
     }
 
+    /// A click changes only the selection, and the rows there are take it (no rebuild); anything else
+    /// rebuilds them.
+    func testSelectionMovesWithoutRebuilding() {
+        update()
+        let before = rows
+        update(group(selectedTab: 20, selected: 2))
+        XCTAssertTrue(zip(before, rows).allSatisfy { $0 === $1 }, "the same rows")
+        XCTAssertTrue(rows[4].isSelected, "notes selected")
+        XCTAssertFalse(rows[2].isSelected)
+        XCTAssertFalse(rows[0].holdsSelection)
+        XCTAssertTrue(rows[3].holdsSelection, "Docs holds it now")
+
+        var renamed = group(selectedTab: 20, selected: 2)
+        renamed.tabs[2] = [SidebarTab(id: 20, title: "todo", custom: "todo", badge: .systemGreen)]
+        update(renamed)
+        XCTAssertFalse(rows[4] === before[4], "a new title rebuilds")
+        XCTAssertEqual(titles.last, "  todo")
+        XCTAssertTrue(rows[4].isSelected)
+    }
+
     func testCollapseHidesTabsAndRaisesTheMostUrgentDot() throws {
         update()
         sidebar.setExpanded(false, "local", 1)
