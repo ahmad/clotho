@@ -1,11 +1,16 @@
-# Status and handoff (2026-10-29, updated after Mac 1.0.4 and clothod 0.1.22)
+# Status and handoff (2026-10-29, updated after Mac 1.0.5 and clothod 0.1.24)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.22** runs on devbox, macbook and imac, upgraded in place. 0.1.22: workspace.move and
+- **clothod 0.1.24** runs on devbox, macbook and imac, upgraded in place. 0.1.24: on macOS, serve and
+  holder always start in the login session's launchd namespace (Aqua), never an SSH session's; a
+  daemon left in a dead SSH namespace lost DNS, opendirectoryd, trustd and the keychain (imac's shells
+  broke this way; imac was restarted with the user's OK and now runs holder 2418 / serve 2417, Aqua).
+  `clothod ps` shows `launchd: <ns>`; hello carries namespace. 0.1.23: per-pane git info (branch,
+  worktree, PR via the machine's own gh). 0.1.22: workspace.move and
   tab.move, and agent sessions kept in the holder meta. 0.1.21: restore after restart (layout.json in
   the state dir; `shutdown --forget` clears it). 0.1.20: client.colors (so
   OSC 10/11/4 and mode 2031 follow the app's light/dark palette). Earlier: 0.1.17 The holders (1799611, 9573
@@ -18,7 +23,8 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.4, build 202610291948 (1beeb43, with clothod 0.1.22): drag to
+- **The Mac app is public:** Clotho 1.0.5, build 202610292040 (c59bc9c, with clothod 0.1.23): git
+  branch, worktree and PR in the tab bar, sidebar, pane strip and ⌘P. 1.0.4 drag to
   reorder and move tabs. 1.0.3 restore note, 1.0.2 rename focus and ⇧⌘ shortcuts, 1.0.1 light mode; 1.0.0 was
   build 202610291513 (at ee15de6). The user updated 1.0.0 → 1.0.1 through Sparkle (first real update, OK).
   Both are Developer ID signed,
@@ -43,7 +49,9 @@ rule. This file has where things stand. The orchestrator keeps it current.
   Live Activity.
 - **TestFlight:** the orchestrator uploads with scripts/testflight-remote. The key ids are in
   ~/.config/clotho/asc.env on devbox.
-- **The Mac's disk:** about 28 GiB free. test-all, dist, build.sh test and testflight-remote all
+- **Next Mac release, 1.0.6:** bundles clothod 0.1.24 plus a notice when a machine's shells lack
+  system services ("Restart Shells…", with a confirmation). In progress with mac.
+- **The Mac's disk:** about 27 GiB free (it dipped to ~12 GiB during 0.1.24; one dip was approved). test-all, dist, build.sh test and testflight-remote all
   clean up after themselves.
 
 ## Waiting on the user
