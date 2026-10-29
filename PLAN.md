@@ -403,3 +403,6 @@ clothod release, app install or TestFlight upload still needs the user's go when
   `clotho-notary` profile, and the Sparkle key pair (public key in mac/Resources/SparklePublicKey).
 - The first public release follows the sidebar work: a notarized build, the zip in /downloads, the
   appcast, and a Download button on the landing page.
+- Hosting (user decision, 2026-10-29): the zip is a static file in the clotho.app Vercel project
+  (~/Projects/clotho.app), beside /downloads and /appcast.xml. Work starts now, in parallel. The
+  first public build waits for the sidebar fixes and a Developer ID-signed clothod (0.1.19).
