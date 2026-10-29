@@ -303,7 +303,10 @@ pub fn failure_reason(stderr: &str, code: Option<i32>) -> &'static str {
     let e = stderr.to_ascii_lowercase();
     if e.contains("no pull requests found") || e.contains("no open pull requests") {
         "none"
-    } else if code == Some(4) || e.contains("gh auth login") || e.contains("not logged") || e.contains("authentication") {
+    } else if code == Some(4)
+        || ["gh auth login", "not logged", "authentication", "bad credentials", "http 401"].iter().any(|w| e.contains(w))
+        || (e.contains("token") && e.contains("invalid"))
+    {
         "gh_auth"
     } else {
         "gh_error"
@@ -548,6 +551,8 @@ mod tests {
         }
         assert_eq!(failure_reason("no pull requests found for branch \"x\"", Some(1)), "none");
         assert_eq!(failure_reason("To get started with GitHub CLI, please run:  gh auth login", Some(4)), "gh_auth");
+        assert_eq!(failure_reason("HTTP 401: Bad credentials (https://api.github.com/graphql)\nTry authenticating with:  gh auth login", Some(1)), "gh_auth");
+        assert_eq!(failure_reason("The token in keyring is invalid.", Some(1)), "gh_auth");
         assert_eq!(failure_reason("error connecting to api.github.com", Some(1)), "gh_error");
     }
 
