@@ -25,22 +25,13 @@ final class SidebarHoverTests: XCTestCase {
         window.close()
     }
 
-    /// Workspaces `ids`, each with three tabs (id * 10 + 0, 1, 2); the first is selected.
+    /// Workspaces `ids`, one tab each; the first is selected.
     private func group(_ ids: [WorkspaceID]) -> SidebarGroup {
-        var workspaces: [Workspace] = []
-        var tabs: [WorkspaceID: [SidebarTab]] = [:]
-        for id in ids {
-            let tabIDs: [TabID] = [id * 10, id * 10 + 1, id * 10 + 2]
-            let modelTabs: [Tab] = tabIDs.map { tab in
-                let pane = PaneID(tab * 10)
-                return Tab(id: tab, activePane: pane, layout: .pane(pane))
-            }
-            workspaces.append(Workspace(id: id, name: "Workspace \(id)", tabs: modelTabs))
-            tabs[id] = tabIDs.map { SidebarTab(id: $0, title: "tab \($0)", custom: nil, badge: nil) }
+        let workspaces = ids.map { id in
+            Workspace(id: id, name: "Workspace \(id)", tabs: [Tab(id: TabID(id * 10), activePane: PaneID(id * 100), layout: .pane(PaneID(id * 100)))])
         }
         return SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces,
-                            selected: ids.first ?? 1, isConnected: true, isLocal: true, badges: [:],
-                            tabs: tabs, selectedTab: nil)
+                            selected: ids.first ?? 1, isConnected: true, isLocal: true, badges: [:])
     }
 
     private func update(_ ids: [WorkspaceID]) {
@@ -78,32 +69,30 @@ final class SidebarHoverTests: XCTestCase {
 
     func testOnlyTheRowUnderAStillPointerHovers() throws {
         update([1, 2, 3])
-        let target = rows.first { $0.label.stringValue == "tab 21" }!
+        let target = rows.first { $0.label.stringValue == "Workspace 2" }!
         let fixed = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil)
         point(fixed)
         sidebar.refreshHover()
-        XCTAssertEqual(hovered.map(\.label.stringValue), ["tab 21"])
+        XCTAssertEqual(hovered.map(\.label.stringValue), ["Workspace 2"])
 
         // Late or spurious enter events, as AppKit sends while rows slide under the pointer: each is
         // checked against where the pointer is.
         rows.forEach { $0.mouseEntered(with: entered()) }
-        XCTAssertEqual(hovered.map(\.label.stringValue), ["tab 21"])
+        XCTAssertEqual(hovered.map(\.label.stringValue), ["Workspace 2"])
 
-        // Collapse workspace 1: every row below it moves up under the still pointer.
-        sidebar.setExpanded(false, "local", 1)
-        sidebar.layoutSubtreeIfNeeded()
-        settle()
+        // Workspace 1 closes: every row below it moves up under the still pointer.
+        update([2, 3])
         let now = try XCTUnwrap(row(at: fixed))
-        XCTAssertNotEqual(now.label.stringValue, "tab 21", "a different row is under the pointer now")
+        XCTAssertNotEqual(now.label.stringValue, "Workspace 2", "a different row is under the pointer now")
         XCTAssertEqual(hovered.map(\.label.stringValue), [now.label.stringValue])
 
         // A rebuild with a workspace added on top moves everything down.
-        update([4, 1, 2, 3])
+        update([4, 5, 2, 3])
         XCTAssertLessThanOrEqual(hovered.count, 1)
         XCTAssertEqual(hovered.first.map(\.label.stringValue), row(at: fixed)?.label.stringValue)
 
         // Scrolling moves rows under it too.
-        update(Array(1...12))
+        update(Array(1...40))
         let clip = try XCTUnwrap(all(NSClipView.self).first { $0.documentView?.frame.height ?? 0 > $0.bounds.height })
         clip.scroll(to: NSPoint(x: 0, y: s(150)))
         XCTAssertLessThanOrEqual(hovered.count, 1)
@@ -114,7 +103,7 @@ final class SidebarHoverTests: XCTestCase {
     /// The bug: a row's visibleRect reaches past its bounds (macOS 14+), so a refresh with the pointer over
     /// one row lit them all.
     func testARowsVisiblePartIsWithinItsBounds() {
-        update([1, 2])
+        update([1, 2, 3])
         for row in rows {
             XCTAssertTrue(row.bounds.contains(Pointer.visiblePart(of: row)) || Pointer.visiblePart(of: row).isEmpty)
         }
@@ -125,7 +114,7 @@ final class SidebarHoverTests: XCTestCase {
     }
 
     func testNothingHoversOnceThePointerLeaves() {
-        update([1, 2])
+        update([1, 2, 3])
         let target = rows[2]
         point(target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil))
         sidebar.refreshHover()
@@ -148,7 +137,7 @@ final class SidebarHoverTests: XCTestCase {
 
         // ... and by a selection move (the fast path) or a rebuild.
         rows.forEach { $0.setHovering(true) }
-        update([1, 2])
+        update([1, 2, 3])
         XCTAssertFalse(anythingHovered)
     }
 }

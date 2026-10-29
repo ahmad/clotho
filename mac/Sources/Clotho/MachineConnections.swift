@@ -267,14 +267,12 @@ extension AppDelegate {
         let local = connections[Self.localKey]!
         groups.append(SidebarGroup(key: Self.localKey, title: local.title, status: connectionStatus(local.store.connection, isLocal: true),
                                    workspaces: local.store.state.workspaces, selected: selectedWorkspace(in: local),
-                                   isConnected: true, isLocal: true, badges: workspaceBadges(local),
-                                   tabs: sidebarTabs(local), selectedTab: selectedTab(in: local)))
+                                   isConnected: true, isLocal: true, badges: workspaceBadges(local)))
         for machine in remoteMachines {
             if let session = connections[machine.key] {
                 groups.append(SidebarGroup(key: machine.key, title: machine.label, status: connectionStatus(session.store.connection, isLocal: false),
                                            workspaces: session.store.state.workspaces, selected: selectedWorkspace(in: session),
-                                           isConnected: true, isLocal: false, badges: workspaceBadges(session),
-                                           tabs: sidebarTabs(session), selectedTab: selectedTab(in: session)))
+                                           isConnected: true, isLocal: false, badges: workspaceBadges(session)))
             } else {
                 // Not connected: a grey dot when ssh works, red with ssh's message when it doesn't.
                 let check = machine.id.flatMap { machineStatus[$0] } ?? .unknown
@@ -297,22 +295,6 @@ extension AppDelegate {
             badges[workspace.id] = agentBadge(machine: session.key, panes: workspace.tabs.flatMap(\.layout.panes))
         }
         return badges
-    }
-
-    private func sidebarTabs(_ session: MachineConnection) -> [WorkspaceID: [SidebarTab]] {
-        let store = session.store
-        var tabs: [WorkspaceID: [SidebarTab]] = [:]
-        for workspace in store.state.workspaces {
-            tabs[workspace.id] = workspace.tabs.map {
-                SidebarTab(id: $0.id, title: store.displayTitle(of: $0), custom: $0.title,
-                           badge: agentBadge(machine: session.key, panes: $0.layout.panes))
-            }
-        }
-        return tabs
-    }
-
-    private func selectedTab(in session: MachineConnection) -> TabID? {
-        session.key == focusedMachine ? session.store.focusedTab?.id : nil
     }
 
     private func selectedWorkspace(in session: MachineConnection) -> WorkspaceID? {
@@ -340,21 +322,8 @@ struct SidebarGroup {
     /// Connected (or connecting) machines list their workspaces; others offer Connect.
     let isConnected: Bool
     let isLocal: Bool
-    /// Agent badges for workspaces: each one's most urgent tab's, for a collapsed workspace.
+    /// Agent badges for workspaces: each one's most urgent agent's.
     let badges: [WorkspaceID: NSColor]
-    /// Each workspace's tabs, in order.
-    var tabs: [WorkspaceID: [SidebarTab]] = [:]
-    /// The focused tab, on the focused machine.
-    var selectedTab: TabID? = nil
-}
-
-/// A tab as the sidebar lists it under its workspace.
-struct SidebarTab: Equatable {
-    let id: TabID
-    let title: String
-    /// Whether the user named it (renaming starts from its name rather than the shown title).
-    let custom: String?
-    let badge: NSColor?
 }
 
 /// The network path the monitor saw last (its handler runs on one serial queue).

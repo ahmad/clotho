@@ -88,8 +88,6 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Actual Terminal Text Size", key: "0", modifiers: [.command, .option], action: #selector(terminalActualSize(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:))),
             Shortcut(menu: "View", title: "Move Focus to Sidebar", key: "s", modifiers: [.command, .option], action: #selector(focusSidebar(_:))),
-            Shortcut(menu: "View", title: "Expand All Workspaces", key: "", action: #selector(expandAllWorkspaces(_:)), listed: false),
-            Shortcut(menu: "View", title: "Collapse All Workspaces", key: "", action: #selector(collapseAllWorkspaces(_:)), listed: false),
 
             Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
             Shortcut(menu: "Workspace", title: "Close Workspace", key: "w", modifiers: [.command, .shift], action: #selector(closeActiveWorkspace(_:))),

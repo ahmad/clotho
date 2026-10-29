@@ -348,15 +348,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             Task { try? await store.backend.renameWorkspace(id, name: name) }
         }
         sidebar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
-        sidebar.onSelectTab = { [weak self] key, tab in self?.focusNow(.tab(tab), on: key, trace: "sidebar tab \(tab)") }
-        sidebar.onRenameTab = { [weak self] key, tab, title in
-            guard let store = self?.connections[key]?.store else { return }
-            Task { try? await store.backend.renameTab(tab, title: title.isEmpty ? nil : title) }
-        }
-        sidebar.onCloseTab = { [weak self] key, tab in
-            self?.focus(machine: key)
-            self?.closeTab(tab)
-        }
         sidebar.onFocusTerminal = { [weak self] in
             guard let self else { return }
             window.makeFirstResponder(activeTerminal)
@@ -580,11 +571,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("quick:") {
                     let query = String(step.dropFirst(6))
                     // "quick:close" dismisses it, so the next "quick:" lists the model as it is then.
-                    if query == "close" { return quickOpen?.dismiss() ?? () }
+                    if query == "close" { return quickOpen?.cancel() ?? () }
+                    if query == "down" || query == "up" {
+                        guard let field = quickOpen.flatMap({ $0.window?.firstResponder as? NSTextView }), let control = quickOpen?.fieldForTesting else { return }
+                        _ = quickOpen?.control(control, textView: field, doCommandBy: query == "down" ? #selector(NSResponder.moveDown(_:)) : #selector(NSResponder.moveUp(_:)))
+                        return log("command bar: selected \(quickOpen?.selected ?? -1), focus \(store.focusedTab.map { store.displayTitle(of: $0) } ?? "none")")
+                    }
                     if quickOpen == nil { showQuickOpen(nil) }
                     if query == "\r" || query == "open" { return quickOpen?.open() ?? () }
                     quickOpen?.setQuery(query)
-                    return log("quick open \"\(query)\": " + (quickOpen?.results.map { "\($0.item.kind) \($0.item.title) [\($0.item.subtitle)]" }.joined(separator: " | ") ?? ""))
+                    return log("quick open \"\(query)\": " + (quickOpen?.results.map { "\($0.entry.item.kind) \($0.entry.item.title) [\($0.entry.item.subtitle)]" }.joined(separator: " | ") ?? ""))
                 }
                 // "find:text" opens the focused pane's find bar and searches; "find:next" / "find:prev" step.
                 if step.hasPrefix("find:") {
@@ -661,11 +657,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     Task { try? await backend.renameWorkspace(workspace, name: name) }
                     return
                 }
-                // "hoverrow:1" hovers the sidebar's second row (workspaces and tabs, top down), as the pointer
-                // would (-1: none). "clickrow:2" posts a real click at the middle of the third row, and
-                // "chevron:0" (with ",alt" for Option) at its chevron. "focussidebar" gives the sidebar the
-                // keyboard (then "key:down", "key:left" … walk it).
-                if step.hasPrefix("hoverrow:") || step.hasPrefix("clickrow:") || step.hasPrefix("chevron:") {
+                // "hoverrow:1" hovers the sidebar's second workspace row (top down), as the pointer would (-1:
+                // none). "clickrow:2" posts a real click at the middle of the third row. "focussidebar" gives
+                // the sidebar the keyboard (then "key:down" … walk it).
+                if step.hasPrefix("hoverrow:") || step.hasPrefix("clickrow:") {
                     func rows(in view: NSView) -> [SidebarRow] {
                         view.subviews.flatMap { ($0 as? SidebarRow).map { [$0] } ?? rows(in: $0) }
                     }
@@ -686,8 +681,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                     guard index < all.count else { return log("TypeText: no row \(index)") }
                     let row = all[index]
-                    let x = step.hasPrefix("chevron:") ? s(17) : row.bounds.midX
-                    let point = row.convert(NSPoint(x: x, y: row.bounds.midY), to: nil)
+                    let point = row.convert(NSPoint(x: row.bounds.midX, y: row.bounds.midY), to: nil)
                     let mods = parts.dropFirst().joined(separator: ",")
                     log("TypeText: \(step) hits '\(row.label.stringValue)' at \(Int(point.x)),\(Int(point.y))"
                         + (Pointer.visiblePart(of: row).height < row.bounds.height ? " (scrolled out of view)" : ""))
@@ -707,7 +701,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     sidebar.refreshHover()
                     return
                 }
-                // "logguides": each sidebar row's frame and tree guide segments, in window points.
                 // "logfocus": what has the keyboard (the active terminal, a field being edited, the sidebar).
                 if step == "logfocus" {
                     let responder = window.firstResponder
@@ -715,18 +708,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         : (responder as? NSTextView)?.isFieldEditor == true ? "a field editor (\(((responder as? NSTextView)?.string) ?? ""))"
                         : responder === sidebar ? "the sidebar" : String(describing: responder.map { type(of: $0) })
                     return log("focus: \(what), workspace \(store.focusedWorkspace?.name ?? "none")")
-                }
-                if step == "logguides" {
-                    func rows(in view: NSView) -> [SidebarRow] {
-                        view.subviews.flatMap { ($0 as? SidebarRow).map { [$0] } ?? rows(in: $0) }
-                    }
-                    for row in rows(in: sidebar) {
-                        let f = { (r: NSRect) in String(format: "%.2f-%.2f", r.minY, r.maxY) }
-                        log("guides \(row.label.stringValue): row \(f(row.convert(row.bounds, to: nil))) lines "
-                            + row.guideRects.map { f(row.convert($0, to: nil)) }.joined(separator: " ")
-                            + " layer " + (row.guides.path.map { f(row.convert($0.boundingBox, to: nil)) } ?? "none"))
-                    }
-                    return
                 }
                 if step == "focussidebar" { return focusSidebar(nil) }
                 // "machine:devbox" focuses that saved machine, connecting first if needed ("machine:local").
@@ -1144,8 +1125,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.takeKeyboard()
     }
 
-    @objc func expandAllWorkspaces(_ sender: Any?) { sidebar.setAllExpanded(true) }
-    @objc func collapseAllWorkspaces(_ sender: Any?) { sidebar.setAllExpanded(false) }
 
     @objc func toggleSidebar(_ sender: Any?) {
         let hide = sidebarWidth.constant > 0
@@ -1245,7 +1224,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         let header = all(MachineHeader.self, in: sidebar).first
         let row = all(WorkspaceRow.self, in: sidebar).first
-        let tabRow = all(TabRow.self, in: sidebar).first
         let tab = all(ChromeItem.self, in: tabBar).first
         let fmt = { (v: CGFloat) -> String in String(format: "%.1f", v) }
         func h(_ v: NSView?) -> String { fmt(v?.frame.height ?? 0) }
@@ -1256,8 +1234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         parts.append("frames at \(Int((UIScale.factor * 100).rounded()))%: tab bar h \(fmt(tabBar.frame.height)), tab h \(h(tab)) font \(font(tab))")
         parts.append("header h \(h(header))")
         parts.append("workspace row h \(h(row)) font \(font(row)) x \(x(row))")
-        parts.append("tab row h \(h(tabRow)) font \(font(tabRow)) x \(x(tabRow))")
-        parts.append("dots \(dot(row))/\(dot(tabRow)) from the edge")
+        parts.append("dot \(dot(row)) from the edge")
         parts.append("terminal \(fmt(terminalFontSize)) pt")
         log(parts.joined(separator: ", "))
     }

@@ -28,17 +28,14 @@ final class NewWorkspaceRenameTests: XCTestCase {
         window.close()
     }
 
-    /// Workspaces `ids` on this Mac, one tab each; `title` is every tab's title.
-    private func update(_ ids: [WorkspaceID], title: String = "zsh") {
-        var tabs: [WorkspaceID: [SidebarTab]] = [:]
-        var workspaces: [Workspace] = []
-        for id in ids {
-            let tab = TabID(id * 10)
-            workspaces.append(Workspace(id: id, name: "Workspace \(id)", tabs: [Tab(id: tab, activePane: PaneID(tab), layout: .pane(PaneID(tab)))]))
-            tabs[id] = [SidebarTab(id: tab, title: title, custom: nil, badge: nil)]
+    /// Workspaces `ids` on this Mac, one tab each; `suffix` goes on workspace 1's name (to force a rebuild).
+    private func update(_ ids: [WorkspaceID], suffix: String = "") {
+        let workspaces = ids.map { id in
+            Workspace(id: id, name: "Workspace \(id)" + (id == 1 ? suffix : ""),
+                      tabs: [Tab(id: TabID(id * 10), activePane: PaneID(id * 10), layout: .pane(PaneID(id * 10)))])
         }
         let group = SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces, selected: ids.last,
-                                 isConnected: true, isLocal: true, badges: [:], tabs: tabs, selectedTab: ids.last.map { TabID($0 * 10) })
+                                 isConnected: true, isLocal: true, badges: [:])
         sidebar.update(agents: [], unreachable: [], groups: [group])
         sidebar.layoutSubtreeIfNeeded()
     }
@@ -59,7 +56,7 @@ final class NewWorkspaceRenameTests: XCTestCase {
         sidebar.renameWhenListed("local", 2)
         settle()
         XCTAssertNil(editingRow, "nothing to rename until the daemon lists it")
-        update([1], title: "vim")  // a rebuild for something else in between
+        update([1], suffix: " (renamed)")  // a rebuild for something else in between
         settle()
         XCTAssertNil(editingRow)
         update([1, 2])
@@ -70,8 +67,8 @@ final class NewWorkspaceRenameTests: XCTestCase {
         let editor = try XCTUnwrap(field.currentEditor())
         XCTAssertEqual(editor.selectedRange, NSRange(location: 0, length: 11), "the default name is selected, to type over")
 
-        // More model updates while typing (the new shell's title, focus) don't rebuild the field away.
-        update([1, 2], title: "zsh — ~")
+        // More model updates while typing (another rename, focus) don't rebuild the field away.
+        update([1, 2], suffix: " again")
         settle()
         XCTAssertTrue(editing.editor === field)
         XCTAssertTrue(editingRow === editing)

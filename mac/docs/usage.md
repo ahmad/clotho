@@ -22,7 +22,11 @@ Machine: this Mac (remote machines come later)
         └── Pane: another shell or command
 ```
 
-The sidebar lists the workspaces under this Mac's name, and each saved SSH machine below it with its own workspaces (see [Remote machines](#remote-machines)). Click one to switch to it, or use its close button. The tab bar shows the focused workspace's tabs. A tab without a name shows its active pane's title, or its folder.
+The sidebar lists the workspaces under this Mac's name, and each saved SSH machine below it with its own workspaces (see [Remote machines](#remote-machines)). Click one to switch to it. Each shows a dot for its most urgent agent; hover over it for **+**, a new tab in that workspace. Right-click a workspace for **New Tab**, **Rename Workspace** and **Close Workspace…**, or press **⇧⌘W** to close the current one. The tab bar shows the focused workspace's tabs.
+
+New Workspace (**⌘N**, or the **+** beside a machine's name) opens the new workspace's name for editing straight away: type a name and press Return, or Esc to keep the default. Either way, the new terminal has the keyboard next.
+
+Press **⌘P** for the command bar. With nothing typed it lists the current workspace's tabs, each with its agent's state and pane count, with the current tab selected. **↑**/**↓** (or Tab/⇧Tab) switch to each tab as you go, Return keeps it, and Esc goes back to where you were. Type to search the workspaces, tabs and agents of every connected machine: agents waiting for you come first, then the current workspace, then everything else. Return goes to the selected row, **⌘1**–**⌘9** to that row, and **⌘P** again closes the bar. A workspace opens on its active tab, and an agent on its pane. A tab without a name shows its active pane's title, or its folder.
 
 Rename in place, as in Finder: double-click a workspace in the sidebar or a tab in the tab bar, press **⌃Return** to rename the current workspace, or use **Rename Workspace** (⇧⌘R) or **Rename Tab**. The name turns into a field with its text selected. Return or clicking anywhere else saves it, and Esc cancels. Clearing a tab's name makes it show its pane's title again.
 
@@ -94,6 +98,7 @@ Resizing moves the nearest divider toward the arrow. A maximized pane fills its 
 | Choose files or folders to upload | ⇧⌘U |
 | Increase / decrease font size | ⌘+ or ⌘= / ⌘- |
 | Reset font size | ⌘0 |
+| Command bar: go to a tab, workspace or agent | ⌘P |
 | Toggle sidebar | ⌃⌘S |
 | Minimize window | ⌘M |
 | Toggle full screen | ⌃⌘F |

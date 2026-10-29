@@ -98,9 +98,10 @@ It writes `build/release/Clotho-<version>-<build>.zip` and `build/release/appcas
 
 1. Open Clotho. The first launch starts the daemon and opens a workspace with one shell.
 2. Press **⌘T** for a new tab, **⌘D** to split right, or **⇧⌘D** to split down.
-3. Press **⌘N** for another workspace, or click the **+** beside a machine's name. Its name opens for editing in the sidebar straight away: type one and press Return, or Esc to keep the default; then the new terminal has the keyboard. The sidebar lists every workspace with its tabs under it: click **[−]** to fold a workspace (Option-click folds them all), and hover over a workspace for **+** (a new tab there). To close a workspace, right-click it and choose **Close Workspace…**, or press **⇧⌘W** for the current one; a tab closes with the **×** that replaces its dot on hover. **⌥⌘S** moves the keyboard to the sidebar: the arrow keys walk it, Return renames, and Esc goes back to the terminal.
-4. Press **⇧⌘O** to browse files, or drop files onto a terminal to copy them into that pane's folder.
-5. Press **⌘/** for every shortcut.
+3. Press **⌘N** for another workspace, or click the **+** beside a machine's name. Its name opens for editing in the sidebar straight away: type one and press Return, or Esc to keep the default; then the new terminal has the keyboard. The sidebar lists every workspace, each with a dot for its most urgent agent; hover over one for **+** (a new tab there). To close a workspace, right-click it and choose **Close Workspace…**, or press **⇧⌘W** for the current one. A tab closes with the **×** on it in the tab bar. **⌥⌘S** moves the keyboard to the sidebar: the arrow keys walk it, Return renames, and Esc goes back to the terminal.
+4. Press **⌘P** for the command bar. It lists the current workspace's tabs, with each one's agent state; ↑/↓ switch to each as you go, Return keeps it and Esc goes back. Type to search every connected machine's workspaces, tabs and agents (waiting agents first); Return or **⌘1**–**⌘9** goes there.
+5. Press **⇧⌘O** to browse files, or drop files onto a terminal to copy them into that pane's folder.
+6. Press **⌘/** for every shortcut.
 
 Read the [usage guide](docs/usage.md) for all shortcuts, file transfers, remote machines, launch options and troubleshooting.
 
@@ -113,7 +114,8 @@ Read the [usage guide](docs/usage.md) for all shortcuts, file transfers, remote 
 | [`Sources/Clotho/PaneView.swift`](Sources/Clotho/PaneView.swift) | One pane: a terminal view fed by the daemon, its size, and the reply filter |
 | [`Sources/Clotho/SplitLayoutView.swift`](Sources/Clotho/SplitLayoutView.swift) | Lays out a tab's split tree, with draggable dividers |
 | [`Sources/Clotho/Chrome.swift`](Sources/Clotho/Chrome.swift) | Tab bar and sidebar |
-| [`Sources/Clotho/SidebarTree.swift`](Sources/Clotho/SidebarTree.swift) | The sidebar's tree: guide lines, the [+]/[−] toggle, quiet + buttons |
+| [`Sources/Clotho/QuickOpen.swift`](Sources/Clotho/QuickOpen.swift) | ⌘P, the command bar: the current workspace's tabs, and a search across machines |
+| [`Sources/Clotho/QuietButton.swift`](Sources/Clotho/QuietButton.swift) | The sidebar's quiet + buttons, and the hover protocol rows share |
 | [`Sources/Clotho/ClickTrace.swift`](Sources/Clotho/ClickTrace.swift) | Times clicks to their result (`-TraceClicks YES`) |
 | [`Sources/Clotho/Shortcuts.swift`](Sources/Clotho/Shortcuts.swift) | Menus, the shortcuts overlay, and the actions behind them |
 | [`Sources/Clotho/MachineConnections.swift`](Sources/Clotho/MachineConnections.swift) | One daemon connection per machine, keyed views, reconnects on wake and network changes |

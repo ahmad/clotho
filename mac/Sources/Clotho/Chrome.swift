@@ -57,47 +57,14 @@ class ChromeItem: NSView, HoverRefreshing {
     var onClose: (() -> Void)?
     var contextMenu: (() -> NSMenu?)?
     var isSelected = false { didSet { updateColors() } }
-    /// A lighter tint, without the bar, for an item that holds the selection (a workspace over its
-    /// selected tab). `.row` style only.
-    var holdsSelection = false { didSet { updateColors() } }
     /// A keyboard cursor ring (the sidebar has keyboard focus and this is its current row).
     var showsCursor = false {
         didSet {
-            highlight?.borderWidth = showsCursor ? s(1.5) : 0
-            highlight?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor
+            layer?.borderWidth = showsCursor ? s(1.5) : 0
+            layer?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor
         }
     }
-    /// Where the highlight (hover, selection, cursor ring) starts, from the leading edge: tab rows start
-    /// it after the tree's arm, so the guide lines stay clear. 0: the whole item.
-    var highlightLeading: CGFloat = 0 {
-        didSet {
-            guard highlightLeading != oldValue else { return }
-            markerLeading?.constant = highlightLeading + s(3)
-            if highlightLeading > 0, inset.superlayer == nil {
-                inset.cornerRadius = s(6)
-                layer?.insertSublayer(inset, at: 0)
-            }
-            needsLayout = true
-            updateColors()
-        }
-    }
-    /// The highlight when it doesn't span the whole item.
-    private let inset = CALayer()
-    /// The layer that shows the highlight.
-    private var highlight: CALayer? { highlightLeading > 0 ? inset : layer }
-    private var markerLeading: NSLayoutConstraint?
-    /// The highlight's rectangle and colour (for tests).
-    var highlightRect: NSRect { highlightLeading > 0 ? inset.frame : bounds }
-    var highlightColor: CGColor? { highlight?.backgroundColor }
-    var markerFrame: NSRect? { marker.isHidden ? nil : marker.frame }
 
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        inset.frame = NSRect(x: highlightLeading, y: 0, width: max(0, bounds.width - highlightLeading), height: bounds.height)
-        CATransaction.commit()
-    }
     /// The title's color when not selected (nil: dim, as before), and when selected.
     var restingTextColor: NSColor?
     private(set) var hovering = false {
@@ -291,7 +258,7 @@ class ChromeItem: NSView, HoverRefreshing {
         closeButton.isHidden = !(hovering || (isSelected && closeShowsWhenSelected)) || !hasTrailingAction || editor != nil
         closeVisibilityChanged()
         guard selectionStyle != .plain else {
-            setHighlight(isSelected ? selectedColor : hovering ? hoverColor : .clear)
+            layer?.backgroundColor = (isSelected ? selectedColor : hovering ? hoverColor : .clear).cgColor
             if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : Theme.dimText }
             return
         }
@@ -299,37 +266,19 @@ class ChromeItem: NSView, HoverRefreshing {
         let active = window?.isKeyWindow ?? true
         let tint = active ? Theme.accent : Theme.dimText
         let fill: NSColor = isSelected ? tint.withAlphaComponent(active ? Self.tintAlpha : 0.16)
-            : holdsSelection ? tint.withAlphaComponent(active ? Self.holdTintAlpha : 0.08)
             : hovering ? hoverColor : .clear
-        setHighlight(fill)
-        // An inset highlight (tab rows) is too narrow before the title for the bar; its tint says enough.
-        marker.isHidden = !isSelected || highlightLeading > 0
+        layer?.backgroundColor = fill.cgColor
+        marker.isHidden = !isSelected
         marker.layer?.backgroundColor = tint.cgColor
-        if !colorsOwnTitle { label.textColor = isSelected || holdsSelection ? Theme.foreground : restingTextColor ?? Theme.dimText }
+        if !colorsOwnTitle { label.textColor = isSelected ? Theme.foreground : restingTextColor ?? Theme.dimText }
         if selectionStyle == .row, let size = label.font?.pointSize {
-            label.font = NSFont.systemFont(ofSize: size, weight: isSelected || holdsSelection ? .semibold : .regular)
+            label.font = NSFont.systemFont(ofSize: size, weight: isSelected ? .semibold : .regular)
         }
-        if showsCursor { highlight?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor }
-    }
-
-    private func setHighlight(_ color: NSColor) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if highlightLeading > 0 {
-            layer?.backgroundColor = NSColor.clear.cgColor
-            layer?.borderWidth = 0
-            inset.backgroundColor = color.cgColor
-            inset.borderWidth = showsCursor ? s(1.5) : 0
-        } else {
-            layer?.backgroundColor = color.cgColor
-        }
-        CATransaction.commit()
+        if showsCursor { layer?.borderColor = Theme.accent.withAlphaComponent(0.8).cgColor }
     }
 
     /// The selection tint's opacity over the sidebar and tab bar.
     static let tintAlpha: CGFloat = 0.22
-    /// The lighter tint of an item that holds the selection.
-    static let holdTintAlpha: CGFloat = 0.09
 
     private func installMarker() {
         guard selectionStyle != .plain, marker.superview == nil else { return }
@@ -340,10 +289,8 @@ class ChromeItem: NSView, HoverRefreshing {
         case .row:
             // A 3 pt bar on the leading edge, inside the rounded highlight.
             marker.layer?.cornerRadius = s(1.5)
-            let leading = marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: highlightLeading + s(3))
-            markerLeading = leading
             NSLayoutConstraint.activate([
-                leading,
+                marker.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(3)),
                 marker.widthAnchor.constraint(equalToConstant: s(3)),
                 marker.topAnchor.constraint(equalTo: topAnchor, constant: s(6)),
                 marker.bottomAnchor.constraint(equalTo: bottomAnchor, constant: s(-6)),
@@ -599,32 +546,19 @@ final class SidebarView: NSView {
     /// After an inline edit ends, so the terminal can take focus back.
     var onEditingEnded: (() -> Void)?
     private var rows: [String: (row: WorkspaceRow, name: String)] = [:]
-    /// Tab rows by tabKey, with the title an edit starts from.
-    private var tabRows: [String: (row: TabRow, name: String)] = [:]
-    /// A tab row was clicked, renamed in place, or closed.
-    var onSelectTab: ((MachineKey, TabID) -> Void)?
     /// A workspace row's + (a new tab in that workspace).
     var onNewTab: ((MachineKey, WorkspaceID) -> Void)?
-    var onRenameTab: ((MachineKey, TabID, String) -> Void)?
-    var onCloseTab: ((MachineKey, TabID) -> Void)?
     /// Esc in the sidebar: the terminal takes the keyboard back.
     var onFocusTerminal: (() -> Void)?
-
-    /// Workspaces whose tabs are hidden ("machine/workspace"), remembered across launches. New ones
-    /// start expanded.
-    private var collapsedWorkspaces = Set(UserDefaults.standard.stringArray(forKey: "CollapsedWorkspaces") ?? [])
-    /// Every workspace listed in the last update, for Collapse All.
-    private var listedWorkspaces: [String] = []
 
     /// A row the keyboard can move to.
     enum Item: Hashable {
         case workspace(MachineKey, WorkspaceID)
-        case tab(MachineKey, WorkspaceID, TabID)
     }
     /// The rows in order, top to bottom, as the arrow keys walk them.
     private(set) var order: [Item] = []
     private var itemRows: [Item: SidebarRow] = [:]
-    /// The selected row: the focused tab's, or its workspace's while that is collapsed.
+    /// The selected row: the focused workspace's.
     private var selectedItem: Item?
     /// The keyboard's row while the sidebar has keyboard focus.
     private(set) var cursor: Item?
@@ -811,11 +745,9 @@ final class SidebarView: NSView {
         }
         lastSignature = signature
         rows = [:]
-        tabRows = [:]
         order = []
         itemRows = [:]
         selectedItem = nil
-        listedWorkspaces = []
         column.arrangedSubviews.forEach { $0.removeFromSuperview() }
         agentsColumn.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
@@ -906,8 +838,7 @@ final class SidebarView: NSView {
             log("sidebar: " + rows.values.map(\.name).sorted().joined(separator: ", "))
             log("sidebar rows: " + order.map { item in
                 let row = itemRows[item]!
-                let marks = (row.isSelected ? "*" : "") + (row.holdsSelection ? "~" : "") + (row.chevron.map { $0.isExpanded ? "v" : ">" } ?? "")
-                return (row is TabRow ? "  " : "") + row.label.stringValue + marks
+                return row.label.stringValue + (row.isSelected ? "*" : "")
             }.joined(separator: " | "))
         }
         refreshHoverSoon()
@@ -999,7 +930,7 @@ final class SidebarView: NSView {
     }
 
     private func layoutSignature(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) -> String {
-        var parts: [String] = ["\(UIScale.factor) \(effectiveAppearance.name.rawValue)", collapsed.sorted().joined(separator: ","), collapsedWorkspaces.sorted().joined(separator: ","),
+        var parts: [String] = ["\(UIScale.factor) \(effectiveAppearance.name.rawValue)", collapsed.sorted().joined(separator: ","),
                                "\(UserDefaults.standard.bool(forKey: "AgentsOthersExpanded"))"]
         for agent in agents {
             parts.append("a \(agent.machine) \(agent.machineName) \(agent.pane) \(agent.paneTitle ?? "") \(agent.tabTitle ?? "") "
@@ -1013,10 +944,6 @@ final class SidebarView: NSView {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 parts.append("w \(workspace.id) \(heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name) "
                              + "\(String(describing: group.badges[workspace.id]))")
-                for tab in group.tabs[workspace.id] ?? [] {
-                    let title = heldNames.title(for: Self.tabKey(group.key, tab.id), model: tab.title) ?? tab.title
-                    parts.append("t \(tab.id) \(title) \(tab.custom ?? "") \(String(describing: tab.badge))")
-                }
             }
         }
         return parts.joined(separator: "\n")
@@ -1029,19 +956,8 @@ final class SidebarView: NSView {
             for workspace in group.workspaces {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 guard let row = rows[rowKey]?.row else { continue }
-                let expanded = !collapsedWorkspaces.contains(rowKey)
-                let tabs = group.tabs[workspace.id] ?? []
-                let focused = workspace.id == group.selected
-                let tabShown = expanded && tabs.contains { $0.id == group.selectedTab }
-                row.isSelected = focused && !tabShown
-                row.holdsSelection = focused && tabShown
+                row.isSelected = workspace.id == group.selected
                 if row.isSelected { selectedItem = .workspace(group.key, workspace.id) }
-                guard expanded else { continue }
-                for tab in tabs {
-                    guard let tabRow = tabRows[Self.tabKey(group.key, tab.id)]?.row else { continue }
-                    tabRow.isSelected = tab.id == group.selectedTab
-                    if tabRow.isSelected { selectedItem = .tab(group.key, workspace.id, tab.id) }
-                }
             }
         }
         if let cursor, !order.contains(cursor) { self.cursor = selectedItem ?? order.first }
@@ -1053,72 +969,34 @@ final class SidebarView: NSView {
 
     /// A name is being edited in place (the sidebar holds its updates until it ends).
     var isEditing: Bool {
-        rows.values.contains { $0.row.isEditing } || tabRows.values.contains { $0.row.isEditing }
+        rows.values.contains { $0.row.isEditing }
     }
 
-    /// A workspace's row and, unless it's collapsed, a row per tab under it. Expanded, the selection is on
-    /// the focused tab and the workspace takes a lighter tint; collapsed, the workspace is selected and
-    /// shows its most urgent tab's dot, so a waiting agent isn't hidden.
+    /// A workspace's row: its name, and its most urgent agent's dot on the trailing edge.
     private func addWorkspace(_ workspace: Workspace, of group: SidebarGroup) {
         let key = group.key
         let rowKey = Self.rowKey(key, workspace.id)
-        listedWorkspaces.append(rowKey)
-        let expanded = !collapsedWorkspaces.contains(rowKey)
-        let tabs = group.tabs[workspace.id] ?? []
-        let row = WorkspaceRow(expanded: expanded)
-        row.hasChildren = expanded && !tabs.isEmpty
+        let row = WorkspaceRow()
         row.onNewTab = { [weak self] in self?.onNewTab?(key, workspace.id) }
         let name = heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name
         row.label.stringValue = name
-        row.toolTip = tabs.count == 1 ? "1 tab" : "\(tabs.count) tabs"
-        row.chevron?.setAccessibilityLabel(expanded ? "Hide tabs" : "Show tabs")
+        row.toolTip = workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
         row.onClick = { [weak self] in self?.onSelect?(key, workspace.id) }
         row.onDoubleClick = { [weak self] in self?.beginRename(key, workspace.id) }
-        row.onToggle = { [weak self, weak row] all in
-            row?.chevron?.setExpanded(!expanded, animated: true) { self?.setExpanded(!expanded, rowKey, all: all) }
-        }
         row.onClose = { [weak self] in self?.onClose?(key, workspace.id) }
         row.contextMenu = { [weak self] in self?.workspaceMenu(key, workspace.id) }
         rows[rowKey] = (row, name)
-        let focused = workspace.id == group.selected
-        let tabShown = expanded && tabs.contains { $0.id == group.selectedTab }
-        row.isSelected = focused && !tabShown
-        row.holdsSelection = focused && tabShown
-        row.setBadge(expanded ? nil : group.badges[workspace.id])
+        row.isSelected = workspace.id == group.selected
+        row.setBadge(group.badges[workspace.id])
         add(row, height: Self.rowHeight)
         let item = Item.workspace(key, workspace.id)
         order.append(item)
         itemRows[item] = row
         if row.isSelected { selectedItem = item }
-        guard expanded, !tabs.isEmpty else { return }
-
-        for tab in tabs {
-            let tabKey = Self.tabKey(key, tab.id)
-            let tabRow = TabRow()
-            let title = heldNames.title(for: tabKey, model: tab.title) ?? tab.title
-            tabRow.label.stringValue = title
-            tabRow.toolTip = title
-            tabRow.onClick = { [weak self] in self?.onSelectTab?(key, tab.id) }
-            tabRow.onDoubleClick = { [weak self] in self?.beginRenameTab(key, tab.id) }
-            tabRow.onClose = { [weak self] in self?.onCloseTab?(key, tab.id) }
-            tabRow.isSelected = tab.id == group.selectedTab
-            tabRow.isLastChild = tab.id == tabs.last?.id
-            tabRow.setBadge(tab.badge)
-            tabRows[tabKey] = (tabRow, tab.custom ?? title)
-            add(tabRow, height: Self.tabRowHeight)
-            let tabItem = Item.tab(key, workspace.id, tab.id)
-            order.append(tabItem)
-            itemRows[tabItem] = tabRow
-            if tabRow.isSelected { selectedItem = tabItem }
-        }
-        // A little air after a workspace's tabs, before the next workspace.
-        if let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.afterTabsSpacing, after: last) }
     }
 
-    static var tabRowHeight: CGFloat { s(24) }
-    static var afterTabsSpacing: CGFloat { s(6) }
-
-    private static func tabKey(_ machine: MachineKey, _ id: TabID) -> String { "\(machine)/tab/\(id)" }
+    /// The quiet New Workspace row's height.
+    static var quietRowHeight: CGFloat { s(24) }
 
     /// A workspace row's right-click menu. Close lives here (and ⇧⌘W), not on the row.
     func workspaceMenu(_ machine: MachineKey, _ id: WorkspaceID) -> NSMenu {
@@ -1128,31 +1006,6 @@ final class SidebarView: NSView {
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Close Workspace…") { [weak self] in self?.onClose?(machine, id) })
         return menu
-    }
-
-    // MARK: Collapsing workspaces
-
-    func isExpanded(_ machine: MachineKey, _ id: WorkspaceID) -> Bool { !collapsedWorkspaces.contains(Self.rowKey(machine, id)) }
-
-    func setExpanded(_ expanded: Bool, _ machine: MachineKey, _ id: WorkspaceID, all: Bool = false) {
-        setExpanded(expanded, Self.rowKey(machine, id), all: all)
-    }
-
-    /// Every workspace's tabs, shown or hidden (View menu, Option-click on a chevron).
-    func setAllExpanded(_ expanded: Bool) {
-        collapsedWorkspaces = expanded ? [] : Set(listedWorkspaces)
-        saveCollapsed()
-    }
-
-    private func setExpanded(_ expanded: Bool, _ rowKey: String, all: Bool) {
-        if all { return setAllExpanded(expanded) }
-        if expanded { collapsedWorkspaces.remove(rowKey) } else { collapsedWorkspaces.insert(rowKey) }
-        saveCollapsed()
-    }
-
-    private func saveCollapsed() {
-        UserDefaults.standard.set(collapsedWorkspaces.sorted(), forKey: "CollapsedWorkspaces")
-        latest?()
     }
 
     // MARK: Keyboard
@@ -1188,21 +1041,13 @@ final class SidebarView: NSView {
         if let shown, let row = itemRows[shown] { row.scrollToVisible(row.bounds) }
     }
 
-    /// ↑ ↓ move through workspace and tab rows, selecting as they go; ← collapses a workspace (or goes from a
-    /// tab to its workspace), → expands one (or goes into its first tab); Return renames; Esc goes back to
-    /// the terminal.
+    /// ↑ ↓ move through workspace rows, selecting as they go; Return renames; Esc goes back to the terminal.
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 126: move(by: -1)
         case 125: move(by: 1)
-        case 123: collapseOrParent()
-        case 124: expandOrChild()
         case 36, 76:
-            switch cursor {
-            case .workspace(let key, let id): beginRename(key, id)
-            case .tab(let key, _, let tab): beginRenameTab(key, tab)
-            case nil: break
-            }
+            if case .workspace(let key, let id) = cursor { beginRename(key, id) }
         case 53:
             wantsKeyboard = false
             onFocusTerminal?()
@@ -1222,29 +1067,7 @@ final class SidebarView: NSView {
     private func go(to item: Item) {
         cursor = item
         updateCursor()
-        switch item {
-        case .workspace(let key, let id): onSelect?(key, id)
-        case .tab(let key, _, let tab): onSelectTab?(key, tab)
-        }
-    }
-
-    private func collapseOrParent() {
-        switch cursor {
-        case .workspace(let key, let id) where isExpanded(key, id):
-            setExpanded(false, key, id)
-        case .tab(let key, let id, _):
-            go(to: .workspace(key, id))
-        default:
-            break
-        }
-    }
-
-    private func expandOrChild() {
-        guard case .workspace(let key, let id) = cursor else { return }
-        if !isExpanded(key, id) { return setExpanded(true, key, id) }
-        if let index = order.firstIndex(of: .workspace(key, id)), index + 1 < order.count, case .tab = order[index + 1] {
-            go(to: order[index + 1])
-        }
+        if case .workspace(let key, let id) = item { onSelect?(key, id) }
     }
 
     static func createWorkspaceTooltip(_ group: SidebarGroup) -> String {
@@ -1264,7 +1087,7 @@ final class SidebarView: NSView {
         row.toolTip = Self.createWorkspaceTooltip(group)
         row.onClick = { [weak self] in self?.onCreateWorkspace?(key) }
         row.setAccessibilityLabel("New Workspace")
-        add(row, height: Self.tabRowHeight)
+        add(row, height: Self.quietRowHeight)
         if UserDefaults.standard.bool(forKey: "LogSidebar") { log("sidebar: \(group.title): New Workspace row") }
     }
 
@@ -1323,27 +1146,6 @@ final class SidebarView: NSView {
                 latest?()
             }
             onRename?(machine, id, text)
-        }
-    }
-
-    /// Edits a tab's title in place. An empty title goes back to the tab's automatic one.
-    func beginRenameTab(_ machine: MachineKey, _ tab: TabID) {
-        let tabKey = Self.tabKey(machine, tab)
-        guard let (row, name) = tabRows[tabKey] else { return }
-        let keyboard = hasKeyboard
-        row.onEditingEnded = { [weak self] in
-            guard let self else { return }
-            if keyboard { window?.makeFirstResponder(self) } else { onEditingEnded?() }
-            runPending()
-        }
-        row.beginEditing(name) { [weak self] text in
-            guard let self, text != name else { return }
-            // The new title shows at once; an empty one (back to automatic) waits for the model's.
-            if !text.isEmpty {
-                heldNames.hold(tabKey, from: row.label.stringValue, to: text)
-                row.label.stringValue = text
-            }
-            onRenameTab?(machine, tab, text)
         }
     }
 
@@ -1544,33 +1346,19 @@ private final class FlippedView: NSView {
     override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
-/// A row of the sidebar's workspace list: an optional [+]/[−] toggle in the machine headers' chevron
-/// column, the title at `indent`, and a status dot pinned to the trailing edge, where every row's dot
-/// lines up. The close button shows only under the pointer, in the dot's place, so hovering moves nothing.
-/// Workspaces and their tabs are drawn as a tree: thin guide lines run from the toggle to each tab
-/// (SidebarTree).
+/// A row of the sidebar's workspace list: the name in line with the machine's, and a dot on the trailing
+/// edge (the workspace's most urgent agent), whose place the hover button takes.
 class SidebarRow: ChromeItem {
     let badge = NSView()
-    /// Set for rows that collapse (workspaces).
-    let chevron: TreeToggle?
-    /// The toggle was clicked; `all` with Option (every workspace follows).
-    var onToggle: ((_ all: Bool) -> Void)?
-    /// Where the dot's centre (and the close button's) sits, from the row's trailing edge.
+    /// Where the dot's centre (and the hover button's) sits, from the row's trailing edge.
     static var dotInset: CGFloat { s(13) }
-    /// The tree's guide lines through this row.
-    let guides = CAShapeLayer()
 
-    /// `expanded` nil: no toggle. `trailingSpace`: what the title leaves free at the end, for the dot
-    /// and any hover buttons.
-    init(indent: CGFloat, expanded: Bool?, fontSize: CGFloat, closable: Bool = true, trailingSpace: CGFloat = s(12)) {
-        chevron = expanded.map { TreeToggle(expanded: $0) }
+    /// `trailingSpace`: what the title leaves free at the end, for the dot and the hover button.
+    init(indent: CGFloat, fontSize: CGFloat, closable: Bool = true, trailingSpace: CGFloat = s(12)) {
         super.init(closable: closable)
         label.font = NSFont.systemFont(ofSize: s(fontSize))
         selectionStyle = .row
         closeShowsWhenSelected = false
-        // The guides reach up into the gap between rows, to meet the row above.
-        layer?.masksToBounds = false
-        layer?.addSublayer(guides)
         badge.wantsLayer = true
         badge.layer?.cornerRadius = s(3.5)
         badge.isHidden = true
@@ -1590,16 +1378,6 @@ class SidebarRow: ChromeItem {
             badge.heightAnchor.constraint(equalToConstant: s(7)),
             label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Self.dotInset + trailingSpace)),
         ])
-        if let chevron {
-            chevron.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(chevron)
-            NSLayoutConstraint.activate([
-                chevron.centerXAnchor.constraint(equalTo: leadingAnchor, constant: SidebarTree.columnX),
-                chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
-                chevron.widthAnchor.constraint(equalToConstant: TreeToggle.size),
-                chevron.heightAnchor.constraint(equalToConstant: TreeToggle.size),
-            ])
-        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -1613,70 +1391,21 @@ class SidebarRow: ChromeItem {
 
     private var badgeColor: NSColor?
 
-    /// The dot gives its place to the close button while that shows.
+    /// The dot gives its place to the hover button while that shows.
     override func closeVisibilityChanged() {
         badge.isHidden = badgeColor == nil || !closeButton.isHidden
     }
-
-    /// The toggle's column (everything before the title) toggles instead of selecting.
-    override func mouseDown(with event: NSEvent) {
-        if let onToggle, chevron != nil, convert(event.locationInWindow, from: nil).x < MachineHeader.nameInset - s(2) {
-            return onToggle(event.modifierFlags.contains(.option))
-        }
-        super.mouseDown(with: event)
-    }
-
-    /// The guide segments this row draws, in its own coordinates.
-    var guideRects: [NSRect] { [] }
-
-    override func layout() {
-        super.layout()
-        redrawGuides()
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        redrawGuides()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        redrawGuides()
-    }
-
-    /// Snapping depends on where the row sits in the window, and a row that only moves isn't laid out
-    /// again, so moving it redraws too.
-    override func setFrameOrigin(_ newOrigin: NSPoint) {
-        super.setFrameOrigin(newOrigin)
-        needsLayout = true
-    }
-
-    func redrawGuides() {
-        chevron?.redraw()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        guides.frame = bounds
-        guides.contentsScale = window?.backingScaleFactor ?? 2
-        guides.path = SidebarTree.path(guideRects)
-        var color = SidebarTree.lineColor.cgColor
-        effectiveAppearance.performAsCurrentDrawingAppearance { color = SidebarTree.lineColor.cgColor }
-        guides.fillColor = color
-        CATransaction.commit()
-    }
 }
 
-/// A workspace: [+]/[−], name, and (collapsed) its most urgent tab's dot. Under the pointer it offers a
-/// new tab (+) in the dot's place; closing it is in its right-click menu (and ⇧⌘W), not on the row.
+/// A workspace: its name and its most urgent agent's dot. Under the pointer it offers a new tab (+) in the
+/// dot's place; closing it is in its right-click menu (and ⇧⌘W), not on the row.
 final class WorkspaceRow: SidebarRow {
-    /// Its tabs are listed under it, so the guide line starts below the toggle.
-    var hasChildren = false { didSet { needsLayout = true } }
     var onNewTab: (() -> Void)?
-    /// The + that makes a tab in this workspace: the trailing button, shown on hover where close is on
-    /// a tab row.
+    /// The + that makes a tab in this workspace: the trailing button, shown on hover.
     var newTabButton: NSButton { closeButton }
 
-    init(expanded: Bool = true) {
-        super.init(indent: MachineHeader.nameInset, expanded: expanded, fontSize: 13, closable: true)
+    init() {
+        super.init(indent: MachineHeader.nameInset, fontSize: 13, closable: true)
         restingTextColor = Theme.foreground
         closeButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
             .withSymbolConfiguration(.init(pointSize: s(10), weight: .semibold))
@@ -1691,47 +1420,6 @@ final class WorkspaceRow: SidebarRow {
     @objc private func newTabTapped() { onNewTab?() }
 
     override var hasTrailingAction: Bool { onNewTab != nil }
-
-    override var guideRects: [NSRect] {
-        guard hasChildren, chevron?.isExpanded == true else { return [] }
-        let (box, _) = SidebarTree.box(in: self, center: NSPoint(x: SidebarTree.columnX, y: bounds.midY))
-        return [SidebarTree.vertical(in: self, from: 0, to: box.minY)]
-    }
-}
-
-/// A tab under its workspace: on a guide line from the workspace's toggle, a touch smaller and lighter,
-/// with its own dot.
-final class TabRow: SidebarRow {
-    /// Where tab titles start: a little in from the workspace names, past the guide's arm.
-    static var indent: CGFloat { MachineHeader.nameInset + s(8) }
-    /// The last tab ends its line at its arm (└); the others carry it on (├).
-    var isLastChild = true { didSet { needsLayout = true } }
-
-    /// Where the highlight starts: just past the end of the arm, a few points before the title.
-    static var highlightStart: CGFloat { indent - s(7) }
-
-    init(closable: Bool = true) {
-        super.init(indent: Self.indent, expanded: nil, fontSize: 12, closable: closable)
-        highlightLeading = Self.highlightStart
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var guideRects: [NSRect] {
-        // The arm, from the line to just short of the title; the last tab's line ends on it (└).
-        let arm = SidebarTree.horizontal(in: self, at: bounds.midY, to: Self.highlightStart - s(2))
-        return [SidebarTree.vertical(in: self, from: isLastChild ? arm.minY : 0, to: aboveBottom), arm]
-    }
-
-    /// Where the row above ends, in this row's coordinates: the line runs up to exactly there, so both
-    /// rows snap their shared edge from the same coordinate and meet without a gap at any zoom.
-    private var aboveBottom: CGFloat {
-        guard let stack = superview as? NSStackView, let index = stack.arrangedSubviews.firstIndex(of: self), index > 0 else {
-            return bounds.maxY + SidebarView.rowSpacing
-        }
-        let above = stack.arrangedSubviews[index - 1]
-        return convert(above.bounds, from: above).minY
-    }
 }
 
 /// A strip under the tab bar for things that need the user's attention but shouldn't block anything,
