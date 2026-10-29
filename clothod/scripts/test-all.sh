@@ -47,10 +47,16 @@ else
 fi
 
 step "dev dist for the remote suite"
-CLOTHOD_KEEP_BUILD=1 DIST_DIR=target/dist-dev ./scripts/dist.sh --dev > target/test-all-dist.log 2>&1 || fail "dev dist (target/test-all-dist.log)"
+# The test builds above are done with: room for the dist's (on the Mac, at least).
+scripts/build-space.sh clean
+# Never a stale one: the remote suite must test this tree's build or nothing.
+rm -rf target/dist-dev
+dist_ok=1
+CLOTHOD_KEEP_BUILD=1 DIST_DIR=target/dist-dev ./scripts/dist.sh --dev > target/test-all-dist.log 2>&1 || { dist_ok=0; fail "dev dist (target/test-all-dist.log)"; }
 
 for h in $REMOTE_HOSTS; do
     step "remote: $h"
+    [ $dist_ok = 1 ] || { fail "remote suite on $h: not run (no dev dist)"; continue; }
     # Unreachable hosts must fail here, not depend on how the suite reports it.
     $SSH "$h" true || { fail "remote suite: can't reach $h over ssh"; continue; }
     log="target/test-all-remote-$(echo "$h" | tr '@' '_').log"
@@ -65,7 +71,10 @@ checked=""
 # a symlink, which find does not follow without it), and login units of the
 # e2e tests (launchd labels / systemd runtime units named clt-test-*).
 # A check that couldn't run is UNCHECKED, a failure: never read silence as clean.
-if ps_out=$(target/debug/clothod ps); then
+# The host build dist.sh leaves in target/release (kept by the cleaning), else the test build.
+ps_bin=target/release/clothod
+[ -x "$ps_bin" ] || ps_bin=target/debug/clothod
+if ps_out=$("$ps_bin" ps); then
     left=$(echo "$ps_out" | grep "/tmp/clt" ; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test)
     [ -n "$left" ] && { echo "$left"; fail "leftovers on this Mac"; } || echo "this Mac: clean"
 else

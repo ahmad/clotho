@@ -91,6 +91,9 @@ pub(crate) struct Client {
     /// The `client` string from `hello` and the connecting process, for the log.
     name: Mutex<String>,
     peer_pid: Option<u32>,
+    /// The client's terminal colors (`hello.colors`, `client.colors`) and when it set them (the
+    /// daemon's `colors_seq`): applications in the panes it uses query these.
+    colors: Mutex<Option<(Arc<clotho_vt::Palette>, u64)>>,
 }
 
 impl Client {
@@ -234,6 +237,38 @@ const AGENT_STATES: [&str; 5] = ["starting", "running", "waiting", "done", "erro
 /// Detected agents count as running while output arrived this recently.
 const AGENT_ACTIVE: Duration = Duration::from_millis(1500);
 
+/// A client's colors: `{foreground, background, cursor?, ansi?: [16]}`, each `#rrggbb`.
+fn parse_palette(v: &Value) -> std::result::Result<clotho_vt::Palette, String> {
+    let o = v.as_object().ok_or("not an object")?;
+    if let Some(k) = o.keys().find(|k| !["foreground", "background", "cursor", "ansi"].contains(&k.as_str())) {
+        return Err(format!("unknown key `{k}`"));
+    }
+    let rgb = |v: &Value, what: &str| -> std::result::Result<clotho_vt::Rgb, String> {
+        let s = v.as_str().filter(|s| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+        let s = s.ok_or_else(|| format!("{what} must be \"#rrggbb\""))?;
+        let h = |i: usize| u8::from_str_radix(&s[i..i + 2], 16).unwrap();
+        Ok(clotho_vt::Rgb { r: h(1), g: h(3), b: h(5) })
+    };
+    let need = |k: &str| o.get(k).ok_or_else(|| format!("missing {k}")).and_then(|v| rgb(v, k));
+    let ansi = match o.get("ansi") {
+        None | Some(Value::Null) => None,
+        Some(a) => {
+            let a = a.as_array().filter(|a| a.len() == 16).ok_or("ansi must have 16 colors")?;
+            let mut out = [clotho_vt::Rgb { r: 0, g: 0, b: 0 }; 16];
+            for (i, c) in a.iter().enumerate() {
+                out[i] = rgb(c, &format!("ansi[{i}]"))?;
+            }
+            Some(out)
+        }
+    };
+    Ok(clotho_vt::Palette {
+        foreground: need("foreground")?,
+        background: need("background")?,
+        cursor: o.get("cursor").filter(|c| !c.is_null()).map(|c| rgb(c, "cursor")).transpose()?,
+        ansi,
+    })
+}
+
 /// A line in clothod.log, with the time (UTC): what closed panes and answered requests, which
 /// clients don't log anywhere else.
 fn log(msg: impl std::fmt::Display) {
@@ -343,6 +378,9 @@ struct Pane {
     exited: Option<ExitStatus>,
     subs: HashMap<u64, Sub>,
     last_input_client: Option<u64>,
+    /// The client that last typed in or subscribed to the pane: its colors are the ones
+    /// applications here get (`pane_palette`).
+    colors_client: Option<u64>,
     /// When a client last typed in (or sent focus or mouse reports to) the pane: whether the
     /// user is at it right now (`user_present`).
     last_input_at: Option<Instant>,
@@ -469,6 +507,7 @@ impl Pane {
             exited: info.exited,
             subs: HashMap::new(),
             last_input_client: None,
+            colors_client: None,
             last_input_at: None,
             pending: HashMap::new(),
             snap_seq: 0,
@@ -528,6 +567,9 @@ pub struct Daemon {
     stop: Notify,
     shutdown_all: AtomicBool,
     had_real_client: AtomicBool,
+    /// Orders `client.colors` calls: the latest setter's colors apply where no client is using
+    /// a pane.
+    colors_seq: AtomicU64,
     push: Arc<crate::push::Push>,
     /// Each pane's workspace name and tab title, for push alerts (refreshed with every persist,
     /// so reading it never needs the model's lock while a pane's is held).
@@ -763,6 +805,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         stop: Notify::new(),
         shutdown_all: AtomicBool::new(false),
         had_real_client: AtomicBool::new(false),
+        colors_seq: AtomicU64::new(0),
         // Ephemeral (test) instances keep registrations with themselves, so they go away together.
         places: Mutex::new(HashMap::new()),
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
@@ -1159,7 +1202,9 @@ impl Daemon {
             FromHolder::Spawned { id, pane } => {
                 let waiter = self.spawns.lock().unwrap().remove(&id);
                 let own = waiter.as_ref().and_then(|w| w.1);
-                let p = Pane::new(&pane, own.unwrap_or_else(|| self.scrollback.load(Ordering::Relaxed)), own.is_some());
+                let mut p = Pane::new(&pane, own.unwrap_or_else(|| self.scrollback.load(Ordering::Relaxed)), own.is_some());
+                // Its applications may ask for colors before anyone types in it.
+                self.refresh_palette(&mut p);
                 self.panes.lock().unwrap().insert(pane.pane, Arc::new(Mutex::new(p)));
                 if let Some((tx, _)) = waiter {
                     let _ = tx.send(Ok(pane));
@@ -1422,7 +1467,55 @@ impl Daemon {
             p.last_input_client = Some(client);
             self.apply_viewport_policy(&mut p, client);
         }
+        self.use_colors_of(&mut p, client);
         let _ = self.holder.send(Frame::Input { pane, data }.encode());
+    }
+
+    /// The colors applications in the pane get when they ask (OSC 4/10/11/12): those of the
+    /// client last using it (typing or subscribing), else of the client that set colors last,
+    /// else none (the terminal's dark defaults). Only connected clients count.
+    fn pane_palette(&self, p: &Pane) -> Option<Arc<clotho_vt::Palette>> {
+        let clients = self.clients.lock().unwrap();
+        let colors = |c: &Arc<Client>| c.colors.lock().unwrap().clone();
+        if let Some(c) = p.colors_client.and_then(|id| clients.get(&id)).and_then(colors) {
+            return Some(c.0);
+        }
+        clients.values().filter_map(colors).max_by_key(|c| c.1).map(|c| c.0)
+    }
+
+    /// Apply the pane's palette to its terminal; an application that asked for mode 2031 is
+    /// told when that switches between dark and light.
+    fn refresh_palette(&self, p: &mut Pane) {
+        let palette = self.pane_palette(p);
+        if let Some(note) = p.vt.set_palette(palette) {
+            self.on_vt_events(p, vec![VtEvent::Reply(note)]);
+        }
+    }
+
+    fn use_colors_of(&self, p: &mut Pane, client: u64) {
+        if p.colors_client != Some(client) {
+            p.colors_client = Some(client);
+            self.refresh_palette(p);
+        }
+    }
+
+    fn refresh_palettes(&self) {
+        let panes: Vec<_> = self.panes.lock().unwrap().values().cloned().collect();
+        for p in panes {
+            self.refresh_palette(&mut p.lock().unwrap());
+        }
+    }
+
+    /// `hello.colors` / `client.colors`: null clears them.
+    fn set_client_colors(&self, client: &Client, v: Option<&Value>) -> std::result::Result<(), RpcError> {
+        let palette = match v {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(Arc::new(parse_palette(v).map_err(|e| err("bad_request", format!("colors: {e}")))?)),
+        };
+        let seq = self.colors_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        *client.colors.lock().unwrap() = palette.map(|p| (p, seq));
+        self.refresh_palettes();
+        Ok(())
     }
 
     // ---- periodic work -----------------------------------------------------------------
@@ -1828,6 +1921,7 @@ impl Daemon {
             control_max: control_max(),
             name: Mutex::new(String::new()),
             peer_pid,
+            colors: Mutex::new(None),
         });
         self.clients.lock().unwrap().insert(id, client.clone());
 
@@ -1959,7 +2053,13 @@ impl Daemon {
         }
         let panes: Vec<_> = self.panes.lock().unwrap().values().cloned().collect();
         for p in panes {
-            p.lock().unwrap().subs.remove(&id);
+            let mut p = p.lock().unwrap();
+            p.subs.remove(&id);
+            // Its colors go with it: the pane falls back to another client's, or the defaults.
+            if p.colors_client == Some(id) {
+                p.colors_client = None;
+            }
+            self.refresh_palette(&mut p);
         }
         self.retire_client_requests(id);
         drop(client);
@@ -1976,13 +2076,16 @@ impl Daemon {
                         format!("client protocol {proto}; this daemon supports {PROTOCOL_MIN}..={PROTOCOL}"),
                     ));
                 }
+                if let Some(c) = p.get("colors") {
+                    self.set_client_colors(client, Some(c))?;
+                }
                 Ok(json!({
                     "protocol": proto,
                     "protocol_min": PROTOCOL_MIN,
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -1996,6 +2099,11 @@ impl Daemon {
                 }))
             }
             "ping" => Ok(json!({})),
+            "client.colors" => {
+                let colors = p.get("colors").ok_or_else(|| err("bad_request", "missing colors (null clears them)"))?;
+                self.set_client_colors(client, Some(colors))?;
+                Ok(json!({}))
+            }
             "debug.stats" => {
                 let mut v = self.stats();
                 if p.get("maps").and_then(Value::as_bool).unwrap_or(false) {
@@ -2382,6 +2490,7 @@ impl Daemon {
             client.full.store(true, Ordering::Relaxed);
         }
         pp.subs.insert(client.id, Sub { client: client.clone(), lagging: defer, viewport });
+        self.use_colors_of(pp, client.id);
 
         let end = pp.vt_seq;
         let mode = match have {

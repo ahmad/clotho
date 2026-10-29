@@ -445,3 +445,63 @@ fn a_cleared_screen_keeps_its_scrollback_out_of_view() {
         roundtrip(30, 10, format!("{cmd}{clear}saved screen 42\r\n$ ").as_bytes());
     }
 }
+
+fn replies(vt: &mut Vt, input: &[u8]) -> String {
+    let out: Vec<u8> = vt.feed(input).into_iter().filter_map(|e| if let VtEvent::Reply(b) = e { Some(b) } else { None }).flatten().collect();
+    String::from_utf8(out).unwrap()
+}
+
+fn light() -> Palette {
+    let mut ansi = [Rgb { r: 0, g: 0, b: 0 }; 16];
+    ansi[1] = Rgb { r: 0xc4, g: 0x1a, b: 0x16 };
+    Palette { foreground: Rgb { r: 0x1d, g: 0x1d, b: 0x1f }, background: Rgb { r: 0xff, g: 0xff, b: 0xff }, cursor: None, ansi: Some(ansi) }
+}
+
+const COLOR_QUERIES: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07\x1b]12;?\x07\x1b]4;1;?\x07\x1b]4;100;?\x07";
+
+/// Colour queries get the client's palette, the defaults without one, and an application's own
+/// colours over either.
+#[test]
+fn color_queries_answer_from_the_palette() {
+    let mut vt = Vt::new(20, 4);
+    assert_eq!(
+        replies(&mut vt, COLOR_QUERIES),
+        "\x1b]10;rgb:d8d8/d8d8/d8d8\x07\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b]12;rgb:d8d8/d8d8/d8d8\x07\x1b]4;1;rgb:cdcd/0000/0000\x07\x1b]4;100;rgb:8787/8787/0000\x07",
+        "no palette: the dark defaults"
+    );
+    assert_eq!(vt.set_palette(Some(Arc::new(light()))), None, "mode 2031 is off: no notification");
+    assert_eq!(
+        replies(&mut vt, COLOR_QUERIES),
+        "\x1b]10;rgb:1d1d/1d1d/1f1f\x07\x1b]11;rgb:ffff/ffff/ffff\x07\x1b]12;rgb:1d1d/1d1d/1f1f\x07\x1b]4;1;rgb:c4c4/1a1a/1616\x07\x1b]4;100;rgb:8787/8787/0000\x07",
+        "the palette: cursor defaults to the foreground, 16-255 keep the cube"
+    );
+    let no_ansi = Palette { ansi: None, cursor: Some(Rgb { r: 1, g: 2, b: 3 }), ..light() };
+    vt.set_palette(Some(Arc::new(no_ansi)));
+    assert_eq!(replies(&mut vt, b"\x1b]4;1;?\x07\x1b]12;?\x07"), "\x1b]4;1;rgb:cdcd/0000/0000\x07\x1b]12;rgb:0101/0202/0303\x07");
+    // What the application set itself wins.
+    assert_eq!(replies(&mut vt, b"\x1b]11;rgb:10/20/30\x07\x1b]4;1;rgb:aa/bb/cc\x07\x1b]11;?\x07\x1b]4;1;?\x07"), "\x1b]11;rgb:1010/2020/3030\x07\x1b]4;1;rgb:aaaa/bbbb/cccc\x07");
+    vt.set_palette(None);
+    assert_eq!(replies(&mut vt, b"\x1b]10;?\x07"), "\x1b]10;rgb:d8d8/d8d8/d8d8\x07", "cleared: the defaults again");
+}
+
+/// Mode 2031: DECRQM, the `CSI ? 996 n` query, and a notification when the colours flip between
+/// dark and light (only then, only while the mode is on).
+#[test]
+fn color_scheme_reports_follow_the_palette() {
+    let mut vt = Vt::new(20, 4);
+    assert_eq!(replies(&mut vt, b"\x1b[?2031$p\x1b[?996n"), "\x1b[?2031;2$y\x1b[?997;1n", "off, and dark with no palette");
+    assert_eq!(vt.set_palette(Some(Arc::new(light()))), None);
+    assert_eq!(replies(&mut vt, b"\x1b[?2031h\x1b[?2031$p\x1b[?996n"), "\x1b[?2031;1$y\x1b[?997;2n");
+    let dark = Palette { background: Rgb { r: 0x1e, g: 0x1e, b: 0x1e }, foreground: Rgb { r: 0xee, g: 0xee, b: 0xee }, ..light() };
+    assert_eq!(vt.set_palette(Some(Arc::new(dark.clone()))).as_deref(), Some(&b"\x1b[?997;1n"[..]), "light to dark");
+    let darker = Palette { background: Rgb { r: 0, g: 0, b: 0 }, ..dark.clone() };
+    assert_eq!(vt.set_palette(Some(Arc::new(darker))), None, "still dark: nothing to tell");
+    assert_eq!(vt.set_palette(Some(Arc::new(light()))).as_deref(), Some(&b"\x1b[?997;2n"[..]));
+    assert_eq!(vt.set_palette(None).as_deref(), Some(&b"\x1b[?997;1n"[..]), "no palette is dark");
+    // Off again (or a reset): no notifications.
+    replies(&mut vt, b"\x1b[?2031l");
+    assert_eq!(vt.set_palette(Some(Arc::new(light()))), None);
+    replies(&mut vt, b"\x1b[?2031h\x1bc");
+    assert_eq!(vt.set_palette(None), None, "RIS turns it off");
+    assert!(light().dark() == false && dark.dark());
+}

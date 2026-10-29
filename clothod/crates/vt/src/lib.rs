@@ -25,7 +25,7 @@ use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::term::{Config, Osc52, Term, TermMode};
 use alacritty_terminal::vte;
 use alacritty_terminal::vte::ansi::{
-    Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler,
+    Color, CursorShape, CursorStyle, NamedColor, Processor, StdSyncHandler,
 };
 
 /// Lines of scrollback each pane keeps. Clients keep their own (deeper) history; this is what a
@@ -101,6 +101,20 @@ struct Tracker {
     /// Zero-based `start..end` (end exclusive); `None` is the full screen.
     region: Option<(usize, usize)>,
     cwd: Option<String>,
+    /// Mode 2031 (color palette update notifications): the application wants `CSI ? 997 ; 1|2 n`
+    /// when the colors switch between dark and light.
+    palette_updates: bool,
+    /// The colors the application gets are dark ones (no palette counts as dark).
+    dark: bool,
+    /// The terminal's event queue: replies the tracker produces (to `CSI ? 996 n`) go in line
+    /// with the terminal's own (see `Vt::feed`).
+    listener: Listener,
+}
+
+/// `CSI ? 997 ; 1 n` (dark) or `; 2 n` (light): the answer to `CSI ? 996 n`, and the
+/// notification mode 2031 asks for.
+fn color_scheme_report(dark: bool) -> Vec<u8> {
+    format!("\x1b[?997;{}n", if dark { 1 } else { 2 }).into_bytes()
 }
 
 impl vte::Perform for Tracker {
@@ -142,8 +156,16 @@ impl vte::Perform for Tracker {
                 }
                 return;
             }
+            (b"?", 'n') if first == 996 => {
+                let report = String::from_utf8(color_scheme_report(self.dark)).unwrap();
+                self.listener.0.lock().unwrap().push(Event::PtyWrite(report));
+                return;
+            }
             (b"?", 'h' | 'l') => {
                 for p in params.iter() {
+                    if p[0] == 2031 {
+                        self.palette_updates = action == 'h';
+                    }
                     if matches!(p[0], 47 | 1047 | 1049) {
                         self.alt = action == 'h';
                         if self.alt {
@@ -175,6 +197,7 @@ impl vte::Perform for Tracker {
             self.region = None;
             self.kitty = [Vec::new(), Vec::new()];
             self.alt = false;
+            self.palette_updates = false;
         }
     }
 
@@ -358,6 +381,46 @@ pub struct Vt {
     guard: OscGuard,
     title: Option<String>,
     scrollback: usize,
+    /// The colors to report to applications that query ones they haven't set (OSC 4/10/11/12):
+    /// those of the client the user is using the pane from. None: [`default_color`].
+    palette: Option<Arc<Palette>>,
+}
+
+pub use alacritty_terminal::vte::ansi::Rgb;
+
+/// A client's terminal colors (see [`Vt::set_palette`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Palette {
+    pub foreground: Rgb,
+    pub background: Rgb,
+    /// None: the foreground.
+    pub cursor: Option<Rgb>,
+    /// ANSI 0-15; None: the xterm defaults.
+    pub ansi: Option<[Rgb; 16]>,
+}
+
+impl Palette {
+    /// Palette index as alacritty numbers them: 0-255, then 256 foreground, 257 background,
+    /// 258 cursor.
+    pub fn color(&self, index: usize) -> Rgb {
+        match index {
+            0..=15 => self.ansi.map_or_else(|| default_color(index), |a| a[index]),
+            256 => self.foreground,
+            257 => self.background,
+            258 => self.cursor.unwrap_or(self.foreground),
+            _ => default_color(index),
+        }
+    }
+
+    /// Dark if the background's relative luminance is under one half.
+    pub fn dark(&self) -> bool {
+        let lin = |c: u8| {
+            let c = c as f64 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let b = self.background;
+        0.2126 * lin(b.r) + 0.7152 * lin(b.g) + 0.0722 * lin(b.b) < 0.5
+    }
 }
 
 impl Vt {
@@ -372,8 +435,9 @@ impl Vt {
         Vt {
             term,
             processor: Processor::new(),
+            tracker: Tracker { kitty: [Vec::new(), Vec::new()], alt: false, rows, region: None, cwd: None, palette_updates: false, dark: true, listener: listener.clone() },
             listener,
-            tracker: Tracker { kitty: [Vec::new(), Vec::new()], alt: false, rows, region: None, cwd: None },
+            palette: None,
             parser: vte::Parser::new(),
             guard: OscGuard::default(),
             title: None,
@@ -496,6 +560,32 @@ impl Vt {
         Ok(SearchResult { matches, next: None })
     }
 
+    /// alacritty doesn't know mode 2031 (the tracker does): its DECRQM answer ("not
+    /// recognized") becomes the mode's state.
+    fn answer_2031_queries(&mut self) {
+        let state = if self.tracker.palette_updates { "1" } else { "2" };
+        for e in self.listener.0.lock().unwrap().iter_mut() {
+            if let Event::PtyWrite(s) = e {
+                if s == "\x1b[?2031;0$y" {
+                    *s = format!("\x1b[?2031;{state}$y");
+                }
+            }
+        }
+    }
+
+    /// The colors applications get when they query ones they haven't set. With mode 2031 on,
+    /// a switch between dark and light returns the notification to send the application.
+    pub fn set_palette(&mut self, palette: Option<Arc<Palette>>) -> Option<Vec<u8>> {
+        if self.palette == palette {
+            return None;
+        }
+        let dark = palette.as_ref().is_none_or(|p| p.dark());
+        self.palette = palette;
+        let flipped = dark != self.tracker.dark;
+        self.tracker.dark = dark;
+        (flipped && self.tracker.palette_updates).then(|| color_scheme_report(dark))
+    }
+
     /// Feed PTY output. Returns replies for the application and other notable events.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<VtEvent> {
         let cwd_before = self.tracker.cwd.clone();
@@ -504,8 +594,22 @@ impl Vt {
                 Piece::Input(b) => b,
                 Piece::Owned(b) => &b[..],
             };
-            self.parser.advance(&mut self.tracker, b);
-            self.processor.advance(&mut self.term, b);
+            // Mode 2031 lives in the tracker, which sees each chunk before the terminal does:
+            // where it matters, the two go a sequence at a time, so its answers and its state
+            // line up with the terminal's replies.
+            if memchr::memmem::find(b, b"2031").is_none() && memchr::memmem::find(b, b"996").is_none() {
+                self.parser.advance(&mut self.tracker, b);
+                self.processor.advance(&mut self.term, b);
+                continue;
+            }
+            let mut start = 0;
+            while start < b.len() {
+                let end = memchr::memchr(0x1b, &b[start + 1..]).map_or(b.len(), |i| start + 1 + i);
+                self.parser.advance(&mut self.tracker, &b[start..end]);
+                self.processor.advance(&mut self.term, &b[start..end]);
+                self.answer_2031_queries();
+                start = end;
+            }
         }
         let mut events = self.drain_events();
         if self.tracker.cwd != cwd_before {
@@ -560,7 +664,8 @@ impl Vt {
             match event {
                 Event::PtyWrite(s) => out.push(VtEvent::Reply(s.into_bytes())),
                 Event::ColorRequest(index, format) => {
-                    let rgb = self.term.colors()[index].unwrap_or_else(|| default_color(index));
+                    let rgb = self.term.colors()[index]
+                        .unwrap_or_else(|| self.palette.as_ref().map_or_else(|| default_color(index), |p| p.color(index)));
                     out.push(VtEvent::Reply(format(rgb).into_bytes()));
                 }
                 Event::TextAreaSizeRequest(format) => {

@@ -94,7 +94,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
-                  "pane.search", "agent.history", "agent.decide", "push.activity"],
+                  "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -120,7 +120,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `push.activity` (Live Activities: `push.activity`, `push.activity_end` and `push.list`'s
   `activities`, see docs/push.md, Live Activities; since 0.1.16. Since 0.1.18 the content
   sent to the relay also carries the optional `tool`, `detail` and `msg`: the detail
-  notifications carry, as one line of at most 64, 200 and 300 characters).
+  notifications carry, as one line of at most 64, 200 and 300 characters),
+  `client.colors` (hello's `colors` and the `client.colors` request, see
+  [Client colors](#client-colors); since 0.1.20).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -755,6 +757,44 @@ no client or several clients are attached. **Clients must not forward their emul
 auto-generated responses as input.** Send only user input such as keys, paste, and mouse and focus
 reports. (With SwiftTerm, that means filtering what the terminal delegate's `send` emits for
 query responses.)
+
+Color queries (OSC 10/11/12, and OSC 4 for entries the application hasn't set) are answered from
+the colors of the client the user is using the pane from, if it sent any (see
+[Client colors](#client-colors)), and otherwise from xterm's palette with a dark background:
+foreground `#d8d8d8`, background `#1e1e1e`.
+
+#### Client colors
+
+Feature flag: `client.colors` in `hello.features`. A client tells the daemon its terminal colors
+so that applications that ask for them (Claude Code's "auto" theme asks for the background) see
+the ones the user sees, light or dark. Send them only to a daemon that lists the flag.
+
+```json
+→ {"id": 2, "method": "client.colors", "params": {"colors": {
+     "foreground": "#1d1d1f", "background": "#ffffff", "cursor": "#0a84ff",
+     "ansi": ["#000000", "#c41a16", …16 colors]}}}
+← {"id": 2, "result": {}}
+```
+
+- `colors` can also go in `hello`'s params. `client.colors` replaces them (send it whenever the
+  appearance changes, e.g. light to dark), and `{"colors": null}` clears them.
+- `foreground` and `background` are required. `cursor` is optional (default: the foreground),
+  and so is `ansi`, which must then hold exactly 16 colors, for ANSI 0–15 (default: xterm's).
+  Each color is `#rrggbb` (hex digits in either case). Anything else, or another key, is
+  `bad_request`.
+- Which client's colors a pane uses: the connected client that last typed in the pane (keys,
+  paste, mouse and focus reports: INPUT frames, `pane.input`, `pane.keys`) or subscribed to it,
+  if that client sent colors. Otherwise the connected client that sent colors most recently.
+  Otherwise the defaults above. A client's colors go when it disconnects.
+- Answers: OSC 10, 11 and 12 report `foreground`, `background` and `cursor`. OSC 4 reports
+  `ansi` for 0–15; 16–255 keep xterm's color cube and grays. Colors the application set itself
+  (OSC 4/10/11/12) are reported as it set them.
+- Dark or light: the colors are dark when the background's relative luminance is under 0.5
+  (none count as dark). `CSI ? 996 n` gets `CSI ? 997 ; 1 n` (dark) or `CSI ? 997 ; 2 n`
+  (light). Applications that turn on mode 2031 (`CSI ? 2031 h`; DECRQM `CSI ? 2031 $ p` reports
+  it) get that report, unasked, whenever their pane's colors switch between dark and light: new
+  colors from the client using it, another client taking it over, or that client leaving.
+- Nothing else changes: snapshots and the screen state don't depend on client colors.
 
 ### Clipboard (OSC 52)
 

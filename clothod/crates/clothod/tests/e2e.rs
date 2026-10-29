@@ -1706,6 +1706,82 @@ fn clotho_bin() -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// Colour queries (OSC 10/11, mode 2031) are answered with the colours of the client using the
+/// pane: the one that last typed in it, else the last to set colours, else the dark defaults;
+/// with mode 2031 on, the application hears when they flip between dark and light.
+#[tokio::test]
+async fn color_queries_follow_the_clients_colors() {
+    let env = Env::new();
+    let light = json!({"foreground": "#1d1d1f", "background": "#FFFFFF", "cursor": "#0a84ff", "ansi": ["#000000", "#c41a16", "#007400", "#826b28", "#0000ff", "#a90d91", "#3e8087", "#e5e5e5", "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff"]});
+    let a = env.client().await;
+    let hello = a.request("hello", json!({"protocol": 1, "client": "test-a", "colors": light})).await.unwrap();
+    assert!(hello["features"].as_array().unwrap().contains(&json!("client.colors")));
+    let b = env.client().await;
+    for bad in [json!({"background": "#fff"}), json!({"foreground": "#000000"}), json!({"foreground": "#000000", "background": "#ffffff", "ansi": ["#000000"]}), json!({"foreground": "#000000", "background": "#ffffff", "extra": 1}), json!("dark")] {
+        let e = b.request("client.colors", json!({"colors": bad})).await.unwrap_err();
+        assert!(e.to_string().contains("bad_request"), "{bad}: {e}");
+    }
+    assert!(b.request("hello", json!({"protocol": 1, "client": "test-b", "colors": {"background": "#zzzzzz"}})).await.is_err());
+
+    // The application turns on mode 2031, then asks whenever the test says so; everything the
+    // terminal answers lands in `rec`.
+    let dir = env.dir.path();
+    let rec = dir.join("rec");
+    let mut params = sh();
+    params["command"] = json!([
+        "/bin/sh",
+        "-c",
+        format!(
+            r#"stty raw -echo; exec 3<&0; cat <&3 > '{rec}' & printf '\033[?2031h'; for i in 1 2 3 4; do while [ ! -e "{d}/go$i" ]; do sleep 0.02; done; printf '\033]11;?\007\033[?996n'; done; wait"#,
+            rec = rec.display(),
+            d = dir.display()
+        )
+    ]);
+    let p = new_pane(&b, params).await;
+    // What arrived since the last call (`seen` bytes were returned before) once it has `want`.
+    async fn wait_for(rec: &std::path::Path, seen: &mut usize, want: String) -> String {
+        let got = |from: usize| String::from_utf8_lossy(&std::fs::read(rec).unwrap_or_default()[from..]).into_owned();
+        let deadline = Instant::now() + T;
+        while !got(*seen).contains(&want) {
+            assert!(Instant::now() < deadline, "never got {want:?}: {:?}", got(*seen));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let new = got(*seen);
+        *seen += new.len();
+        new
+    }
+    let mut seen = 0;
+    let ask = |n: u32| std::fs::write(dir.join(format!("go{n}")), "").unwrap();
+    let light_answer = "\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?997;2n".to_string();
+
+    // Nobody uses the pane yet: the last client to set colours, A (light).
+    ask(1);
+    wait_for(&rec, &mut seen, light_answer.clone()).await;
+
+    // B sets dark colours: now the latest, so the pane flips and the application is told.
+    b.request("client.colors", json!({"colors": {"foreground": "#eeeeee", "background": "#101010"}})).await.unwrap();
+    wait_for(&rec, &mut seen, "\x1b[?997;1n".into()).await;
+
+    // A types in the pane: its colours again.
+    a.request("pane.input", json!({"pane": p, "data": "x"})).await.unwrap();
+    let all = wait_for(&rec, &mut seen, "\x1b[?997;2n".into()).await;
+    assert!(all.contains('x'), "{all:?}");
+    ask(2);
+    wait_for(&rec, &mut seen, light_answer).await;
+
+    // A goes: back to B's.
+    drop(a);
+    wait_for(&rec, &mut seen, "\x1b[?997;1n".into()).await;
+    ask(3);
+    wait_for(&rec, &mut seen, "\x1b]11;rgb:1010/1010/1010\x07\x1b[?997;1n".into()).await;
+
+    // B clears its colours: the defaults, still dark, so no notification.
+    b.request("client.colors", json!({"colors": null})).await.unwrap();
+    ask(4);
+    let all = wait_for(&rec, &mut seen, "\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b[?997;1n".into()).await;
+    assert_eq!(all, "\x1b]11;rgb:1e1e/1e1e/1e1e\x07\x1b[?997;1n", "no flip report on the way: {all:?}");
+}
+
 /// `clotho attach` shows pane output in a real terminal, which answers the queries in it. Those
 /// answers must not be forwarded: the daemon already answered, and e.g. a kitty `CSI ? u`
 /// answer would switch Claude Code's keyboard protocol. The outer terminal here is another

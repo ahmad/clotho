@@ -208,6 +208,7 @@ name = "clotho-vt"
 version = "0.1.19"
 dependencies = [
  "alacritty_terminal",
+ "memchr",
  "regex-automata",
 ]
 

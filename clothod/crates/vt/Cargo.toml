@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 alacritty_terminal.workspace = true
 regex-automata = "0.4"
+memchr = "2"
