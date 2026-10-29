@@ -415,3 +415,5 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - ⌘P becomes a quick command bar. Empty, it lists the current workspace's tabs with the current tab
   selected; ↑/↓ and Return switch. Typing filters across all machines' workspaces, tabs and agents,
   with waiting agents first. It's instant, from the model in memory.
+- Search ranks workspaces first once you type (a name match beats tabs that match), and choosing a
+  workspace goes to the tab last active in it, falling back to its first tab (user, 2026-10-29).
