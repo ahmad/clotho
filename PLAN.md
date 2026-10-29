@@ -434,3 +434,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - A full shutdown (`clothod shutdown`, "restart sessions") keeps the layout, so the next start brings it
   back (user confirmed). `clothod shutdown --forget` also clears the saved layout. Closing a workspace
   is how to forget it.
+
+## Drag to reorder (user request, 2026-10-29)
+
+- Drag workspaces in the sidebar and tabs in the tab bar to reorder them. Drag a tab onto another
+  workspace to move it there, with its shells intact. This works within one machine only, since a
+  pane's shell lives on its machine.
+- clothod adds `workspace.move` and `tab.move` (feature "move") in 0.1.22. The Mac app does the drag UI,
+  and the iPhone follows later.
