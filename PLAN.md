@@ -464,3 +464,6 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - Fix: clothod starts serve and holder on macOS through launchd in the user's durable domain. The user
   approved restarting imac's daemon once that fix is in. Its shells end, and restore brings back the
   layout and agent conversations. macbook's serve is not restarted for now.
+- Disk (2026-10-29): the user allowed one dip below the 20 GiB floor on macbook, for the 0.1.24 test
+  and release builds only (abort under 8 GiB). Most of the space went to swap from the user's own
+  dev server and browser, not to our builds.
