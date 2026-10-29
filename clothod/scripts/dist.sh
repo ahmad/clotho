@@ -74,7 +74,10 @@ if [ -n "$sign" ]; then
     command -v codesign >/dev/null || { echo "dist: CLOTHOD_SIGN_IDENTITY needs codesign (a Mac)" >&2; exit 1; }
 fi
 
-out=${DIST_DIR:-dist}
+# Built into $out.new and swapped in only when complete: a failed run (a build, signing) leaves
+# the last release's builds in $out.
+final=${DIST_DIR:-dist}
+out=$final.new
 rm -rf "$out"
 mkdir -p "$out"
 {
@@ -101,7 +104,9 @@ mkdir -p "$out"
     done
     printf '\n  }\n}\n'
 } > "$out/manifest.json"
-cat "$out/manifest.json"
+rm -rf "$final"
+mv "$out" "$final"
+cat "$final/manifest.json"
 if [ "$dev" = 0 ]; then
     echo "$version" > RELEASED
     echo "dist: released $version (recorded in RELEASED)"
