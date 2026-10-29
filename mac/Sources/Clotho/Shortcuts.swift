@@ -48,10 +48,17 @@ struct Shortcut {
     }
 
     // AppKit matches shifted punctuation by the character it produces, so ⇧⌘[ is registered as ⌘{.
+    ///
+    /// Letters too: AppKit reads a lowercase key equivalent with Shift in its mask as the plain letter, so
+    /// "r" + ⇧⌘ fired on ⌘R (Rename Workspace took Rename Tab's key) and never on ⇧⌘R. The convention is
+    /// the capital letter without Shift in the mask.
     var menuKey: (String, NSEvent.ModifierFlags) {
         let shifted = ["[": "{", "]": "}"]
         if modifiers.contains(.shift), let char = shifted[key] {
             return (char, modifiers.subtracting(.shift))
+        }
+        if modifiers.contains(.shift), key.count == 1, let letter = key.first, letter.isLetter, letter.isLowercase {
+            return (key.uppercased(), modifiers.subtracting(.shift))
         }
         return (key, modifiers)
     }
@@ -142,6 +149,14 @@ extension AppDelegate {
     static let menuOrder = ["Clotho", "File", "Edit", "View", "Workspace", "Tab", "Pane", "Window", "Help"]
 
     func buildMenu() {
+        let main = Self.makeMainMenu()
+        if let window = main.items.first(where: { $0.submenu?.title == "Window" })?.submenu { NSApp.windowsMenu = window }
+        if let help = main.items.first(where: { $0.submenu?.title == "Help" })?.submenu { NSApp.helpMenu = help }
+        NSApp.mainMenu = main
+    }
+
+    /// The menu bar, from `shortcuts`; actions go to the responder chain.
+    static func makeMainMenu() -> NSMenu {
         let main = NSMenu()
         for name in Self.menuOrder {
             let item = NSMenuItem()
@@ -166,10 +181,8 @@ extension AppDelegate {
             }
             item.submenu = menu
             main.addItem(item)
-            if name == "Window" { NSApp.windowsMenu = menu }
-            if name == "Help" { NSApp.helpMenu = menu }
         }
-        NSApp.mainMenu = main
+        return main
     }
 
     // Shows the shortcuts card over the terminal, inside this window; ⌘/ again, Esc or a click outside hides it.

@@ -119,10 +119,13 @@ extension AppDelegate {
         window.title = tab.map { "\(store.displayTitle(of: $0)) — \(place ?? "")" } ?? "Clotho"
 
         // Keyboard focus follows the daemon's focus, unless an overlay (the command bar previews tabs while
-        // keeping the keyboard), a sheet, the sidebar or a name being
-        // edited in it has it (the rename that follows New Workspace starts before the workspace's focus lands).
+        // keeping the keyboard), a sheet, the sidebar, or a name being edited has it: in the sidebar (the
+        // rename that follows New Workspace starts before the workspace's focus lands), in the tab bar, or
+        // any other field being typed in. A sync runs on every retitle and output, so without this a busy
+        // pane took the cursor out of a tab's name mid-rename.
         if let focusedPane, let host = shown[focusedPane], shortcutsOverlay == nil, fileBrowser == nil, quickOpen == nil,
-           window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard, !sidebar.isEditing {
+           window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard, !sidebar.isEditing,
+           !tabBar.isEditing, !Self.isTypingInAField(window) {
             window.makeFirstResponder(host.terminal)
         }
     }
@@ -140,6 +143,15 @@ extension AppDelegate {
 
     // Clicking into a pane focuses it in its daemon, which every client shares.
     func firstResponderChanged() {
+        // TraceFocus=YES logs who gave a terminal the keyboard (KVO runs inside makeFirstResponder), for
+        // chasing focus taken from a field.
+        if UserDefaults.standard.bool(forKey: "TraceFocus"), let terminal = window.firstResponder as? PaneTerminalView {
+            let frames = Thread.callStackSymbols.dropFirst(2).prefix(14).compactMap { line -> String? in
+                let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+                return parts.count > 3 ? String(parts[3]) : nil
+            }
+            log("focus: pane \(terminal.paneID) took the keyboard: \(frames.joined(separator: " < "))")
+        }
         guard let terminal = window.firstResponder as? PaneTerminalView, let session = connections[terminal.machine],
               session.store.state.focus.pane != terminal.paneID, session.store.state.pane(terminal.paneID) != nil else { return }
         focusNow(.pane(terminal.paneID), on: terminal.machine, trace: "pane \(terminal.paneID)")
@@ -166,6 +178,11 @@ extension AppDelegate {
 
     func renameWorkspace(_ id: WorkspaceID) {
         sidebar.beginRename(focusedMachine, id)
+    }
+
+    /// Whether the window's keyboard is in a text field being edited (its field editor has it).
+    static func isTypingInAField(_ window: NSWindow) -> Bool {
+        (window.firstResponder as? NSTextView)?.isFieldEditor == true
     }
 
     func renameTab(withID id: TabID) {

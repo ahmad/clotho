@@ -992,16 +992,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let keys: [String: (code: UInt16, char: String)] = [
             "return": (36, "\r"), "enter": (76, "\u{3}"), "tab": (48, "\t"), "esc": (53, "\u{1b}"), "delete": (51, "\u{7f}"),
             "left": (123, String(UnicodeScalar(NSLeftArrowFunctionKey)!)), "right": (124, String(UnicodeScalar(NSRightArrowFunctionKey)!)),
-            "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "n": (45, "n"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"),
+            "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "n": (45, "n"), "r": (15, "r"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"),
         ]
         let flags: [String: NSEvent.ModifierFlags] = ["shift": .shift, "cmd": .command, "ctrl": .control, "alt": .option]
         guard let key = keys[name], parts.allSatisfy({ flags[$0] != nil }) else { return log("TypeText: unknown key \(spec)") }
         let modifiers = parts.reduce(into: NSEvent.ModifierFlags()) { $0.formUnion(flags[$1]!) }
+        // As a keyboard reports it: Shift makes a letter its capital.
+        let char = modifiers.contains(.shift) && key.char.count == 1 && key.char.first!.isLetter ? key.char.uppercased() : key.char
         window.makeKey()
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
                                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                                               context: nil, characters: key.char, charactersIgnoringModifiers: key.char,
+                                               context: nil, characters: char, charactersIgnoringModifiers: char,
                                                isARepeat: false, keyCode: key.code) else { continue }
             NSApp.postEvent(event, atStart: false)
         }

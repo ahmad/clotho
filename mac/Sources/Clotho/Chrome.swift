@@ -234,6 +234,7 @@ class ChromeItem: NSView, HoverRefreshing {
 
     func endEditing(commit: Bool) {
         guard let field = editor else { return }
+        if UserDefaults.standard.bool(forKey: "TraceFocus") { log("focus: inline edit of \(label.stringValue) ends, commit \(commit)") }
         editor = nil
         if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
         clickMonitor = nil
@@ -533,6 +534,9 @@ final class TabBarView: NSView {
 
     /// The tabs' frames (tests and the LogSidebar aid).
     var tabFrames: [NSRect] { stack.arrangedSubviews.map(\.frame) }
+
+    /// Whether a tab's name is being edited (the window leaves the keyboard alone meanwhile).
+    var isEditing: Bool { items.values.contains { $0.item.isEditing } }
 
     /// Edits a tab's title in place, starting from the title it shows.
     func beginRename(_ id: TabID) {
