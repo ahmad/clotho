@@ -159,7 +159,8 @@ final class SidebarTreeTests: XCTestCase {
         XCTAssertGreaterThan(SidebarTree.strokePixels(scale: 2), 1, "bolder than the 1 px guides on Retina")
     }
 
-    /// A workspace row's + shows under the pointer, beside close, and makes a tab in that workspace.
+    /// A workspace row has no ×: under the pointer it shows only a + (a new tab there), in the slot where
+    /// a tab row shows its ×. Closing it is in its right-click menu.
     func testWorkspacePlusMakesATab() throws {
         var asked: [(MachineKey, WorkspaceID)] = []
         sidebar.onNewTab = { asked.append(($0, $1)) }
@@ -167,17 +168,60 @@ final class SidebarTreeTests: XCTestCase {
         let docs = try XCTUnwrap(rows.first { $0.label.stringValue == "Docs" } as? WorkspaceRow)
         XCTAssertTrue(docs.newTabButton.isHidden, "hidden at rest")
         docs.setHovering(true)
+        docs.layoutSubtreeIfNeeded()
         XCTAssertFalse(docs.newTabButton.isHidden, "shown under the pointer")
-        XCTAssertFalse(docs.closeButton.isHidden)
-        XCTAssertLessThan(docs.newTabButton.frame.maxX, docs.closeButton.frame.minX + 1, "just before close")
+        XCTAssertEqual(docs.newTabButton.accessibilityLabel(), "New Tab")
+        let visibleButtons = docs.subviews.compactMap { $0 as? NSButton }.filter { !$0.isHidden }
+        XCTAssertEqual(visibleButtons.map { $0.accessibilityLabel() }, ["New Tab"], "no close button on a workspace")
+        let tab = try XCTUnwrap(rows.first { $0 is TabRow })
+        tab.setHovering(true)
+        tab.layoutSubtreeIfNeeded()
+        XCTAssertEqual(docs.convert(docs.newTabButton.frame, to: nil).midX, tab.convert(tab.closeButton.frame, to: nil).midX, accuracy: 0.5,
+                       "the + sits where a tab's × does")
         XCTAssertLessThan(docs.label.frame.maxX, docs.newTabButton.frame.minX, "the name stops before it")
         docs.newTabButton.performClick(nil)
         XCTAssertEqual(asked.map(\.0), ["local"])
         XCTAssertEqual(asked.map(\.1), [2])
         docs.setHovering(false)
         XCTAssertTrue(docs.newTabButton.isHidden)
-        // Tab rows have no +.
+        // Tab rows keep their × and have no +.
         XCTAssertFalse(rows.contains { $0 is TabRow && $0.subviews.contains { ($0 as? NSButton)?.accessibilityLabel() == "New Tab" } })
+    }
+
+    /// Collapsed, a workspace shows its tabs' dot; under the pointer the + takes the dot's place.
+    func testCollapsedWorkspacePlusReplacesTheDot() throws {
+        sidebar.onNewTab = { _, _ in }
+        let base = group()
+        update(SidebarGroup(key: base.key, title: base.title, status: base.status, workspaces: base.workspaces, selected: 2,
+                            isConnected: true, isLocal: true, badges: [1: .systemOrange], tabs: base.tabs, selectedTab: 20))
+        sidebar.setExpanded(false, "local", 1)
+        sidebar.layoutSubtreeIfNeeded()
+        let platform = try XCTUnwrap(rows.first as? WorkspaceRow)
+        XCTAssertFalse(platform.badge.isHidden, "the dot shows while collapsed")
+        let dot = platform.badge.frame
+        platform.setHovering(true)
+        platform.layoutSubtreeIfNeeded()
+        XCTAssertTrue(platform.badge.isHidden)
+        XCTAssertFalse(platform.newTabButton.isHidden)
+        XCTAssertEqual(platform.newTabButton.frame.midX, dot.midX, accuracy: 0.5)
+    }
+
+    /// Right-click on a workspace: New Tab, Rename Workspace, and Close Workspace… (which asks first).
+    func testWorkspaceMenuCloses() throws {
+        var closed: [(MachineKey, WorkspaceID)] = [], newTabs = 0
+        sidebar.onClose = { closed.append(($0, $1)) }
+        sidebar.onNewTab = { _, _ in newTabs += 1 }
+        update()
+        let docs = try XCTUnwrap(rows.first { $0.label.stringValue == "Docs" } as? WorkspaceRow)
+        let menu = try XCTUnwrap(docs.contextMenu?())
+        XCTAssertEqual(menu.items.filter { !$0.isSeparatorItem }.map(\.title), ["New Tab", "Rename Workspace", "Close Workspace…"])
+        let close = try XCTUnwrap(menu.items.first { $0.title == "Close Workspace…" })
+        _ = close.target?.perform(close.action, with: close)
+        XCTAssertEqual(closed.map(\.0), ["local"])
+        XCTAssertEqual(closed.map(\.1), [2])
+        let newTab = try XCTUnwrap(menu.items.first)
+        _ = newTab.target?.perform(newTab.action, with: newTab)
+        XCTAssertEqual(newTabs, 1)
     }
 
     /// New Workspace is a quiet + in the machine's header; only a machine with no workspaces lists a row

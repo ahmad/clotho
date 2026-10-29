@@ -78,8 +78,10 @@ final class WorkspaceRowTests: XCTestCase {
     func testRenameHidesClose() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 28), styleMask: [], backing: .buffered, defer: true)
         let row = laidOut(WorkspaceRow(), "Platform")
+        row.onNewTab = {}
         window.contentView = row
         row.setHovering(true)
+        XCTAssertFalse(row.closeButton.isHidden, "the + shows on hover")
         row.beginEditing("Platform") { _ in }
         XCTAssertTrue(row.closeButton.isHidden)
         row.endEditing(commit: false)

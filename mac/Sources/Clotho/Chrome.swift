@@ -116,6 +116,8 @@ class ChromeItem: NSView, HoverRefreshing {
     /// Whether the close button also shows on the selected item (tabs), or only under the pointer
     /// (workspace rows).
     var closeShowsWhenSelected = true { didSet { updateColors() } }
+    /// Whether the trailing button (close, or a workspace row's +) has something to do.
+    var hasTrailingAction: Bool { onClose != nil }
     /// Called whenever the close button is shown or hidden.
     func closeVisibilityChanged() {}
 
@@ -286,7 +288,7 @@ class ChromeItem: NSView, HoverRefreshing {
     }
 
     private func updateColors() {
-        closeButton.isHidden = !(hovering || (isSelected && closeShowsWhenSelected)) || onClose == nil || editor != nil
+        closeButton.isHidden = !(hovering || (isSelected && closeShowsWhenSelected)) || !hasTrailingAction || editor != nil
         closeVisibilityChanged()
         guard selectionStyle != .plain else {
             setHighlight(isSelected ? selectedColor : hovering ? hoverColor : .clear)
@@ -1073,6 +1075,7 @@ final class SidebarView: NSView {
             row?.chevron?.setExpanded(!expanded, animated: true) { self?.setExpanded(!expanded, rowKey, all: all) }
         }
         row.onClose = { [weak self] in self?.onClose?(key, workspace.id) }
+        row.contextMenu = { [weak self] in self?.workspaceMenu(key, workspace.id) }
         rows[rowKey] = (row, name)
         let focused = workspace.id == group.selected
         let tabShown = expanded && tabs.contains { $0.id == group.selectedTab }
@@ -1113,6 +1116,16 @@ final class SidebarView: NSView {
     static var afterTabsSpacing: CGFloat { s(6) }
 
     private static func tabKey(_ machine: MachineKey, _ id: TabID) -> String { "\(machine)/tab/\(id)" }
+
+    /// A workspace row's right-click menu. Close lives here (and ⇧⌘W), not on the row.
+    func workspaceMenu(_ machine: MachineKey, _ id: WorkspaceID) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "New Tab") { [weak self] in self?.onNewTab?(machine, id) })
+        menu.addItem(ClosureMenuItem(title: "Rename Workspace") { [weak self] in self?.beginRename(machine, id) })
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem(title: "Close Workspace…") { [weak self] in self?.onClose?(machine, id) })
+        return menu
+    }
 
     // MARK: Collapsing workspaces
 
@@ -1624,48 +1637,31 @@ class SidebarRow: ChromeItem {
 }
 
 /// A workspace: [+]/[−], name, and (collapsed) its most urgent tab's dot. Under the pointer it offers a
-/// new tab (+) beside close.
+/// new tab (+) in the dot's place; closing it is in its right-click menu (and ⇧⌘W), not on the row.
 final class WorkspaceRow: SidebarRow {
     /// Its tabs are listed under it, so the guide line starts below the toggle.
     var hasChildren = false { didSet { needsLayout = true } }
-    /// The + that makes a tab in this workspace (hover only, beside close).
-    let newTabButton = NSButton()
     var onNewTab: (() -> Void)?
+    /// The + that makes a tab in this workspace: the trailing button, shown on hover where close is on
+    /// a tab row.
+    var newTabButton: NSButton { closeButton }
 
-    init(expanded: Bool = true, closable: Bool = true) {
-        super.init(indent: MachineHeader.nameInset, expanded: expanded, fontSize: 13, closable: closable,
-                   trailingSpace: s(12) + Self.buttonSpacing)
+    init(expanded: Bool = true) {
+        super.init(indent: MachineHeader.nameInset, expanded: expanded, fontSize: 13, closable: true)
         restingTextColor = Theme.foreground
-        newTabButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
+        closeButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
             .withSymbolConfiguration(.init(pointSize: s(10), weight: .semibold))
-        newTabButton.isBordered = false
-        newTabButton.contentTintColor = Theme.dimText
-        newTabButton.target = self
-        newTabButton.action = #selector(newTabTapped)
-        newTabButton.toolTip = "New Tab"
-        newTabButton.isHidden = true
-        newTabButton.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(newTabButton)
-        NSLayoutConstraint.activate([
-            newTabButton.centerXAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.dotInset + Self.buttonSpacing)),
-            newTabButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            newTabButton.widthAnchor.constraint(equalToConstant: s(16)),
-            newTabButton.heightAnchor.constraint(equalToConstant: s(16)),
-        ])
+        closeButton.setAccessibilityLabel("New Tab")
+        closeButton.toolTip = "New Tab"
+        closeButton.target = self
+        closeButton.action = #selector(newTabTapped)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// From the close button's centre to the + button's.
-    static var buttonSpacing: CGFloat { s(18) }
-
     @objc private func newTabTapped() { onNewTab?() }
 
-    /// The + shows with close: under the pointer, and not while renaming.
-    override func closeVisibilityChanged() {
-        super.closeVisibilityChanged()
-        newTabButton.isHidden = closeButton.isHidden || onNewTab == nil
-    }
+    override var hasTrailingAction: Bool { onNewTab != nil }
 
     override var guideRects: [NSRect] {
         guard hasChildren, chevron?.isExpanded == true else { return [] }
