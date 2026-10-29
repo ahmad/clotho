@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Model {
     pub next_id: u64,
     pub workspaces: Vec<Workspace>,
@@ -17,7 +17,7 @@ pub struct Focus {
     pub pane: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Workspace {
     pub id: u64,
     pub name: String,
@@ -27,7 +27,7 @@ pub struct Workspace {
     pub tabs: Vec<Tab>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Tab {
     pub id: u64,
     pub title: Option<String>,
@@ -44,7 +44,7 @@ pub enum Axis {
     Vertical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Node {
     Pane { pane: u64 },
@@ -342,6 +342,31 @@ impl Model {
         true
     }
 
+    /// Give the panes new ids (`map`, old to new), as after a restore; a pane not in `map` is
+    /// removed first, as if it had exited. Focus, active tabs and active panes follow.
+    pub fn remap_panes(&mut self, map: &std::collections::HashMap<u64, u64>) {
+        for old in self.panes() {
+            if !map.contains_key(&old) {
+                self.remove_pane(old);
+            }
+        }
+        fn walk(n: &mut Node, map: &std::collections::HashMap<u64, u64>) {
+            match n {
+                Node::Pane { pane } => *pane = map[pane],
+                Node::Split { a, b, .. } => {
+                    walk(a, map);
+                    walk(b, map);
+                }
+            }
+        }
+        for t in self.workspaces.iter_mut().flat_map(|w| w.tabs.iter_mut()) {
+            walk(&mut t.layout, map);
+            t.active_pane = map.get(&t.active_pane).copied().unwrap_or_else(|| t.layout.first_pane());
+        }
+        self.focus.pane = self.focus.pane.and_then(|p| map.get(&p).copied());
+        self.fix_focus();
+    }
+
     /// Point focus at something that still exists.
     fn fix_focus(&mut self) {
         let f = self.focus.clone();
@@ -372,6 +397,28 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remap_panes_keeps_the_layout() {
+        let mut m = Model::default();
+        let (ws, tab) = m.create_workspace(Some("w".into()), 1);
+        m.split(1, 2, Direction::Right, 0.3);
+        m.split(2, 3, Direction::Down, 0.5);
+        let tab2 = m.create_tab(ws, 4).unwrap();
+        m.focus_pane(3);
+        m.focus_tab(tab2);
+        m.focus_tab(tab);
+        // 2 failed to come back; the rest get new ids, some equal to old ones.
+        let map: std::collections::HashMap<u64, u64> = [(1, 3), (3, 7), (4, 1)].into_iter().collect();
+        m.remap_panes(&map);
+        assert_eq!(m.panes(), vec![3, 7, 1]);
+        assert_eq!(m.focus, Focus { workspace: Some(ws), tab: Some(tab), pane: Some(7) });
+        let t = &m.workspaces[0].tabs[0];
+        assert_eq!(t.active_pane, 7);
+        let Node::Split { ratio, .. } = &t.layout else { panic!() };
+        assert_eq!(*ratio, 0.3);
+        assert_eq!(m.workspaces[0].tabs[1].active_pane, 1);
+    }
 
     #[test]
     fn split_and_remove() {

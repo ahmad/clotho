@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod fs;
 pub mod push;
 pub mod service;
+pub mod layout;
 pub mod model;
 
 use std::io::Write;

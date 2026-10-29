@@ -288,6 +288,11 @@ fn log(msg: impl std::fmt::Display) {
     eprintln!("clothod: {y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z {msg}", sod / 3600, sod / 60 % 60, sod % 60);
 }
 
+/// Whether input is the user's typing, not a terminal report (focus in/out, mouse).
+fn typed(data: &[u8]) -> bool {
+    !(data == b"\x1b[I" || data == b"\x1b[O" || data.starts_with(b"\x1b[<") || data.starts_with(b"\x1b[M"))
+}
+
 fn unix_now() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
@@ -395,6 +400,9 @@ struct Pane {
     /// What its agents did, oldest first (`agent.history`), at most HISTORY_MAX entries; kept
     /// across serve restarts in the pane meta.
     history: VecDeque<Value>,
+    /// Brought back after a restart (`{at, agent, session}`, docs/protocol.md "Restore after
+    /// restart") until a client dismisses it or the user types in the pane.
+    restored: Option<Value>,
 }
 
 /// A client that sent input to a pane it shows within this long means the user is at that pane:
@@ -515,6 +523,7 @@ impl Pane {
             last_output: Instant::now(),
             polled_cwd: None,
             history: VecDeque::new(),
+            restored: None,
         }
     }
 
@@ -535,6 +544,7 @@ impl Pane {
             "exited": self.exited,
             "scrollback_lines": self.vt.scrollback(),
             "agent": self.agent.as_ref().map(Agent::json),
+            "restored": self.restored,
         })
     }
 }
@@ -574,6 +584,71 @@ pub struct Daemon {
     /// Each pane's workspace name and tab title, for push alerts (refreshed with every persist,
     /// so reading it never needs the model's lock while a pane's is held).
     places: Mutex<HashMap<u64, (Option<u64>, Option<String>, Option<String>)>>,
+    /// The saved layout file, if this instance keeps one.
+    layout: Option<LayoutWriter>,
+}
+
+/// Writes the layout file (`crate::layout`) when it changes: debounced, and held back for a
+/// while after a pane exits, so a shutdown that ends the shells before clothod doesn't save an
+/// emptied layout over the real one.
+struct LayoutWriter {
+    path: PathBuf,
+    host: String,
+    runtime_dir: String,
+    st: Mutex<LayoutState>,
+}
+
+#[derive(Default)]
+struct LayoutState {
+    /// Off until a restore (if any) is done, so the empty model of a fresh start isn't saved.
+    enabled: bool,
+    written: Option<crate::layout::Saved>,
+    pending: Option<(crate::layout::Saved, Instant)>,
+    last_exit: Option<Instant>,
+}
+
+/// A layout change is written once nothing changed for this long.
+const LAYOUT_DEBOUNCE: Duration = Duration::from_millis(500);
+/// And not until this long after a pane exited.
+const LAYOUT_EXIT_QUIET: Duration = Duration::from_secs(5);
+
+impl LayoutWriter {
+    fn offer(&self, saved: crate::layout::Saved) {
+        let mut st = self.st.lock().unwrap();
+        if !st.enabled || st.written.as_ref() == Some(&saved) || st.pending.as_ref().is_some_and(|p| p.0 == saved) {
+            return;
+        }
+        st.pending = Some((saved, Instant::now()));
+    }
+
+    /// Remove the saved layout and write no more (the daemon is shutting down).
+    fn forget(&self) {
+        let mut st = self.st.lock().unwrap();
+        st.enabled = false;
+        st.pending = None;
+        crate::layout::forget(&self.path);
+        log(format_args!("layout: forgot {}", self.path.display()));
+    }
+
+    /// Write what's pending if it settled (or `now`, skipping the debounce), unless a pane
+    /// exited recently.
+    fn flush(&self, now: bool) {
+        let mut st = self.st.lock().unwrap();
+        let Some((_, at)) = st.pending.as_ref() else { return };
+        if !now && at.elapsed() < LAYOUT_DEBOUNCE {
+            return;
+        }
+        if st.last_exit.is_some_and(|e| e.elapsed() < LAYOUT_EXIT_QUIET) {
+            return;
+        }
+        let (saved, _) = st.pending.take().unwrap();
+        let mut out = saved.clone();
+        out.saved_at = unix_now();
+        match serde_json::to_string(&out).map_err(std::io::Error::other).and_then(|t| crate::layout::write(&self.path, &t)) {
+            Ok(()) => st.written = Some(saved),
+            Err(e) => log(format_args!("layout: writing {} failed: {e}", self.path.display())),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -809,6 +884,12 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         // Ephemeral (test) instances keep registrations with themselves, so they go away together.
         places: Mutex::new(HashMap::new()),
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
+        layout: crate::layout::path().map(|path| LayoutWriter {
+            path,
+            host: platform::hostname(),
+            runtime_dir: dir.to_string_lossy().into_owned(),
+            st: Mutex::new(LayoutState::default()),
+        }),
     });
 
     // Recovery: panes with their snapshots and buffered output, up to `ready`.
@@ -822,6 +903,26 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         }
         d.on_holder_frame(frame);
     }
+    // A holder that never had a serve (it has no state, and no panes) means a fresh start: the
+    // machine rebooted, or the holder died. Then, and only then, bring back the saved layout.
+    // restore_model gives the holder a state right away, so a serve that starts after this one
+    // (a crash mid-restore) adopts the holder instead of restoring a second time.
+    let fresh = state.is_none() && d.panes.lock().unwrap().is_empty();
+    let saved = match (&d.layout, fresh) {
+        (Some(w), true) => match crate::layout::load(&w.path, &w.host, Path::new(&w.runtime_dir)) {
+            crate::layout::Loaded::Ok(s) => Some(s),
+            crate::layout::Loaded::Missing => None,
+            crate::layout::Loaded::NotOurs(why) => {
+                log(format_args!("layout: not restoring {}: {why}", w.path.display()));
+                None
+            }
+            crate::layout::Loaded::Corrupt(to) => {
+                log(format_args!("layout: {} was unreadable; moved it to {}", w.path.display(), to.display()));
+                None
+            }
+        },
+        _ => None,
+    };
     d.restore_model(state);
     // Replay may end inside a synchronized update. Apply it now and drop what it produced:
     // replies to replayed queries were answered by the previous process (or never will be),
@@ -861,6 +962,14 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
             d.stop.notify_one();
         })
     };
+
+    if let Some(saved) = saved {
+        d.restore_layout(saved).await;
+    }
+    if let Some(w) = &d.layout {
+        w.st.lock().unwrap().enabled = true;
+        d.persist();
+    }
 
     let sock = socket_path(&dir);
     let pid = format!("{}\n", std::process::id()).into_bytes();
@@ -914,6 +1023,9 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
             }
         }
         d.persist();
+    }
+    if let Some(w) = &d.layout {
+        w.flush(true);
     }
     let _ = d.holder.send(Vec::new());
     let _ = tokio::time::timeout(Duration::from_secs(5), holder_writer).await;
@@ -1069,11 +1181,97 @@ impl Daemon {
                 let muted = p.agent.as_ref().filter(|a| a.muted).map(|a| json!({"kind": a.kind, "pid": a.pid, "session": a.session}))
                     .or_else(|| p.muted_agent.as_ref().map(|(k, pid, s)| json!({"kind": k, "pid": pid, "session": s})));
                 (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback,
-                    "agent_muted": muted, "agent_history": p.history}))
+                    "agent_muted": muted, "agent_history": p.history, "restored": p.restored}))
             })
             .collect();
+        if let Some(w) = &self.layout {
+            w.offer(self.saved_layout(&model, w));
+        }
         let state = json!({"model": model, "meta": meta});
         self.to_holder(&ToHolder::SetState { state });
+    }
+
+    /// The layout file's view of `model`: structure, and each pane's cwd, command, size and
+    /// resumable agent session.
+    fn saved_layout(&self, model: &Model, w: &LayoutWriter) -> crate::layout::Saved {
+        let mut panes = HashMap::new();
+        for id in model.panes() {
+            let Some(p) = self.pane(id) else { continue };
+            let p = p.lock().unwrap();
+            let cwd = p.cwd.clone().or_else(|| p.polled_cwd.clone()).or_else(|| platform::process_cwd(p.pid).map(|c| c.to_string_lossy().into_owned()));
+            let agent = p
+                .agent
+                .as_ref()
+                .filter(|a| matches!(a.kind.as_str(), "claude" | "codex"))
+                .and_then(|a| Some(crate::layout::SavedAgent { kind: a.kind.clone(), session: a.session.clone().filter(|s| crate::layout::safe_session(s))? }));
+            panes.insert(id.to_string(), crate::layout::SavedPane { cwd, command: p.command.clone(), cols: p.cols, rows: p.rows, agent });
+        }
+        crate::layout::Saved {
+            version: crate::layout::VERSION,
+            host: w.host.clone(),
+            runtime_dir: w.runtime_dir.clone(),
+            saved_at: 0.0,
+            model: model.clone(),
+            panes,
+        }
+    }
+
+    /// Bring back a saved layout into a fresh holder: a new shell per pane in its cwd, typing
+    /// the resume line for a pane whose agent had a session. Panes that fail to start are left
+    /// out; nothing is retried.
+    async fn restore_layout(self: &Arc<Self>, saved: crate::layout::Saved) {
+        let at = unix_now();
+        let mut model = saved.model;
+        let mut map = HashMap::new();
+        let mut resumed = 0;
+        for old in model.panes() {
+            let sp = saved.panes.get(&old.to_string()).cloned().unwrap_or_default();
+            let cwd = sp.cwd.filter(|c| Path::new(c).is_dir());
+            let command = if crate::layout::is_shell(&sp.command) { sp.command } else { default_shell() };
+            let (cols, rows) = if sp.cols >= 2 && sp.rows >= 2 { (sp.cols, sp.rows) } else { (80, 24) };
+            let opts = SpawnOpts { command, cwd, env: Vec::new(), cols, rows, scrollback: None };
+            let new = match self.spawn_pane(opts).await {
+                Ok(n) => n,
+                Err(e) => {
+                    log(format_args!("layout: pane {old} not restored: {}", e.message));
+                    continue;
+                }
+            };
+            map.insert(old, new);
+            let line = sp.agent.as_ref().and_then(crate::layout::resume_line);
+            let agent = sp.agent.filter(|_| line.is_some());
+            if let Some(p) = self.pane(new) {
+                p.lock().unwrap().restored = Some(json!({"at": at, "agent": agent.as_ref().map(|a| &a.kind), "session": agent.as_ref().map(|a| &a.session)}));
+            }
+            if let Some(line) = line {
+                resumed += 1;
+                let d = self.clone();
+                tokio::spawn(async move { d.type_when_ready(new, line).await });
+            }
+        }
+        model.remap_panes(&map);
+        let n = model.panes().len();
+        *self.model.lock().unwrap() = model;
+        self.model_changed();
+        log(format_args!("layout: restored {n} panes ({resumed} resuming an agent) in {} workspaces, saved at {}", self.model.lock().unwrap().workspaces.len(), saved.saved_at as u64));
+    }
+
+    /// Type `line` into a new pane once its shell is up: it printed (a prompt) and went quiet,
+    /// or 5 s passed.
+    async fn type_when_ready(&self, pane: u64, line: String) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let Some(p) = self.pane(pane) else { return };
+            let p = p.lock().unwrap();
+            if p.exited.is_some() {
+                return;
+            }
+            if (p.ring.end() > 0 && p.last_output.elapsed() >= Duration::from_millis(300)) || Instant::now() >= deadline {
+                break;
+            }
+        }
+        let _ = self.holder.send(Frame::Input { pane, data: line.into_bytes() }.encode());
     }
 
     fn restore_model(&self, state: Option<Value>) {
@@ -1089,6 +1287,7 @@ impl Daemon {
                 if p.cwd.is_none() {
                     p.cwd = m.get("cwd").and_then(Value::as_str).map(String::from);
                 }
+                p.restored = m.get("restored").filter(|r| r.is_object()).cloned();
                 if let Some(a) = m.get("agent_muted").filter(|a| a.is_object()) {
                     if let Some(kind) = a.get("kind").and_then(Value::as_str) {
                         let pid = a.get("pid").and_then(Value::as_u64).map(|v| v as u32);
@@ -1379,6 +1578,9 @@ impl Daemon {
             self.pane_event(&p);
         }
         self.panes.lock().unwrap().remove(&pane);
+        if let Some(w) = &self.layout {
+            w.st.lock().unwrap().last_exit = Some(Instant::now());
+        }
         self.push.pane_gone(pane);
         self.to_holder(&ToHolder::Forget { pane });
         let removed = self.model.lock().unwrap().remove_pane(pane);
@@ -1468,7 +1670,18 @@ impl Daemon {
             self.apply_viewport_policy(&mut p, client);
         }
         self.use_colors_of(&mut p, client);
+        // The user typing in a restored pane has seen it: the note goes (stored at once, so a
+        // serve restart doesn't bring it back).
+        let seen = p.restored.is_some() && typed(&data);
+        if seen {
+            p.restored = None;
+            self.pane_event(&p);
+        }
         let _ = self.holder.send(Frame::Input { pane, data }.encode());
+        drop(p);
+        if seen {
+            self.persist();
+        }
     }
 
     /// The colors applications in the pane get when they ask (OSC 4/10/11/12): those of the
@@ -1896,6 +2109,9 @@ impl Daemon {
         if snapshot_check && self.dirty.load(Ordering::Relaxed) {
             self.persist();
         }
+        if let Some(w) = &self.layout {
+            w.flush(false);
+        }
     }
 
     // ---- clients -----------------------------------------------------------------------
@@ -2085,7 +2301,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -2309,6 +2525,17 @@ impl Daemon {
                 self.resize(&mut pp.lock().unwrap(), cols, rows);
                 Ok(json!({}))
             }
+            "pane.dismiss_restored" => {
+                let pane = param_u64(p, "pane")?;
+                let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+                let mut pp = pp.lock().unwrap();
+                if pp.restored.take().is_some() {
+                    self.pane_event(&pp);
+                    drop(pp);
+                    self.persist();
+                }
+                Ok(json!({}))
+            }
             "pane.input" => {
                 let pane = param_u64(p, "pane")?;
                 let data = p.get("data").and_then(Value::as_str).ok_or_else(|| err("bad_request", "missing data"))?;
@@ -2401,6 +2628,12 @@ impl Daemon {
             "settings.set" => self.set_settings(p),
             "daemon.stop" => Ok(json!({})),
             "daemon.shutdown" => {
+                // `forget`: the saved layout goes too, so the next start is empty.
+                if p.get("forget").and_then(Value::as_bool) == Some(true) {
+                    if let Some(w) = &self.layout {
+                        w.forget();
+                    }
+                }
                 self.shutdown_all.store(true, Ordering::SeqCst);
                 Ok(json!({}))
             }

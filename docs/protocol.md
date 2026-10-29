@@ -94,7 +94,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "protocol": 1, "protocol_min": 1, "protocol_max": 1,
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
-                  "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors"],
+                  "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
+                  "restore"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -122,7 +123,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
   sent to the relay also carries the optional `tool`, `detail` and `msg`: the detail
   notifications carry, as one line of at most 64, 200 and 300 characters),
   `client.colors` (hello's `colors` and the `client.colors` request, see
-  [Client colors](#client-colors); since 0.1.20).
+  [Client colors](#client-colors); since 0.1.20), `restore` (panes' `restored` and
+  `pane.dismiss_restored`, see [Restore after restart](#restore-after-restart); since 0.1.21).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -237,6 +239,8 @@ the life of the object and never reused within an `instance`.
     about a second with nothing else happening in the pane.
   - `exited` is `null` while the pane runs, then `{"code": 0}` or `{"signal": 9}`.
   - `scrollback_lines` is the history the daemon keeps for the pane (spawn options).
+  - `restored` is `null`, or `{"at", "agent", "session"}` for a pane brought back after a
+    restart; see [Restore after restart](#restore-after-restart).
 - When a tab's active pane closes or exits, the new `active_pane` is the first pane of the
   sibling subtree that takes its place (as in tmux).
 - A pane is removed from the layout when its process exits. A tab with no panes closes, but a
@@ -246,6 +250,55 @@ the life of the object and never reused within an `instance`.
   pane. `focus` with only a `workspace` goes to that workspace's `active_tab` and its
   `active_pane` (or to its first tab if none). `focus` with only a `tab` goes to its
   `active_pane`.
+
+## Restore after restart
+
+The holder keeps every shell across serve restarts and upgrades. When the holder itself goes
+away (the machine restarts, or it is killed), the shells go with it. For that case the daemon
+saves the layout to a file and brings it back on the next start.
+
+- **What is saved.** The model: workspaces (names, order, active tab), tabs (titles, order,
+  active pane), split trees (axes, ratios) and focus. For each pane it saves the cwd, the
+  command, the size, and the agent session: the pane's agent, if it is Claude Code or Codex and
+  its hooks reported a session id. Claude's hooks send `session_id`; Codex's notify payload
+  sends `thread-id`. Scrollback, screen contents and pane titles (set by applications) are not
+  saved.
+- **Where.** `layout.json` in the state dir: `~/.local/state/clothod/` (or
+  `$XDG_STATE_HOME/clothod/`) on Linux, and `~/Library/Application Support/clothod/` on macOS.
+  It is written atomically (temp file, fsync, rename) with mode 0600, 0.5 s after the layout
+  settles. Writes are held back for 5 s after any pane exits, so a shutdown that ends the shells
+  before the daemon can't save an emptied layout. Ephemeral (test) instances never read or write
+  one, unless `$CLOTHOD_LAYOUT_FILE` names the file to use.
+- **When it is restored.** Only when serve starts a fresh holder: one with no state and no
+  panes. A serve that adopts a running holder never restores anything; that covers restarts,
+  crashes and in-place upgrades. The file must also belong to this instance: the same host name
+  and runtime dir, and a format no newer than the daemon's. A file that doesn't parse is moved
+  aside to `layout.json.corrupt-<unix secs>` and nothing is restored. The holder gets a state
+  before the first pane is spawned, so a serve started after a crash mid-restore adopts and
+  doesn't restore a second time. After a restore, the file follows the new live state.
+- **Forgetting.** Closing workspaces, tabs and panes is how a layout is forgotten: the file
+  follows. A shutdown (`clothod shutdown`, `daemon.shutdown`) ends every shell but keeps the
+  layout, so the next start brings it back (for example after the one-time restart a legacy
+  holder needs). `clothod shutdown --forget`, or `daemon.shutdown` with `"forget": true`, also
+  deletes the saved layout. The CLI deletes it even when no daemon is running.
+- **How.** Each saved pane gets a fresh shell in its saved cwd (`$HOME` if that is gone). The
+  shell is the saved command if it was a shell, else the user's login shell. Workspace, tab and
+  split ids are the saved ones; pane ids are new, and so is `instance`. A pane whose agent had a
+  session gets one line typed into the shell once it is up: `claude --resume <id>` or
+  `codex resume <id>`. Flags from the original run are not carried over. The agent runs from the
+  shell, so the shell stays when it exits. If the resume fails (unknown session, agent not
+  installed), the shell shows the error; nothing is retried. Session ids that are not
+  `[A-Za-z0-9_-]{1,128}` are never typed. A pane that fails to spawn is left out.
+- **Marking.** A restored pane carries
+  `"restored": {"at": <unix secs>, "agent": "claude"|"codex"|null, "session": <id>|null}`.
+  `agent` and `session` are set when a resume line was typed. The field stays, also across
+  serve restarts and upgrades, until one of these clears it for every client (a `pane`
+  event):
+  - `pane.dismiss_restored`;
+  - the user types in the pane: INPUT, `pane.input` or `pane.keys`, but not focus or mouse
+    reports.
+
+  Clients can show a quiet note such as "Restored after restart" ("· resumed Claude session").
 
 ## Commands
 
@@ -289,6 +342,7 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `pane.resize` | `pane`, `cols`, `rows` | `{}`: sets the size now, whatever the viewports say |
 | `pane.input` | `pane`, `data` (UTF-8 string) | `{}`: same as an INPUT frame, for clients without binary framing |
 | `pane.keys` | `pane`, `text?`, `keys?` (list of key names) | `{}`: input encoded for the pane's current modes (see below). Counts as input like an INPUT frame |
+| `pane.dismiss_restored` | `pane` | `{}`: clears the pane's `restored` for every client (a `pane` event). Idempotent; `not_found` for an unknown pane. See [Restore after restart](#restore-after-restart) |
 | `pane.search` | `pane`, `query`; optional `regex`, `case_sensitive` (both default false), `limit` (1–1000, default 100), `before` (`{line, col}`) | matches in the scrollback and screen, newest first; see [Searching scrollback](#searching-scrollback) |
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
 | `settings.get` | – | the settings object; see [Settings](#settings) |
@@ -297,7 +351,7 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `service.install` | – | the service object, after the login unit is written and registered |
 | `service.uninstall` | – | the service object, after the login unit is removed (the daemon keeps running) |
 | `daemon.stop` | – | `{}`, then the logic process exits; shells keep running in the holder |
-| `daemon.shutdown` | – | `{}`, then all panes are hung up and the holder and daemon exit |
+| `daemon.shutdown` | `forget?` (bool) | `{}`, then all panes are hung up and the holder and daemon exit. The saved layout stays, so the next start restores it; with `forget: true` it is deleted (see [Restore after restart](#restore-after-restart)) |
 
 **`pane.keys`** is for clients that want to say "press Enter" rather than produce bytes:
 quick replies, scripted driving, remote controls. `text` is sent first, wrapped in

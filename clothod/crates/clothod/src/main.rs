@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clotho_proto::{platform, read_frame, write_frame, Frame};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::net::UnixStream;
 
 // mimalloc on Linux, the system allocator on macOS (clothod::alloc), counting live bytes for
@@ -23,7 +23,9 @@ with no clients and no panes, or when its last client disconnects (exit).
 
   start      start the daemon in the background unless it is running; wait until it accepts
   stop       stop the daemon; shells keep running in the holder
-  shutdown   stop the daemon, the holder and every shell
+  shutdown [--forget]
+             stop the daemon, the holder and every shell; --forget also deletes the saved
+             layout, so the next start doesn't restore it
   holder     run the PTY holder in the foreground (normally started by `serve`)
   status     print what is running: versions, pids, executables, sockets
              --print-socket: print only the client socket path (use this, don't compute it)
@@ -98,6 +100,7 @@ fn run() -> Result<()> {
                 flags.push(args.next().context("--resume-fd needs a value")?);
             }
             _ if command.as_deref() == Some("build-id") => flags.push(a),
+            "--forget" if command.as_deref() == Some("shutdown") => flags.push(a),
             _ if command.as_deref() == Some("service") && !a.starts_with('-') => flags.push(a),
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -134,8 +137,18 @@ fn run() -> Result<()> {
             println!("{}", build_id(&file.map_or_else(std::env::current_exe, Ok)?)?);
             Ok(())
         }
-        "stop" => rt.block_on(call(dir, "daemon.stop")),
-        "shutdown" => rt.block_on(call(dir, "daemon.shutdown")),
+        "stop" => rt.block_on(call(dir, "daemon.stop", json!({}))),
+        "shutdown" => {
+            let forget = flags.iter().any(|f| f == "--forget");
+            rt.block_on(call(dir, "daemon.shutdown", json!({"forget": forget})))?;
+            // Also when no daemon was running to do it.
+            if forget {
+                if let Some(path) = clothod::layout::path() {
+                    clothod::layout::forget(&path);
+                }
+            }
+            Ok(())
+        }
         "status" if flags.iter().any(|f| f == "--print-socket") => {
             // Clients ask instead of computing the path themselves.
             println!("{}", clothod::daemon::socket_path(&dir).display());
@@ -281,7 +294,7 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
     bail!("clothod did not start; see {}", log_path.display())
 }
 
-async fn call(dir: PathBuf, method: &str) -> Result<()> {
+async fn call(dir: PathBuf, method: &str, params: Value) -> Result<()> {
     let mut s = match connect(&dir).await {
         Ok(s) => s,
         Err(_) if method == "daemon.shutdown" => return shutdown_holder(&dir).await,
@@ -292,7 +305,7 @@ async fn call(dir: PathBuf, method: &str) -> Result<()> {
     };
     let hello = json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "clothod-cli"}});
     write_frame(&mut s, &Frame::Json(hello)).await?;
-    write_frame(&mut s, &Frame::Json(json!({"id": 2, "method": method}))).await?;
+    write_frame(&mut s, &Frame::Json(json!({"id": 2, "method": method, "params": params}))).await?;
     while let Some(f) = read_frame(&mut s).await? {
         if let Frame::Json(v) = f {
             if v["id"] == 2 {
@@ -606,7 +619,7 @@ async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool>
             Some((cur, ..)) => {
                 attempt += 1;
                 eprintln!("clothod: switching from {} (attempt {attempt})", cur.display());
-                call(dir.to_path_buf(), "daemon.stop").await?;
+                call(dir.to_path_buf(), "daemon.stop", json!({})).await?;
             }
             None => {}
         }

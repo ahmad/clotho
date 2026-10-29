@@ -4175,3 +4175,341 @@ fn hooks_from_an_older_build_are_outdated_and_reinstall_replaces_them() {
     assert!(!notify[2].contains(r#"c="${CLOTHOD_REPORT"#));
 }
 
+
+// ---- restore after restart ---------------------------------------------------------------
+
+/// An instance that keeps a layout file (in its own data dir, never the user's), with stand-in
+/// `claude` and `codex` on PATH that record how they were run.
+struct RestoreEnv {
+    env: Env,
+    vars: Vec<(String, String)>,
+}
+
+impl RestoreEnv {
+    fn new() -> RestoreEnv {
+        let env = Env::empty();
+        let stubs = env.dir.path().join("stubs");
+        std::fs::create_dir_all(&stubs).unwrap();
+        let rec = env.dir.path().join("agents.rec");
+        for name in ["claude", "codex"] {
+            let f = stubs.join(name);
+            std::fs::write(&f, format!("#!/bin/sh\necho \"{name} $* in $PWD\" >> '{}'\n", rec.display())).unwrap();
+            std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", stubs.display(), std::env::var("PATH").unwrap_or_default());
+        let vars = vec![
+            ("CLOTHOD_LAYOUT_FILE".to_string(), env.dir.path().join("data/layout.json").display().to_string()),
+            ("PATH".to_string(), path),
+        ];
+        let mut r = RestoreEnv { env, vars };
+        r.start();
+        r
+    }
+
+    fn start(&mut self) {
+        let vars: Vec<(&str, &str)> = self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        self.env.start_with(&test_bin(), &vars);
+    }
+
+    fn layout(&self) -> Option<Value> {
+        std::fs::read_to_string(self.env.dir.path().join("data/layout.json")).ok().and_then(|t| serde_json::from_str(&t).ok())
+    }
+
+    fn rec(&self) -> String {
+        std::fs::read_to_string(self.env.dir.path().join("agents.rec")).unwrap_or_default()
+    }
+
+    /// Wait until the saved layout satisfies `cond`.
+    async fn wait_layout(&self, what: &str, cond: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + T;
+        loop {
+            if let Some(l) = self.layout().filter(|l| cond(l)) {
+                return l;
+            }
+            assert!(Instant::now() < deadline, "layout never {what}: {:?}", self.layout());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A stand-in agent in `pane` that reports through the real hook commands with `session`,
+    /// then stays (as the agent process the hook reports from would).
+    async fn agent(&self, c: &Client, pane: u64, kind: &str, session: &str) {
+        let b = test_bin();
+        let line = match kind {
+            "claude" => {
+                let f = self.env.dir.path().join(format!("hook-{pane}.json"));
+                let payload = json!({"session_id": session, "transcript_path": "/t.jsonl", "cwd": "/p", "hook_event_name": "UserPromptSubmit", "prompt": "hi"});
+                std::fs::write(&f, payload.to_string()).unwrap();
+                format!("'{b}' report --claude-hook < '{}'", f.display())
+            }
+            _ => {
+                let payload = json!({"type": "agent-turn-complete", "thread-id": session, "turn-id": "t1", "cwd": "/p", "input-messages": ["hi"], "last-assistant-message": "ok"});
+                format!("'{b}' report --codex-notify '{payload}'")
+            }
+        };
+        let script = self.env.dir.path().join(format!("agent-{pane}.sh"));
+        std::fs::write(&script, format!("{line}\nexec sleep 120\n")).unwrap();
+        c.input(pane, format!("sh '{}'\r", script.display()).as_bytes());
+        wait_agent(c, pane, "the agent's session", |a| a["session"] == session).await;
+    }
+}
+
+fn pane_of(state: &Value, id: u64) -> &Value {
+    state["panes"].as_array().unwrap().iter().find(|p| p["id"] == id).unwrap_or_else(|| panic!("no pane {id} in {state}"))
+}
+
+/// A canonical path (macOS: /tmp is /private/tmp), as a shell's cwd reads.
+fn real(p: &std::path::Path) -> String {
+    std::fs::canonicalize(p).unwrap().display().to_string()
+}
+
+/// A reboot: serve and holder die at once (and with the holder, every shell), and the
+/// runtime dir is wiped. The next start brings back the workspaces, tabs, splits, focus and
+/// cwds from the layout file, resumes the agents that had a session, and does it only once.
+#[tokio::test]
+async fn a_restart_restores_the_layout_and_resumes_agents() {
+    let mut r = RestoreEnv::new();
+    let c = r.env.client().await;
+    let dirs: Vec<_> = ["a", "b", "c"].iter().map(|n| r.env.dir.path().join("work").join(n)).collect();
+    for d in &dirs {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let at = |i: usize| with(sh(), json!({"cwd": dirs[i].display().to_string()}));
+    let w1 = c.request("workspace.create", with(at(0), json!({"name": "alpha"}))).await.unwrap();
+    let (p1, ws1, t1) = (w1["pane"].as_u64().unwrap(), w1["workspace"].as_u64().unwrap(), w1["tab"].as_u64().unwrap());
+    c.request("tab.rename", json!({"tab": t1, "title": "build"})).await.unwrap();
+    let p2 = c.request("pane.split", with(at(1), json!({"pane": p1, "direction": "right", "ratio": 0.3}))).await.unwrap()["pane"].as_u64().unwrap();
+    let w2 = c.request("workspace.create", with(at(2), json!({"name": "beta"}))).await.unwrap();
+    let p3 = w2["pane"].as_u64().unwrap();
+    let t3 = c.request("tab.create", with(at(0), json!({"workspace": w2["workspace"]}))).await.unwrap();
+    c.request("tab.rename", json!({"tab": t3["tab"], "title": "logs"})).await.unwrap();
+    r.agent(&c, p1, "claude", "1f0e5d2c-claude-session").await;
+    r.agent(&c, p2, "codex", "019a2b3c-codex-thread").await;
+    c.request("focus", json!({"pane": p2})).await.unwrap();
+    let before = c.request("state.get", json!({})).await.unwrap();
+    assert_eq!(before["focus"]["pane"], p2);
+    let instance = c.hello["instance"].clone();
+
+    let saved = r
+        .wait_layout("saved with both sessions and the focus", |l| {
+            let s = l.to_string();
+            s.contains("1f0e5d2c-claude-session") && s.contains("019a2b3c-codex-thread") && l["model"]["focus"]["pane"] == p2
+        })
+        .await;
+    assert_eq!(saved["version"], 1);
+    assert_eq!(saved["panes"][p3.to_string()]["cwd"], real(&dirs[2]));
+    drop(c);
+
+    // The reboot.
+    let holder = holder_pid(&r.env);
+    r.env.kill();
+    unsafe { libc::kill(holder as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + T;
+    while clotho_proto::platform::process_alive(holder) {
+        assert!(Instant::now() < deadline, "holder {holder} still running");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::remove_dir_all(r.env.path()).unwrap();
+    std::fs::create_dir_all(r.env.path()).unwrap();
+    r.start();
+
+    let c = r.env.client().await;
+    assert_ne!(c.hello["instance"], instance, "a fresh holder");
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("restore")), "{}", c.hello);
+    let after = c.request("state.get", json!({})).await.unwrap();
+    // Same structure: names, titles, order, split and ratio, active tabs; new pane ids.
+    let names: Vec<_> = after["workspaces"].as_array().unwrap().iter().map(|w| w["name"].clone()).collect();
+    assert_eq!(names, vec![json!("alpha"), json!("beta")]);
+    let tabs = |s: &Value, w: usize| -> Vec<Value> { s["workspaces"][w]["tabs"].as_array().unwrap().iter().map(|t| t["title"].clone()).collect() };
+    assert_eq!(tabs(&after, 0), vec![json!("build")]);
+    assert_eq!(tabs(&after, 1), vec![Value::Null, json!("logs")]);
+    let layout = &after["workspaces"][0]["tabs"][0]["layout"];
+    assert_eq!((layout["type"].clone(), layout["axis"].clone(), layout["ratio"].clone()), (json!("split"), json!("horizontal"), json!(0.3)));
+    assert_eq!(after["workspaces"][0]["id"], ws1, "workspace ids are the saved ones");
+    let (n1, n2) = (layout["a"]["pane"].as_u64().unwrap(), layout["b"]["pane"].as_u64().unwrap());
+    let n3 = after["workspaces"][1]["tabs"][0]["layout"]["pane"].as_u64().unwrap();
+    let n4 = after["workspaces"][1]["tabs"][1]["layout"]["pane"].as_u64().unwrap();
+    assert_eq!(after["focus"]["pane"], n2, "focus came back");
+    assert_eq!(after["workspaces"][0]["tabs"][0]["active_pane"], n2);
+    assert_eq!(after["panes"].as_array().unwrap().len(), 4, "{after}");
+
+    // Each pane: a fresh shell in its cwd, marked restored; the agents' panes resumed theirs.
+    for (id, dir) in [(n1, 0), (n2, 1), (n3, 2), (n4, 0)] {
+        let deadline = Instant::now() + T;
+        loop {
+            let s = c.request("state.get", json!({})).await.unwrap();
+            if pane_of(&s, id)["cwd"] == real(&dirs[dir]) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "pane {id} cwd: {}", pane_of(&s, id));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    let restored = |id: u64| pane_of(&after, id)["restored"].clone();
+    assert_eq!((restored(n1)["agent"].clone(), restored(n1)["session"].clone()), (json!("claude"), json!("1f0e5d2c-claude-session")));
+    assert_eq!((restored(n2)["agent"].clone(), restored(n2)["session"].clone()), (json!("codex"), json!("019a2b3c-codex-thread")));
+    for id in [n3, n4] {
+        assert!(restored(id)["at"].as_f64().is_some() && restored(id)["agent"].is_null(), "{}", restored(id));
+    }
+    let deadline = Instant::now() + T;
+    while r.rec().lines().count() < 2 {
+        assert!(Instant::now() < deadline, "agents not resumed: {:?}\n{}", r.rec(), r.env.log());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let mut rec: Vec<String> = r.rec().lines().map(String::from).collect();
+    rec.sort();
+    assert_eq!(
+        rec,
+        vec![format!("claude --resume 1f0e5d2c-claude-session in {}", real(&dirs[0])), format!("codex resume 019a2b3c-codex-thread in {}", real(&dirs[1]))]
+    );
+    // The shell stays when the agent exits.
+    c.input(n1, b"echo still-here\r");
+    wait_for_text(&c, n1, T, |l| has_line(l, "still-here")).await.unwrap();
+
+    // The note goes when a client dismisses it, or the user types in the pane (n1 just did);
+    // focus reports don't count.
+    c.input(n3, b"\x1b[I");
+    c.request("pane.dismiss_restored", json!({"pane": n2})).await.unwrap();
+    c.request("pane.dismiss_restored", json!({"pane": n2})).await.unwrap();
+    assert!(c.request("pane.dismiss_restored", json!({"pane": 999_999})).await.unwrap_err().to_string().contains("not_found"));
+    let s = c.request("state.get", json!({})).await.unwrap();
+    assert!(pane_of(&s, n1)["restored"].is_null() && pane_of(&s, n2)["restored"].is_null());
+    assert!(pane_of(&s, n3)["restored"].is_object() && pane_of(&s, n4)["restored"].is_object(), "{s}");
+
+    // The file now holds the new live state.
+    r.wait_layout("rewritten with the new panes", |l| l["model"]["focus"]["pane"] == n2 && l["panes"].get(n4.to_string()).is_some()).await;
+    drop(c);
+
+    // A serve restart adopts the holder: nothing restored again, nothing typed again, and the
+    // restored mark survives where it wasn't dismissed.
+    r.env.kill();
+    r.start();
+    let c = r.env.client().await;
+    let again = c.request("state.get", json!({})).await.unwrap();
+    let ids = |s: &Value| -> Vec<u64> { let mut v: Vec<u64> = s["panes"].as_array().unwrap().iter().map(|p| p["id"].as_u64().unwrap()).collect(); v.sort(); v };
+    assert_eq!(ids(&again), ids(&after));
+    assert!(pane_of(&again, n3)["restored"].is_object() && pane_of(&again, n2)["restored"].is_null(), "{again}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(r.rec().lines().count(), 2, "{}", r.rec());
+    assert!(!r.env.log().contains("not restoring"), "{}", r.env.log());
+    drop(c);
+
+    // `shutdown --forget` ends everything and deletes the saved layout: nothing to restore.
+    r.env.daemon.take();
+    let out = Command::new(test_bin())
+        .args(["shutdown", "--forget", "--runtime-dir"])
+        .arg(r.env.path())
+        .env("CLOTHOD_STATE_DIR", r.env.state())
+        .env("CLOTHOD_RUNTIME_DIR", r.env.path())
+        .envs(r.vars.iter().map(|(k, v)| (k, v)))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert!(r.layout().is_none(), "layout still there: {:?}", r.layout());
+    std::fs::create_dir_all(r.env.path()).unwrap();
+    r.start();
+    let c = r.env.client().await;
+    assert!(c.request("state.get", json!({})).await.unwrap()["workspaces"].as_array().unwrap().is_empty());
+}
+
+/// What must never restore: a serve that adopts a running holder (a crash, an in-place
+/// upgrade) restores nothing and duplicates nothing; a corrupt file is moved aside; an
+/// ordinary ephemeral instance keeps no layout file at all.
+#[tokio::test]
+async fn adopting_the_holder_never_restores() {
+    let mut r = RestoreEnv::new();
+    let c = r.env.client().await;
+    let p = new_pane(&c, sh()).await;
+    let q = c.request("pane.split", with(sh(), json!({"pane": p, "direction": "down"}))).await.unwrap()["pane"].as_u64().unwrap();
+    r.agent(&c, p, "claude", "aaaa-bbbb").await;
+    r.wait_layout("saved", |l| l.to_string().contains("aaaa-bbbb")).await;
+    let instance = c.hello["instance"].clone();
+    let before = c.request("state.get", json!({})).await.unwrap();
+    drop(c);
+
+    let check = |s: &Value, what: &str| {
+        let ids: Vec<_> = s["panes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect();
+        assert_eq!(ids.len(), 2, "{what}: {s}");
+        assert!(ids.contains(&json!(p)) && ids.contains(&json!(q)), "{what}: {s}");
+        assert_eq!(s["workspaces"], before["workspaces"], "{what}");
+        assert!(s["panes"].as_array().unwrap().iter().all(|x| x["restored"].is_null()), "{what}: {s}");
+    };
+    // Crash and restart.
+    r.env.kill();
+    r.start();
+    let c = r.env.client().await;
+    assert_eq!(c.hello["instance"], instance);
+    check(&c.request("state.get", json!({})).await.unwrap(), "after a restart");
+    drop(c);
+
+    // In-place upgrade.
+    r.env.daemon.take();
+    let (v2, id2) = other_build(&r.env, "v2");
+    let out = Command::new(&v2)
+        .arg("upgrade")
+        .arg("--runtime-dir")
+        .arg(r.env.path())
+        .env("CLOTHOD_STATE_DIR", r.env.state())
+        .env("CLOTHOD_INSTALL_DIR", r.env.dir.path().join("bin"))
+        .env("CLOTHOD_REGISTRY_DIR", r.env.dir.path().join("registry"))
+        .env("CLOTHOD_RUNTIME_DIR", r.env.path())
+        .envs(r.vars.iter().map(|(k, v)| (k, v)))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let c = r.env.client().await;
+    assert_eq!((c.hello["build"].clone(), c.hello["instance"].clone()), (json!(id2), instance));
+    check(&c.request("state.get", json!({})).await.unwrap(), "after an upgrade");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(r.rec(), "", "nothing resumed");
+    drop(c);
+    let _ = clothod_cmd(&r.env, &v2, &["shutdown"]);
+
+    // A corrupt file at a fresh start: moved aside, nothing restored, and a new one written.
+    let data = r.env.dir.path().join("data");
+    std::fs::write(data.join("layout.json"), "{\"version\": 1, \"model\": ").unwrap();
+    let deadline = Instant::now() + T;
+    while std::os::unix::net::UnixStream::connect(r.env.path().join("clothod.sock")).is_ok() {
+        assert!(Instant::now() < deadline, "did not shut down");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    std::fs::create_dir_all(r.env.path()).unwrap();
+    r.start();
+    let c = r.env.client().await;
+    let s = c.request("state.get", json!({})).await.unwrap();
+    assert!(s["workspaces"].as_array().unwrap().is_empty(), "{s}");
+    let aside: Vec<_> = std::fs::read_dir(&data).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("layout.json.corrupt-")).collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    new_pane(&c, sh()).await;
+    r.wait_layout("rewritten", |l| l["model"]["workspaces"].as_array().is_some_and(|w| w.len() == 1)).await;
+    drop(c);
+
+    // An ephemeral instance without CLOTHOD_LAYOUT_FILE writes nothing anywhere.
+    let plain = Env::new();
+    let c = plain.client().await;
+    new_pane(&c, sh()).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut found = Vec::new();
+    for d in [plain.dir.path().to_path_buf()] {
+        for e in walk(&d) {
+            if e.file_name().is_some_and(|n| n.to_string_lossy().starts_with("layout")) {
+                found.push(e);
+            }
+        }
+    }
+    assert!(found.is_empty(), "{found:?}");
+}
+
+fn walk(d: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+        let p = e.path();
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            out.extend(walk(&p));
+        } else {
+            out.push(p);
+        }
+    }
+    out
+}

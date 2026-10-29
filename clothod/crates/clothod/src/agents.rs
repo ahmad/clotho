@@ -62,6 +62,9 @@ fn try_report(args: &[String]) -> Result<()> {
                 }
                 state = Some("done".into());
                 kind = Some("codex".into());
+                // The thread is the session `codex resume <id>` takes (Codex 0.164's payload
+                // carries it as "thread-id").
+                session = v["thread-id"].as_str().map(String::from);
                 message = v["last-assistant-message"].as_str().map(|m| one_line(m, RESULT_MAX));
                 // The user's messages in this turn, oldest first: the last one is what they asked.
                 let asked = v["input-messages"].as_array().and_then(|m| m.last()).and_then(Value::as_str).map(user_prompt);
