@@ -87,10 +87,10 @@ done
 # generate_keys at the release Mac). Without them the app has updates turned off. The dev build never
 # updates.
 #
-# UPDATES_LIVE is the one switch for hosting: set it to true once https://clotho.app/appcast.xml is
-# published. Until then only --release and --package builds (the ones release.sh ships) get the feed,
-# so the user's plain installs never check a feed that isn't there and never show an update error.
-UPDATES_LIVE=false
+# UPDATES_LIVE is the one switch for hosting. https://clotho.app/appcast.xml is live (2026-10-29), so
+# every non-dev build gets the feed. Set it to false to keep plain installs off the feed (only --release
+# and --package builds then get it), e.g. if the feed ever goes away.
+UPDATES_LIVE=true
 UPDATE_KEYS=""
 if ! $DEV && [[ -s Resources/SparklePublicKey ]] && { $UPDATES_LIVE || $RELEASE || $PACKAGE; }; then
   UPDATE_KEYS="<key>SUFeedURL</key><string>https://clotho.app/appcast.xml</string>
