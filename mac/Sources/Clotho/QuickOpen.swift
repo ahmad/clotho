@@ -4,15 +4,17 @@ import ClothoKit
 // ⌘P, the command bar: a floating panel over the window, Spotlight-like. With nothing typed it lists the
 // current workspace's tabs with the current one selected; ↑/↓ (or Tab/⇧Tab) switch to each as a live
 // preview, Return keeps it and Esc goes back. Typing searches every connected machine's workspaces, tabs
-// and agents, from the models already in memory: agents waiting for you first, then the current workspace,
-// then the rest. Return goes there, ⌘1–9 pick a row, and ⌘P again closes it. Matching is ClothoKit's
-// FuzzyMatch, as on iOS.
+// and agents, from the models already in memory: by how well the name matches, workspaces first among
+// matches as good (see `CommandBar.band`). A workspace opens at its last active tab (the model's
+// `active_tab`, as a sidebar click does). Return goes there, ⌘1–9 pick a row, and ⌘P again closes it.
+// Matching is ClothoKit's FuzzyMatch, as on iOS.
 
 /// One row of the command bar.
 struct CommandBarEntry {
     /// What's matched (title, then subtitle) and its id.
     var item: QuickOpenItem
-    /// The ranking group while searching: 0 an agent waiting for you, 1 the current workspace, 2 the rest.
+    /// Breaks ties while searching, after match quality and kind: 0 an agent waiting for you, 1 the
+    /// current workspace, 2 the rest.
     var tier: Int
     /// The agent dot (the tab's or workspace's most urgent agent).
     var dot: NSColor?
@@ -26,20 +28,47 @@ enum CommandBar {
     /// Rows shown at most.
     static let limit = 12
 
-    /// What the bar lists for `query`: with nothing typed, the current workspace's tabs in order; otherwise
-    /// every match, by tier (waiting agents, the current workspace, the rest), best match first within
-    /// each. Returns each entry with the matched positions in its title.
+    /// What the bar lists for `query`: with nothing typed, the current workspace's tabs in order. Otherwise
+    /// every match, by how well its name matches (`band`); among matches as good, workspaces first, then by
+    /// tier (waiting agents, the current workspace, the rest), then by FuzzyMatch's score. So a workspace
+    /// whose name starts with the query leads every tab that only contains it. Returns each entry with the
+    /// matched positions in its title.
     static func results(all: [CommandBarEntry], current: [CommandBarEntry], query: String) -> [(entry: CommandBarEntry, indices: [Int])] {
-        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return current.prefix(limit).map { ($0, []) } }
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return current.prefix(limit).map { ($0, []) } }
         var byID: [String: CommandBarEntry] = [:]
         for entry in all { byID[entry.item.id] = entry }
         let ranked = QuickOpen.rank(all.map(\.item), query: query, limit: all.count)
+        let letters = query.filter { !$0.isWhitespace }.count
         let matched = ranked.enumerated().compactMap { order, result in
-            byID[result.item.id].map { (entry: $0, indices: result.titleIndices, order: order) }
+            byID[result.item.id].map { entry in
+                (entry: entry, indices: result.titleIndices, order: order,
+                 key: [band(title: entry.item.title, query: query, inTitle: result.titleIndices.count == letters),
+                       entry.item.kind == .workspace ? 0 : 1, entry.tier])
+            }
         }
-        // A stable sort by tier keeps the match order within each.
-        let sorted = matched.sorted { $0.entry.tier != $1.entry.tier ? $0.entry.tier < $1.entry.tier : $0.order < $1.order }
+        // A stable sort keeps FuzzyMatch's order among equals.
+        let sorted = matched.sorted { $0.key != $1.key ? $0.key.lexicographicallyPrecedes($1.key) : $0.order < $1.order }
         return sorted.prefix(limit).map { ($0.entry, $0.indices) }
+    }
+
+    /// How well `query` matches a row's title, best first: 0 the title starts with it ("api" for "api" or
+    /// "api-tests"), 1 a word in it does ("deploy api"), 2 its letters are in the title in order ("a-p-i"),
+    /// 3 only with the subtitle's help ("bb api" for devbox's api). Case doesn't matter.
+    static func band(title: String, query: String, inTitle: Bool) -> Int {
+        let text = Array(title.lowercased())
+        let needle = Array(query.lowercased())
+        guard !needle.isEmpty, needle.count <= text.count else { return inTitle ? 2 : 3 }
+        if Array(text.prefix(needle.count)) == needle { return 0 }
+        let original = Array(title)
+        let separators: Set<Character> = [" ", "-", "_", "/", ".", ":", "@", "(", "[", "›", "·"]
+        for start in stride(from: 1, through: text.count - needle.count, by: 1) where Array(text[start..<start + needle.count]) == needle {
+            // A word starts after a separator or at a lower-to-upper case change, as in FuzzyMatch.
+            let atWord = separators.contains(text[start - 1])
+                || (text.count == original.count && original[start - 1].isLowercase && original[start].isUppercase)
+            if atWord { return 1 }
+        }
+        return inTitle ? 2 : 3
     }
 }
 
@@ -117,6 +146,7 @@ extension AppDelegate {
                 all.append(CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: workspace.name, subtitle: session.title, id: workspaceID),
                                            tier: here ? 1 : 2,
                                            dot: agentBadge(machine: key, panes: workspace.tabs.flatMap(\.layout.panes))))
+                // Its last active tab, by the model's rules (LocalFocus), as a sidebar click.
                 actions[workspaceID] = { [weak self] in self?.focusNow(.workspace(workspace.id), on: key, trace: "command bar") }
                 for tab in workspace.tabs {
                     let id = "tab|\(key)|\(tab.id)"

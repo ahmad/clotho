@@ -4,7 +4,7 @@ import XCTest
 @testable import Clotho
 
 /// ⌘P, the command bar: the current workspace's tabs with nothing typed (arrows preview each, Esc goes
-/// back), a search across every machine's workspaces, tabs and agents (waiting agents first), Return or
+/// back), a search across every machine's workspaces, tabs and agents (best names first, workspaces leading), Return or
 /// ⌘1–9 to go, and ⌘P again to close.
 @MainActor
 final class CommandBarTests: XCTestCase {
@@ -123,18 +123,67 @@ final class CommandBarTests: XCTestCase {
         XCTAssertTrue(previewed.isEmpty, "no preview while searching")
     }
 
-    /// Waiting agents first, then the current workspace, then the rest, best match first within each.
-    func testRankingPutsWaitingAgentsFirst() {
+    /// Typing ranks by how well the name matches; among matches as good, workspaces lead, then waiting
+    /// agents, then the current workspace, then the rest.
+    func testRankingFollowsMatchQuality() {
         open()
         bar.setQuery("api")
-        XCTAssertEqual(titles, ["Claude Code: deploy api", "api", "api-gateway"])
-        XCTAssertEqual(bar.results.map(\.entry.tier), [0, 1, 2])
-        // The tiers hold even when a later one matches better: "platform" is an exact name in tier 1, but
-        // the current workspace's tabs (tier 1, through "MacBook · Platform") and the workspace come before
-        // anything elsewhere.
+        XCTAssertEqual(titles, ["api", "api-gateway", "Claude Code: deploy api"],
+                       "names that start with it, then the agent whose name only contains it as a word")
+        XCTAssertEqual(bar.results.map(\.entry.tier), [1, 2, 0])
         let ranked = CommandBar.results(all: all, current: current, query: "plat")
-        XCTAssertTrue(ranked.allSatisfy { $0.entry.tier == 1 })
-        XCTAssertEqual(ranked.first?.entry.item.title, "Platform", "the best match leads its tier")
+        XCTAssertEqual(ranked.first?.entry.item.title, "Platform", "the workspace by name before its tabs (by subtitle)")
+        XCTAssertEqual(ranked.dropFirst().map(\.entry.item.title), ["api", "web", "docs"])
+    }
+
+    private func workspace(_ name: String, machine: String = "devbox") -> CommandBarEntry {
+        CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: name, subtitle: machine, id: "ws|\(machine)|\(name)"), tier: 2)
+    }
+
+    /// The user's case: a workspace "api" beats a tab "api-tests", even one in the current workspace.
+    func testAWorkspaceBeatsATabThatMatchesAsWell() {
+        let entries = all + [tab("api-tests", machine: "MacBook", workspace: "Platform", tier: 1), workspace("api")]
+        let ranked = CommandBar.results(all: entries, current: current, query: "api")
+        XCTAssertEqual(ranked.first?.entry.item.id, "ws|devbox|api")
+        // A longer workspace name that starts with it still leads an exact tab name.
+        let longer = all + [workspace("api-platform-services")]
+        XCTAssertEqual(CommandBar.results(all: longer, current: current, query: "api").first?.entry.item.title, "api-platform-services")
+        // Case doesn't matter.
+        XCTAssertEqual(CommandBar.results(all: entries, current: current, query: "API").first?.entry.item.id, "ws|devbox|api")
+    }
+
+    /// A workspace whose name starts with the query beats a tab that only matches fuzzily, even when
+    /// FuzzyMatch scores the tab higher (word starts in a short name against a long one).
+    func testPrefixBeatsFuzzy() {
+        let fuzzyTab = tab("a.p.i", machine: "imac", workspace: "Scratch", tier: 1)
+        let longName = workspace("apiary-of-very-long-names-for-bees-and-more")
+        XCTAssertGreaterThan(FuzzyMatch.match("api", in: "a.p.i")!.score,
+                             FuzzyMatch.match("api", in: longName.item.title)!.score, "the raw scores favour the tab")
+        let ranked = CommandBar.results(all: [fuzzyTab, longName], current: [], query: "api")
+        XCTAssertEqual(ranked.map(\.entry.item.title), [longName.item.title, "a.p.i"])
+        // But a tab that starts with it beats a workspace that only matches fuzzily: quality comes first.
+        let fuzzyWorkspace = workspace("a-p-i")
+        let prefixTab = tab("api-tests", machine: "imac", workspace: "Scratch", tier: 2)
+        XCTAssertEqual(CommandBar.results(all: [fuzzyWorkspace, prefixTab], current: [], query: "api").map(\.entry.item.title),
+                       ["api-tests", "a-p-i"])
+    }
+
+    func testMatchBands() {
+        XCTAssertEqual(CommandBar.band(title: "api", query: "api", inTitle: true), 0)
+        XCTAssertEqual(CommandBar.band(title: "API-tests", query: "api", inTitle: true), 0)
+        XCTAssertEqual(CommandBar.band(title: "deploy api", query: "api", inTitle: true), 1)
+        XCTAssertEqual(CommandBar.band(title: "deployApi", query: "api", inTitle: true), 1, "a camelCase word")
+        XCTAssertEqual(CommandBar.band(title: "rapid", query: "api", inTitle: true), 2, "inside a word")
+        XCTAssertEqual(CommandBar.band(title: "a-p-i", query: "api", inTitle: true), 2)
+        XCTAssertEqual(CommandBar.band(title: "zsh", query: "bb", inTitle: false), 3, "through the subtitle")
+        XCTAssertEqual(CommandBar.band(title: "ap", query: "api", inTitle: false), 3, "shorter than the query")
+    }
+
+    /// Among matches as good that aren't workspaces, a waiting agent still comes first.
+    func testWaitingAgentsLeadTheirBand() {
+        let entries = [tab("deploy api", machine: "MacBook", workspace: "Platform", tier: 1), all[0]]
+        XCTAssertEqual(CommandBar.results(all: entries, current: [], query: "api").map(\.entry.item.id),
+                       ["agent|devbox|7", "tab|MacBook|deploy api"])
     }
 
     func testCommandNumbersPickARow() {

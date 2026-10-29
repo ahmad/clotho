@@ -824,7 +824,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let what = responder === activeTerminal ? "the active terminal"
                         : (responder as? NSTextView)?.isFieldEditor == true ? "a field editor (\(((responder as? NSTextView)?.string) ?? ""))"
                         : responder === sidebar ? "the sidebar" : String(describing: responder.map { type(of: $0) })
-                    return log("focus: \(what), workspace \(store.focusedWorkspace?.name ?? "none")")
+                    let tab = store.focusedWorkspace.flatMap { w in store.focusedTab.flatMap { t in w.tabs.firstIndex { $0.id == t.id }.map { "\($0 + 1) of \(w.tabs.count) (\(store.displayTitle(of: t)))" } } }
+                    return log("focus: \(what), workspace \(store.focusedWorkspace?.name ?? "none"), tab \(tab ?? "none")")
                 }
                 if step == "focussidebar" { return focusSidebar(nil) }
                 // "machine:devbox" focuses that saved machine, connecting first if needed ("machine:local").
