@@ -5,11 +5,11 @@
 # Usage: scripts/testflight-remote [--dry-run | --no-upload]
 #
 # 1. Hashes the app's sources at HEAD (from git, so stray files don't count) with ios/scripts/sources-sha.sh.
-# 2. Syncs the working tree to the Mac's mirror (clotho-mac).
+# 2. Syncs the working tree to the iOS mirror on the build Mac (scripts/clotho-build ios).
 # 3. Runs ios/scripts/testflight.sh there with EXPECT_SOURCES_SHA, so the Mac refuses to build anything but HEAD.
 #
 # The App Store Connect key ids come from ~/.config/clotho/asc.env (mode 600, never in the repo); the key itself
-# and the keychain password stay on the Mac. Don't run clotho-mac from anywhere else while this runs.
+# and the keychain password stay on the Mac. Coordinate with the ios agent: this uses its mirror (~/Builds/clotho-ios).
 set -euo pipefail
 export CLOTHO_MAC=${CLOTHO_MAC:-macbook@imac}
 cd "$(dirname "$0")/.."
@@ -34,7 +34,7 @@ git archive HEAD "${paths[@]}" | tar -x -C "$tmp"
 sha=$(ios/scripts/sources-sha.sh "$tmp")
 echo "==> $(git log --oneline -1 HEAD) | sources $sha | clothod $(cat clothod/RELEASED)"
 
-clotho-mac true
+scripts/clotho-build ios true
 # Keep only the newest archive in ~/Builds/testflight on the build Mac.
-ssh "$CLOTHO_MAC" "cd ~/Builds/clotho-clothod && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
-ssh "$CLOTHO_MAC" 'cd ~/Builds/testflight 2>/dev/null && ls -dt Clotho-* | tail -n +2 | xargs rm -rf; rm -rf ~/Builds/clotho-clothod/ios/build/Index.noindex; df -h /System/Volumes/Data | tail -1'
+ssh "$CLOTHO_MAC" "cd ~/Builds/clotho-ios && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
+ssh "$CLOTHO_MAC" 'cd ~/Builds/testflight 2>/dev/null && ls -dt Clotho-* | tail -n +2 | xargs rm -rf; rm -rf ~/Builds/clotho-ios/ios/build/Index.noindex; df -h /System/Volumes/Data | tail -1'

@@ -62,7 +62,11 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
   free; check with `df -h /System/Volumes/Data` before big builds. Don't touch `~/Library` caches or
   simulators without asking the user.
 - **imac** (macOS arm64, `macbook@imac`, always on): **the build host** (user, 2026-10-30). Run Mac and iOS
-  builds, tests and dists there with `CLOTHO_MAC=macbook@imac clotho-mac <command>`; macbook is the fallback.
+  builds, tests and dists there with `scripts/clotho-build <role> <command>` (role = clothod, mac, ios or
+  orchestrator). Each role has its own mirror on imac (~/Builds/clotho-clothod for clothod, which holds the
+  released clothod/dist; clotho-mac, clotho-ios, clotho-orch, whose clothod/dist links to it), so agents never
+  sync over each other's builds. Never sync into another role's mirror. macbook is the fallback
+  (`CLOTHO_MAC=ahmad@macbook clotho-mac <command>`).
   Signing uses imac's dedicated build keychain (~/Library/Keychains/clotho-build.keychain-db, password in
   ~/.config/clotho/build-keychain-pw; never print it). Unlock it in the same SSH session before codesign,
   notarytool (profile `clotho-notary`, ASC API key) or Sparkle signing. The Sparkle key is read from it
