@@ -747,6 +747,25 @@ final class SidebarView: NSView {
     private let agentsColumn = NSStackView()
     private var agentsHeight: NSLayoutConstraint!
     static let agentsHeightRange: ClosedRange<CGFloat> = 90...900
+    /// The divider and the Agents panel (tests).
+    private(set) var agentsViews: [NSView] = []
+    /// The workspaces list (tests).
+    private(set) var workspacesScroll: NSScrollView!
+    /// The workspaces list ends at the divider with the Agents panel, or at the footer without it.
+    private var sessionsToDivider: NSLayoutConstraint!
+    private var sessionsToFooter: NSLayoutConstraint!
+
+    /// Settings › General › Show Agents in the sidebar (and View ▸ Show Agents Panel). Off removes the
+    /// Agents panel and its divider, and the workspaces use the full height. Dots, ⌘P and notifications
+    /// don't change.
+    var showsAgents = true {
+        didSet {
+            agentsViews.forEach { $0.isHidden = !showsAgents }
+            sessionsToDivider.isActive = showsAgents
+            sessionsToFooter.isActive = !showsAgents
+            needsLayout = true
+        }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -779,11 +798,15 @@ final class SidebarView: NSView {
         // The workspaces panel keeps some room even when the window is short.
         let sessionsMinimum = scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 80)
         agentsHeight.priority = .defaultHigh
+        agentsViews = [divider, agentsScroll]
+        workspacesScroll = scroll
+        sessionsToDivider = scroll.bottomAnchor.constraint(equalTo: divider.topAnchor)
+        sessionsToFooter = scroll.bottomAnchor.constraint(equalTo: footer.topAnchor)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.topInset),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: divider.topAnchor),
+            sessionsToDivider,
             sessionsMinimum,
             divider.leadingAnchor.constraint(equalTo: leadingAnchor),
             divider.trailingAnchor.constraint(equalTo: trailingAnchor),

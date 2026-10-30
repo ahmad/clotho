@@ -2,14 +2,15 @@ import AppKit
 
 // What the window shows where panes go when there are none: a workspace without tabs ("New Tab"), or a
 // machine without workspaces ("New Workspace"). Centred: a quiet icon, the name, one line, and the action
-// as a prominent button with its shortcut beside it.
+// as a prominent accent button with its shortcut inside it: [ New Tab (⌘T) ], the "(⌘T)" dimmer.
 
 final class EmptyStateView: NSView {
     let icon = NSImageView()
     let title = NSTextField(labelWithString: "")
     let line = NSTextField(labelWithString: "")
     let button = NSButton(title: "", target: nil, action: nil)
-    let shortcut = NSTextField(labelWithString: "")
+    /// The shortcut shown in the button (tests).
+    private(set) var shortcut = ""
     private var onAction: (() -> Void)?
     private var buttonWidth: NSLayoutConstraint!
 
@@ -33,13 +34,7 @@ final class EmptyStateView: NSView {
         buttonWidth.isActive = true
         button.target = self
         button.action = #selector(tapped)
-        shortcut.font = .systemFont(ofSize: 12, weight: .medium)
-        shortcut.textColor = Theme.dimText
-
-        let action = NSStackView(views: [button, shortcut])
-        action.orientation = .horizontal
-        action.spacing = 10
-        let stack = NSStackView(views: [icon, title, line, action])
+        let stack = NSStackView(views: [icon, title, line, button])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 6
@@ -64,15 +59,24 @@ final class EmptyStateView: NSView {
             .withSymbolConfiguration(.init(pointSize: 34, weight: .light))
         self.title.stringValue = title
         self.line.stringValue = line
-        button.attributedTitle = NSAttributedString(string: action, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.white,
-        ])
+        button.attributedTitle = Self.title(action, shortcut: shortcut)
         buttonWidth.constant = ceil(button.attributedTitle.size().width) + 36
         updateColors()
         button.setAccessibilityLabel("\(action) (\(shortcut))")
-        self.shortcut.stringValue = shortcut
+        self.shortcut = shortcut
         self.onAction = onAction
         isHidden = false
+    }
+
+    /// "New Tab (⌘T)": the label in the button's weight, then a space and the shortcut in parentheses, in
+    /// the same text at 60%.
+    static func title(_ action: String, shortcut: String) -> NSAttributedString {
+        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let title = NSMutableAttributedString(string: action, attributes: [.font: font, .foregroundColor: NSColor.white])
+        guard !shortcut.isEmpty else { return title }
+        title.append(NSAttributedString(string: " ", attributes: [.font: font]))
+        title.append(NSAttributedString(string: "(\(shortcut))", attributes: [.font: font, .foregroundColor: NSColor.white.withAlphaComponent(0.6)]))
+        return title
     }
 
     @objc private func tapped() { onAction?() }

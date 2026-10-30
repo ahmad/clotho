@@ -85,8 +85,21 @@ final class ChromeControlsTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
         XCTAssertFalse(view.isHidden)
         XCTAssertEqual(view.title.stringValue, "Workspace 4")
-        XCTAssertEqual(view.button.title, "New Tab")
-        XCTAssertEqual(view.shortcut.stringValue, "⌘T")
+        // [ New Tab (⌘T) ]: the shortcut inside the button, in parentheses, dimmer.
+        let title = view.button.attributedTitle
+        XCTAssertEqual(title.string, "New Tab (⌘T)")
+        let open = (title.string as NSString).range(of: "(").location
+        XCTAssertEqual((title.attribute(.foregroundColor, at: open, effectiveRange: nil) as? NSColor)?.alphaComponent ?? 0, 0.6, accuracy: 0.01,
+                       "the parentheses are dim too")
+        XCTAssertEqual(view.shortcut, "⌘T")
+        let label = title.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+        let key = title.attribute(.foregroundColor, at: title.length - 1, effectiveRange: nil) as? NSColor
+        XCTAssertEqual(label?.alphaComponent, 1)
+        XCTAssertEqual(key?.alphaComponent ?? 0, 0.6, accuracy: 0.01)
+        XCTAssertEqual(title.attribute(.font, at: 0, effectiveRange: nil) as? NSFont, title.attribute(.font, at: title.length - 1, effectiveRange: nil) as? NSFont,
+                       "the same text")
+        XCTAssertEqual(view.button.accessibilityLabel(), "New Tab (⌘T)")
+        XCTAssertGreaterThanOrEqual(view.button.frame.width, title.size().width + 30, "room for both")
         let frame = view.button.convert(view.button.bounds, to: view)
         XCTAssertEqual(frame.midY, view.bounds.midY, accuracy: 120, "near the middle")
         view.button.performClick(nil)

@@ -115,6 +115,7 @@ final class GeneralSettingsController: NSViewController {
     /// The appearance control, for tests and the toggle in the sidebar.
     private(set) var appearanceControl: NSSegmentedControl?
     private(set) var updatesSwitch: NSSwitch?
+    private(set) var agentsSwitch: NSSwitch?
 
     init(app: AppDelegate) {
         self.app = app
@@ -145,7 +146,7 @@ final class GeneralSettingsController: NSViewController {
         guard let app, isViewLoaded else { return }
         content.arrangedSubviews.forEach { $0.removeFromSuperview() }
         targets.removeAll()
-        for section in [notifications(app), appearance(), updates(app)] {
+        for section in [notifications(app), sidebar(app), appearance(), updates(app)] {
             content.addArrangedSubview(section)
             section.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         }
@@ -165,6 +166,12 @@ final class GeneralSettingsController: NSViewController {
             })
         }
         return formSection("Notifications", FormGroup(rows), footnote: "From agents that report their state, such as Claude Code and Codex with status hooks.")
+    }
+
+    private func sidebar(_ app: AppDelegate) -> NSView {
+        let show = toggle(app.showsAgentsPanel, "Show Agents in the sidebar") { [weak app] on in app?.setShowsAgentsPanel(on) }
+        agentsSwitch = show
+        return formSection("Sidebar", FormGroup([FormRow("Show Agents in the sidebar", caption: "Dots, ⌘P and notifications stay either way", control: show)]))
     }
 
     private func appearance() -> NSView {

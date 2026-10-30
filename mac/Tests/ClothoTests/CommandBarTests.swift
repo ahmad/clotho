@@ -257,8 +257,17 @@ final class CommandBarTests: XCTestCase {
         XCTAssertNotNil(bar.picking, "now pick where to")
         XCTAssertEqual(bar.query, "")
         XCTAssertTrue(ran.isEmpty)
-        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(titles, ["Claude Code: deploy api", "Platform", "Notes"], "workspaces only, no tab rows")
+        XCTAssertEqual(selectedTitle, "Notes", "starting on the first workspace other than the tab's own")
+        XCTAssertTrue(bar.isDimmedForPick(.workspace(machine: "local", 1)), "its own workspace is dimmed")
+        XCTAssertTrue(bar.isDimmedForPick(.workspace(machine: "bb", 3)), "and other machines'")
+        XCTAssertFalse(bar.isDimmedForPick(.machine("local")))
+        XCTAssertFalse(command(#selector(NSResponder.moveRight(_:))) && titles.count > 3, "workspaces don't open into tabs")
+        command(#selector(NSResponder.moveUp(_:)))  // Platform, the current one
         XCTAssertTrue(previewed.isEmpty, "no previews while picking")
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertTrue(ran.isEmpty, "Return on the current workspace does nothing")
+        XCTAssertNotNil(bar.picking)
         command(#selector(NSResponder.moveDown(_:)))  // Notes
         command(#selector(NSResponder.insertNewline(_:)))
         XCTAssertEqual(ran.first?.0, "moveTab")
@@ -271,6 +280,7 @@ final class CommandBarTests: XCTestCase {
         command(#selector(NSResponder.cancelOperation(_:)))
         XCTAssertNil(bar.picking)
         XCTAssertNotNil(bar.superview, "still open")
+        XCTAssertTrue(titles.contains("web"), "the tree has its tabs again")
     }
 
     func testCommandReturnOpensATabBeside() {

@@ -343,6 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var sidebarWidth: NSLayoutConstraint!
     var tabBar: TabBarView!
     var tabBarLeading: NSLayoutConstraint!
+    var sidebarToggle: QuietButton?
     var splitView: SplitLayoutView!
     var emptyLabel: NSTextField!
     /// A workspace with no tabs, or a machine with no workspaces (EmptyState.swift).
@@ -510,6 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onCreateWorkspace = { [weak self] key in self?.createWorkspace(on: key) }
         wireSettingsButtons(sidebar)
+        applyAgentsPanelSetting()
         sidebar.onReconnect = { [weak self] in self?.reconnect($0) }
         sidebar.footer.onSetAppearance = { [weak self] in self?.setAppearance($0) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
@@ -585,6 +587,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         corner.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(corner)
+        // The sidebar's show/hide button in the title row (SidebarToggle.swift).
+        let toggle = Self.makeSidebarToggle { [weak self] in self?.showOrHideSidebar(self?.sidebarToggle) }
+        container.addSubview(toggle)
+        sidebarToggle = toggle
 
         splitTop = splitView.topAnchor.constraint(equalTo: tabBar.bottomAnchor)
         tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: TabBarView.height)
@@ -616,7 +622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             corner.widthAnchor.constraint(equalToConstant: WindowButtons.width),
             // Centred on the tab bar, as a titled window centres its buttons in its title bar.
             corner.heightAnchor.constraint(equalTo: tabBar.heightAnchor),
-        ])
+        ] + Self.sidebarToggleConstraints(toggle, corner: corner, sidebar: sidebar))
         updateTabBarInset()
 
         window.contentView = container
@@ -1074,6 +1080,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let enabled = (handler as? NSMenuItemValidation)?.validateMenuItem(item) ?? true
                     return log("menutarget: \(title) (\(NSStringFromSelector(action))) from \(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil") → \(type(of: handler)), enabled \(enabled)")
                 }
+                // "agentspanel:on" / "agentspanel:off" shows or hides the sidebar's Agents panel (the setting).
+                if step.hasPrefix("agentspanel:") { return setShowsAgentsPanel(step.hasSuffix(":on")) }
                 // "logtab" logs the focused tab's layout and tab count, for checking moves.
                 if step == "logtab" {
                     let tabs = store.focusedWorkspace?.tabs.map { "\($0.id)" }.joined(separator: ",") ?? "-"
@@ -1512,7 +1520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = animate
             (animate ? sidebarWidth.animator() : sidebarWidth).constant = hide ? 0 : savedSidebarWidth
-            (animate ? tabBarLeading.animator() : tabBarLeading).constant = hide ? 80 : 0
+            (animate ? tabBarLeading.animator() : tabBarLeading).constant = hide ? Self.hiddenTabBarInset : 0
             if animate { window.contentView?.layoutSubtreeIfNeeded() }
         }, completionHandler: { [weak self] in
             guard let self, sidebarWidth.constant == 0 else { return }
@@ -1532,7 +1540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // With the sidebar hidden, the tab bar starts after the window buttons.
     func updateTabBarInset() {
-        tabBarLeading.constant = sidebarWidth.constant > 0 ? 0 : 80
+        tabBarLeading.constant = sidebarWidth.constant > 0 ? 0 : Self.hiddenTabBarInset
     }
 
     // View › Zoom In / Zoom Out / Actual Size: the whole app, chrome and terminal together.
@@ -1601,6 +1609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         UIScale.factor = factor
         UIScale.save(factor)
         tabBarHeight.constant = TabBarView.height
+        updateTabBarInset()
         tabBar.applyScale()
         sidebar.applyScale()
         if let noticeBar { splitTop.constant = noticeBar.fittingSize.height }

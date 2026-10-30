@@ -580,7 +580,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// Esc or ⌘P: back to where you were, and close.
     func cancel() {
         if picking != nil {
-            picking = nil
+            endPick()
             field.stringValue = ""
             field.placeholderString = Self.placeholder
             return update()
@@ -591,6 +591,23 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     static let placeholder = "Search workspaces, tabs and agents, or > for commands"
 
+    private func endPick() {
+        picking = nil
+        pickSource = nil
+        if let treeBeforePick { tree = treeBeforePick }
+        treeBeforePick = nil
+    }
+
+    /// While picking where a tab goes: its own workspace, and workspaces on other machines.
+    func isDimmedForPick(_ node: CommandTree.Node) -> Bool {
+        guard let pickSource else { return false }
+        switch node {
+        case let .workspace(machine, id): return machine != pickSource.machine || id == pickSource.workspace
+        case let .machine(machine): return machine != pickSource.machine
+        default: return true
+        }
+    }
+
     // MARK: State
 
     var query: String { field.stringValue }
@@ -599,6 +616,11 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     var isSearching: Bool { !isCommandMode && !query.trimmingCharacters(in: .whitespaces).isEmpty }
     /// A command that needs a target (Move Tab) waits for a workspace to be picked in the tree.
     private(set) var picking: (item: CommandListItem, subject: CommandTree.Node)?
+    /// The tree as it was before picking, to come back to.
+    private var treeBeforePick: CommandTree?
+    /// While picking: the tab's own workspace ("current") and machine (others are dimmed: a tab can't
+    /// move between machines).
+    private var pickSource: (machine: String, workspace: WorkspaceID?)?
     private(set) var commands: [CommandListItem] = []
     private var commandSelected = 0
     /// The search field (tests and TypeText).
@@ -741,6 +763,11 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             if command.target != nil, let subject {
                 // Move Tab: pick the workspace in the tree, then it moves.
                 picking = (command, subject)
+                treeBeforePick = tree
+                let source: WorkspaceID? = if case let .tab(machine, tab) = subject { tree.workspace(containing: tab, on: machine) } else { nil }
+                pickSource = (subject.machine, source)
+                tree.workspacesOnly = true
+                tree.selectFirstWorkspace(on: subject.machine, except: source)
                 field.stringValue = ""
                 field.placeholderString = command.title.replacingOccurrences(of: " to…", with: " to which workspace?")
                 return update()
@@ -750,12 +777,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         if let picking {
             // The picked row's workspace: a workspace row (or result); a machine row expands as usual.
             let node = isSearching ? selectedEntry.flatMap { CommandTree.Node(entryID: $0.item.id) } : tree.selection
-            if case .workspace = node {
-                self.picking = nil
+            if let node, case .workspace = node {
+                // The tab's own workspace and other machines' workspaces aren't targets.
+                guard !isDimmedForPick(node) else { return }
+                endPick()
                 return onCommand?(picking.item, picking.subject, node) ?? ()
             }
             if !isSearching, case .machine = node, tree.activate() == .expanded { return render() }
-            return NSSound.beep()
         }
         if isSearching {
             if let entry = selectedEntry { onOpen?(entry) }
@@ -830,7 +858,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     }
 
     private func update() {
-        results = isSearching ? CommandBar.results(all: all, current: [], query: query) : []
+        results = isSearching ? CommandBar.results(all: picking == nil ? all : all.filter { $0.item.kind == .workspace }, current: [], query: query) : []
         searchSelected = 0
         if isCommandMode, let text = CommandList.commandQuery(query) {
             let context = commandContext?(tree.selection) ?? CommandContext()
@@ -872,12 +900,20 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
                 lastSection = row.section
             }
             let number = index - windowStart
-            let rowView = QuickOpenRow(entry: shown.entry, indices: shown.indices, selected: index == selected,
+            var entry = shown.entry
+            let node = CommandTree.Node(entryID: entry.item.id)
+            let dimmed = node.map(isDimmedForPick) ?? false
+            if let pickSource, case let .workspace(machine, id)? = node, machine == pickSource.machine, id == pickSource.workspace {
+                entry.detail = "current"
+            }
+            let rowView = QuickOpenRow(entry: entry, indices: shown.indices, selected: index == selected,
                                        shortcut: number < 9 ? number + 1 : nil, depth: shown.row?.depth ?? 0,
                                        disclosure: shown.row.flatMap { $0.expandable ? $0.expanded : nil },
                                        showPath: shown.row == nil || shown.row?.section == .needsYou || shown.entry.item.kind == .machine) { [weak self] in
                 self?.pick(number)
             }
+            // Dimmed rows aren't targets while picking (machines stay expandable).
+            if dimmed, case .workspace? = node { rowView.alphaValue = 0.4 } else if dimmed { rowView.alphaValue = 0.6 }
             list.addArrangedSubview(rowView)
             rowView.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -s(12)).isActive = true
         }
