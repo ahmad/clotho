@@ -70,6 +70,18 @@ final class CommandTreeTests: XCTestCase {
         XCTAssertFalse(tree.collapse(), "nothing above the machines")
     }
 
+    func testShowMachinesJumpsToTheMachineList() {
+        var tree = CommandTree(outline: outline(), machine: "bb", workspace: 5, tab: 50)
+        tree.showMachines()
+        XCTAssertEqual(tree.scope, .machines)
+        XCTAssertEqual(tree.selection, .machine("bb"), "the machine that was showing")
+        XCTAssertEqual(nodes(tree), [.agent(machine: "bb", pane: 500), .machine("local"), .machine("bb"), .machine("imac")])
+        tree.showMachines()
+        XCTAssertEqual(tree.selection, .machine("bb"), "again: nothing changes")
+        tree.expand()
+        XCTAssertTrue(nodes(tree).contains(.workspace(machine: "bb", 5)), "and the tree works from there")
+    }
+
     func testReturn() {
         var tree = CommandTree(outline: outline(), machine: "local", workspace: 1, tab: 10)
         XCTAssertEqual(tree.activate(), .open(.tab(machine: "local", 10)))

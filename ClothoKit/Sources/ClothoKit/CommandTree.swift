@@ -233,6 +233,16 @@ public struct CommandTree: Sendable, Equatable {
         return .expanded
     }
 
+    /// Straight to the machine list (a touch UI's "All machines"), with the machine whose workspaces were
+    /// showing selected, and the rest of the tree's state kept.
+    public mutating func showMachines() {
+        guard scope != .machines else { return }
+        let machine: String? = if case let .machine(key) = scope { key } else { nil }
+        scope = .machines
+        selection = machine.map { .machine($0) }
+        fixSelection()
+    }
+
     // MARK: Leaving search
 
     /// Tab on a search result: the tree, at that row, expanded. A tab shows inside its expanded workspace.
