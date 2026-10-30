@@ -8,7 +8,10 @@ resubscribes from the seq it reached and resumes in live or replay mode.
 
 ## Build and test
 
-Needs Xcode 26 and XcodeGen (`brew install xcodegen`). The Xcode project is generated from `project.yml`.
+Needs Xcode 26 or later and XcodeGen (`brew install xcodegen`; without Homebrew, the release zip unpacked in
+`~/Builds/tools/xcodegen`, which the scripts find). The Xcode project is generated from `project.yml`. The
+builds and tests run on imac (`CLOTHO_MAC=macbook@imac clotho-mac ios/build.sh test <simulator id>`, Xcode 27,
+iOS 27 simulators); macbook (Xcode 26) still works.
 
 ```sh
 ./build.sh          # generate the project and build for the booted simulator
@@ -24,8 +27,16 @@ exact bytes into Caches on first use (`DistBundle.swift`).
 ## TestFlight
 
 ```sh
-./scripts/testflight.sh    # Release archive, team TEAMID0000 (Ahmad Amin), upload to App Store Connect
+./scripts/testflight.sh              # Release archive, team TEAMID0000 (Ahmad Amin), upload to App Store Connect
+./scripts/testflight.sh --dry-run    # archive only
+./scripts/testflight.sh --no-upload  # archive and export the signed .ipa, no upload
 ```
+
+Signing: the archive uses the existing "Apple Development: Ahmad Amin" identity, and the export Apple's
+cloud-managed "Apple Distribution: Ahmad Amin", through the App Store Connect API key (`-allowProvisioningUpdates`),
+so no Xcode account needs to be signed in. Over SSH the script unlocks imac's build keychain
+(`~/Library/Keychains/clotho-build.keychain-db`, password in `~/.config/clotho/build-keychain-pw`) when it
+exists, else the login keychain with `~/.keychain_pw` (macbook).
 
 App Store Connect app: "Clotho: Remote Terminal" (bundle ID `nyc.amin.clotho`, SKU `clotho-ios`, app id
 1234567890). The internal group "Personal testing" has automatic distribution on, so each upload reaches

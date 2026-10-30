@@ -51,8 +51,9 @@ final class TerminalGesturesUITests: XCTestCase {
         let item = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Text size'")).firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 3))
         let digits = item.label.split(whereSeparator: { !$0.isNumber }).first.flatMap { Int($0) }
-        // Close the menu without choosing anything.
-        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.9)).tap()
+        // Close the menu without choosing anything: a tap on the terminal left of the menu. (Not near the bottom: since
+        // iOS 27 a tap on the software keyboard types there and leaves the menu open.)
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.08, dy: 0.45)).tap()
         sleep(1)
         return try XCTUnwrap(digits, "no size in \"\(item.label)\"")
     }

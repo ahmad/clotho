@@ -4,6 +4,8 @@
 # `test` starts the "Local Mac (dev)" clothod first and always runs scripts/cleanup-dev.sh afterwards, so no
 # test daemon outlives the run.
 cd "$(dirname "$0")"
+# Where Homebrew has no xcodegen (imac), the release zip lives in ~/Builds/tools.
+[ -x "$HOME/Builds/tools/xcodegen/bin/xcodegen" ] && PATH=$HOME/Builds/tools/xcodegen/bin:$PATH
 action=${1:-build}
 sim=${2:-$(xcrun simctl list devices booted | grep -m1 -o '[0-9A-F-]\{36\}')}
 # CLOTHOD_DIST=<dir> bundles (and tests against) that clothod dist instead of the release in clothod/dist, e.g.

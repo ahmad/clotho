@@ -2,8 +2,9 @@
 # Archives Clotho (Release, team TEAMID0000) and uploads it to App Store Connect for TestFlight. Runs on the
 # Mac, in its own login session or over SSH (scripts/testflight-remote on devbox does the latter).
 #
-# Usage: ios/scripts/testflight.sh [--dry-run]
-#   --dry-run   check, archive and stop: nothing is exported or uploaded.
+# Usage: ios/scripts/testflight.sh [--dry-run | --no-upload]
+#   --dry-run    check, archive and stop: nothing is exported or uploaded.
+#   --no-upload  archive and export (signed for App Store Connect) into the logs folder, but don't upload.
 # Environment:
 #   ASC_KEY_ID, ASC_ISSUER_ID   the App Store Connect API key (required); the key itself is
 #                               ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8 on the Mac.
@@ -17,16 +18,20 @@
 set -euo pipefail
 
 DRY_RUN=0
+NO_UPLOAD=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
+  --no-upload) NO_UPLOAD=1 ;;
   "") ;;
-  *) echo "usage: $0 [--dry-run]" >&2; exit 64 ;;
+  *) echo "usage: $0 [--dry-run | --no-upload]" >&2; exit 64 ;;
 esac
 
 IOS=$(cd "$(dirname "$0")/.." && pwd)
 ROOT=$(cd "$IOS/.." && pwd)
 cd "$IOS"
 DIST=$ROOT/clothod/dist
+# Where Homebrew has no xcodegen (imac), the release zip lives in ~/Builds/tools.
+[ -x "$HOME/Builds/tools/xcodegen/bin/xcodegen" ] && PATH=$HOME/Builds/tools/xcodegen/bin:$PATH
 
 fail() { echo "testflight: $*" >&2; exit 2; }
 
@@ -67,10 +72,24 @@ echo "==> Clotho build $BUILD_NUMBER, clothod $RELEASED, sources $SOURCES (logs:
 
 # MARK: Signing over SSH
 
-# Over SSH the login keychain is locked; the user keeps its password in ~/.keychain_pw. Never echoed.
-if [ -f "$HOME/.keychain_pw" ]; then
+# Over SSH keychains are locked. imac has a dedicated build keychain (its password in
+# ~/.config/clotho/build-keychain-pw, mode 600); macbook uses the login keychain, whose password the user keeps
+# in ~/.keychain_pw. Passwords are never echoed.
+BUILD_KEYCHAIN=$HOME/Library/Keychains/clotho-build.keychain-db
+BUILD_KEYCHAIN_PW=$HOME/.config/clotho/build-keychain-pw
+SIGN_FLAGS=()
+if [ -f "$BUILD_KEYCHAIN" ] && [ -f "$BUILD_KEYCHAIN_PW" ]; then
+  security unlock-keychain -p "$(cat "$BUILD_KEYCHAIN_PW")" "$BUILD_KEYCHAIN" >/dev/null 2>&1 \
+    || fail "couldn't unlock the build keychain"
+  # codesign finds identities through the user's search list; the list is the machine's setup, not ours to change.
+  security list-keychains -d user | grep -q clotho-build.keychain-db \
+    || fail "the build keychain isn't on the user's keychain search list"
+  SIGN_FLAGS=(OTHER_CODE_SIGN_FLAGS="--keychain $BUILD_KEYCHAIN")
+  echo "==> signing with the build keychain"
+elif [ -f "$HOME/.keychain_pw" ]; then
   security unlock-keychain -p "$(cat "$HOME/.keychain_pw")" "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1 \
     || fail "couldn't unlock the login keychain"
+  echo "==> signing with the login keychain"
 fi
 AUTH=(-allowProvisioningUpdates
       -authenticationKeyPath "$KEY_PATH"
@@ -94,7 +113,7 @@ echo "==> archive"
 if ! xcodebuild -project Clotho.xcodeproj -scheme Clotho -configuration Release \
     -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
     -skipPackagePluginValidation -skipMacroValidation \
-    "${AUTH[@]}" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive > "$OUT/archive.log" 2>&1; then
+    "${AUTH[@]}" ${SIGN_FLAGS[@]+"${SIGN_FLAGS[@]}"} CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive > "$OUT/archive.log" 2>&1; then
   tail -30 "$OUT/archive.log" >&2
   echo "testflight: archive failed (log: $OUT/archive.log)" >&2
   exit 1
@@ -111,12 +130,19 @@ fi
 
 # MARK: Export and upload
 
+EXPORT_OPTIONS=scripts/ExportOptions.plist
+if [ "$NO_UPLOAD" = 1 ]; then
+  # The same signing, but the .ipa stays in $OUT/export.
+  EXPORT_OPTIONS=$OUT/ExportOptions-no-upload.plist
+  cp scripts/ExportOptions.plist "$EXPORT_OPTIONS"
+  plutil -replace destination -string export "$EXPORT_OPTIONS"
+fi
 export_once() {
   rm -rf "$OUT/export"
-  xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist scripts/ExportOptions.plist \
+  xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist "$EXPORT_OPTIONS" \
     -exportPath "$OUT/export" "${AUTH[@]}" > "$OUT/export-$1.log" 2>&1
 }
-echo "==> export and upload"
+[ "$NO_UPLOAD" = 1 ] && echo "==> export (no upload)" || echo "==> export and upload"
 attempt=1
 until export_once "$attempt"; do
   # App Store Connect answers 500 now and then while Xcode fetches the app record ("Error Downloading
@@ -133,4 +159,9 @@ until export_once "$attempt"; do
 done
 grep -q '\*\* EXPORT SUCCEEDED \*\*' "$OUT/export-$attempt.log" \
   || { echo "testflight: no EXPORT SUCCEEDED in $OUT/export-$attempt.log" >&2; exit 1; }
+if [ "$NO_UPLOAD" = 1 ]; then
+  ls "$OUT"/export/*.ipa >/dev/null 2>&1 || { echo "testflight: no .ipa in $OUT/export" >&2; exit 1; }
+  echo "Exported Clotho build $BUILD_NUMBER (not uploaded): $(ls "$OUT"/export/*.ipa)"
+  exit 0
+fi
 echo "Uploaded Clotho build $BUILD_NUMBER"

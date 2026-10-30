@@ -45,7 +45,11 @@ final class AgentInputUITests: XCTestCase {
         let app = recordingPane()
         // cat -v shows ESC as ^[ and CR as ^M.
         app.typeText("a")
-        app.buttons["Newline"].tap()
+        // The key is at the scrolling bar's far end. Scroll there and let it settle first: since iOS 27 a tap that
+        // XCUITest makes while the bar is still scrolling only stops the scroll.
+        let newline = app.buttons["Newline"]
+        for _ in 0..<3 where !newline.isHittable { app.buttons["esc"].firstMatch.swipeLeft(); sleep(1) }
+        newline.tap()
         app.typeText("b")
         waitFor("a^[^Mb", "the key bar's newline")
         app.typeText("\u{03}")
