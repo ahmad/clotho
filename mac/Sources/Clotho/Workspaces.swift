@@ -166,6 +166,7 @@ extension AppDelegate {
             }
             log("focus: pane \(terminal.paneID) took the keyboard: \(frames.joined(separator: " < "))")
         }
+        if window.firstResponder is PaneTerminalView { paneFocusReporter?.note("pane took the keyboard") }
         guard let terminal = window.firstResponder as? PaneTerminalView, let session = connections[terminal.machine],
               session.store.state.focus.pane != terminal.paneID, session.store.state.pane(terminal.paneID) != nil else { return }
         focusNow(.pane(terminal.paneID), on: terminal.machine, trace: "pane \(terminal.paneID)")

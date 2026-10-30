@@ -100,6 +100,9 @@ public struct Hello: Codable, Equatable, Sendable {
         case git
         /// `pane.move` and `tab.join`: a pane, or a whole tab, into a split beside another pane (0.1.26).
         case paneMove = "pane.move"
+        /// `pane.focus`: the pane takes the viewport of the client that focused it most recently; typing
+        /// no longer picks the size (0.1.28).
+        case paneFocus = "pane.focus"
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -364,6 +367,11 @@ public protocol SessionBackend: AnyObject, Sendable {
     func setViewport(_ pane: PaneID, _ size: Size) async throws
     /// Forces the PTY size.
     func resize(_ pane: PaneID, _ size: Size) async throws
+    /// Tells the daemon this client's user is now looking at `pane` (`pane.focus`): the pane takes this
+    /// client's viewport. Call it when the pane really gets the user's focus (focused in the key window,
+    /// the window or app becoming active, switching to its tab), once per action. Does nothing when
+    /// hello's `features` lacks `.paneFocus`.
+    func focusPane(_ pane: PaneID) async throws
 
     /// Keys, paste, mouse and focus reports. Never the local emulator's automatic replies.
     func sendInput(_ pane: PaneID, _ bytes: Data)
@@ -454,6 +462,9 @@ public extension SessionBackend {
     }
 
     func ackAgent(_ pane: PaneID) async throws {}
+
+    /// Backends with one client: its viewport is already the size.
+    func focusPane(_ pane: PaneID) async throws {}
 
     func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         throw BackendError(code: "unknown_method", message: "this backend can't mute agents")

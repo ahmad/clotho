@@ -413,6 +413,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     var windowedFrame: NSRect?
     var firstResponderObservation: NSKeyValueObservation?
+    /// Tells the daemon which pane the user focused here (PaneFocus.swift).
+    var paneFocusReporter: PaneFocusReporter?
+    var paneFocusObservers: [NSObjectProtocol] = []
+    var paneFocusClickMonitor: Any?
     var appearanceObservation: NSKeyValueObservation?
 
     // Carries settings over, once, from the "Clotho Next" builds that ran beside the herdr-based app
@@ -646,6 +650,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             toggleFullScreen(nil)
         }
 
+        installPaneFocusReporting()
         firstResponderObservation = window.observe(\.firstResponder) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.firstResponderChanged() }
         }

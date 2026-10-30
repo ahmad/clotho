@@ -52,7 +52,7 @@ final class PaneCloseButton: NSView {
 }
 
 extension PaneHostView {
-    /// The ×'s margin from the terminal's top and right edges.
+    /// The ×'s margin inside the host's padding, from its top and right edges.
     static var closeMargin: CGFloat { 6 }
 
     /// The corner the pointer has to be in for the × to show (flipped: the top right).
@@ -78,15 +78,18 @@ extension PaneHostView {
         positionCloseButton()
     }
 
-    /// Inside the terminal's own top-right corner (it's sized to whole cells, so it often ends short of
-    /// the host's edge), and never past the host's edge when another client made the terminal wider.
+    /// In the host's own top-right corner, the one the pointer hovers to show it, whatever size the
+    /// terminal is: another client (an iPhone) can make the terminal much narrower than the pane.
     func positionCloseButton() {
         guard let closeButton else { return }
-        let size = PaneCloseButton.size, margin = Self.closeMargin
-        let right = min(terminal.frame.maxX, bounds.maxX - Self.padding) - margin
-        let top = max(terminal.frame.minY, Self.padding) + margin
-        let frame = NSRect(x: right - size, y: top, width: size, height: size)
+        let frame = closeButtonFrame
         if closeButton.frame != frame { closeButton.frame = frame }
+    }
+
+    /// Where the × goes (flipped): padding and margin in from the host's top and right edges.
+    var closeButtonFrame: NSRect {
+        let size = PaneCloseButton.size, inset = Self.padding + Self.closeMargin
+        return NSRect(x: bounds.maxX - inset - size, y: inset, width: size, height: size)
     }
 
     func updateCornerTracking() {

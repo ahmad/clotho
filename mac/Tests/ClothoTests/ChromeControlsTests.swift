@@ -67,15 +67,44 @@ final class ChromeControlsTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         let close = try XCTUnwrap(host.closeButton)
         XCTAssertTrue(host.closeCorner.contains(close.frame), "inside the corner it shows for")
-        XCTAssertTrue(host.terminal.frame.contains(close.frame), "wholly inside the terminal, not over its edge")
-        let right = min(host.terminal.frame.maxX, host.bounds.maxX - PaneHostView.padding)
-        XCTAssertEqual(right - close.frame.maxX, PaneHostView.closeMargin, accuracy: 0.5, "a margin from the visible right edge")
-        XCTAssertEqual(close.frame.minY - host.terminal.frame.minY, PaneHostView.closeMargin, accuracy: 0.5)
+        let inset = PaneHostView.padding + PaneHostView.closeMargin
+        XCTAssertEqual(host.bounds.maxX - close.frame.maxX, inset, accuracy: 0.5, "padding and a margin from the host's right edge")
+        XCTAssertEqual(close.frame.minY, inset, accuracy: 0.5, "and from its top")
         XCTAssertEqual(host.fittedSize(), size, "it takes no rows")
         close.button.performClick(nil)
         XCTAssertEqual(closed, 1)
         host.setCornerHover(false)
         XCTAssertNil(host.closeButton)
+    }
+
+    /// A pane another client sized (an iPhone's 40 columns) leaves the terminal far narrower than the
+    /// host. The × still sits in the host's top-right corner, where the pointer hovers, not at the
+    /// terminal's right edge mid-pane; and it stays there as the host resizes.
+    func testPaneCloseStaysInTheHostCornerWhenTheTerminalIsNarrower() async throws {
+        let backend = FakeBackend()
+        let store = ModelStore(backend: backend)
+        defer { store.stop() }
+        try await store.start()
+        let created = try await backend.createWorkspace(name: "One", spawn: SpawnOptions(command: ["/bin/sleep", "30"]))
+        let deadline = Date().addingTimeInterval(5)
+        while store.state.pane(created.pane) == nil, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        var pane = try XCTUnwrap(store.state.pane(created.pane))
+        pane.cols = 40
+        pane.rows = 12
+        let host = PaneHostView(pane: pane, store: store, font: .monospacedSystemFont(ofSize: 12, weight: .regular))
+        host.onClose = {}
+        let inset = PaneHostView.padding + PaneHostView.closeMargin
+        for width: CGFloat in [1200, 900] {
+            host.frame = NSRect(x: 0, y: 0, width: width, height: 700)
+            host.layoutSubtreeIfNeeded()
+            XCTAssertLessThan(host.terminal.frame.maxX, width / 2, "the terminal is much narrower than the host")
+            host.setCornerHover(true)
+            let close = try XCTUnwrap(host.closeButton)
+            XCTAssertEqual(close.frame.maxX, width - inset, accuracy: 0.5, "at the host's right edge, not the terminal's")
+            XCTAssertEqual(close.frame.minY, inset, accuracy: 0.5)
+            XCTAssertGreaterThan(close.frame.minX, host.terminal.frame.maxX, "not mid-pane")
+            XCTAssertTrue(host.closeCorner.contains(close.frame), "inside the corner it shows for")
+        }
     }
 
     func testEmptyWorkspaceOffersNewTab() {

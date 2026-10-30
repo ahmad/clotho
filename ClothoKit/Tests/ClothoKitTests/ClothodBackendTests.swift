@@ -14,7 +14,9 @@ final class ClothodBackendTests: XCTestCase {
         try XCTSkipUnless(FileManager.default.isExecutableFile(atPath: clothod), "clothod isn't built")
         // Short, so the socket path fits in sun_path.
         // One daemon per test: a shared directory let one test's shutdown race the next test's start.
-        runtimeDir = "/tmp/ckt-\(getpid())-\(UUID().uuidString.prefix(6))"
+        // CLOTHOKIT_RUNTIME_PREFIX lets a role run them in its own dirs (the mac agent's /tmp/cmac-).
+        let prefix = ProcessInfo.processInfo.environment["CLOTHOKIT_RUNTIME_PREFIX"] ?? "/tmp/ckt-"
+        runtimeDir = "\(prefix)\(getpid())-\(UUID().uuidString.prefix(6))"
     }
 
     override func tearDown() {

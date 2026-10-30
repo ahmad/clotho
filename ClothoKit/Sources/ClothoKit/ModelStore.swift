@@ -171,6 +171,12 @@ public final class ModelStore: ObservableObject {
     /// A click shows on the frame it happens in rather than after a round trip; the daemon's state then
     /// confirms it. States that arrive before the daemon has it (older changes, still in flight) keep the
     /// local focus. If the daemon refuses, the daemon's focus comes back and the error is thrown.
+    /// The pane got the user's focus on this client: it takes this client's viewport
+    /// (`SessionBackend.focusPane`, feature `pane.focus`; nothing on older daemons).
+    public func focusPane(_ pane: PaneID) async throws {
+        try await backend.focusPane(pane)
+    }
+
     public func focus(_ target: FocusTarget) async throws {
         showFocus(target)
         try await sendFocus(target)

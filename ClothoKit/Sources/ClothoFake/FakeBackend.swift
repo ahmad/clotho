@@ -276,6 +276,19 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         try await resize(pane, size)
     }
 
+    /// The panes `focusPane` was called for, in order (tests count how often a client sends it).
+    public var focusedPanes: [PaneID] { locked { paneFocusCalls } }
+    private var paneFocusCalls: [PaneID] = []
+
+    /// One client: its viewport is already the pane's size. Counted, and fails for an unknown pane as
+    /// clothod's does.
+    public func focusPane(_ pane: PaneID) async throws {
+        try locked {
+            guard state.panes.contains(where: { $0.id == pane }) else { throw notFound("pane \(pane)") }
+            paneFocusCalls.append(pane)
+        }
+    }
+
     public func resize(_ pane: PaneID, _ size: Size) async throws {
         try await applySize(pane, size, notifySubscriber: true)
     }

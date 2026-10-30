@@ -402,6 +402,11 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         _ = try await request("pane.unsubscribe", ["pane": pane])
     }
 
+    public func focusPane(_ pane: PaneID) async throws {
+        guard locked({ lastHello?.features.contains(.paneFocus) == true }) else { return }
+        _ = try await request("pane.focus", ["pane": pane])
+    }
+
     public func setViewport(_ pane: PaneID, _ size: Size) async throws {
         locked { subscriptions[pane]?.viewport = size }
         _ = try await request("pane.viewport", ["pane": pane, "cols": size.cols, "rows": size.rows])
