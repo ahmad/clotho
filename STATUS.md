@@ -1,11 +1,13 @@
-# Status and handoff (2026-10-30, after Mac 1.0.13, clothod 0.1.27, iOS 202610301954)
+# Status and handoff (2026-10-30, after Mac 1.0.14, clothod 0.1.28, iOS 202610302317)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.27** runs on devbox, macbook and imac, upgraded in place (holders 1799611, 9573, 5702 kept).
+- **clothod 0.1.28** runs on devbox and imac, upgraded in place (holders 1799611, 5702 kept). macbook was offline and is
+  still on 0.1.27 (holder 9573): upgrade it in place when it's back, and run the remote suite there (d71b675 untested on it).
+  0.1.28: `pane.focus`; the client that focused a pane last sets its size, input no longer does.
   0.1.27: client safety (shutdown --forget only deletes the target's own layout; ps shows the real runtime
   dir or "?"; stop/shutdown/status wait at most 15 s). 0.1.26: pane.move and tab.join (⌘↩ open beside). First
   releases built on imac. 0.1.25: agents survive a
@@ -29,7 +31,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on imac):
+- **The Mac app is public:** Clotho 1.0.14, build 202610302256 (8f201c2, clothod 0.1.28): panes follow focus (pane.focus), the pane × stays in the host's corner, word-prefix ⌘P commands. Before: 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on imac):
   ⌘P ">" commands, ⌘↩ open beside, Move Tab picker, title-row sidebar toggle, "New Tab (⌘T)" buttons,
   Agents panel switch, sidebar slides instead of squashing (crash fix). 1.0.12 ⌘P tree; 1.0.11 one
   Settings window (General, Machines); 1.0.10 Toggle Sidebar on macOS 26. 1.0.9 machine
@@ -49,7 +51,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
   - The site deploys ONLY from the CLI (vercel.json git.deploymentEnabled=false). The zips are
     gitignored, so a git-built deploy 404s every download; that broke the first 1.0.1 update.
   - UPDATES_LIVE=true (93b3da6): every non-dev build checks the feed.
-- **iOS:** TestFlight build 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on imac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
+- **iOS:** TestFlight build 202610302317 (8f201c2: a pane takes the phone's size on focus, not on typing; clothod 0.1.28). Before: 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on imac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
   one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
   failed; iPad passed.
