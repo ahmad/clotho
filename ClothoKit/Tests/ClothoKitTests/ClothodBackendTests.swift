@@ -19,15 +19,20 @@ final class ClothodBackendTests: XCTestCase {
 
     override func tearDown() {
         if let clothod, let runtimeDir {
-            _ = try? run(clothod, ["shutdown"])
-            // shutdown needs the logic process; if a test killed it, stop whatever still uses this test's dir.
-            _ = try? run("/usr/bin/pkill", ["-f", "runtime-dir \(runtimeDir)"])
+            TestClothod.shutdown(clothod, runtimeDir: runtimeDir)
             try? FileManager.default.removeItem(atPath: runtimeDir)
         }
     }
 
+    /// The CLI: clothod itself through TestClothod (its runtime dir named explicitly, and bounded).
     @discardableResult
     func run(_ executable: String, _ args: [String]) throws -> String {
+        if executable == clothod {
+            // A private runtime dir needs an ephemeral instance; it also cleans itself up if a test dies.
+            // Its own config too, so settings.set never writes the user's.
+            return try TestClothod.run(executable, args, runtimeDir: runtimeDir,
+                                       environment: ["CLOTHOD_EPHEMERAL": "60", "CLOTHOD_CONFIG": runtimeDir + "/config.toml"])
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = args

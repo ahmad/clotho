@@ -45,20 +45,8 @@ final class RemoteSetupTests: XCTestCase {
         let installDir = root + "/bin", runtimeDir = root + "/rt"
         defer {
             let bin = (try? FileManager.default.contentsOfDirectory(atPath: installDir))?.first.map { "\(installDir)/\($0)/clothod" }
-            if let bin {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: bin)
-                process.arguments = ["shutdown"]
-                process.environment = ["CLOTHOD_RUNTIME_DIR": runtimeDir, "HOME": NSHomeDirectory()]
-                try? process.run()
-                process.waitUntilExit()
-            }
-            // shutdown needs the logic process; stop whatever still uses this test's runtime dir.
-            let pkill = Process()
-            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pkill.arguments = ["-f", "runtime-dir \(runtimeDir)"]
-            try? pkill.run()
-            pkill.waitUntilExit()
+            // Explicit runtime dir, bounded, then anything still using it (TestClothod).
+            if let bin { TestClothod.shutdown(bin, runtimeDir: runtimeDir) }
             try? FileManager.default.removeItem(atPath: root)
         }
 
