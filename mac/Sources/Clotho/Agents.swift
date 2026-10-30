@@ -429,6 +429,8 @@ extension AppDelegate {
     }
 
     func setUpAgentNotifications() {
+        // UNUserNotificationCenter needs an app bundle (a test process runs in xctest, which isn't one).
+        guard Bundle.main.bundleURL.pathExtension == "app" else { return log("notifications: off (not an app bundle)") }
         UNUserNotificationCenter.current().delegate = notificationDelegate
         UNUserNotificationCenter.current().setNotificationCategories(Self.notificationCategories())
         notificationDelegate.onOpen = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }

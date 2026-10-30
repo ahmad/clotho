@@ -341,6 +341,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var notchHeight: NSLayoutConstraint!
     var sidebar: SidebarView!
     var sidebarWidth: NSLayoutConstraint!
+    /// Hidden, the sidebar slides out to the left (this goes to minus its width); it keeps its width, so
+    /// its contents are never squeezed to nothing (at width 0 its wrapping labels sent AutoLayout round
+    /// in circles until AppKit threw, SidebarLayoutTests).
+    var sidebarLeading: NSLayoutConstraint!
+    var isSidebarHidden: Bool { sidebarLeading.constant < 0 }
     var tabBar: TabBarView!
     var tabBarLeading: NSLayoutConstraint!
     var sidebarToggle: QuietButton?
@@ -530,13 +535,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             MainActor.assumeIsolated { self?.sync() }
         }
         container.addSubview(sidebar)
-        sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: UserDefaults.standard.bool(forKey: "HideSidebar") ? 0 : savedSidebarWidth)
+        sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: savedSidebarWidth)
+        sidebarLeading = sidebar.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+                                                          constant: UserDefaults.standard.bool(forKey: "HideSidebar") ? -savedSidebarWidth : 0)
         sidebar.onResize = { [weak self] width in
             guard let self else { return }
             sidebarWidth.constant = min(max(width.rounded(), Self.sidebarWidthRange.lowerBound), Self.sidebarWidthRange.upperBound)
         }
-        // At width 0 its rows and bottom bar would still draw past its edge.
-        sidebar.isHidden = sidebarWidth.constant == 0
+        // Slid out, it's hidden too, so nothing of it draws or takes clicks.
+        sidebar.isHidden = isSidebarHidden
         sidebar.onResizeEnd = { [weak self] in
             guard let self else { return }
             UserDefaults.standard.set(Double(sidebarWidth.constant), forKey: "SidebarWidth")
@@ -600,7 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             notchExtension.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             notchHeight,
             sidebar.topAnchor.constraint(equalTo: notchExtension.bottomAnchor),
-            sidebar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            sidebarLeading,
             sidebar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             sidebarWidth,
             tabBar.topAnchor.constraint(equalTo: notchExtension.bottomAnchor),
@@ -1499,7 +1506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// View ▸ Move Focus to Sidebar: the arrow keys walk the workspace and tab rows (see SidebarView.keyDown).
     @objc func focusSidebar(_ sender: Any?) {
-        if sidebarWidth.constant == 0 { showOrHideSidebar(nil) }
+        if isSidebarHidden { showOrHideSidebar(nil) }
         sidebar.takeKeyboard()
     }
 
@@ -1508,22 +1515,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// toggleSidebar(_:): macOS 26's NSWindow implements that (for split view sidebars) and comes before
     /// the app in the responder chain, so the menu item went to the window, greyed out (MenuTargetTests).
     @objc func showOrHideSidebar(_ sender: Any?) {
-        let hide = sidebarWidth.constant > 0
+        let hide = !isSidebarHidden
         log("sidebar: \(hide ? "hide" : "show") (\(Self.describeTrigger(sender)))")
         UserDefaults.standard.set(hide, forKey: "HideSidebar")
         // Tests and the onboarding pass nil and need the end state at once; the menu and its key animate.
         let animate = sender != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        // Hidden once it's slid out (at width 0 its contents would still draw past its edge), shown before it slides in.
+        // Hidden once it's slid out, shown before it slides in.
         if !hide { sidebar.isHidden = false }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = animate ? 0.18 : 0
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = animate
-            (animate ? sidebarWidth.animator() : sidebarWidth).constant = hide ? 0 : savedSidebarWidth
+            (animate ? sidebarLeading.animator() : sidebarLeading).constant = hide ? -sidebarWidth.constant : 0
             (animate ? tabBarLeading.animator() : tabBarLeading).constant = hide ? Self.hiddenTabBarInset : 0
             if animate { window.contentView?.layoutSubtreeIfNeeded() }
         }, completionHandler: { [weak self] in
-            guard let self, sidebarWidth.constant == 0 else { return }
+            guard let self, isSidebarHidden else { return }
             sidebar.isHidden = true
         })
         if !animate, hide { sidebar.isHidden = true }
@@ -1540,7 +1547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // With the sidebar hidden, the tab bar starts after the window buttons.
     func updateTabBarInset() {
-        tabBarLeading.constant = sidebarWidth.constant > 0 ? 0 : Self.hiddenTabBarInset
+        tabBarLeading.constant = isSidebarHidden ? Self.hiddenTabBarInset : 0
     }
 
     // View › Zoom In / Zoom Out / Actual Size: the whole app, chrome and terminal together.

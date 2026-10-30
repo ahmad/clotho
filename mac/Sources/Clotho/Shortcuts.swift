@@ -228,7 +228,7 @@ extension AppDelegate {
         let options = spawnOptions()
         let machine = focusedMachine
         sidebar.expand(machine)
-        if sidebarWidth.constant == 0 { showOrHideSidebar(nil) }
+        if isSidebarHidden { showOrHideSidebar(nil) }
         run { [weak self] backend in
             let created = try await backend.createWorkspace(name: name, spawn: options)
             self?.sidebar.renameWhenListed(machine, created.workspace)
