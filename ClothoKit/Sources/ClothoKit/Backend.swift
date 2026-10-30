@@ -98,6 +98,8 @@ public struct Hello: Codable, Equatable, Sendable {
         case move
         /// Panes carry `git`: repo, branch, worktree and pull request (0.1.23).
         case git
+        /// `pane.move` and `tab.join`: a pane, or a whole tab, into a split beside another pane (0.1.26).
+        case paneMove = "pane.move"
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.

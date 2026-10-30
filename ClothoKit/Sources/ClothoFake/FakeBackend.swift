@@ -52,7 +52,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        hello.featureNames = ["pane.keys", "agents", "fs", "restore", "move", "git"]
+        hello.featureNames = ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move"]
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -339,6 +339,13 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
 
     /// Moves by the daemon's rules (`ModelState.moving`). A move that changes nothing sends no state.
     public func move(_ move: MoveRequest) async throws {
+        switch move {
+        case let .pane(pane, to, direction, ratio, focus):
+            return try locked { try graft(moving: .pane(pane), beside: to, direction: direction, ratio: ratio, focus: focus) }
+        case let .tabJoin(tab, to, direction, ratio, focus):
+            return try locked { try graft(moving: .tab(tab), beside: to, direction: direction, ratio: ratio, focus: focus) }
+        case .workspace, .tab: break
+        }
         try locked {
             guard let moved = state.moving(move) else {
                 if case .workspace(_, let index) = move, index < 0 { throw BackendError(code: "bad_request", message: "negative index") }
@@ -560,6 +567,69 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     }
 
     /// Takes a pane out of its tab, closing the tab if it was the last pane.
+    private enum Moved { case pane(PaneID), tab(TabID) }
+
+    /// pane.move and tab.join, by clothod's rules (protocol.md, "Moving panes"; model.rs move_pane,
+    /// join_tab, graft): out of its place (an emptied tab closes, its workspace stays), then into a new
+    /// split beside `to`; focus follows when asked or when it was on what moved.
+    private func graft(moving what: Moved, beside to: PaneID, direction: Direction, ratio: Double?, focus: Bool) throws {
+        guard state.pane(to) != nil, let (toW, toT) = indexOfTab(containing: to) else { throw notFound("pane \(to)") }
+        let sub: Layout
+        let focusOn: PaneID?
+        switch what {
+        case let .pane(pane):
+            guard pane != to else { throw BackendError(code: "bad_request", message: "pane is to_pane") }
+            guard let (w, t) = indexOfTab(containing: pane) else { throw notFound("pane \(pane)") }
+            let follows = focus || state.focus.pane == pane
+            let old = state.workspaces[w].tabs[t].layout
+            if let rest = old.removing(pane) {
+                state.workspaces[w].tabs[t].layout = rest
+                if state.workspaces[w].tabs[t].activePane == pane {
+                    state.workspaces[w].tabs[t].activePane = old.sibling(of: pane)?.panes.first ?? rest.panes.first!
+                }
+            } else {
+                removeTab(at: w, t)
+            }
+            sub = .pane(pane)
+            focusOn = follows ? pane : nil
+        case let .tab(tab):
+            let (w, t) = try tabIndex(tab)
+            guard (w, t) != (toW, toT) else { throw BackendError(code: "bad_request", message: "to_pane is in the tab") }
+            let follows = focus || state.focus.tab == tab
+            let moved = state.workspaces[w].tabs[t]
+            removeTab(at: w, t)
+            sub = moved.layout
+            focusOn = follows ? moved.activePane : nil
+        }
+        repairFocus()
+        guard let (dw, dt) = indexOfTab(containing: to) else { throw notFound("pane \(to)") }
+        let split = makeID()
+        let r = min(max(ratio ?? 0.5, Layout.ratioRange.lowerBound), Layout.ratioRange.upperBound)
+        state.workspaces[dw].tabs[dt].layout = state.workspaces[dw].tabs[dt].layout.replacing(to) { old in
+            direction.newPaneIsSecond
+                ? .split(id: split, axis: direction.axis, ratio: r, a: old, b: sub)
+                : .split(id: split, axis: direction.axis, ratio: 1 - r, a: sub, b: old)
+        }
+        if let focusOn {
+            state.workspaces[dw].tabs[dt].activePane = focusOn
+            state.workspaces[dw].activeTab = state.workspaces[dw].tabs[dt].id
+            state.focus = ClothoKit.Focus(workspace: state.workspaces[dw].id, tab: state.workspaces[dw].tabs[dt].id, pane: focusOn)
+        } else {
+            repairFocus()
+        }
+        publishState()
+    }
+
+    /// Removes a tab with tab.close's rule: the workspace's active tab becomes the one before it.
+    private func removeTab(at w: Int, _ t: Int) {
+        let id = state.workspaces[w].tabs[t].id
+        state.workspaces[w].tabs.remove(at: t)
+        if state.workspaces[w].activeTab == id {
+            let tabs = state.workspaces[w].tabs
+            state.workspaces[w].activeTab = tabs.isEmpty ? nil : tabs[max(t - 1, 0)].id
+        }
+    }
+
     private func removeFromLayout(_ pane: PaneID) {
         state.panes.removeAll { $0.id == pane }
         guard let (w, t) = indexOfTab(containing: pane) else { return }

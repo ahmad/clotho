@@ -219,6 +219,8 @@ public final class ModelStore: ObservableObject {
     /// daemon: a drop shows on the frame it happens in. States that arrive before the daemon has it keep
     /// the move. If the daemon refuses, the daemon's state comes back and the error is thrown.
     public func move(_ move: MoveRequest) async throws {
+        // A pane move or tab join shows with the daemon's state event, which carries the new split's id.
+        if move.isDaemonOnly { return try await backend.move(move) }
         guard let id = showMove(move) else { throw BackendError(code: "not_found", message: "nothing to move: \(move)") }
         try await sendMove(move, id: id)
     }

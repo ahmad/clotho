@@ -7,6 +7,21 @@ public enum MoveRequest: Equatable, Sendable {
     /// Puts the tab at `index` among `workspace`'s tabs (nil: its own workspace, a reorder). `focus` makes it
     /// the focus too.
     case tab(TabID, workspace: WorkspaceID?, index: Int, focus: Bool)
+    /// Puts `pane` beside `to` (feature `pane.move`): out of its tab as `pane.close` takes it, but alive,
+    /// then into a split with `to` as `pane.split {to, direction, ratio}` makes one. `ratio` is `to`'s share
+    /// (nil: 0.5). `focus` moves focus to it. The daemon only: the new split's id is the daemon's.
+    case pane(PaneID, beside: PaneID, direction: Direction, ratio: Double?, focus: Bool)
+    /// Puts every pane of `tab`, its splits as they are, beside `to` in another tab (`tab.join`); the tab
+    /// goes. ⌘↩ in ⌘P ("open beside"). The daemon only, as `.pane`.
+    case tabJoin(TabID, beside: PaneID, direction: Direction, ratio: Double?, focus: Bool)
+
+    /// Moves the daemon makes new ids for, which can't be shown before its reply.
+    public var isDaemonOnly: Bool {
+        switch self {
+        case .pane, .tabJoin: return true
+        case .workspace, .tab: return false
+        }
+    }
 }
 
 extension ModelState {
@@ -51,6 +66,9 @@ extension ModelState {
             } else if wasEmpty {
                 next.workspaces[w].activeTab = id
             }
+        case .pane, .tabJoin:
+            // Only the daemon knows the new split's id (`isDaemonOnly`).
+            return nil
         }
         return next
     }

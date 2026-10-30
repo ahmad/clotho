@@ -459,6 +459,14 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             if let workspace { params["workspace"] = workspace }
             if focus { params["focus"] = true }
             _ = try await request("tab.move", params)
+        case let .pane(pane, to, direction, ratio, focus):
+            var params: [String: Any] = ["pane": pane, "to_pane": to, "direction": direction.rawValue, "focus": focus]
+            if let ratio { params["ratio"] = ratio }
+            _ = try await request("pane.move", params)
+        case let .tabJoin(tab, to, direction, ratio, focus):
+            var params: [String: Any] = ["tab": tab, "to_pane": to, "direction": direction.rawValue, "focus": focus]
+            if let ratio { params["ratio"] = ratio }
+            _ = try await request("tab.join", params)
         }
     }
 
