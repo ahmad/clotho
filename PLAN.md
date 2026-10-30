@@ -482,3 +482,8 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - A Claude without hooks gets its session from Claude's own ~/.claude/sessions/<pid>.json (read-only).
 - With no known session, the user chose "only when unambiguous": `claude --continue` / `codex resume --last` runs only if that pane is the only saved pane with that agent in its folder; otherwise a bare shell. The pane is marked `restored.continued` and the apps say "Continued the latest conversation in this folder".
 - Unreachable machines: 3 tries, then "Can't reach <name>" and a Reconnect button; wake and network changes retry automatically.
+
+## Machines and files (user, 2026-10-30; Mac 1.0.9)
+
+- Manage Machines has an on/off switch per machine. Off disconnects the app and stops reconnecting, and hides the machine from the sidebar, Agents and ⌘P. Its clothod and shells keep running. The local Mac can't be turned off.
+- File manager: sort by any column, copy between any two machines (remote→remote streams through the Mac), and a per-machine filter field.
