@@ -454,6 +454,9 @@ final class Connections: ObservableObject {
     private var watchers: [UUID: [AnyCancellable]] = [:]
     /// Agents on every connected machine, waiting first.
     @Published private(set) var agentRows: [AgentRow] = []
+    /// Fires after any machine's model or connection changed (on the next turn, once the change has landed).
+    /// Not @Published, so views that only show agents don't redraw for every change.
+    let modelChanged = PassthroughSubject<Void, Never>()
     private var recomputeScheduled = false
 
     init() { watchNetwork() }
@@ -496,6 +499,7 @@ final class Connections: ObservableObject {
         let rows = AgentRow.sorted(connections.values.flatMap(\.agentRows))
         if rows != agentRows { agentRows = rows }
         updateWidget(rows)
+        modelChanged.send()
     }
 
     /// The "Needs you" widget's summary: the agents that need the user, on the machines this app is connected

@@ -115,7 +115,8 @@ final class NavigationTests: XCTestCase {
     func testQuickOpenRanking() {
         let id = UUID()
         func entry(_ kind: QuickOpenItem.Kind, _ title: String, _ subtitle: String = "") -> QuickOpenEntry {
-            QuickOpenEntry(item: QuickOpenItem(kind: kind, title: title, subtitle: subtitle, id: title), symbol: "", route: .machine(id))
+            QuickOpenEntry(item: QuickOpenItem(kind: kind, title: title, subtitle: subtitle, id: title), symbol: "", route: .machine(id),
+                           node: .machine(id.uuidString))
         }
         let entries = [entry(.tab, "cargo test", "devbox › clotho"), entry(.tab, "zsh", "devbox › clotho"),
                        entry(.workspace, "clotho", "devbox"), entry(.machine, "devbox")]

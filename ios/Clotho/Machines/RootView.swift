@@ -32,6 +32,16 @@ final class Navigator: ObservableObject {
         }
     }
 
+    /// The tab on screen, if any.
+    var focusedTab: TabID? {
+        if regular {
+            if case .tab(_, let tab) = selection { return tab }
+            return nil
+        }
+        if case .pane(_, let tab, _) = path.last { return tab }
+        return nil
+    }
+
     func open(_ route: Route) {
         switch route {
         case .machine(let id):
@@ -111,7 +121,7 @@ struct RootView: View {
             .onAppear { AgentNotifier.shared.deferPrompt = true }
         }
         .sheet(isPresented: $navigator.quickOpen) {
-            QuickOpenView(focusedMachine: navigator.focusedMachine) { route in
+            QuickOpenView(focusedMachine: navigator.focusedMachine, focusedTab: navigator.focusedTab) { route in
                 navigator.quickOpen = false
                 navigator.open(route)
             }

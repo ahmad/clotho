@@ -40,10 +40,12 @@ final class SavedStateUITests: XCTestCase {
         let machine = app.staticTexts["Local Mac (dev)"].firstMatch
         XCTAssertTrue(machine.waitForExistence(timeout: 5))
         machine.tap()
-        let row = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "saved-state-test")).firstMatch
-        for _ in 0..<4 where !row.waitForExistence(timeout: 1) || !row.isHittable { app.swipeUp() }
-        XCTAssertTrue(row.exists, "the saved model lists the tab before the machine connects")
+        // Before scrolling: the header with New Workspace scrolls away (the list only keeps the rows in view).
         XCTAssertFalse(app.buttons["New Workspace"].firstMatch.isEnabled, "still the saved model")
+        let row = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "saved-state-test")).firstMatch
+        // Earlier tests leave many workspaces above it.
+        for _ in 0..<12 where !row.waitForExistence(timeout: 1) || !row.isHittable { app.swipeUp() }
+        XCTAssertTrue(row.exists, "the saved model lists the tab before the machine connects")
         row.tap()
 
         let badge = app.descendants(matching: .any)["savedBadge"]
