@@ -37,6 +37,9 @@ public final class ByteStream: @unchecked Sendable {
         self.writeFD = writeFD
         self.onShutdown = onShutdown
         self.closeReason = closeReason
+        // A write to a pipe whose reader is gone (an ssh that was just ended) must fail with EPIPE, not
+        // raise SIGPIPE, which would end the whole app. Sockets get SO_NOSIGPIPE where they're made.
+        _ = fcntl(writeFD, F_SETNOSIGPIPE, 1)
     }
 
     /// Reads until the stream ends, handing each chunk to `onData`, then calls `onClose` once.
