@@ -4685,6 +4685,12 @@ async fn adopting_the_holder_never_restores() {
         assert!(Instant::now() < deadline, "did not shut down");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    // The exiting temporary instance removes its runtime dir after the socket closes: wait
+    // for that, or a new dir made now could be removed under the next start.
+    while r.env.path().exists() {
+        assert!(Instant::now() < deadline, "runtime dir not removed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     std::fs::create_dir_all(r.env.path()).unwrap();
     r.start();
     let c = r.env.client().await;
