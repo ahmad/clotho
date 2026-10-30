@@ -65,7 +65,9 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
   builds, tests and dists there with `scripts/clotho-build <role> <command>` (role = clothod, mac, ios or
   orchestrator). Each role has its own mirror on imac (~/Builds/clotho-clothod for clothod, which holds the
   released clothod/dist; clotho-mac, clotho-ios, clotho-orch, whose clothod/dist links to it), so agents never
-  sync over each other's builds. Never sync into another role's mirror. macbook is the fallback
+  sync over each other's builds. Never sync into another role's mirror. Separate mirrors stop file clashes, not CPU
+  contention: the iOS UI suite is timing-sensitive, so ask the other agents before a heavy run (test suites,
+  release builds) while one of them is mid-run, and wait for their "done". macbook is the fallback
   (`CLOTHO_MAC=ahmad@macbook clotho-mac <command>`).
   Signing uses imac's dedicated build keychain (~/Library/Keychains/clotho-build.keychain-db, password in
   ~/.config/clotho/build-keychain-pw; never print it). Unlock it in the same SSH session before codesign,
