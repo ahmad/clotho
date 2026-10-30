@@ -487,3 +487,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
 
 - Manage Machines has an on/off switch per machine. Off disconnects the app and stops reconnecting, and hides the machine from the sidebar, Agents and ⌘P. Its clothod and shells keep running. The local Mac can't be turned off.
 - File manager: sort by any column, copy between any two machines (remote→remote streams through the Mac), and a per-machine filter field.
+
+## Build host: imac (user, 2026-10-30)
+
+- imac (macbook@imac, always on, Xcode) becomes the build host for clothod dists, Mac releases, iOS builds and tests, and TestFlight; macbook stays as a fallback. `CLOTHO_MAC=macbook@imac clotho-mac …`.
+- Keys were copied from macbook (user's choice), not re-created: the Developer ID identity only (not the third-party Apple Development identity on macbook) and the Sparkle key, into a dedicated build keychain on imac (~/Library/Keychains/clotho-build.keychain-db, password in ~/.config/clotho/build-keychain-pw, 600). The ASC API key is in ~/.appstoreconnect/private_keys; notarization on imac uses the API key (`clotho-notary` in the build keychain), so the app-specific password stays on macbook.
+- The Sparkle key moved via a private temp folder on macbook erased right after (user-approved exception to "never export it to disk").
+- iOS signing on imac must not create new certificates, devices or profiles in the Apple account without the user's OK.
+- The user runs `sudo pmset autorestart 1` on imac once, so it comes back after a power cut.
