@@ -67,6 +67,10 @@ final class ChromeControlsTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         let close = try XCTUnwrap(host.closeButton)
         XCTAssertTrue(host.closeCorner.contains(close.frame), "inside the corner it shows for")
+        XCTAssertTrue(host.terminal.frame.contains(close.frame), "wholly inside the terminal, not over its edge")
+        let right = min(host.terminal.frame.maxX, host.bounds.maxX - PaneHostView.padding)
+        XCTAssertEqual(right - close.frame.maxX, PaneHostView.closeMargin, accuracy: 0.5, "a margin from the visible right edge")
+        XCTAssertEqual(close.frame.minY - host.terminal.frame.minY, PaneHostView.closeMargin, accuracy: 0.5)
         XCTAssertEqual(host.fittedSize(), size, "it takes no rows")
         close.button.performClick(nil)
         XCTAssertEqual(closed, 1)
@@ -94,6 +98,10 @@ final class ChromeControlsTests: XCTestCase {
         let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 700))
         var asked: [MachineKey] = []
         sidebar.onReconnect = { asked.append($0) }
+        func texts(_ text: String) -> [NSTextField] {
+            func all(_ view: NSView) -> [NSTextField] { (view as? NSTextField).map { [$0] } ?? [] + view.subviews.flatMap(all) }
+            return all(sidebar).filter { $0.stringValue == text }
+        }
         func buttons() -> [NSButton] {
             func all(_ view: NSView) -> [NSButton] { (view as? NSButton).map { [$0] } ?? [] + view.subviews.flatMap(all) }
             return all(sidebar).filter { $0.title.trimmingCharacters(in: .whitespaces) == "Reconnect" }
@@ -104,7 +112,10 @@ final class ChromeControlsTests: XCTestCase {
         }
         sidebar.update(agents: [], unreachable: [], groups: [group(nil)])
         XCTAssertTrue(buttons().isEmpty, "no button while it's still trying")
-        sidebar.update(agents: [], unreachable: [], groups: [group("Can't resolve devbox")])
+        sidebar.update(agents: [], unreachable: [("devbox", "Can't resolve devbox")], groups: [group("Can't resolve devbox")])
+        XCTAssertTrue(texts("New Workspace").isEmpty, "no New Workspace on a machine it can't reach")
+        let note = try XCTUnwrap(texts("devbox is unreachable, so its agents aren't shown").first)
+        XCTAssertEqual(note.textColor, Theme.dimText, "muted, not red")
         let button = try XCTUnwrap(buttons().first)
         XCTAssertEqual(AppDelegate.pausedStatus("devbox").1, "Can't reach devbox")
         XCTAssertTrue(button.toolTip?.contains("Can't resolve devbox") == true, "the reason, on hover")

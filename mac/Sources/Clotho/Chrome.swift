@@ -949,7 +949,7 @@ final class SidebarView: NSView {
             log("agents: attention [\(names(attention))] others [\(names(others))]")
         }
         for machine in unreachable {
-            add(note("\(machine.name) is unreachable, so its agents aren't shown", tooltip: machine.reason, color: AgentInfo.State.error.color),
+            add(note("\(machine.name) is unreachable, so its agents aren't shown", tooltip: machine.reason, color: Theme.dimText),
                 to: agentsColumn)
         }
         if agents.isEmpty && unreachable.isEmpty {

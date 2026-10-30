@@ -467,6 +467,7 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         // Anchored top-left, so a pane sized by another client lines up like a normal terminal.
         let frame = NSRect(origin: CGPoint(x: Self.padding, y: Self.padding), size: size)
         if terminal.frame != frame { terminal.frame = frame }
+        positionCloseButton()
         gitStrip?.frame = NSRect(x: 0, y: bounds.height - GitStrip.height, width: bounds.width, height: GitStrip.height)
         searchLayoutChanged()
         if wantsSubscription, bounds.width > 0, bounds.height > 0 { subscribe() }

@@ -52,6 +52,9 @@ final class PaneCloseButton: NSView {
 }
 
 extension PaneHostView {
+    /// The ×'s margin from the terminal's top and right edges.
+    static var closeMargin: CGFloat { 6 }
+
     /// The corner the pointer has to be in for the × to show (flipped: the top right).
     var closeCorner: NSRect {
         let width = min(bounds.width, 72), height = min(bounds.height, 44)
@@ -69,11 +72,21 @@ extension PaneHostView {
         let close = PaneCloseButton()
         close.onClose = { [weak self] in self?.onClose?() }
         addSubview(close)
-        NSLayoutConstraint.activate([
-            close.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding),
-            close.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padding),
-        ])
+        // Placed by frame in layout(), next to the terminal's (also placed by hand there).
+        close.translatesAutoresizingMaskIntoConstraints = true
         closeButton = close
+        positionCloseButton()
+    }
+
+    /// Inside the terminal's own top-right corner (it's sized to whole cells, so it often ends short of
+    /// the host's edge), and never past the host's edge when another client made the terminal wider.
+    func positionCloseButton() {
+        guard let closeButton else { return }
+        let size = PaneCloseButton.size, margin = Self.closeMargin
+        let right = min(terminal.frame.maxX, bounds.maxX - Self.padding) - margin
+        let top = max(terminal.frame.minY, Self.padding) + margin
+        let frame = NSRect(x: right - size, y: top, width: size, height: size)
+        if closeButton.frame != frame { closeButton.frame = frame }
     }
 
     func updateCornerTracking() {

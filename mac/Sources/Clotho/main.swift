@@ -827,6 +827,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     guard let host = focusedPaneHost else { return log("TypeText: no focused pane") }
                     return host.setCornerHover(step == "panehover:on")
                 }
+                // "restorednote:continued" (or ":claude", ":plain") shows the focused pane's restored note here
+                // only, as the daemon's mark would (a screenshot of a daemon that doesn't send it yet).
+                if step.hasPrefix("restorednote:") {
+                    guard let host = focusedPaneHost else { return log("TypeText: no focused pane") }
+                    let kind = step.dropFirst(13)
+                    return host.showRestored(kind == "continued" ? PaneRestore(at: Date().timeIntervalSince1970, agent: "claude", continued: true)
+                                             : kind == "claude" ? PaneRestore(at: Date().timeIntervalSince1970, agent: "claude", session: "s")
+                                             : PaneRestore(at: Date().timeIntervalSince1970))
+                }
                 if step.hasPrefix("wsname:"), let workspace = store.focusedWorkspace?.id {
                     let backend = backend, name = String(step.dropFirst(7))
                     Task { try? await backend.renameWorkspace(workspace, name: name) }
