@@ -40,7 +40,9 @@ Bundle the whole `dist/` directory.
 ### Build hosts
 
 Releases and `test-all.sh` run on imac (`macbook@imac`, always on), through
-`CLOTHO_MAC=macbook@imac clotho-mac <cmd>`, which mirrors the clone into `~/Builds/clotho-clothod`.
+`scripts/clotho-build clothod <cmd>`, which mirrors the clone into `~/Builds/clotho-clothod`. That
+mirror's `clothod/dist` is the released builds; the other agents' mirrors link their
+`clothod/dist` to it.
 The toolchain lives in the `macbook` account only. Nothing is installed system-wide, and no
 dotfile was edited:
 

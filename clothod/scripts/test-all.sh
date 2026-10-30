@@ -7,7 +7,7 @@
 #   3. remote: the SSH suite against $REMOTE_HOSTS (a dev dist, not dist/)
 #   4. cleanliness: no test instance or /tmp/clt* dir left on any of those machines
 #
-# Runs on the build Mac (imac: `CLOTHO_MAC=macbook@imac clotho-mac clothod/scripts/test-all.sh`).
+# Runs on the build Mac (imac: `scripts/clotho-build clothod clothod/scripts/test-all.sh`).
 # The remote suite's other Mac is macbook, a laptop that sleeps: hosts in $OPTIONAL_HOSTS that
 # don't answer ssh are skipped (said so in the summary) instead of failing the run. Never list
 # the build Mac itself as a remote: it has no ssh to itself.
