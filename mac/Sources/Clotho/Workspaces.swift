@@ -73,9 +73,7 @@ extension AppDelegate {
         }
         tabBar.machine = focusedMachine
         tabBar.workspace = workspace?.id
-        var gits: [TabID: String] = [:]
-        for each in workspace?.tabs ?? [] { if let git = git(of: each, in: store) { gits[each.id] = git.short } }
-        tabBar.update(tabs: tabs, selected: tab?.id, gits: gits)
+        tabBar.update(tabs: tabs, selected: tab?.id)
 
         // One view per pane on every connected machine, kept while the pane exists so its screen survives
         // tab and machine switches.
@@ -112,14 +110,18 @@ extension AppDelegate {
         }
 
         let machineName = focusedConnection.title
+        emptyLabel.stringValue = ""
         if !store.isConnected && store.state.workspaces.isEmpty {
+            emptyState.isHidden = true
             emptyLabel.stringValue = "Connecting to \(machineName)…"
         } else if workspace == nil {
-            emptyLabel.stringValue = "No workspaces on \(machineName). Press ⌘N to start one."
-        } else if tab == nil {
-            emptyLabel.stringValue = "No tabs in \(workspace!.name). Press ⌘T to open one."
+            emptyState.show(symbol: "square.stack.3d.up", title: machineName, line: "No workspaces on this machine yet.",
+                            action: "New Workspace", shortcut: "⌘N") { [weak self] in self?.newWorkspace(nil) }
+        } else if let workspace, tab == nil {
+            emptyState.show(symbol: "terminal", title: workspace.name, line: "This workspace has no tabs open.",
+                            action: "New Tab", shortcut: "⌘T") { [weak self] in self?.newTab(nil) }
         } else {
-            emptyLabel.stringValue = ""
+            emptyState.isHidden = true
         }
         let place = focusedMachine == Self.localKey ? workspace?.name : workspace.map { "\($0.name) on \(machineName)" }
         window.title = tab.map { "\(store.displayTitle(of: $0)) — \(place ?? "")" } ?? "Clotho"
@@ -143,6 +145,10 @@ extension AppDelegate {
         host.terminal.onDropFiles = { [weak self] urls in self?.dropFiles(urls, on: key) }
         host.terminal.onPaste = { [weak self] terminal in self?.pasteImage(into: terminal, key: .command) ?? false }
         host.terminal.contextMenu = { [weak self] in self?.paneMenu(for: key) }
+        host.onClose = { [weak self] in
+            guard let self, focusedMachine == key.machine else { return }
+            close(pane: key.pane)
+        }
         paneHosts[key] = host
         return host
     }

@@ -698,7 +698,7 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
         let tips = NSStackView(views: [tip("⌘P", "Go to any workspace, tab or agent"),
                                        tip("⇧⌘O", "Browse and copy files between machines"),
-                                       tip("⌘/", "See every shortcut")])
+                                       tip("⌥⌘/", "See every shortcut")])
         tips.orientation = .vertical
         tips.alignment = .leading
         tips.spacing = 12

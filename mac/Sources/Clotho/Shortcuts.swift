@@ -93,7 +93,9 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Bigger Terminal Text", key: "=", modifiers: [.command, .option], action: #selector(terminalZoomIn(_:))),
             Shortcut(menu: "View", title: "Smaller Terminal Text", key: "-", modifiers: [.command, .option], action: #selector(terminalZoomOut(_:))),
             Shortcut(menu: "View", title: "Actual Terminal Text Size", key: "0", modifiers: [.command, .option], action: #selector(terminalActualSize(_:))),
-            Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:))),
+            Shortcut(menu: "View", title: "Toggle Sidebar", key: "/", action: #selector(toggleSidebar(_:))),
+            Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:)),
+                     hiddenInMenu: true, listed: false),
             Shortcut(menu: "View", title: "Move Focus to Sidebar", key: "s", modifiers: [.command, .option], action: #selector(focusSidebar(_:))),
 
             Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
@@ -141,7 +143,8 @@ extension AppDelegate {
             Shortcut(menu: "Window", title: "File Browser", key: "o", modifiers: [.command, .shift], action: #selector(showFileBrowser(_:))),
 
             Shortcut(menu: "Help", title: "Welcome to Clotho", key: "", action: #selector(showOnboarding(_:)), listed: false),
-            Shortcut(menu: "Help", title: "Keyboard Shortcuts", key: "/", action: #selector(showShortcuts(_:))),
+            // ⇧⌘/ (⌘?) is macOS's own Show Help Menu.
+            Shortcut(menu: "Help", title: "Keyboard Shortcuts", key: "/", modifiers: [.command, .option], action: #selector(showShortcuts(_:))),
         ]
         return list
     }()
@@ -185,7 +188,7 @@ extension AppDelegate {
         return main
     }
 
-    // Shows the shortcuts card over the terminal, inside this window; ⌘/ again, Esc or a click outside hides it.
+    // Shows the shortcuts card over the terminal, inside this window; ⌥⌘/ again, Esc or a click outside hides it.
     @objc func showShortcuts(_ sender: Any?) {
         if let shortcutsOverlay {
             shortcutsOverlay.dismiss()
@@ -421,7 +424,7 @@ final class ShortcutsOverlay: NSView {
         layer?.backgroundColor = Theme.backdrop.cgColor
 
         let heading = Self.label("Keyboard Shortcuts", size: 17, weight: .semibold, color: Theme.foreground)
-        let hint = Self.label("⌘/ or Esc to close", size: 12, weight: .regular, color: Theme.dimText)
+        let hint = Self.label("⌥⌘/ or Esc to close", size: 12, weight: .regular, color: Theme.dimText)
         let top = NSStackView(views: [heading, NSView(), hint])
         top.orientation = .horizontal
         top.alignment = .firstBaseline

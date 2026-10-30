@@ -200,6 +200,11 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     var restoredNote: RestoredNote?
     /// Set once × is clicked, so the note doesn't flash back before the daemon's update arrives.
     var dismissedRestore = false
+    /// The × in the top-right corner, while the pointer is near it (PaneClose.swift).
+    var closeButton: PaneCloseButton?
+    /// What the × does: the app's Close Pane for this pane. Without it there's no ×.
+    var onClose: (() -> Void)?
+    var cornerTracking: NSTrackingArea?
     /// The git strip at the bottom (GitStrip.swift), while the pane is in a repo.
     var gitStrip: GitStrip?
     /// The pane's git info (nil outside a repo, or without the daemon's `git`), from the model on every sync.
@@ -438,6 +443,19 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         terminal.font = font
         terminal.withoutReplies { terminal.resize(cols: paneSize.cols, rows: paneSize.rows) }
         needsLayout = true
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        updateCornerTracking()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if event.trackingArea === cornerTracking { setCornerHover(true) } else { super.mouseEntered(with: event) }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if event.trackingArea === cornerTracking { setCornerHover(false) } else { super.mouseExited(with: event) }
     }
 
     override func layout() {

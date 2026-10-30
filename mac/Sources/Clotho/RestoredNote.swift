@@ -75,7 +75,8 @@ extension PaneHostView {
             addSubview(note)
             NSLayoutConstraint.activate([
                 note.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding + 2),
-                note.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + 14)),
+                // Left of the pane's × (PaneClose.swift), which shows in the corner on hover.
+                note.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + PaneCloseButton.size + 10)),
                 note.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.8),
             ])
             restoredNote = note

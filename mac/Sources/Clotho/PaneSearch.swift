@@ -384,7 +384,7 @@ extension PaneHostView {
             addSubview(controller.bar)
             NSLayoutConstraint.activate([
                 controller.bar.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding + 2),
-                controller.bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + 14)),
+                controller.bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + PaneCloseButton.size + 10)),
             ])
             if let selected = terminal.getSelection(), !selected.isEmpty, !selected.contains("\n") {
                 controller.bar.field.stringValue = selected

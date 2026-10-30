@@ -38,7 +38,7 @@ final class MenuShortcutTests: XCTestCase {
         retarget(menu)
         var checked = 0
         for shortcut in AppDelegate.shortcuts where shortcut.key.count == 1 && shortcut.modifiers.contains(.command) {
-            guard let letter = shortcut.key.first, letter.isLetter || "[]".contains(letter) else { continue }
+            guard let letter = shortcut.key.first, letter.isLetter || "[]/".contains(letter) else { continue }
             let event = try XCTUnwrap(event(for: shortcut))
             recorder.fired = []
             _ = menu.performKeyEquivalent(with: event)
@@ -46,6 +46,14 @@ final class MenuShortcutTests: XCTestCase {
             checked += 1
         }
         XCTAssertGreaterThan(checked, 20)
+    }
+
+    func testSlashKeys() {
+        let sidebar = AppDelegate.shortcuts.first { $0.title == "Toggle Sidebar" && !$0.hiddenInMenu }!
+        XCTAssertEqual(sidebar.displayKeys, "⌘/")
+        let help = AppDelegate.shortcuts.first { $0.title == "Keyboard Shortcuts" }!
+        XCTAssertEqual(help.displayKeys, "⌥⌘/", "⇧⌘/ is macOS's Show Help Menu")
+        XCTAssertTrue(AppDelegate.shortcuts.contains { $0.title == "Toggle Sidebar" && $0.displayKeys == "⌃⌘S" }, "the old key still works")
     }
 
     func testRenameKeys() {

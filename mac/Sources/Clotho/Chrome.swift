@@ -179,9 +179,6 @@ class ChromeItem: NSView, HoverRefreshing, NSDraggingSource {
 
     // MARK: Dragging (Drag.swift has the drop side)
 
-    /// A tab's git suffix, when it has one (tests).
-    var gitSuffix: NSTextField?
-
     /// What dragging this item carries (a tab or a workspace); nil: it doesn't drag.
     var dragPayload: (() -> ChromeDrag.Payload?)?
     private var mouseDownAt: NSPoint?
@@ -509,17 +506,15 @@ final class TabBarView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// `gits`: each tab's git suffix ("main · #42"), shown dim after its title.
-    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?,
-                gits: [TabID: String] = [:]) {
-        latest = { [weak self] in self?.update(tabs: tabs, selected: selected, gits: gits) }
+    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?) {
+        latest = { [weak self] in self?.update(tabs: tabs, selected: selected) }
         // Held while a title is edited, or a drag is in flight (rebuilding would remove what's dragged).
         if items.values.contains(where: { $0.item.isEditing }) || ChromeDrag.isActive {
             pending = latest
             return
         }
         // Only the selection changed (a click): the tabs stay, so one being pressed can still be dragged.
-        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, badge: $0.badge, git: gits[$0.id]) }
+        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, badge: $0.badge) }
         if shape == lastShape, !items.isEmpty {
             for (id, entry) in items { entry.item.isSelected = id == selected }
             return
@@ -542,26 +537,7 @@ final class TabBarView: NSView {
             // there: nothing in a tab moves when a dot or the × comes and goes.
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = Self.dotSlot }
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
-            if let git = gits[tab.id] {
-                // The git suffix keeps up to 45% of the tab; the title truncates first. Neither moves the tab's width.
-                let suffix = NSTextField(labelWithString: git)
-                suffix.font = NSFont.systemFont(ofSize: s(11))
-                suffix.textColor = Theme.faintText
-                suffix.lineBreakMode = .byTruncatingTail
-                suffix.translatesAutoresizingMaskIntoConstraints = false
-                suffix.setContentCompressionResistancePriority(.defaultLow + 1, for: .horizontal)
-                item.label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                item.addSubview(suffix)
-                NSLayoutConstraint.activate([
-                    suffix.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)),
-                    suffix.centerYAnchor.constraint(equalTo: item.label.centerYAnchor),
-                    suffix.widthAnchor.constraint(lessThanOrEqualTo: item.widthAnchor, multiplier: 0.45),
-                    item.label.trailingAnchor.constraint(equalTo: suffix.leadingAnchor, constant: s(-6)),
-                ])
-                item.gitSuffix = suffix
-            } else {
-                item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
-            }
+            item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
             item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
             item.dragPayload = { [weak self] in
@@ -609,7 +585,7 @@ final class TabBarView: NSView {
     /// The last tabs built, to tell a selection-only update apart.
     private var lastShape: [TabShape]?
     private struct TabShape: Equatable {
-        var id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?, git: String?
+        var id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?
     }
 
     /// Every tab's width: the bar shared equally, between a minimum and a maximum. It depends only on
@@ -783,9 +759,8 @@ final class SidebarView: NSView {
             guard let self else { return }
             UserDefaults.standard.set(Double(agentsHeight.constant), forKey: "AgentsPanelHeight")
         }
-        footer = SidebarFooter(title: "Manage Machines…", symbol: "server.rack")
-        footer.onClick = { [weak self] in self?.onManageMachines?() }
-        footer.toolTip = "Add, edit, remove and reorder machines"
+        footer = SidebarFooter(frame: .zero)
+        footer.onMachines = { [weak self] in self?.onManageMachines?() }
         for view in [scroll, divider, agentsScroll, footer!] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
@@ -1123,7 +1098,7 @@ final class SidebarView: NSView {
             for workspace in group.workspaces {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 parts.append("w \(workspace.id) \(heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name) "
-                             + "\(String(describing: group.badges[workspace.id])) \(group.branches[workspace.id] ?? "")")
+                             + "\(String(describing: group.badges[workspace.id]))")
             }
         }
         return parts.joined(separator: "\n")
@@ -1172,7 +1147,6 @@ final class SidebarView: NSView {
         rows[rowKey] = (row, name)
         row.isSelected = workspace.id == group.selected
         row.setBadge(group.badges[workspace.id])
-        row.setBranch(group.branches[workspace.id])
         add(row, height: Self.rowHeight)
         let item = Item.workspace(key, workspace.id)
         order.append(item)
@@ -1613,35 +1587,6 @@ final class WorkspaceRow: SidebarRow {
     @objc private func newTabTapped() { onNewTab?() }
 
     override var hasTrailingAction: Bool { onNewTab != nil }
-
-    /// The workspace's branch, small and grey after its name; it truncates before the name does.
-    private(set) var branch: NSTextField?
-
-    func setBranch(_ text: String?) {
-        guard let text, !text.isEmpty else {
-            branch?.removeFromSuperview()
-            branch = nil
-            return
-        }
-        let field = branch ?? {
-            let field = NSTextField(labelWithString: "")
-            field.font = NSFont.systemFont(ofSize: s(11))
-            field.textColor = Theme.faintText
-            field.lineBreakMode = .byTruncatingTail
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            label.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-            addSubview(field)
-            NSLayoutConstraint.activate([
-                field.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: s(6)),
-                field.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
-                field.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Self.dotInset + s(10))),
-            ])
-            branch = field
-            return field
-        }()
-        field.stringValue = text
-    }
 }
 
 /// A strip under the tab bar for things that need the user's attention but shouldn't block anything,
@@ -1803,52 +1748,50 @@ final class DisclosureRow: ChromeItem {
 }
 
 
-/// The sidebar's footer row (Manage Machines…): pinned under the lists, a thin separator on top, an icon
-/// and secondary text, highlighted on hover.
+/// The sidebar's bottom bar: icon buttons for Machines (Manage Machines…), Settings, and light or dark.
+/// Pinned under the lists, with a thin separator on top, in the sidebar's quiet style.
 final class SidebarFooter: NSView {
     static var height: CGFloat { s(34) }
-    var onClick: (() -> Void)? {
-        get { item.onClick }
-        set { item.onClick = newValue }
-    }
-    private let item = ChromeItem(closable: false)
-    private let separator = NSView()
-    private let icon = NSImageView()
-    private let symbol: String
-    private var heightConstraint: NSLayoutConstraint!
-    private var scaled: [(NSLayoutConstraint, CGFloat)] = []
+    var onMachines: (() -> Void)?
+    var onSettings: (() -> Void)?
+    /// Light, Dark or Match System, chosen here.
+    var onSetAppearance: ((Theme.Mode) -> Void)?
 
-    init(title: String, symbol: String) {
-        self.symbol = symbol
-        super.init(frame: .zero)
+    private(set) var machinesButton: QuietButton!
+    private(set) var settingsButton: QuietButton!
+    /// A click switches between Light and Dark; its right-click menu also offers Match System.
+    private(set) var appearanceButton: QuietButton!
+    private let separator = NSView()
+    private let row = NSStackView()
+    private var heightConstraint: NSLayoutConstraint!
+    private var leading: NSLayoutConstraint!
+    private var buttonSizes: [NSLayoutConstraint] = []
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
         separator.wantsLayer = true
         separator.layer?.backgroundColor = Theme.divider.cgColor
-        item.label.stringValue = title
-        item.setAccessibilityRole(.button)
-        item.setAccessibilityLabel(title)
-        icon.contentTintColor = Theme.dimText
-        for view in [separator, item, icon] {
+        machinesButton = QuietButton(symbol: "server.rack", label: "Machines", pointSize: s(12)) { [weak self] in self?.onMachines?() }
+        machinesButton.toolTip = "Machines: add, edit, remove and reorder them"
+        settingsButton = QuietButton(symbol: "gearshape", label: "Settings", pointSize: s(12)) { [weak self] in self?.onSettings?() }
+        settingsButton.toolTip = "Settings (⌘,)"
+        appearanceButton = QuietButton(symbol: "moon", label: "Appearance", pointSize: s(12)) { [weak self] in self?.toggleAppearance() }
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        for button in [machinesButton!, settingsButton!, appearanceButton!] { row.addArrangedSubview(button) }
+        for view in [separator, row] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         heightConstraint = heightAnchor.constraint(equalToConstant: 0)
-        // The title moves right of the icon.
-        item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.isActive = false }
-        scaled = [
-            (item.leadingAnchor.constraint(equalTo: leadingAnchor), 8),
-            (item.trailingAnchor.constraint(equalTo: trailingAnchor), -8),
-            (item.topAnchor.constraint(equalTo: separator.bottomAnchor), 4),
-            (item.bottomAnchor.constraint(equalTo: bottomAnchor), -4),
-            (icon.leadingAnchor.constraint(equalTo: item.leadingAnchor), 10),
-            (item.label.leadingAnchor.constraint(equalTo: icon.trailingAnchor), 6),
-        ]
-        NSLayoutConstraint.activate(scaled.map(\.0) + [
-            heightConstraint,
+        leading = row.leadingAnchor.constraint(equalTo: leadingAnchor)
+        NSLayoutConstraint.activate([
+            heightConstraint, leading,
             separator.topAnchor.constraint(equalTo: topAnchor),
             separator.leadingAnchor.constraint(equalTo: leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1),
-            icon.centerYAnchor.constraint(equalTo: item.centerYAnchor),
+            row.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 0.5),
         ])
         applyScale()
     }
@@ -1858,14 +1801,55 @@ final class SidebarFooter: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         withAppearance { separator.layer?.backgroundColor = Theme.divider.cgColor }
+        updateAppearanceButton()
+    }
+
+    /// Whether the window shows dark now (whatever chose it).
+    private var showsDark: Bool { effectiveAppearance.isDark }
+
+    private func toggleAppearance() { onSetAppearance?(showsDark ? .light : .dark) }
+
+    /// The toggle's icon shows what's in effect (a half circle while it follows the system); its tooltip
+    /// and right-click menu say what it does.
+    func updateAppearanceButton() {
+        let mode = Theme.Mode.current
+        let symbol = mode == .system ? "circle.lefthalf.filled" : (mode == .dark ? "moon" : "sun.max")
+        appearanceButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Appearance")?
+            .withSymbolConfiguration(.init(pointSize: s(12), weight: .medium))
+        let target = showsDark ? "Light" : "Dark"
+        appearanceButton.toolTip = mode == .system
+            ? "Switch to \(target) (now matching the system)"
+            : "Switch to \(target) (right-click to match the system)"
+        appearanceButton.setAccessibilityValue(mode.title)
+        let menu = NSMenu()
+        for each in Theme.Mode.allCases {
+            let item = menu.addItem(withTitle: each.title, action: #selector(chooseAppearance(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = each.rawValue
+            item.state = each == mode ? .on : .off
+        }
+        appearanceButton.menu = menu
+    }
+
+    @objc private func chooseAppearance(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let mode = Theme.Mode(rawValue: raw) else { return }
+        onSetAppearance?(mode)
     }
 
     /// Re-applies the app zoom (the footer is built once).
     func applyScale() {
         heightConstraint.constant = Self.height
-        for (constraint, points) in scaled { constraint.constant = s(points) }
-        item.label.font = NSFont.systemFont(ofSize: s(12))
-        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: s(11), weight: .regular))
+        leading.constant = s(12)
+        row.spacing = s(10)
+        for (button, symbol) in [(machinesButton!, "server.rack"), (settingsButton!, "gearshape")] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.accessibilityLabel())?
+                .withSymbolConfiguration(.init(pointSize: s(12), weight: .medium))
+        }
+        NSLayoutConstraint.deactivate(buttonSizes)
+        buttonSizes = [machinesButton!, settingsButton!, appearanceButton!].flatMap {
+            [$0.widthAnchor.constraint(equalToConstant: s(24)), $0.heightAnchor.constraint(equalToConstant: s(24))]
+        }
+        NSLayoutConstraint.activate(buttonSizes)
+        updateAppearanceButton()
     }
 }

@@ -332,6 +332,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var tabBarLeading: NSLayoutConstraint!
     var splitView: SplitLayoutView!
     var emptyLabel: NSTextField!
+    /// A workspace with no tabs, or a machine with no workspaces (EmptyState.swift).
+    var emptyState: EmptyStateView!
     var shortcutsOverlay: ShortcutsOverlay?
     var quickOpen: QuickOpenOverlay?
     var fileBrowser: FileBrowserOverlay?
@@ -496,6 +498,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onCreateWorkspace = { [weak self] key in self?.createWorkspace(on: key) }
         sidebar.onManageMachines = { [weak self] in self?.showMachineManager(nil) }
+        sidebar.footer.onSettings = { [weak self] in self?.showSettings(nil) }
+        sidebar.footer.onSetAppearance = { [weak self] in self?.setAppearance($0) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
         sidebar.onResolveAgent = { [weak self] machine, pane in self?.resolveAgent(machine: machine, pane: pane) }
         sidebar.onMuteAgent = { [weak self] machine, pane in self?.muteAgent(machine: machine, pane: pane, muted: true) }
@@ -517,6 +521,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             sidebarWidth.constant = min(max(width.rounded(), Self.sidebarWidthRange.lowerBound), Self.sidebarWidthRange.upperBound)
         }
+        // At width 0 its rows and bottom bar would still draw past its edge.
+        sidebar.isHidden = sidebarWidth.constant == 0
         sidebar.onResizeEnd = { [weak self] in
             guard let self else { return }
             UserDefaults.standard.set(Double(sidebarWidth.constant), forKey: "SidebarWidth")
@@ -554,6 +560,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         emptyLabel.alignment = .center
         emptyLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(emptyLabel)
+        emptyState = EmptyStateView()
+        emptyState.isHidden = true
+        emptyState.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(emptyState)
 
         let corner = WindowButtons(
             target: self,
@@ -583,6 +593,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             splitView.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             splitView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            emptyState.topAnchor.constraint(equalTo: splitView.topAnchor),
+            emptyState.bottomAnchor.constraint(equalTo: splitView.bottomAnchor),
+            emptyState.leadingAnchor.constraint(equalTo: splitView.leadingAnchor),
+            emptyState.trailingAnchor.constraint(equalTo: splitView.trailingAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: splitView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: splitView.centerYAnchor),
             corner.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -697,7 +711,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let decode = { (text: String) in text.replacingOccurrences(of: "\\r", with: "\r").replacingOccurrences(of: "\\e", with: "\u{1b}") }
         for (i, step) in (UserDefaults.standard.string(forKey: "TypeText")?.components(separatedBy: "|") ?? []).enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3 + Double(i) * 2) { [self] in
-                guard !step.isEmpty, let pane = store.focusedPane?.id else { return }
+                // Steps that type into a pane need one; the others (shots, keys, appearance) run without.
+                guard !step.isEmpty else { return }
+                let pane = store.focusedPane?.id ?? 0
                 log("TypeText: \(step)")
                 if step.hasPrefix("key:") { return postTestKey(String(step.dropFirst(4))) }
                 if step.hasPrefix("type:") { return postTestText(String(step.dropFirst(5))) }
@@ -798,6 +814,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         for _ in 1..<max(1, Int(parts.dropFirst().first ?? "") ?? 1) { _ = try? await backend.createTab(in: created.workspace, spawn: spawn) }
                     }
                     return
+                }
+                // "closetabs" closes every tab of the focused workspace without asking (an empty workspace);
+                // "panehover:on" / "panehover:off" as if the pointer came to the focused pane's corner or left.
+                if step == "closetabs", let workspace = store.focusedWorkspace {
+                    let backend = backend
+                    Task { for tab in workspace.tabs { try? await backend.closeTab(tab.id) } }
+                    return
+                }
+                if step.hasPrefix("panehover:") {
+                    guard let host = focusedPaneHost else { return log("TypeText: no focused pane") }
+                    return host.setCornerHover(step == "panehover:on")
                 }
                 if step.hasPrefix("wsname:"), let workspace = store.focusedWorkspace?.id {
                     let backend = backend, name = String(step.dropFirst(7))
@@ -921,6 +948,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // "windowid" logs the main window's number, for `screencapture -l`.
                 if step == "windowid" { return log("window id \(window.windowNumber)") }
                 if step == "wait" { return }
+                guard store.focusedPane != nil else { return log("TypeText: no focused pane for \(step)") }
                 if step.hasPrefix("drop:") {
                     return dropFiles([URL(fileURLWithPath: String(step.dropFirst(5)))], on: PaneKey(machine: focusedMachine, pane: pane))
                 }
@@ -1070,7 +1098,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let keys: [String: (code: UInt16, char: String)] = [
             "return": (36, "\r"), "enter": (76, "\u{3}"), "tab": (48, "\t"), "esc": (53, "\u{1b}"), "delete": (51, "\u{7f}"),
             "left": (123, String(UnicodeScalar(NSLeftArrowFunctionKey)!)), "right": (124, String(UnicodeScalar(NSRightArrowFunctionKey)!)),
-            "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "n": (45, "n"), "r": (15, "r"), "t": (17, "t"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"),
+            "/": (44, "/"), "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "n": (45, "n"), "r": (15, "r"), "t": (17, "t"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"),
         ]
         let flags: [String: NSEvent.ModifierFlags] = ["shift": .shift, "cmd": .command, "ctrl": .control, "alt": .option]
         guard let key = keys[name], parts.allSatisfy({ flags[$0] != nil }) else { return log("TypeText: unknown key \(spec)") }
@@ -1331,11 +1359,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
 
+    /// View ▸ Toggle Sidebar (⌘/): slides the sidebar out or back in, and remembers which.
     @objc func toggleSidebar(_ sender: Any?) {
         let hide = sidebarWidth.constant > 0
         UserDefaults.standard.set(hide, forKey: "HideSidebar")
-        sidebarWidth.constant = hide ? 0 : savedSidebarWidth
-        updateTabBarInset()
+        // Tests and the onboarding pass nil and need the end state at once; the menu and its key animate.
+        let animate = sender != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        // Hidden once it's slid out (at width 0 its contents would still draw past its edge), shown before it slides in.
+        if !hide { sidebar.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = animate ? 0.18 : 0
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = animate
+            (animate ? sidebarWidth.animator() : sidebarWidth).constant = hide ? 0 : savedSidebarWidth
+            (animate ? tabBarLeading.animator() : tabBarLeading).constant = hide ? 80 : 0
+            if animate { window.contentView?.layoutSubtreeIfNeeded() }
+        }, completionHandler: { [weak self] in
+            guard let self, sidebarWidth.constant == 0 else { return }
+            sidebar.isHidden = true
+        })
+        if !animate, hide { sidebar.isHidden = true }
     }
 
     // Wide enough to read long agent titles in the Agents panel (rows stay one line each).
@@ -1383,6 +1426,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func setAppearance(_ mode: Theme.Mode) {
         UserDefaults.standard.set(mode.rawValue, forKey: Theme.Mode.defaultsKey)
         NSApp.appearance = mode.appearance
+        // The sidebar's toggle and Settings show the choice, even when what's shown doesn't change.
+        sidebar?.footer.updateAppearanceButton()
+        settingsWindow?.reload()
         log("appearance: \(mode.rawValue)")
     }
 

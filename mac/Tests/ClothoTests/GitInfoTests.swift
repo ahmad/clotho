@@ -4,8 +4,8 @@ import ClothoKit
 import XCTest
 @testable import Clotho
 
-/// Git info in the four places: the tab bar's suffix (never moving tab widths), the sidebar's branch, the
-/// pane's strip (room kept whether focused or not; the PR opens on GitHub only), and ⌘P's search.
+/// Git info lives in the pane's strip (room kept whether focused or not; the PR opens on GitHub only) and
+/// in ⌘P's search; tab and workspace names carry none.
 @MainActor
 final class GitInfoTests: XCTestCase {
     private var window: NSWindow!
@@ -22,39 +22,6 @@ final class GitInfoTests: XCTestCase {
     private let git = PaneGit(repo: "clotho", root: "/p/clotho-fix", remote: "ahmad/clotho", branch: "fix-login", head: "a1b2c3d",
                               worktree: .init(name: "fix-login", path: "../clotho-fix"),
                               pr: .init(number: 42, state: .open, url: "https://github.com/ahmad/clotho/pull/42", title: "Fix login"))
-
-    func testTabSuffixKeepsWidths() throws {
-        let bar = TabBarView(frame: NSRect(x: 0, y: 0, width: 1000, height: 40))
-        window.contentView!.addSubview(bar)
-        let tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)] = [(1, "zsh", nil, false, nil), (2, "vim", nil, false, nil)]
-        bar.update(tabs: tabs, selected: 1)
-        bar.layoutSubtreeIfNeeded()
-        let plain = bar.tabFrames
-        bar.update(tabs: tabs, selected: 1, gits: [1: git.short])
-        bar.layoutSubtreeIfNeeded()
-        XCTAssertEqual(bar.tabFrames, plain, "the suffix never changes a tab's width")
-        let items = bar.subviews.flatMap { $0.subviews }.compactMap { $0 as? ChromeItem }
-        XCTAssertEqual(items[0].gitSuffix?.stringValue, "fix-login · #42")
-        XCTAssertNil(items[1].gitSuffix)
-        let suffix = try XCTUnwrap(items[0].gitSuffix)
-        XCTAssertLessThanOrEqual(items[0].label.frame.maxX, suffix.frame.minX, "the title ends before the suffix")
-    }
-
-    func testSidebarShowsTheBranch() throws {
-        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 700))
-        window.contentView!.addSubview(sidebar)
-        let workspaces = [Workspace(id: 1, name: "Platform", tabs: [Tab(id: 10, activePane: 100, layout: .pane(100))])]
-        sidebar.update(agents: [], unreachable: [], groups: [SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces,
-                                                                         selected: 1, isConnected: true, isLocal: true, badges: [:], branches: [1: "main"])])
-        sidebar.layoutSubtreeIfNeeded()
-        let row = try XCTUnwrap(sidebar.workspaceRows(of: "local").first?.row as? WorkspaceRow)
-        XCTAssertEqual(row.branch?.stringValue, "main")
-        XCTAssertGreaterThanOrEqual(row.branch!.frame.minX, row.label.frame.maxX, "after the name")
-        // Without the feature (no branches), no branch.
-        sidebar.update(agents: [], unreachable: [], groups: [SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces,
-                                                                         selected: 1, isConnected: true, isLocal: true, badges: [:])])
-        XCTAssertNil((sidebar.workspaceRows(of: "local").first?.row as? WorkspaceRow)?.branch)
-    }
 
     func testStripKeepsItsRoomAndOpensOnlyGitHub() async throws {
         let backend = FakeBackend()

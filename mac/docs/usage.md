@@ -22,7 +22,11 @@ Machine: this Mac (remote machines come later)
         └── Pane: another shell or command
 ```
 
-The sidebar lists the workspaces under this Mac's name, and each saved SSH machine below it with its own workspaces (see [Remote machines](#remote-machines)). Click one to switch to it. Each shows a dot for its most urgent agent; hover over it for **+**, a new tab in that workspace. Right-click a workspace for **New Tab**, **Rename Workspace** and **Close Workspace…**, or press **⇧⌘W** to close the current one. The tab bar shows the focused workspace's tabs.
+The sidebar lists the workspaces under this Mac's name, and each saved SSH machine below it with its own workspaces (see [Remote machines](#remote-machines)). Click one to switch to it. Each shows a dot for its most urgent agent; hover over it for **+**, a new tab in that workspace. Right-click a workspace for **New Tab**, **Rename Workspace** and **Close Workspace…**, or press **⇧⌘W** to close the current one. The tab bar shows the focused workspace's tabs; a workspace with none offers a **New Tab** button. **⌘/** hides or shows the sidebar.
+
+The bar at the bottom of the sidebar has three buttons: **Machines** (add, edit, remove and reorder machines), **Settings**, and light or dark. Clicking the last one switches between Light and Dark, whatever macOS uses; right-click it (or use **Settings → Appearance**) to match the system again. The terminals follow the choice.
+
+In a git repository, the focused pane shows a thin strip at its bottom with the repository, branch, worktree and pull request (pull requests need GitHub's `gh`, signed in). **⌘P** also finds tabs by branch, worktree or pull request number.
 
 New Workspace (**⌘N**, or the **+** beside a machine's name) opens the new workspace's name for editing straight away: type a name and press Return, or Esc to keep the default. Either way, the new terminal has the keyboard next.
 
@@ -56,7 +60,7 @@ Closing a pane, tab or workspace ends the programs in it. Shells don't survive a
 
 ## Keyboard shortcuts
 
-**⌘** means Command, **⇧** Shift, **⌥** Option, and **⌃** Control. **Help → Keyboard Shortcuts** (**⌘/**) shows them in the app.
+**⌘** means Command, **⇧** Shift, **⌥** Option, and **⌃** Control. **Help → Keyboard Shortcuts** (**⌥⌘/**) shows them in the app.
 
 ### Workspaces and tabs
 
@@ -85,7 +89,7 @@ Closing a pane, tab or workspace ends the programs in it. Shells don't survive a
 | Resize pane in a direction | ⌃⌘ plus an arrow key |
 | Toggle pane maximize | ⇧⌘Return |
 
-Resizing moves the nearest divider toward the arrow. A maximized pane fills its tab, and its tab shows ⤢; the other panes keep running. When the file browser or shortcuts overlay is open, **⌘W** closes it instead of the pane.
+Resizing moves the nearest divider toward the arrow. A maximized pane fills its tab, and its tab shows ⤢; the other panes keep running. When the file browser or shortcuts overlay is open, **⌘W** closes it instead of the pane. Hovering near a pane's top-right corner shows a **×** that closes that pane, as ⌘W does.
 
 ### Editing, files, and the window
 
@@ -99,12 +103,12 @@ Resizing moves the nearest divider toward the arrow. A maximized pane fills its 
 | Increase / decrease font size | ⌘+ or ⌘= / ⌘- |
 | Reset font size | ⌘0 |
 | Command bar: go to a tab, workspace or agent | ⌘P |
-| Toggle sidebar | ⌃⌘S |
+| Toggle sidebar | ⌘/ (or ⌃⌘S) |
 | Minimize window | ⌘M |
 | Toggle full screen | ⌃⌘F |
 | Hide Clotho | ⌘H |
 | Quit Clotho | ⌘Q |
-| Toggle shortcut overlay | ⌘/ |
+| Toggle shortcut overlay | ⌥⌘/ |
 
 Closing a workspace always asks first. Closing a tab or pane asks too, with a "Don't ask again" option for each. Option acts as the terminal's Meta key.
 
@@ -151,7 +155,7 @@ ssh -o BatchMode=yes user@imac true
 
 If that fails, set up a key or an SSH agent. Clotho runs ssh without prompts and can't ask for a password or passphrase. The machine needs a POSIX shell. The file browser uses the machine's clothod, so it needs clothod 0.1.3 or later; an older one shows an update notice in the browser.
 
-Then click **+ Add Machine** at the bottom of the sidebar (or choose **File → Add Machine…**), and give it a name and the SSH target.
+Then click **Machines** at the bottom of the sidebar and **Add…** (or choose **File → Add Machine…**), and give it a name and the SSH target.
 
 With Tailscale, connect both machines to the tailnet and use the remote machine's MagicDNS name or Tailscale IP as the host. See [Tailscale's connection guide](https://tailscale.com/docs/how-to/connect-to-devices).
 
