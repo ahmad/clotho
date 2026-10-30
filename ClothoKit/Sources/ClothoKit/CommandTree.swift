@@ -94,6 +94,16 @@ public struct CommandTree: Sendable, Equatable {
     public private(set) var scope: Scope
     public private(set) var expanded: Set<Node>
     public private(set) var selection: Node?
+    /// Picking a workspace (Move Tab to…): workspaces only, without their tabs and not expandable. A
+    /// selected tab gives way to its workspace.
+    public var workspacesOnly = false {
+        didSet {
+            if workspacesOnly, case let .tab(machine, tab) = selection, let workspace = outline.workspace(of: tab, on: machine) {
+                selection = .workspace(machine: machine, workspace.id)
+            }
+            fixSelection()
+        }
+    }
 
     /// The tree as ⌘P opens: the focused machine's workspaces with the current one expanded, and the
     /// current tab (else the current workspace) selected.
@@ -120,8 +130,9 @@ public struct CommandTree: Sendable, Equatable {
         func addWorkspaces(of machine: Outline.Machine, depth: Int) {
             for workspace in machine.workspaces ?? [] {
                 let node = Node.workspace(machine: machine.key, workspace.id)
-                let open = expanded.contains(node) && !workspace.tabs.isEmpty
-                rows.append(Row(node: node, depth: depth, section: .tree, expandable: !workspace.tabs.isEmpty, expanded: open))
+                let hasTabs = !workspace.tabs.isEmpty && !workspacesOnly
+                let open = expanded.contains(node) && hasTabs
+                rows.append(Row(node: node, depth: depth, section: .tree, expandable: hasTabs, expanded: open))
                 guard open else { continue }
                 for tab in workspace.tabs {
                     rows.append(Row(node: .tab(machine: machine.key, tab), depth: depth + 1, section: .tree, expandable: false, expanded: false))
@@ -155,6 +166,23 @@ public struct CommandTree: Sendable, Equatable {
         let from = selectedIndex ?? (by > 0 ? -1 : rows.count)
         selection = rows[((from + by) % rows.count + rows.count) % rows.count].node
         return selection
+    }
+
+    /// The workspace `tab` is in, on `machine`.
+    public func workspace(containing tab: TabID, on machine: String) -> WorkspaceID? {
+        outline.workspace(of: tab, on: machine)?.id
+    }
+
+    /// Selects the first workspace on `machine` other than `except` (else `except` itself), for picking
+    /// where a tab goes.
+    public mutating func selectFirstWorkspace(on machine: String, except: WorkspaceID?) {
+        let workspaces = outline.machine(machine)?.workspaces ?? []
+        if let other = workspaces.first(where: { $0.id != except }) {
+            selection = .workspace(machine: machine, other.id)
+        } else if let except {
+            selection = .workspace(machine: machine, except)
+        }
+        fixSelection()
     }
 
     /// Selects row `index` (clicks, ⌘1–9).

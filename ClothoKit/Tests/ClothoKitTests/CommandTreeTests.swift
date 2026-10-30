@@ -82,6 +82,25 @@ final class CommandTreeTests: XCTestCase {
         XCTAssertTrue(nodes(tree).contains(.workspace(machine: "bb", 5)), "and the tree works from there")
     }
 
+    func testWorkspacesOnlyForPickingWhereATabGoes() {
+        var tree = CommandTree(outline: outline(), machine: "local", workspace: 1, tab: 11)
+        tree.workspacesOnly = true
+        XCTAssertEqual(nodes(tree), [.agent(machine: "bb", pane: 500), .workspace(machine: "local", 1), .workspace(machine: "local", 2)],
+                       "no tab rows")
+        XCTAssertEqual(tree.selection, .workspace(machine: "local", 1), "the selected tab gave way to its workspace")
+        XCTAssertTrue(tree.rows.allSatisfy { !$0.expandable || $0.node == .machine("local") })
+        XCTAssertFalse(tree.expand(), "workspaces don't open into tabs")
+        tree.selectFirstWorkspace(on: "local", except: 1)
+        XCTAssertEqual(tree.selection, .workspace(machine: "local", 2), "the first other workspace")
+        // Machines still expand, to their workspaces only.
+        tree.collapse()
+        tree.select(nodes(tree).firstIndex(of: .machine("bb"))!)
+        tree.expand()
+        XCTAssertEqual(nodes(tree).suffix(2), [.workspace(machine: "bb", 5), .machine("imac")])
+        tree.workspacesOnly = false
+        XCTAssertTrue(tree.rows.contains { $0.expandable && $0.node == .workspace(machine: "bb", 5) }, "back to normal")
+    }
+
     func testReturn() {
         var tree = CommandTree(outline: outline(), machine: "local", workspace: 1, tab: 10)
         XCTAssertEqual(tree.activate(), .open(.tab(machine: "local", 10)))
