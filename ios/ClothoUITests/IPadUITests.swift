@@ -47,10 +47,10 @@ final class IPadUITests: XCTestCase {
         XCTAssertTrue(actions.waitForExistence(timeout: 10), "Return didn't open the workspace")
 
         actions.tap()
-        // Let the menu finish opening: on iOS 27 a tap on an item while it animates in is lost.
-        sleep(1)
+        let close = app.buttons["Close tab"]
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
         attach(app, "pane menu")
-        app.buttons["Close tab"].tap()
+        close.tapWhenSettled()
         sleep(1)
         attach(app, "after close tab")
         XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10), "closing the tab didn't go back to the machine")

@@ -76,7 +76,7 @@ final class AgentsUITests: XCTestCase {
         waiting.tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         actions.tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

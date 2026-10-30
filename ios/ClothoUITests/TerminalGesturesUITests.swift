@@ -33,7 +33,7 @@ final class TerminalGesturesUITests: XCTestCase {
             actions.tap()
             let item = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Text size'")).firstMatch
             XCTAssertTrue(item.waitForExistence(timeout: 3))
-            item.tap()
+            item.tapWhenSettled()
             let step = app.buttons[current > before ? "Smaller" : "Larger"]
             if step.waitForExistence(timeout: 3) { step.tap() }
             sleep(1)
@@ -42,7 +42,7 @@ final class TerminalGesturesUITests: XCTestCase {
         XCTAssertEqual(current, before)
 
         actions.tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     /// The size in the pane menu's "Text size · 13 pt", read with the menu open, then closed again.

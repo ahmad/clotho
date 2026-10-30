@@ -57,7 +57,7 @@ final class RemoteUITests: XCTestCase {
         XCTAssertTrue(["live", "replay"].contains(mode.label), "resumed with \(mode.label)")
         attach(app, "resumed")
         app.buttons["Pane actions"].tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
 
         // Disconnecting removes the test clothod from the machine (scripts/cleanup-dev.sh checks).
         sleep(1)

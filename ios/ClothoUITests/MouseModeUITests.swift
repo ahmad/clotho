@@ -68,7 +68,7 @@ final class MouseModeUITests: XCTestCase {
     private func closeTab(_ app: XCUIApplication) {
         sleep(1)
         app.buttons["Pane actions"].tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

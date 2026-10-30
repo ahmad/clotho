@@ -14,7 +14,7 @@ final class PaneActionsUITests: XCTestCase {
         let actions = app.buttons["Pane actions"]
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         actions.tap()
-        app.buttons["Split down"].tap()
+        app.buttons["Split down"].tapWhenSettled()
 
         // Two panes: the strip appears and the new (second) pane is shown.
         let second = app.buttons.matching(NSPredicate(format: "label BEGINSWITH '2 '")).firstMatch
@@ -43,7 +43,7 @@ final class PaneActionsUITests: XCTestCase {
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
 
         actions.tap()
-        app.buttons["Close pane"].tap()
+        app.buttons["Close pane"].tapWhenSettled()
         XCTAssertTrue(second.waitForNonExistence(timeout: 10))
 
         actions.tap()
@@ -52,7 +52,7 @@ final class PaneActionsUITests: XCTestCase {
         sleep(2)
         attach(app, "new tab")
         actions.tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
         sleep(2)
         attach(app, "closed tab")
     }

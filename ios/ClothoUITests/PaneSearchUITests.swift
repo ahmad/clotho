@@ -24,7 +24,7 @@ final class PaneSearchUITests: XCTestCase {
         app.typeText("clear; echo nee\"\"dle-old; for i in $(seq 1 300); do echo line-$i; done; echo nee\"\"dle-new\n")
         sleep(2)
         actions.tap()
-        app.buttons["Find…"].tap()
+        app.buttons["Find…"].tapWhenSettled()
         let field = app.textFields["findField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         if app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Update clothod'")).firstMatch.exists {
@@ -51,7 +51,7 @@ final class PaneSearchUITests: XCTestCase {
         app.buttons["Done"].tap()
         XCTAssertFalse(field.exists)
         actions.tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     func testAgentHistory() throws {
@@ -63,7 +63,7 @@ final class PaneSearchUITests: XCTestCase {
         actions.tap()
         let history = app.buttons["Agent History"]
         XCTAssertTrue(history.waitForExistence(timeout: 5))
-        history.tap()
+        history.tapWhenSettled()
         if app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Update clothod'")).firstMatch.waitForExistence(timeout: 2) {
             throw XCTSkip("this clothod has no agent.history")
         }
@@ -77,7 +77,7 @@ final class PaneSearchUITests: XCTestCase {
         app.buttons["Done"].tap()
         app.typeText("\u{03}")
         actions.tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

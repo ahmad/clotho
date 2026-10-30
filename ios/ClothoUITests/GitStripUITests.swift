@@ -32,7 +32,7 @@ final class GitStripUITests: XCTestCase {
         app.typeText("cd /tmp && rm -rf /tmp/cki-ios-git /tmp/cki-ios-git-wt && clear\n")
         XCTAssertTrue(strip.waitForNonExistence(timeout: 30), "the strip stayed outside the repo")
         app.buttons["Pane actions"].tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

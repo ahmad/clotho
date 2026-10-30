@@ -40,7 +40,7 @@ final class PaneEventsUITests: XCTestCase {
         app.buttons["Pane actions"].tap()
         let close = app.buttons["Close tab"]
         XCTAssertTrue(close.waitForExistence(timeout: 3))
-        close.tap()
+        close.tapWhenSettled()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

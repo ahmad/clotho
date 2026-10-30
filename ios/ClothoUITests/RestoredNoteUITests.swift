@@ -23,7 +23,7 @@ final class RestoredNoteUITests: XCTestCase {
         XCTAssertTrue(note.waitForNonExistence(timeout: 3), "× didn't dismiss it")
         attach(app, "restored note dismissed")
         app.buttons["Pane actions"].tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

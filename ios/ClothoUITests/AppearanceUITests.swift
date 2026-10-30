@@ -30,7 +30,7 @@ final class AppearanceUITests: XCTestCase {
 
         // Switch to Dark from the pane's menu; the open terminal changes with it.
         actions.tap()
-        app.buttons["Appearance"].tap()
+        app.buttons["Appearance"].tapWhenSettled()
         let darkChoice = app.buttons["Dark"]
         XCTAssertTrue(darkChoice.waitForExistence(timeout: 3))
         darkChoice.tap()
@@ -43,11 +43,11 @@ final class AppearanceUITests: XCTestCase {
 
         // Back to the system's appearance for later tests, then close what the test made.
         actions.tap()
-        app.buttons["Appearance"].tap()
+        app.buttons["Appearance"].tapWhenSettled()
         app.buttons["System"].tap()
         sleep(1)
         actions.tap()
-        app.buttons["Close tab"].tap()
+        app.buttons["Close tab"].tapWhenSettled()
     }
 
     /// Asks the pane's terminal for its background colour (OSC 11) from its shell, the way an app does, and
