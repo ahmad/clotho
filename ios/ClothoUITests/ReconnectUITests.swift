@@ -8,15 +8,21 @@ final class ReconnectUITests: XCTestCase {
         app.launchArguments = ["-UITesting", "-UnreachableMachine", "YES"]
         app.launch()
 
+        // Earlier tests leave workspaces on the dev machine, so this machine may be below the fold; the list only
+        // builds (and connects) the sections on screen.
+        let header = app.staticTexts["Away (test)"].firstMatch
+        for _ in 0..<12 where !(header.exists && header.isHittable) { app.swipeUp() }
         let cantReach = app.descendants(matching: .any)["cantReach"].firstMatch
         XCTAssertTrue(cantReach.waitForExistence(timeout: 30), "never gave up retrying")
+        let reconnect = app.buttons["reconnect"].firstMatch
+        for _ in 0..<3 where !reconnect.isHittable { app.swipeUp() }
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "identifier == 'machineStatus' AND label == %@", "can't reach")).firstMatch.exists,
+                      "the machine's header says so")
         XCTAssertTrue(app.staticTexts["Can't reach Away (test)"].exists)
-        XCTAssertTrue(app.staticTexts["can't reach"].exists, "the machine's header says so")
-        XCTAssertTrue(app.staticTexts["Local Mac (dev)"].exists)
         attach(app, "home can't reach")
 
         // Reconnect tries again (the row goes while it does), then gives up again.
-        app.buttons["reconnect"].firstMatch.tap()
+        reconnect.tap()
         XCTAssertTrue(cantReach.waitForNonExistence(timeout: 5), "Reconnect didn't try again")
         XCTAssertTrue(cantReach.waitForExistence(timeout: 30), "didn't stop after the second round")
 
