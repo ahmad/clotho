@@ -93,13 +93,16 @@ struct MachineView: View {
     var body: some View {
         List {
             Section {
-                HStack {
-                    ConnectionDot(connection: connection)
-                    Text(connection.connectionLabel).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    Spacer()
-                    if let hello = store.hello {
-                        Text("clothod \(hello.version)")
-                            .font(.caption2).foregroundStyle(.tertiary)
+                CantReachRow(connection: connection)
+                if !connection.cantReach {
+                    HStack {
+                        ConnectionDot(connection: connection)
+                        Text(connection.connectionLabel).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        Spacer()
+                        if let hello = store.hello {
+                            Text("clothod \(hello.version)")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
                     }
                 }
             }
@@ -155,7 +158,7 @@ struct MachineView: View {
                     if store.isConnected {
                         ContentUnavailableView("No workspaces on \(connection.machine.displayName)", systemImage: "rectangle.stack",
                                                description: Text("Tap the New Workspace button to start one."))
-                    } else {
+                    } else if !connection.cantReach {
                         ProgressView(connection.connectionLabel).frame(maxWidth: .infinity)
                     }
                 }

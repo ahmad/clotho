@@ -122,8 +122,9 @@ private struct HomeMachineSection: View {
 
     var body: some View {
         Section {
+            CantReachRow(connection: connection)
             offers
-            if store.state.workspaces.isEmpty {
+            if store.state.workspaces.isEmpty, !connection.cantReach {
                 Text(store.isConnected ? "No workspaces yet. Tap + to start one." : connection.connectionLabel)
                     .font(.callout).foregroundStyle(.secondary)
             }
@@ -148,6 +149,7 @@ private struct HomeMachineSection: View {
     // MARK: Header
 
     private var status: String {
+        if connection.cantReach { return "can't reach" }
         if store.isSaved { return connection.lastSeen.map { "last seen \(MachineConnection.ago($0))" } ?? "connecting…" }
         if connection.suspended { return "paused" }
         switch store.connection {
@@ -348,6 +350,7 @@ struct ConnectionDot: View {
     }
 
     private var color: Color {
+        if connection.cantReach { return .red }
         if connection.suspended || store.isSaved { return .gray }
         switch store.connection {
         case .connected: return .green

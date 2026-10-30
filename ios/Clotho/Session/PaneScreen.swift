@@ -22,6 +22,8 @@ struct PaneScreen: View {
     @StateObject private var find: PaneFind
     @State private var finding = false
     @State private var showingHistory: PaneID?
+    /// Restored notes dismissed here, gone at once; the machine's pane update clears them everywhere else.
+    @State private var dismissedRestore: Set<PaneID> = []
 
     /// In the iPad's detail column: switching tabs here moves the sidebar's selection, and a closed tab
     /// goes back to the machine (instead of popping the stack).
@@ -77,7 +79,12 @@ struct PaneScreen: View {
                 } else {
                     Color(Theme.background)
                 }
+                if let pane, let restore = restoreMark(pane), !finding, !dismissedRestore.contains(pane.id) {
+                    RestoredNote(restore: restore) { dismissRestore(pane.id) }
+                }
             }
+            // The pane's repo, branch, worktree and pull request, under the terminal.
+            if let git = pane?.git { GitStrip(git: git) }
             // Uploads for pasted images and photos: progress, and any failure (nothing is pasted then).
             TransferBar(machine: connection.machine.id)
         }
@@ -103,6 +110,9 @@ struct PaneScreen: View {
             if let onTabGone { onTabGone() } else { dismiss() }
         }
         .onChange(of: appearance) { AppearanceChoice.applyToAllWindows() }
+        .onChange(of: pane?.restored == nil) { _, cleared in
+            if cleared, let id = currentPane { dismissedRestore.remove(id) }
+        }
         .onChange(of: fontSize) { _, size in
             connection.setFont(UIFont.monospacedSystemFont(ofSize: size, weight: .regular))
         }
@@ -121,6 +131,21 @@ struct PaneScreen: View {
     }
 
     // MARK: Pieces
+
+    private func restoreMark(_ pane: Pane) -> PaneRestore? {
+        #if DEBUG
+        if let preview = RestoredNote.preview { return preview }
+        #endif
+        return pane.restored
+    }
+
+    private func dismissRestore(_ id: PaneID) {
+        dismissedRestore.insert(id)
+        let backend = store.backend, name = connection.machine.displayName
+        Task {
+            do { try await backend.dismissRestored(id) } catch { log("[\(name)] dismissing the restored note failed: \(error.localizedDescription)") }
+        }
+    }
 
     private var paneStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -158,7 +183,21 @@ struct PaneScreen: View {
 
     /// The pane's connection when it isn't live. Rare changes, so its own room in the layout is fine.
     @ViewBuilder private var statusBar: some View {
-        if store.isSaved || connection.suspended || !store.isConnected {
+        if connection.cantReach {
+            HStack(spacing: 6) {
+                Image(systemName: "bolt.horizontal.circle").accessibilityHidden(true)
+                Text(connection.connectionLabel).lineLimit(1)
+                Spacer(minLength: 0)
+                ReconnectButton(connection: connection)
+            }
+            .font(.caption)
+            .padding(.horizontal, 12).padding(.vertical, 3)
+            .frame(maxWidth: .infinity)
+            .background(.bar)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("cantReach")
+            .transition(.move(edge: .top).combined(with: .opacity))
+        } else if store.isSaved || connection.suspended || !store.isConnected {
             let saved = store.isSaved
             HStack(spacing: 6) {
                 Image(systemName: saved ? "clock.arrow.circlepath" : "bolt.horizontal.circle").accessibilityHidden(true)

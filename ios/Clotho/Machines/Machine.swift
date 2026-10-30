@@ -81,6 +81,14 @@ struct Machine: Codable, Identifiable, Hashable, Sendable {
     static let localDev = Machine(id: UUID(uuidString: "00000000-0000-0000-0000-00000000C10D")!, name: "Local Mac (dev)",
                                   kind: .localSocket, socketPath: "/tmp/cki-ios/clothod.sock",
                                   modifiedAt: .distantPast)
+
+    #if DEBUG
+    /// For UI tests (`-UnreachableMachine YES`): an SSH machine nothing answers on (127.0.0.1, port 9), to see
+    /// the retries give up and the Reconnect button.
+    static let unreachable = Machine(id: UUID(uuidString: "00000000-0000-0000-0000-0000000DEAD1")!, name: "Away (test)",
+                                     host: "127.0.0.1", port: 9, user: "test", remoteCommand: "true",
+                                     modifiedAt: .distantPast)
+    #endif
     #endif
 }
 
@@ -104,6 +112,9 @@ final class MachineList: ObservableObject {
     /// Saved machines, plus the simulator's local dev machine.
     var all: [Machine] {
         #if targetEnvironment(simulator)
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "UnreachableMachine") { return [Machine.localDev, Machine.unreachable] + machines }
+        #endif
         return [Machine.localDev] + machines
         #else
         return machines

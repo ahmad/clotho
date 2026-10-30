@@ -1,6 +1,7 @@
 import ClothoKit
 import Combine
 import Foundation
+import Network
 import SwiftUI
 import WidgetKit
 
@@ -75,8 +76,12 @@ final class MachineConnection: ObservableObject, Identifiable {
     init(machine: Machine, transport: ClothodTransport) {
         self.machine = machine
         self.transport = transport
-        backend = ClothodBackend(configuration: .init(transport: transport, clientName: "clotho-ios/0.1",
-                                                      log: { log("[\(machine.displayName)] \($0)") }))
+        var configuration = ClothodBackend.Configuration(transport: transport, clientName: "clotho-ios/0.1",
+                                                         log: { log("[\(machine.displayName)] \($0)") })
+        // A few quick tries, then "Can't reach" and a Reconnect button, like the Mac: no SSH in a loop for a
+        // machine that's off or away. Coming back to the foreground and network changes try again.
+        if machine.kind == .ssh { configuration.retry = .remote }
+        backend = ClothodBackend(configuration: configuration)
         store = ModelStore(backend: backend)
         // The last-known model, shown at once (dimmed, read-only) until the machine's own arrives.
         if let cached = SavedState.shared.load(machine.id) {
@@ -274,7 +279,24 @@ final class MachineConnection: ObservableObject, Identifiable {
         }
     }
 
+    /// It stopped retrying on its own (see `RetryPolicy.remote`) and waits for `reconnect()`.
+    var cantReach: Bool { store.retryPaused && !suspended && started }
+
+    /// Why the last attempt failed, for under "Can't reach".
+    var cantReachReason: String {
+        if case .reconnecting(let reason) = store.connection, !reason.isEmpty { return reason }
+        return "The last attempts failed."
+    }
+
+    /// Reconnect, or a network change or the app coming back: tries now, and starts the automatic retries again.
+    func reconnect(_ why: String = "asked") {
+        guard started, !store.isConnected else { return }
+        log("[\(machine.displayName)] reconnecting (\(why))")
+        backend.reconnectNow()
+    }
+
     var connectionLabel: String {
+        if cantReach { return "Can't reach \(machine.displayName)" }
         if store.isSaved { return savedLabel }
         if suspended { return "Paused" }
         switch store.connection {
@@ -434,6 +456,8 @@ final class Connections: ObservableObject {
     @Published private(set) var agentRows: [AgentRow] = []
     private var recomputeScheduled = false
 
+    init() { watchNetwork() }
+
     func connection(for machine: Machine) -> MachineConnection {
         if let existing = connections[machine.id], existing.machine.endpoint == machine.endpoint {
             existing.update(machine)
@@ -525,7 +549,38 @@ final class Connections: ObservableObject {
 
     func resumeAll() {
         inBackground = false
+        // Kept open in the background (a transfer, an alert action) and gave up meanwhile: try again too.
+        // The rest were closed, and resuming starts them afresh.
+        let gaveUp = connections.values.filter(\.cantReach)
         connections.values.forEach { $0.resume() }
+        gaveUp.forEach { $0.reconnect("foreground") }
+    }
+
+    private var networkMonitor: NWPathMonitor?
+    private var lastNetworkRetry = Date.distantPast
+
+    /// Machines that stopped retrying, or are between retries, try again when the network changes: back
+    /// online, or a different set of interfaces (Wi-Fi to cellular, a VPN).
+    func watchNetwork() {
+        guard networkMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        let last = LastPath()
+        monitor.pathUpdateHandler = { [weak self] path in
+            // The monitor reports the current path right after it starts; only a change counts.
+            guard let previous = last.swap(path), path.status == .satisfied else { return }
+            let interfaces = { (p: NWPath) in Set(p.availableInterfaces.map(\.name)) }
+            guard previous.status != .satisfied || interfaces(previous) != interfaces(path) else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.networkChanged() } }
+        }
+        monitor.start(queue: DispatchQueue(label: "clotho.network"))
+        networkMonitor = monitor
+    }
+
+    private func networkChanged() {
+        // Changes come in bursts (an interface going down, a VPN, DHCP); one retry covers them.
+        guard !inBackground, Date().timeIntervalSince(lastNetworkRetry) > 2 else { return }
+        lastNetworkRetry = Date()
+        connections.values.forEach { $0.reconnect("network change") }
     }
 
     static func transport(for machine: Machine) -> ClothodTransport {
@@ -535,5 +590,15 @@ final class Connections: ObservableObject {
         case .ssh:
             return SSHTransport(machine: machine)
         }
+    }
+}
+
+/// The network path the monitor saw last (its handler runs on one serial queue).
+private final class LastPath: @unchecked Sendable {
+    private var path: NWPath?
+
+    func swap(_ new: NWPath) -> NWPath? {
+        defer { path = new }
+        return path
     }
 }
