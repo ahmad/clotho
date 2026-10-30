@@ -1,339 +1,210 @@
 import AppKit
 import ClothoKit
 
-// Clotho › Settings… (⌘,): agent notifications, and per machine whether its agents show, how much
-// history each pane keeps (clothod's scrollback setting) and whether clothod starts at login. The
-// machine settings live in that machine's clothod, so every client sees the same values.
+// Settings (⌘,): one window with two tabs in the standard Settings toolbar, and its title follows the tab.
+//   General   agent notifications, light or dark, and updates.
+//   Machines  the saved machines (MachinesSettings.swift): order, on/off, add, edit, remove, and the
+//             selected machine's own settings (its agents, clothod's scrollback and start at login),
+//             which live in that machine's clothod, so every client sees the same values.
+// The sidebar's Settings button opens General; its Machines button and Manage Machines… open Machines.
+
+enum SettingsTab: String, CaseIterable {
+    case general, machines
+
+    var title: String { self == .general ? "General" : "Machines" }
+    var symbol: String { self == .general ? "gearshape" : "server.rack" }
+}
 
 @MainActor
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     weak var app: AppDelegate?
-    private let stack = NSStackView()
-    /// Scrollback edits wait a moment, so typing 10000 doesn't set 1, 10, 100 and 1000 on the way.
-    private var pendingScrollback: [MachineKey: DispatchWorkItem] = [:]
-    /// The last error per machine, shown under its controls until the next change.
-    private var errors: [MachineKey: String] = [:]
+    let tabs = SettingsTabsController()
+    let general: GeneralSettingsController
+    let machines: MachinesSettingsController
 
     init(app: AppDelegate) {
         self.app = app
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 480),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = isDevBuild ? "Clotho Dev Settings" : "Clotho Settings"
+        general = GeneralSettingsController(app: app)
+        machines = MachinesSettingsController(app: app)
+        for (tab, controller) in [(SettingsTab.general, general as NSViewController), (.machines, machines)] {
+            controller.title = tab.title
+            let item = NSTabViewItem(viewController: controller)
+            item.label = tab.title
+            item.identifier = tab.rawValue
+            item.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: tab.title)
+            tabs.addTabViewItem(item)
+        }
+        tabs.tabStyle = .toolbar
+        let window = NSWindow(contentViewController: tabs)
+        // A Settings window: fixed size per tab, no zoom, the system's standard buttons.
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.toolbarStyle = .preference
         window.setFrameAutosaveName("ClothoSettings")
-        window.minSize = NSSize(width: 460, height: 300)
         super.init(window: window)
         window.delegate = self
-
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = s(10)
-        stack.edgeInsets = NSEdgeInsets(top: s(20), left: s(24), bottom: s(20), right: s(24))
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        let document = FlippedStackHost()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        document.addSubview(stack)
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.documentView = document
-        window.contentView = scroll
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: document.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-        ])
+        tabs.onSelect = { [weak self] in self?.fitWindowToTab(animate: true) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show() {
+    var selectedTab: SettingsTab {
+        SettingsTab(rawValue: tabs.tabViewItems[tabs.selectedTabViewItemIndex].identifier as? String ?? "") ?? .general
+    }
+
+    func show(_ tab: SettingsTab) {
+        let wasVisible = window?.isVisible == true
         reload()
         loadMachineSettings()
-        window?.center()
+        if let index = SettingsTab.allCases.firstIndex(of: tab) { tabs.selectedTabViewItemIndex = index }
+        fitWindowToTab(animate: false)
+        if !wasVisible { window?.center() }
         window?.makeKeyAndOrderFront(nil)
+        log("settings: showing \(tab.rawValue)")
     }
 
-    /// Fetches each connected machine's settings (events keep them current afterwards).
-    func loadMachineSettings() {
-        guard let app else { return }
-        for session in app.connections.values {
-            let store = session.store
-            let key = session.key
-            let features = store.hello?.features ?? []
-            guard features.contains(.settings) || features.contains(.service) else { continue }
-            Task { @MainActor [weak self] in
-                do {
-                    if features.contains(.settings) { try await store.loadSettings() }
-                    if features.contains(.service) { try await store.loadService() }
-                    self?.errors[key] = nil
-                } catch {
-                    self?.errors[key] = error.localizedDescription
-                }
-                self?.reload()
-            }
-        }
+    /// Each tab has its own fixed size; the window takes it, keeping its top edge where it is.
+    func fitWindowToTab(animate: Bool) {
+        guard let window, let controller = tabs.tabViewItems[tabs.selectedTabViewItemIndex].viewController else { return }
+        controller.view.layoutSubtreeIfNeeded()
+        let size = NSSize(width: SettingsStyle.width, height: controller.view.fittingSize.height)
+        controller.preferredContentSize = size
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: animate && window.isVisible)
     }
 
-    /// What the machine blocks depend on: which machines are connected, their clothod, and whether their
-    /// settings are loaded. Model changes come often, so the window rebuilds only when this changes.
-    private var shownSignature = ""
+    // MARK: What the rest of the app calls
+
+    func reload() {
+        general.reload()
+        machines.reload()
+    }
 
     func refreshIfNeeded() {
-        guard let app, window?.isVisible == true else { return }
-        let signature = app.connections.values.map { session in
-            "\(session.key):\(session.store.isConnected):\(session.store.hello?.version ?? "-"):\(session.store.settings != nil):\(session.store.service != nil)"
-        }.sorted().joined(separator: ",") + "|\(app.remoteMachines.map(\.key))"
-        guard signature != shownSignature else { return }
-        shownSignature = signature
-        // A machine that just connected gets its settings fetched.
-        if app.connections.values.contains(where: {
-            ($0.store.settings == nil && $0.store.hello?.features.contains(.settings) == true)
-                || ($0.store.service == nil && $0.store.hello?.features.contains(.service) == true)
-        }) {
-            loadMachineSettings()
-        }
+        guard window?.isVisible == true else { return }
+        machines.refreshIfNeeded()
+    }
+
+    func loadMachineSettings() { machines.loadMachineSettings() }
+    func setStartsAtLogin(_ on: Bool, on key: MachineKey) { machines.setStartsAtLogin(on, on: key) }
+    func setScrollback(_ lines: Int, on key: MachineKey) { machines.setScrollback(lines, on: key) }
+
+    func windowWillClose(_ notification: Notification) {
+        log("settings: closed")
+    }
+}
+
+/// The tab controller, telling the window when the user picks another tab.
+final class SettingsTabsController: NSTabViewController {
+    var onSelect: (() -> Void)?
+
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        onSelect?()
+    }
+}
+
+// MARK: General
+
+@MainActor
+final class GeneralSettingsController: NSViewController {
+    weak var app: AppDelegate?
+    private let content = NSStackView()
+    /// Targets for closure-based controls live as long as the current contents.
+    private var targets: [ClosureTarget] = []
+    /// The appearance control, for tests and the toggle in the sidebar.
+    private(set) var appearanceControl: NSSegmentedControl?
+    private(set) var updatesSwitch: NSSwitch?
+
+    init(app: AppDelegate) {
+        self.app = app
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func loadView() {
+        let root = NSView()
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 22
+        content.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(content)
+        NSLayoutConstraint.activate([
+            root.widthAnchor.constraint(equalToConstant: SettingsStyle.width),
+            content.topAnchor.constraint(equalTo: root.topAnchor, constant: SettingsStyle.margin),
+            content.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: SettingsStyle.margin),
+            content.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -SettingsStyle.margin),
+            content.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -SettingsStyle.margin),
+        ])
+        view = root
         reload()
     }
 
-    // MARK: Building
-
     func reload() {
-        guard let app, window?.isVisible == true || stack.arrangedSubviews.isEmpty else { return }
-        // A field being edited keeps its text: rebuilding would throw the edit away.
-        if let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor { return }
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard let app, isViewLoaded else { return }
+        content.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        targets.removeAll()
+        for section in [notifications(app), appearance(), updates(app)] {
+            content.addArrangedSubview(section)
+            section.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
+        }
+    }
 
-        section("Notifications")
-        note("Agents notify when they need you: when the daemon raises their attention, for example through Claude Code's or Codex's status hooks.")
-        for (state, title) in [(AgentInfo.State.waiting, "When an agent is waiting for you"), (.done, "When an agent finishes"),
-                               (.error, "When an agent hits an error")] {
-            add(checkbox(title, on: app.notifies(state)) { on in
+    private func toggle(_ on: Bool, _ label: String, _ changed: @escaping (Bool) -> Void) -> NSSwitch {
+        let (toggle, target) = SettingsStyle.toggle(on: on, label: label, changed: changed)
+        targets.append(target)
+        return toggle
+    }
+
+    private func notifications(_ app: AppDelegate) -> NSView {
+        let rows = [(AgentInfo.State.waiting, "An agent is waiting for you"), (.done, "An agent finishes"),
+                    (.error, "An agent hits an error")].map { state, title in
+            FormRow(title, control: toggle(app.notifies(state), title) { on in
                 UserDefaults.standard.set(on, forKey: "NotifyAgent.\(state.rawValue)")
             })
         }
-
-        section("Appearance")
-        let modes = NSPopUpButton()
-        modes.addItems(withTitles: Theme.Mode.allCases.map(\.title))
-        modes.selectItem(at: Theme.Mode.allCases.firstIndex(of: Theme.Mode.current) ?? 0)
-        let modeTarget = ClosureTarget { [weak app] sender in
-            guard let index = (sender as? NSPopUpButton)?.indexOfSelectedItem else { return }
-            app?.setAppearance(Theme.Mode.allCases[index])
-        }
-        targets.append(modeTarget)
-        modes.target = modeTarget
-        modes.action = #selector(ClosureTarget.fire(_:))
-        add(modes)
-        note("Light or dark for the whole window, terminals included. Match System follows macOS.")
-
-        section("Updates")
-        if let reason = app.updates.unavailableReason {
-            note(reason)
-        } else {
-            add(checkbox("Check for updates automatically", on: app.updates.automaticallyChecks) { [weak app] on in
-                app?.updates.automaticallyChecks = on
-            })
-            let check = ClosureButton(title: "Check Now") { [weak app] in app?.checkForUpdates(nil) }
-            check.bezelStyle = .rounded
-            check.controlSize = .small
-            add(check, indent: 20)
-            note("Clotho checks once a day and asks before installing anything. Updates are signed, and one that isn't signed with Clotho's key is refused.")
-        }
-
-        section("Machines")
-        var machines = [Machine.local] + app.remoteMachines
-        machines.sort { $0.isLocal != $1.isLocal ? $0.isLocal : $0.label < $1.label }
-        for machine in machines { machineBlock(machine, app: app) }
+        return formSection("Notifications", FormGroup(rows), footnote: "From agents that report their state, such as Claude Code and Codex with status hooks.")
     }
 
-    private func machineBlock(_ machine: Machine, app: AppDelegate) {
-        let key = machine.key
-        let session = app.connections[key]
-        let name = machine.isLocal ? ComputerName.current : machine.label
-        let title = NSTextField(labelWithString: name + (machine.isLocal ? " (this Mac)" : ""))
-        title.font = .systemFont(ofSize: s(13), weight: .semibold)
-        add(title, spacingBefore: 14)
-
-        add(checkbox("Show its agents and notify", on: app.monitorsAgents(key)) { [weak app] on in
-            app?.setMonitorsAgents(key, on)
-        }, indent: 12)
-
-        guard let session, session.store.isConnected, let hello = session.store.hello else {
-            note("Connect to \(name) to change its clothod settings.", indent: 12)
-            return
+    private func appearance() -> NSView {
+        let modes = Theme.Mode.allCases
+        let control = NSSegmentedControl(labels: modes.map { $0 == .system ? "System" : $0.title }, trackingMode: .selectOne,
+                                         target: nil, action: nil)
+        control.selectedSegment = modes.firstIndex(of: Theme.Mode.current) ?? 0
+        control.controlSize = .regular
+        let target = ClosureTarget { [weak app] sender in
+            guard let index = (sender as? NSSegmentedControl)?.selectedSegment, modes.indices.contains(index) else { return }
+            app?.setAppearance(modes[index])
         }
-        if !hello.features.contains(.settings) && !hello.features.contains(.service) {
-            note("\(name) runs clothod \(hello.version). Scrollback and Start at Login need clothod 0.1.7 or later; update it from the machine's menu in the sidebar.", indent: 12)
-            return
-        }
-        if hello.features.contains(.settings) {
-            if let settings = session.store.settings { scrollbackControls(settings, key: key) } else { note("Loading…", indent: 12) }
-        }
-        if hello.features.contains(.service) {
-            if let service = session.store.service { loginControls(service, key: key, name: name) } else { note("Loading…", indent: 12) }
-        }
-        if let error = errors[key] { note(error, indent: 12, color: NSColor.systemRed) }
-    }
-
-    private func scrollbackControls(_ settings: DaemonSettings, key: MachineKey) {
-        // Scrollback: a number field and a stepper, within the daemon's limits.
-        let limits = settings.limits.scrollbackLines
-        let field = NSTextField(string: "\(settings.scrollbackLines)")
-        field.alignment = .right
-        field.formatter = Self.lineFormatter(limits)
-        field.widthAnchor.constraint(equalToConstant: s(80)).isActive = true
-        let stepper = NSStepper()
-        stepper.minValue = Double(limits.min)
-        stepper.maxValue = Double(limits.max)
-        stepper.increment = 1000
-        stepper.integerValue = settings.scrollbackLines
-        let apply = { [weak self] (value: Int) in self?.setScrollback(value, on: key) }
-        let fieldTarget = ClosureTarget { [weak stepper] sender in
-            guard let field = sender as? NSTextField else { return }
-            stepper?.integerValue = field.integerValue
-            apply(field.integerValue)
-        }
-        field.target = fieldTarget
-        field.action = #selector(ClosureTarget.fire(_:))
-        let stepperTarget = ClosureTarget { [weak field] sender in
-            guard let stepper = sender as? NSStepper else { return }
-            field?.integerValue = stepper.integerValue
-            apply(stepper.integerValue)
-        }
-        stepper.target = stepperTarget
-        stepper.action = #selector(ClosureTarget.fire(_:))
-        targets += [fieldTarget, stepperTarget]
-        let row = NSStackView(views: [NSTextField(labelWithString: "Scrollback:"), field, stepper,
-                                      NSTextField(labelWithString: "lines per pane")])
-        row.spacing = s(6)
-        add(row, indent: 12)
-        note("""
-        \(limits.min)–\(limits.max) lines (default \(limits.default)). About 3 MB of memory per 1000 lines for every pane \
-        whose history fills up. Applies to new panes and to panes without their own setting; lowering it drops \
-        their oldest lines at once. Saved in \(settings.config ?? "clothod's config file").
-        """, indent: 12)
-
-    }
-
-    /// Start at login: the toggle is whether the service is installed.
-    private func loginControls(_ service: DaemonService, key: MachineKey, name: String) {
-        let login = checkbox("Start clothod at login", on: service.installed) { [weak self] on in self?.setStartsAtLogin(on, on: key) }
-        // Turning it off always works; turning it on needs a service manager and nothing missing.
-        login.isEnabled = service.installed || (service.supported && service.needs.isEmpty)
-        if service.installed && !service.upToDate {
-            let refresh = ClosureButton(title: "Refresh") { [weak self] in self?.setStartsAtLogin(true, on: key) }
-            refresh.bezelStyle = .rounded
-            refresh.controlSize = .small
-            let row = NSStackView(views: [login, refresh])
-            row.spacing = s(8)
-            add(row, indent: 12)
-            note("The installed login item is from another clothod build; Refresh rewrites it.", indent: 12)
-        } else {
-            add(login, indent: 12)
-        }
-        var lines = ["Keeps \(name)'s workspaces running from login, before Clotho connects. Turning it off leaves clothod running."]
-        if service.installed, !service.loaded { lines.append("Installed, but \(service.manager ?? "the service manager") hasn't loaded it.") }
-        if let message = service.message { lines.append(message) }
-        note(lines.joined(separator: " "), indent: 12)
-    }
-
-    func setStartsAtLogin(_ on: Bool, on key: MachineKey) {
-        guard let store = app?.connections[key]?.store else { return }
-        log("settings: \(key) start at login → \(on)")
-        Task { @MainActor [weak self] in
-            do {
-                let result = try await store.setStartsAtLogin(on)
-                self?.errors[key] = nil
-                log("settings: \(key) service installed=\(result.installed) loaded=\(result.loaded)")
-            } catch {
-                let message = (error as? BackendError)?.message ?? error.localizedDescription
-                self?.errors[key] = on ? "Couldn't turn on start at login: \(message)" : "Couldn't turn off start at login: \(message)"
-                log("settings: \(key) service failed: \(error)")
-            }
-            self?.reload()
-        }
-    }
-
-    static func lineFormatter(_ limits: DaemonSettings.Range) -> NumberFormatter {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .none
-        formatter.allowsFloats = false
-        formatter.minimum = NSNumber(value: limits.min)
-        formatter.maximum = NSNumber(value: limits.max)
-        return formatter
-    }
-
-    // MARK: Applying
-
-    func setScrollback(_ lines: Int, on key: MachineKey) {
-        pendingScrollback[key]?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, let store = app?.connections[key]?.store, store.settings?.scrollbackLines != lines else { return }
-            log("settings: \(key) scrollback → \(lines)")
-            Task { @MainActor [weak self] in
-                do {
-                    let result = try await store.changeSettings(.init(scrollbackLines: lines))
-                    self?.errors[key] = nil
-                    log("settings: \(key) scrollback is \(result.scrollbackLines), applied to \(result.appliedPanes?.count ?? 0) panes")
-                } catch {
-                    self?.errors[key] = "Couldn't change the scrollback: \(error.localizedDescription)"
-                    log("settings: \(key) failed: \(error)")
-                }
-                self?.reload()
-            }
-        }
-        pendingScrollback[key] = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
-    }
-
-    // MARK: Pieces
-
-    /// Targets for closure-based controls live as long as the window's current contents.
-    private var targets: [ClosureTarget] = []
-
-    private func section(_ title: String) {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: s(15), weight: .bold)
-        add(label, spacingBefore: stack.arrangedSubviews.isEmpty ? 0 : 22)
-    }
-
-    private func note(_ text: String, indent: CGFloat = 0, color: NSColor = .secondaryLabelColor) {
-        if UserDefaults.standard.bool(forKey: "LogSettings") { log("settings window: \(text.prefix(140))") }
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: s(11))
-        label.textColor = color
-        label.preferredMaxLayoutWidth = 440
-        add(label, indent: indent)
-    }
-
-    private func checkbox(_ title: String, on: Bool, changed: @escaping (Bool) -> Void) -> NSButton {
-        let target = ClosureTarget { sender in changed((sender as? NSButton)?.state == .on) }
         targets.append(target)
-        let box = NSButton(checkboxWithTitle: title, target: target, action: #selector(ClosureTarget.fire(_:)))
-        box.state = on ? .on : .off
-        return box
+        control.target = target
+        control.action = #selector(ClosureTarget.fire(_:))
+        control.setAccessibilityLabel("Appearance")
+        appearanceControl = control
+        return formSection("Appearance", FormGroup([FormRow("Appearance", caption: "Terminals follow too", control: control)]))
     }
 
-    private func add(_ view: NSView, indent: CGFloat = 0, spacingBefore: CGFloat? = nil) {
-        if let spacingBefore, let last = stack.arrangedSubviews.last { stack.setCustomSpacing(spacingBefore, after: last) }
-        guard indent > 0 else { return stack.addArrangedSubview(view) }
-        let wrapper = NSView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: indent),
-            view.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor),
-            view.topAnchor.constraint(equalTo: wrapper.topAnchor),
-            view.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
-        ])
-        stack.addArrangedSubview(wrapper)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        targets.removeAll()
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+    private func updates(_ app: AppDelegate) -> NSView {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        let check = ClosureButton(title: "Check Now") { [weak app] in app?.checkForUpdates(nil) }
+        check.bezelStyle = .rounded
+        let automatic: FormRow
+        if let reason = app.updates.unavailableReason {
+            let off = toggle(false, "Check for updates automatically") { _ in }
+            off.isEnabled = false
+            check.isEnabled = false
+            automatic = FormRow("Check for updates automatically", caption: reason, control: off)
+        } else {
+            let on = toggle(app.updates.automaticallyChecks, "Check for updates automatically") { [weak app] on in
+                app?.updates.automaticallyChecks = on
+            }
+            updatesSwitch = on
+            automatic = FormRow("Check for updates automatically", caption: "Daily; asks before installing", control: on)
+        }
+        let current = FormRow("Clotho \(version)", caption: build.map { "Build \($0)" }, control: check)
+        return formSection("Updates", FormGroup([automatic, current]))
     }
 }
 
@@ -344,14 +215,22 @@ final class ClosureTarget: NSObject {
     @objc func fire(_ sender: Any?) { body(sender) }
 }
 
-/// The scroll view's document, top-aligned.
-private final class FlippedStackHost: NSView {
-    override var isFlipped: Bool { true }
-}
-
 extension AppDelegate {
-    @objc func showSettings(_ sender: Any?) {
+    /// ⌘, and the sidebar's Settings button: Settings on General.
+    @objc func showSettings(_ sender: Any?) { showSettings(tab: .general) }
+
+    /// Manage Machines… and the sidebar's Machines button: Settings on Machines.
+    @objc func showMachineManager(_ sender: Any?) { showSettings(tab: .machines) }
+
+    /// The sidebar's Machines and Settings buttons (and its machines' Manage Machines…) open Settings on
+    /// their tab.
+    func wireSettingsButtons(_ sidebar: SidebarView) {
+        sidebar.onManageMachines = { [weak self] in self?.showMachineManager(nil) }
+        sidebar.footer.onSettings = { [weak self] in self?.showSettings(nil) }
+    }
+
+    func showSettings(tab: SettingsTab) {
         if settingsWindow == nil { settingsWindow = SettingsWindowController(app: self) }
-        settingsWindow?.show()
+        settingsWindow?.show(tab)
     }
 }

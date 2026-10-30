@@ -1,4 +1,6 @@
 import AppKit
+import ClothoFake
+import ClothoKit
 import XCTest
 @testable import Clotho
 
@@ -61,4 +63,46 @@ final class MenuTargetTests: XCTestCase {
         // Nothing on the way validates it off: the app has no validator that disables it.
         if let validator = handler as? NSMenuItemValidation { XCTAssertTrue(validator.validateMenuItem(item)) }
     }
+
+    /// ⌘/ toggles the sidebar and ⌥⌘/ shows the shortcuts: real key events, as a US keyboard reports them
+    /// (⌥/ types ÷), through the focused terminal view and then the menu bar, as AppKit routes them.
+    func testCommandSlashTogglesTheSidebarAndOptionCommandSlashShowsShortcuts() async throws {
+        _ = NSApplication.shared
+        let menu = AppDelegate.makeMainMenu()
+        let recorder = KeyRecorder()
+        let watched = [#selector(AppDelegate.showOrHideSidebar(_:)), #selector(AppDelegate.showShortcuts(_:))]
+        for item in menu.items.compactMap(\.submenu).flatMap(\.items) where watched.contains(where: { $0 == item.action }) {
+            item.target = recorder
+        }
+        // A focused terminal, as in the app.
+        let backend = FakeBackend()
+        let store = ModelStore(backend: backend)
+        defer { store.stop() }
+        try await store.start()
+        let created = try await backend.createWorkspace(name: "One", spawn: SpawnOptions(command: ["/bin/sleep", "30"]))
+        let deadline = Date().addingTimeInterval(5)
+        while store.state.pane(created.pane) == nil, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        let host = PaneHostView(pane: try XCTUnwrap(store.state.pane(created.pane)), store: store, font: .monospacedSystemFont(ofSize: 12, weight: .regular))
+        host.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+
+        func press(_ modifiers: NSEvent.ModifierFlags, typing characters: String) throws -> [String] {
+            recorder.fired = []
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                                                       windowNumber: 0, context: nil, characters: characters,
+                                                       charactersIgnoringModifiers: "/", isARepeat: false, keyCode: 44))
+            // The window offers key equivalents to its views first; the terminal must let these through.
+            XCTAssertFalse(host.terminal.performKeyEquivalent(with: event), "the terminal kept \(modifiers) /")
+            _ = menu.performKeyEquivalent(with: event)
+            return recorder.fired
+        }
+        XCTAssertEqual(try press(.command, typing: "/"), ["sidebar"], "⌘/ toggles the sidebar")
+        XCTAssertEqual(try press([.command, .option], typing: "÷"), ["shortcuts"], "⌥⌘/ shows the shortcuts")
+    }
+}
+
+/// Records which of the two "/" actions a key press reached.
+final class KeyRecorder: NSObject {
+    var fired: [String] = []
+    @objc func showOrHideSidebar(_ sender: Any?) { fired.append("sidebar") }
+    @objc func showShortcuts(_ sender: Any?) { fired.append("shortcuts") }
 }

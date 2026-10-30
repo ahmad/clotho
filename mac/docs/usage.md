@@ -24,7 +24,7 @@ Machine: this Mac (remote machines come later)
 
 The sidebar lists the workspaces under this Mac's name, and each saved SSH machine below it with its own workspaces (see [Remote machines](#remote-machines)). Click one to switch to it. Each shows a dot for its most urgent agent; hover over it for **+**, a new tab in that workspace. Right-click a workspace for **New Tab**, **Rename Workspace** and **Close Workspace…**, or press **⇧⌘W** to close the current one. The tab bar shows the focused workspace's tabs; a workspace with none offers a **New Tab** button. **⌘/** hides or shows the sidebar.
 
-The bar at the bottom of the sidebar has three buttons: **Machines** (add, edit, remove and reorder machines), **Settings**, and light or dark. Clicking the last one switches between Light and Dark, whatever macOS uses; right-click it (or use **Settings → Appearance**) to match the system again. The terminals follow the choice.
+The bar at the bottom of the sidebar has three buttons: **Machines** (Settings › Machines), **Settings** (Settings › General), and light or dark. Clicking the last one switches between Light and Dark, whatever macOS uses; right-click it (or use **Settings → Appearance**) to match the system again. The terminals follow the choice.
 
 In a git repository, the focused pane shows a thin strip at its bottom with the repository, branch, worktree and pull request (pull requests need GitHub's `gh`, signed in). **⌘P** also finds tabs by branch, worktree or pull request number.
 
@@ -181,9 +181,16 @@ Right-click a machine's name for its menu:
 - **Check Connection** runs the SSH check again (machines that aren't connected).
 - **Edit…** changes its name or SSH target, and **Remove…** takes it off Clotho's list. Neither touches the machine or its shells.
 
+### Settings
+
+**⌘,** opens Settings, a window with two tabs:
+
+- **General**: which agent events notify you (waiting, finished, error), Appearance (System, Light or Dark; the terminals follow), and Updates (a daily automatic check, **Check Now**, and the version you run).
+- **Machines**: every saved machine, This Mac first, with its user@host, a status dot (connected, connecting, not connected, can't reach, or a hollow ring when it's off) and its on/off switch. **+** adds a machine and **−** removes the selected one; double-click a machine (or right-click it) to edit it, and drag to reorder the sidebar. Under the list are the selected machine's own settings: whether its agents show in the sidebar, ⌘P and notifications, how many lines of scrollback each pane keeps, and whether clothod starts at login. The last two live in that machine's clothod, so they need it connected, and every client sees the same values.
+
 ### Switch a machine off
 
-**Machines** at the bottom of the sidebar lists every saved machine, each with a switch (this Mac has none). Switching a machine off closes Clotho's connection to it at once and stops every reconnect attempt. It leaves the sidebar, the Agents list, **⌘P** and the file browser, and Clotho shows no notifications from it. Its clothod and shells keep running on the machine. The machine stays in the list, dimmed and marked **Off**, and switching it back on reconnects and shows its workspaces again. The setting is saved.
+**Settings › Machines** (the **Machines** button at the bottom of the sidebar) lists every saved machine, each with a status dot and a switch (this Mac has none). Switching a machine off closes Clotho's connection to it at once and stops every reconnect attempt. It leaves the sidebar, the Agents list, **⌘P** and the file browser, and Clotho shows no notifications from it. Its clothod and shells keep running on the machine. The machine stays in the list, dimmed and marked **Off**, and switching it back on reconnects and shows its workspaces again. The setting is saved.
 
 ### Updates
 

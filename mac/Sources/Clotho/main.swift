@@ -249,7 +249,8 @@ final class FramelessWindow: NSWindow {
 }
 
 // The close, minimize and full-screen buttons in the top-left corner, always shown. Like the standard
-// ones, their symbols appear while the pointer is over the group.
+// ones, their symbols appear while the pointer is over the group. Same size and left inset as a titled
+// window's (14 pt, 9 pt in, 20 pt apart on macOS 26), centred on the tab bar (WindowChromeTests).
 final class WindowButtons: NSView {
     private var buttons: [NSButton] = []
     private var hovering = false
@@ -304,10 +305,22 @@ final class WindowButtons: NSView {
 /// "Clotho Dev.app" (build-app.sh --dev) keeps its log and workspaces apart from the installed app.
 let isDevBuild = Bundle.main.object(forInfoDictionaryKey: "ClothoDevBuild") as? Bool == true
 
-// Appends a line to ~/Library/Logs/Clotho.log (Clotho Dev.log for the dev build) so problems can be diagnosed.
+/// Where `log` writes: ~/Library/Logs/Clotho.log (Clotho Dev.log for the dev build). Unit tests write to
+/// a file in the temp folder, so they never add lines to the installed app's log. A static, not a
+/// top-level `let`: main.swift's globals are set only when its top-level code runs, which tests never do.
+enum LogFile {
+    static let url: URL = {
+        if NSClassFromString("XCTestCase") != nil {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("clotho-tests.log")
+        }
+        let devBuild = Bundle.main.object(forInfoDictionaryKey: "ClothoDevBuild") as? Bool == true
+        return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/\(devBuild ? "Clotho Dev" : "Clotho").log")
+    }()
+}
+
+// Appends a line to the log (LogFile.url) so problems can be diagnosed.
 func log(_ message: String) {
-    let name = isDevBuild ? "Clotho Dev" : "Clotho"
-    let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/\(name).log")
+    let url = LogFile.url
     let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
     if let handle = try? FileHandle(forWritingTo: url) {
         handle.seekToEndOfFile()
@@ -339,7 +352,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var fileBrowser: FileBrowserOverlay?
     var keyMonitor: Any?
     var settingsWindow: SettingsWindowController?
-    var machineManager: MachineManagerController?
     var onboarding: OnboardingController?
     var agentHistoryWindows: [PaneKey: AgentHistoryWindowController] = [:]
     lazy var updates = Updates()
@@ -497,9 +509,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onCreateWorkspace = { [weak self] key in self?.createWorkspace(on: key) }
-        sidebar.onManageMachines = { [weak self] in self?.showMachineManager(nil) }
+        wireSettingsButtons(sidebar)
         sidebar.onReconnect = { [weak self] in self?.reconnect($0) }
-        sidebar.footer.onSettings = { [weak self] in self?.showSettings(nil) }
         sidebar.footer.onSetAppearance = { [weak self] in self?.setAppearance($0) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
         sidebar.onResolveAgent = { [weak self] machine, pane in self?.resolveAgent(machine: machine, pane: pane) }
@@ -603,7 +614,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             corner.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             corner.topAnchor.constraint(equalTo: sidebar.topAnchor),
             corner.widthAnchor.constraint(equalToConstant: WindowButtons.width),
-            corner.heightAnchor.constraint(equalToConstant: 28),
+            // Centred on the tab bar, as a titled window centres its buttons in its title bar.
+            corner.heightAnchor.constraint(equalTo: tabBar.heightAnchor),
         ])
         updateTabBarInset()
 
@@ -962,6 +974,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 // "machines" opens Manage Machines; "machineoff:name" / "machineon:name" flips its switch.
                 if step == "machines" { return showMachineManager(nil) }
+                // "settings:general" / "settings:machines" opens Settings on that tab; "settingsselect:name"
+                // selects that machine's row in Machines.
+                if step.hasPrefix("settings:"), let tab = SettingsTab(rawValue: String(step.dropFirst(9))) {
+                    return showSettings(tab: tab)
+                }
+                if step.hasPrefix("settingsselect:"), let machines = settingsWindow?.machines {
+                    let name = String(step.dropFirst(15))
+                    guard let row = machines.machines.firstIndex(where: { ($0.isLocal ? ComputerName.current : $0.label) == name }) else {
+                        return log("TypeText: no machine row \(name)")
+                    }
+                    return machines.table.selectRowIndexes([row], byExtendingSelection: false)
+                }
+                // "wincap:Title:/path.png" saves an image of the whole window with that title ("main" for the
+                // main window), title bar, toolbar and buttons included, drawn by the app itself (no Screen
+                // Recording permission needed).
+                if step.hasPrefix("wincap:") {
+                    let parts = step.dropFirst(7).split(separator: ":", maxSplits: 1).map(String.init)
+                    guard parts.count == 2, let target = NSApp.windows.first(where: {
+                        $0.isVisible && (parts[0] == "main" ? $0 === window : $0.title == parts[0])
+                    }), let frameView = target.contentView?.superview,
+                          let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds) else {
+                        return log("TypeText: no window for \(step)")
+                    }
+                    frameView.cacheDisplay(in: frameView.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: parts[1]))
+                    return log("wincap: \(parts[0]) → \(parts[1])")
+                }
+                // "windowids" logs every visible window's number and title, for `screencapture -l`.
+                if step == "windowids" {
+                    for other in NSApp.windows where other.isVisible {
+                        log("window id \(other.windowNumber) \(other === window ? "main" : other.title)")
+                    }
+                    return
+                }
                 if step.hasPrefix("machineoff:") || step.hasPrefix("machineon:") {
                     let on = step.hasPrefix("machineon:"), name = String(step.drop { $0 != ":" }.dropFirst())
                     guard let machine = Machine.all().first(where: { $0.label == name }) else { return log("TypeText: no machine \(name)") }
@@ -1178,11 +1224,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let modifiers = parts.reduce(into: NSEvent.ModifierFlags()) { $0.formUnion(flags[$1]!) }
         // As a keyboard reports it: Shift makes a letter its capital.
         let char = modifiers.contains(.shift) && key.char.count == 1 && key.char.first!.isLetter ? key.char.uppercased() : key.char
+        // ⌥ changes what a key types (⌥/ is ÷ on a US keyboard) but not charactersIgnoringModifiers.
+        let typed = modifiers.contains(.option) && key.char == "/" ? "÷" : char
         window.makeKey()
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
                                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                                               context: nil, characters: char, charactersIgnoringModifiers: char,
+                                               context: nil, characters: typed, charactersIgnoringModifiers: char,
                                                isARepeat: false, keyCode: key.code) else { continue }
             NSApp.postEvent(event, atStart: false)
         }
@@ -1438,6 +1486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// the app in the responder chain, so the menu item went to the window, greyed out (MenuTargetTests).
     @objc func showOrHideSidebar(_ sender: Any?) {
         let hide = sidebarWidth.constant > 0
+        log("sidebar: \(hide ? "hide" : "show") (\(Self.describeTrigger(sender)))")
         UserDefaults.standard.set(hide, forKey: "HideSidebar")
         // Tests and the onboarding pass nil and need the end state at once; the menu and its key animate.
         let animate = sender != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion

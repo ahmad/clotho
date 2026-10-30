@@ -190,6 +190,7 @@ extension AppDelegate {
 
     // Shows the shortcuts card over the terminal, inside this window; ⌥⌘/ again, Esc or a click outside hides it.
     @objc func showShortcuts(_ sender: Any?) {
+        log("shortcuts: \(shortcutsOverlay == nil ? "show" : "hide") (\(Self.describeTrigger(sender)))")
         if let shortcutsOverlay {
             shortcutsOverlay.dismiss()
             return
@@ -537,5 +538,18 @@ final class ShortcutsOverlay: NSView {
         field.font = NSFont.systemFont(ofSize: size, weight: weight)
         field.textColor = color
         return field
+    }
+}
+
+extension AppDelegate {
+    /// What invoked a menu action, for the log: the menu item and the key event behind it, if any.
+    static func describeTrigger(_ sender: Any?) -> String {
+        var parts: [String] = []
+        if let item = sender as? NSMenuItem { parts.append("item \"\(item.title)\"") }
+        if let event = NSApp.currentEvent, event.type == .keyDown {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            parts.append("key \(event.keyCode) \"\(event.charactersIgnoringModifiers ?? "")\"/\"\(event.characters ?? "")\" flags \(flags.rawValue)")
+        }
+        return parts.isEmpty ? "no event" : parts.joined(separator: ", ")
     }
 }

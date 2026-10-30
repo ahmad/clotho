@@ -22,9 +22,9 @@ final class UIScaleTests: XCTestCase {
     }
 
     func testPersistence() throws {
-        let suite = "clotho-uiscale-test-\(UUID().uuidString)"
+        let suite = TestDefaults.name("uiscale")
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestDefaults.remove(suite) }
         XCTAssertEqual(UIScale.load(defaults), 1, "100% until set")
         UIScale.save(1.3, defaults)
         XCTAssertEqual(UIScale.load(defaults), 1.3, accuracy: 0.0001)

@@ -8,13 +8,13 @@ final class MachineListTests: XCTestCase {
     private var saved: UserDefaults!
 
     override func setUp() {
-        suite = "clotho-machines-test-\(UUID().uuidString)"
+        suite = TestDefaults.name("machines")
         saved = Machine.store
         Machine.store = UserDefaults(suiteName: suite)!
     }
 
     override func tearDown() {
-        Machine.store.removePersistentDomain(forName: suite)
+        TestDefaults.remove(suite)
         Machine.store = saved
     }
 
@@ -56,10 +56,10 @@ final class MachineListTests: XCTestCase {
     /// Table rows count this Mac first; dropping above a row maps to a saved-machine index.
     func testDropRowToSavedIndex() {
         // Rows: 0 Mac, 1 a, 2 b, 3 c.
-        XCTAssertEqual(MachineManagerController.savedIndex(dropRow: 1, from: 3), 0, "c to the top")
-        XCTAssertEqual(MachineManagerController.savedIndex(dropRow: 4, from: 1), 2, "a to the end")
-        XCTAssertEqual(MachineManagerController.savedIndex(dropRow: 0, from: 2), 0, "never above this Mac")
-        XCTAssertEqual(MachineManagerController.savedIndex(dropRow: 3, from: 1), 1, "a below b")
+        XCTAssertEqual(MachinesSettingsController.savedIndex(dropRow: 1, from: 3), 0, "c to the top")
+        XCTAssertEqual(MachinesSettingsController.savedIndex(dropRow: 4, from: 1), 2, "a to the end")
+        XCTAssertEqual(MachinesSettingsController.savedIndex(dropRow: 0, from: 2), 0, "never above this Mac")
+        XCTAssertEqual(MachinesSettingsController.savedIndex(dropRow: 3, from: 1), 1, "a below b")
     }
 }
 

@@ -214,3 +214,12 @@ final class ClosureMenuItem: NSMenuItem {
 
     @objc private func run() { handler() }
 }
+
+extension AppDelegate {
+    /// The sidebar's Create Workspace: on a connected machine at once; on another, it connects first.
+    func createWorkspace(on key: MachineKey) {
+        if key == Self.localKey || connections[key] != nil { return newWorkspace(on: key) }
+        guard let machine = remoteMachines.first(where: { $0.key == key }) else { return }
+        connect(machine, startWorkspace: true)
+    }
+}

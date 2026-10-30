@@ -13,7 +13,7 @@ final class FileBrowserTests: XCTestCase {
 
     override func setUp() {
         _ = NSApplication.shared
-        suite = "clotho-files-test-\(UUID().uuidString)"
+        suite = TestDefaults.name("files")
         savedSort = FileSort.store
         savedMachines = Machine.store
         FileSort.store = UserDefaults(suiteName: suite)!
@@ -21,7 +21,7 @@ final class FileBrowserTests: XCTestCase {
     }
 
     override func tearDown() {
-        FileSort.store.removePersistentDomain(forName: suite)
+        TestDefaults.remove(suite)
         FileSort.store = savedSort
         Machine.store = savedMachines
     }
@@ -177,13 +177,13 @@ final class MachineSwitchTests: XCTestCase {
     private var saved: UserDefaults!
 
     override func setUp() {
-        suite = "clotho-switch-test-\(UUID().uuidString)"
+        suite = TestDefaults.name("switch")
         saved = Machine.store
         Machine.store = UserDefaults(suiteName: suite)!
     }
 
     override func tearDown() {
-        Machine.store.removePersistentDomain(forName: suite)
+        TestDefaults.remove(suite)
         Machine.store = saved
     }
 
@@ -211,8 +211,8 @@ final class MachineSwitchTests: XCTestCase {
         XCTAssertTrue(app.remoteMachines.isEmpty, "not in the sidebar, Agents, ⌘P or the file browser's menu")
         app.connect(try XCTUnwrap(Machine.all().last))
         XCTAssertNil(app.connections[imac.key], "switched off: no connection, no ssh")
-        XCTAssertEqual(MachineManagerController.detail(for: Machine.all().last!), "Off · nobody@imac.invalid")
-        XCTAssertEqual(MachineManagerController.detail(for: imac), "nobody@imac.invalid")
+        XCTAssertEqual(MachinesSettingsController.detail(for: Machine.all().last!), "nobody@imac.invalid")
+        XCTAssertFalse(Machine.all().last!.isEnabled, "listed in Settings › Machines as Off")
         XCTAssertFalse(Machine.local.isEditable, "this Mac has no switch")
     }
 

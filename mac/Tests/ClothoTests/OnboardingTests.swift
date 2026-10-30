@@ -40,9 +40,9 @@ final class SSHDiagnosisTests: XCTestCase {
     }
 
     func testFirstRun() {
-        let suite = "clotho-onboarding-test-\(UUID().uuidString)"
+        let suite = TestDefaults.name("onboarding")
         let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { TestDefaults.remove(suite) }
         XCTAssertTrue(OnboardingController.isFirstRun(defaults))
         defaults.set("local", forKey: "FocusedMachine")
         XCTAssertFalse(OnboardingController.isFirstRun(defaults))

@@ -18,7 +18,7 @@ final class AgentHistoryWindowController: NSWindowController, NSWindowDelegate, 
         self.app = app
         self.key = key
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
-                            styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
+                            styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         panel.title = title
         panel.minSize = NSSize(width: 420, height: 240)
         panel.isFloatingPanel = false
