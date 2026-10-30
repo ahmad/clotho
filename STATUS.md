@@ -1,11 +1,14 @@
-# Status and handoff (2026-10-29, updated after Mac 1.0.9 and clothod 0.1.25)
+# Status and handoff (2026-10-30, after Mac 1.0.13, clothod 0.1.27, iOS 202610301954)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.25** runs on devbox, macbook and imac, upgraded in place. 0.1.25: agents survive a
+- **clothod 0.1.27** runs on devbox, macbook and imac, upgraded in place (holders 1799611, 9573, 5702 kept).
+  0.1.27: client safety (shutdown --forget only deletes the target's own layout; ps shows the real runtime
+  dir or "?"; stop/shutdown/status wait at most 15 s). 0.1.26: pane.move and tab.join (⌘↩ open beside). First
+  releases built on imac. 0.1.25: agents survive a
   reboot (agent kept 10 s after it leaves a live shell), detected Claude sessions from
   ~/.claude/sessions/<pid>.json, and `continued` restores when unambiguous. Proven on imac's unplanned
   reboot 2026-10-30 09:18: 4 panes, 3 Claude sessions resumed. 0.1.24: on macOS, serve and
@@ -26,7 +29,10 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.9, build 202610301400 (5c8f5a8, with clothod 0.1.25): machine
+- **The Mac app is public:** Clotho 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on imac):
+  ⌘P ">" commands, ⌘↩ open beside, Move Tab picker, title-row sidebar toggle, "New Tab (⌘T)" buttons,
+  Agents panel switch, sidebar slides instead of squashing (crash fix). 1.0.12 ⌘P tree; 1.0.11 one
+  Settings window (General, Machines); 1.0.10 Toggle Sidebar on macOS 26. 1.0.9 machine
   on/off switch, file browser sort/filter/any-to-any copy, SIGPIPE fix. 1.0.8 continued restores and
   polish; 1.0.7 git info only in the pane strip, ⌘/ sidebar, bottom bar, pane ×, empty workspace,
   Reconnect after 3 tries. 1.0.6 a "Restart Shells…" notice when a machine's shells run outside the login session. 1.0.5 git
@@ -43,7 +49,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
   - The site deploys ONLY from the CLI (vercel.json git.deploymentEnabled=false). The zips are
     gitignored, so a git-built deploy 404s every download; that broke the first 1.0.1 update.
   - UPDATES_LIVE=true (93b3da6): every non-dev build checks the feed.
-- **iOS:** TestFlight build 202610301224 (Reconnect, git strip, restored note; with 0.1.25). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
+- **iOS:** TestFlight build 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on imac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
   one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
   failed; iPad passed.
@@ -55,7 +61,8 @@ rule. This file has where things stand. The orchestrator keeps it current.
   Live Activity.
 - **TestFlight:** the orchestrator uploads with scripts/testflight-remote. The key ids are in
   ~/.config/clotho/asc.env on devbox.
-- **The Mac's disk:** about 27 GiB free (it dipped to ~12 GiB during 0.1.24; one dip was approved). test-all, dist, build.sh test and testflight-remote all
+- **Build host: imac.** Everything builds, tests, signs and uploads on imac via `scripts/clotho-build <role>` (per-role mirrors; see CLAUDE.md). macbook is a fallback only.
+- **The Mac's disk:** about 25 GiB free (it dipped to ~12 GiB during 0.1.24; one dip was approved). test-all, dist, build.sh test and testflight-remote all
   clean up after themselves.
 
 ## Waiting on the user
