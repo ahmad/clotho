@@ -93,8 +93,8 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Bigger Terminal Text", key: "=", modifiers: [.command, .option], action: #selector(terminalZoomIn(_:))),
             Shortcut(menu: "View", title: "Smaller Terminal Text", key: "-", modifiers: [.command, .option], action: #selector(terminalZoomOut(_:))),
             Shortcut(menu: "View", title: "Actual Terminal Text Size", key: "0", modifiers: [.command, .option], action: #selector(terminalActualSize(_:))),
-            Shortcut(menu: "View", title: "Toggle Sidebar", key: "/", action: #selector(toggleSidebar(_:))),
-            Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(toggleSidebar(_:)),
+            Shortcut(menu: "View", title: "Toggle Sidebar", key: "/", action: #selector(showOrHideSidebar(_:))),
+            Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(showOrHideSidebar(_:)),
                      hiddenInMenu: true, listed: false),
             Shortcut(menu: "View", title: "Move Focus to Sidebar", key: "s", modifiers: [.command, .option], action: #selector(focusSidebar(_:))),
 
@@ -226,7 +226,7 @@ extension AppDelegate {
         let options = spawnOptions()
         let machine = focusedMachine
         sidebar.expand(machine)
-        if sidebarWidth.constant == 0 { toggleSidebar(nil) }
+        if sidebarWidth.constant == 0 { showOrHideSidebar(nil) }
         run { [weak self] backend in
             let created = try await backend.createWorkspace(name: name, spawn: options)
             self?.sidebar.renameWhenListed(machine, created.workspace)

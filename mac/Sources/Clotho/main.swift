@@ -1000,6 +1000,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                     return
                 }
+                // "menutarget:Title" logs who a menu bar item's action reaches from the focused view, the way
+                // AppKit looks (view, superviews, window, its delegate, the app, the app's delegate), and
+                // whether that responder enables it.
+                if step.hasPrefix("menutarget:") {
+                    let title = String(step.dropFirst(11))
+                    let items = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items) ?? []
+                    guard let item = items.first(where: { $0.title == title && !$0.isHidden }), let action = item.action else {
+                        return log("menutarget: no item \(title)")
+                    }
+                    var chain: [AnyObject] = []
+                    var responder: NSResponder? = window.firstResponder
+                    while let current = responder { chain.append(current); responder = current.nextResponder }
+                    if let delegate = window.delegate { chain.append(delegate) }
+                    chain += [NSApp, self]
+                    guard let handler = chain.first(where: { $0.responds(to: action) }) else { return log("menutarget: \(title) reaches nothing") }
+                    let enabled = (handler as? NSMenuItemValidation)?.validateMenuItem(item) ?? true
+                    return log("menutarget: \(title) (\(NSStringFromSelector(action))) from \(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil") → \(type(of: handler)), enabled \(enabled)")
+                }
                 // "windowid" logs the main window's number, for `screencapture -l`.
                 if step == "windowid" { return log("window id \(window.windowNumber)") }
                 if step == "wait" { return }
@@ -1410,13 +1428,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// View ▸ Move Focus to Sidebar: the arrow keys walk the workspace and tab rows (see SidebarView.keyDown).
     @objc func focusSidebar(_ sender: Any?) {
-        if sidebarWidth.constant == 0 { toggleSidebar(nil) }
+        if sidebarWidth.constant == 0 { showOrHideSidebar(nil) }
         sidebar.takeKeyboard()
     }
 
 
-    /// View ▸ Toggle Sidebar (⌘/): slides the sidebar out or back in, and remembers which.
-    @objc func toggleSidebar(_ sender: Any?) {
+    /// View ▸ Toggle Sidebar (⌘/): slides the sidebar out or back in, and remembers which. Not named
+    /// toggleSidebar(_:): macOS 26's NSWindow implements that (for split view sidebars) and comes before
+    /// the app in the responder chain, so the menu item went to the window, greyed out (MenuTargetTests).
+    @objc func showOrHideSidebar(_ sender: Any?) {
         let hide = sidebarWidth.constant > 0
         UserDefaults.standard.set(hide, forKey: "HideSidebar")
         // Tests and the onboarding pass nil and need the end state at once; the menu and its key animate.
