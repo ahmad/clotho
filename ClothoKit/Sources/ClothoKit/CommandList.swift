@@ -127,15 +127,33 @@ public enum CommandList {
         return items
     }
 
-    /// The commands matching `query` (what follows ">"), best first, by ClothoKit's FuzzyMatch over the
-    /// title and keywords; all of them, in order, for an empty query.
+    /// The commands matching `query` (what follows ">"): every word typed must start a word of the title
+    /// or the keywords ("cla" finds Claude Here, "new tab" New Tab, "ren" Rename…), case and accents
+    /// aside; scattered letters don't count. Commands whose words all start title words come first, then
+    /// by how many matched only in keywords; the list's own order breaks ties. Empty: all of them, in
+    /// order.
     public static func matching(_ items: [CommandListItem], query: String) -> [CommandListItem] {
-        let query = query.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return items }
-        let byID = Dictionary(items.map { ($0.id.rawValue, $0) }, uniquingKeysWith: { first, _ in first })
-        let ranked = QuickOpen.rank(items.map { QuickOpenItem(kind: .agent, title: $0.title, subtitle: $0.keywords.joined(separator: " "), id: $0.id.rawValue) },
-                                    query: query, limit: items.count)
-        return ranked.compactMap { byID[$0.item.id] }
+        let needles = words(query)
+        guard !needles.isEmpty else { return items }
+        let ranked: [(item: CommandListItem, keywordOnly: Int, order: Int)] = items.enumerated().compactMap { order, item in
+            let title = words(item.title), keywords = item.keywords.flatMap(words)
+            var keywordOnly = 0
+            for needle in needles {
+                if title.contains(where: { $0.hasPrefix(needle) }) { continue }
+                guard keywords.contains(where: { $0.hasPrefix(needle) }) else { return nil }
+                keywordOnly += 1
+            }
+            return (item, keywordOnly, order)
+        }
+        return ranked.sorted { ($0.keywordOnly, $0.order) < ($1.keywordOnly, $1.order) }.map(\.item)
+    }
+
+    /// Lowercased words without accents, split at anything that isn't a letter or digit ("Tab “zsh”"
+    /// gives "tab", "zsh").
+    static func words(_ text: String) -> [String] {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
     }
 
     /// Text after the command prefix (">"), or nil when the query isn't a command.

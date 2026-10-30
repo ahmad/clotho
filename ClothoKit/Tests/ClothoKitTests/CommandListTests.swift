@@ -55,4 +55,23 @@ final class CommandListTests: XCTestCase {
         XCTAssertEqual(CommandList.commandQuery("  > new"), " new")
         XCTAssertNil(CommandList.commandQuery("api"))
     }
+
+    /// Words, not scattered letters: ">rename" finds Rename only, not "New Workspace on Local Mac (dev)",
+    /// whose letters r-e-n-a-m-e appear in order across it.
+    func testMatchesWordPrefixesNotScatteredLetters() {
+        let items = CommandList.items(for: CommandContext(machine: "local", machineName: "Local Mac (dev)", workspace: 1, workspaceName: "api",
+                                                          tab: 1, tabName: "zsh"))
+        XCTAssertEqual(CommandList.matching(items, query: "rename").map(\.id), [.rename])
+        XCTAssertEqual(CommandList.matching(items, query: "ren").map(\.id), [.rename])
+        XCTAssertEqual(CommandList.matching(items, query: "cla").map(\.id), [.claudeHere, .resumeClaude], "Claude in the title; Close doesn't start with cla")
+        XCTAssertEqual(CommandList.matching(items, query: "new tab").first?.id, .newTab)
+        XCTAssertFalse(CommandList.matching(items, query: "new tab").contains { $0.id == .newWorkspace }, "every word has to match")
+        XCTAssertEqual(CommandList.matching(items, query: "ZSH").first?.id, .rename, "case aside, inside quotes")
+        // Title words lead keyword-only matches; the list order breaks ties.
+        let ai = CommandList.matching(items, query: "agent").map(\.id)
+        XCTAssertEqual(ai, [.claudeHere, .codexHere, .resumeClaude], "all through keywords, in list order")
+        let theme = CommandList.matching(items, query: "appearance").map(\.id)
+        XCTAssertEqual(theme, [.appearanceSystem, .appearanceLight, .appearanceDark])
+        XCTAssertTrue(CommandList.matching(items, query: "xyz").isEmpty)
+    }
 }
