@@ -502,3 +502,16 @@ clothod release, app install or TestFlight upload still needs the user's go when
 
 - One Settings window with two toolbar tabs, General and Machines; the separate Machines window goes. The sidebar's Machines and Settings buttons open the matching tab. "Make it feel premium": grouped form sections, no scrolling, compact captions.
 - The window buttons (close, minimize, zoom) are the same size and placement in every Clotho window.
+
+## ⌘P as a tree (user, 2026-10-30)
+
+Navigation (phase 1, Mac 1.0.12):
+- Empty ⌘P shows this machine only: the current workspace expanded to its tabs, then this machine's other workspaces collapsed (no tabs). Above them, a pinned "Needs you" section lists agents waiting or erroring on any machine; Return jumps to the pane.
+- With nothing typed: → expands the selected workspace (to its tabs) or machine (to its workspaces); ← collapses, and from a workspace level goes up to the machine list (every enabled machine, with status). Return on a workspace opens its last active tab; Return on a machine expands it.
+- ↑/↓ preview tabs live as today; workspace and machine rows only highlight. Esc goes back to where you were.
+- Typing searches everything, flat, as today, with a dim "machine › workspace" path on each result; clearing the text returns to the tree where you were. While typing, ←/→ edit text; Tab expands the selected row, ⇧Tab goes up.
+- Row keys: ⌘⌫ closes the selected tab or workspace (usual confirmation); ⌘↩ opens the selected tab beside the current pane; ⌥↩ opens a new tab in the selected workspace or machine; ⌘1–⌘9 still jump to rows.
+
+Commands (phase 2, typed after ">"): new tab / new workspace on any machine, close tab / workspace, split right / down; "Claude here", "Codex here" and "Resume last Claude in this folder"; rename the selected tab or workspace inline; move a tab to another workspace (pick the target in the same tree); open Files, Settings, Machines; toggle the sidebar; switch appearance; turn a machine on or off; reconnect.
+
+The iPhone and iPad get the same model after the Mac ships.
