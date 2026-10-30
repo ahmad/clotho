@@ -1,0 +1,8 @@
+# One rustc for every machine that builds clothod (devbox, the build Mac, any other Mac), so a
+# release doesn't depend on which Mac last ran `rustup update`. Bump it on purpose, in its own
+# commit: release sizes and ids change with it.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]

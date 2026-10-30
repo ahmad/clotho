@@ -7,15 +7,23 @@
 #   3. remote: the SSH suite against $REMOTE_HOSTS (a dev dist, not dist/)
 #   4. cleanliness: no test instance or /tmp/clt* dir left on any of those machines
 #
+# Runs on the build Mac (imac: `CLOTHO_MAC=macbook@imac clotho-mac clothod/scripts/test-all.sh`).
+# The remote suite's other Mac is macbook, a laptop that sleeps: hosts in $OPTIONAL_HOSTS that
+# don't answer ssh are skipped (said so in the summary) instead of failing the run. Never list
+# the build Mac itself as a remote: it has no ssh to itself.
+#
 # Tests only ever use ephemeral instances in /tmp/clt* dirs; they never touch the default
 # (the user's) instance.
 set -u
 cd "$(dirname "$0")/.."
+. scripts/toolchain.sh
 
 LINUX_HOST=${LINUX_HOST:-ahmad@devbox}
-REMOTE_HOSTS=${REMOTE_HOSTS:-"ahmad@devbox macbook@imac"}
+REMOTE_HOSTS=${REMOTE_HOSTS:-"ahmad@devbox ahmad@macbook"}
+OPTIONAL_HOSTS=${OPTIONAL_HOSTS:-"ahmad@macbook"}
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 failed=""
+skipped=""
 step() { printf '\n=== %s\n' "$*"; }
 fail() { failed="$failed\n  - $*"; printf 'FAILED: %s\n' "$*"; }
 
@@ -57,8 +65,15 @@ CLOTHOD_KEEP_BUILD=1 DIST_DIR=target/dist-dev ./scripts/dist.sh --dev > target/t
 for h in $REMOTE_HOSTS; do
     step "remote: $h"
     [ $dist_ok = 1 ] || { fail "remote suite on $h: not run (no dev dist)"; continue; }
-    # Unreachable hosts must fail here, not depend on how the suite reports it.
-    $SSH "$h" true || { fail "remote suite: can't reach $h over ssh"; continue; }
+    # Unreachable hosts must fail here, not depend on how the suite reports it; optional ones
+    # (a sleeping laptop) are skipped, and named in the summary.
+    if ! $SSH "$h" true; then
+        case " $OPTIONAL_HOSTS " in
+        *" $h "*) echo "$h skipped (unreachable)"; skipped="$skipped\n  - $h skipped (unreachable)" ;;
+        *) fail "remote suite: can't reach $h over ssh" ;;
+        esac
+        continue
+    fi
     log="target/test-all-remote-$(echo "$h" | tr '@' '_').log"
     CLOTHO_DIST=$PWD/target/dist-dev CLOTHO_TEST_SSH_HOST=$h cargo test -p clotho --test remote > "$log" 2>&1
     grep -E "^test result|panicked" "$log"
@@ -82,6 +97,8 @@ else
 fi
 for h in $LINUX_HOST $REMOTE_HOSTS; do
     case " $checked " in *" $h "*) continue ;; esac
+    # A skipped host ran nothing, so there is nothing of ours to check.
+    case "$skipped" in *" $h skipped"*) echo "$h: skipped (unreachable)"; continue ;; esac
     checked="$checked $h"
     # The marker proves the remote commands ran; ssh failing leaves it out.
     out=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test; ls /run/user/$(id -u)/systemd/user 2>/dev/null | grep clt-test; echo CLOTHO-CHECKED')
@@ -93,6 +110,7 @@ for h in $LINUX_HOST $REMOTE_HOSTS; do
     [ -n "$left" ] && { echo "$left"; fail "leftovers on $h"; } || echo "$h: clean"
 done
 
+[ -n "$skipped" ] && printf '\nSKIPPED:%b\n' "$skipped"
 if [ -n "$failed" ]; then
     printf '\nFAILED:%b\n' "$failed"
     exit 1

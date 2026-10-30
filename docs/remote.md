@@ -37,6 +37,33 @@ handshake. Run the remote commands with no PTY (`ssh -T`, or an exec channel wit
 `clothod build-id [FILE]` computes it. A build is installed when `<base>/<id>/clothod` exists.
 Bundle the whole `dist/` directory.
 
+### Build hosts
+
+Releases and `test-all.sh` run on imac (`macbook@imac`, always on), through
+`CLOTHO_MAC=macbook@imac clotho-mac <cmd>`, which mirrors the clone into `~/Builds/clotho-clothod`.
+The toolchain lives in the `macbook` account only. Nothing is installed system-wide, and no
+dotfile was edited:
+
+- rustup in `~/.cargo` and `~/.rustup` (minimal profile, installed with `--no-modify-path`).
+  `clothod/rust-toolchain.toml` pins the rustc that every machine builds with, and its four
+  targets. rustup installs that version on first use.
+- zig from ziglang.org, checked against the published sha256, in
+  `~/.local/share/zig/<release>`, with `~/.local/share/zig/current` linked to it.
+- `cargo-zigbuild` in `~/.cargo/bin` (`cargo install --locked`).
+
+A non-interactive `zsh -lc` reads no profile there, so `dist.sh` and `test-all.sh` source
+`scripts/toolchain.sh`, which puts those dirs on `PATH`.
+
+Signing: when `~/Library/Keychains/clotho-build.keychain-db` and
+`~/.config/clotho/build-keychain-pw` both exist, `dist.sh` unlocks that keychain and signs from it
+with `codesign --keychain`. Otherwise, as on macbook, it uses the login keychain, which the caller
+unlocks.
+
+In `test-all.sh`, devbox is the Linux host, and the remote suite runs against `ahmad@devbox` and
+`ahmad@macbook`. macbook is a laptop: when it doesn't answer ssh, its remote run is skipped and
+the summary says so. Every other unreachable host is a failure. The build Mac never tests
+against itself.
+
 ## 1. Probe
 
 Run this script with `sh -s` (script on stdin) or `sh -c '<script>'`. It only reads, apart from a

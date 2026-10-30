@@ -15,6 +15,7 @@
 # manifest and every installed daemon's id. Unset, they keep the linker's ad-hoc signature.
 set -eu
 cd "$(dirname "$0")/.."
+. scripts/toolchain.sh
 
 # Releases (what reaches the user's machines) need a version newer than the last release: the
 # apps only offer upgrades to a higher version, since two builds of one version can't be
@@ -79,8 +80,18 @@ host=target/release/clothod
 cargo build --release --bin clothod
 
 sign=${CLOTHOD_SIGN_IDENTITY:-}
+keychain=""
 if [ -n "$sign" ]; then
     command -v codesign >/dev/null || { echo "dist: CLOTHOD_SIGN_IDENTITY needs codesign (a Mac)" >&2; exit 1; }
+    # A build Mac with a dedicated build keychain (imac) signs from it: unlocked here, since over
+    # SSH it is locked, and named to codesign so only it is searched. Without one (macbook), the
+    # login keychain, unlocked by the caller.
+    kc="$HOME/Library/Keychains/clotho-build.keychain-db"
+    kcpw="$HOME/.config/clotho/build-keychain-pw"
+    if [ -f "$kc" ] && [ -f "$kcpw" ]; then
+        security unlock-keychain -p "$(cat "$kcpw")" "$kc" || { echo "dist: can't unlock $kc" >&2; exit 1; }
+        keychain=$kc
+    fi
 fi
 
 # Built into $out.new and swapped in only when complete: a failed run (a build, signing) leaves
@@ -99,10 +110,16 @@ mkdir -p "$out"
         cp "target/$t/release/clothod" "$out/$name/clothod"
         case $name in macos-*)
             if [ -n "$sign" ]; then
-                codesign --force --options runtime --timestamp --sign "$sign" "$out/$name/clothod" >&2
+                codesign --force --options runtime --timestamp --sign "$sign" ${keychain:+--keychain "$keychain"} "$out/$name/clothod" >&2
                 codesign --verify --strict --verbose=1 "$out/$name/clothod" >&2
-                # It must still start under the hardened runtime (x86_64 through Rosetta).
-                "$out/$name/clothod" version >&2
+                # It must still start under the hardened runtime (x86_64 through Rosetta). A
+                # build Mac without Rosetta (imac) can't run the x86_64 one: said loudly, so it's
+                # run on a Mac that can before the release goes out.
+                if [ "$name" = macos-x86_64 ] && [ "$(uname -m)" = arm64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+                    echo "dist: NOT RUN: $name version (no Rosetta here); run it on another Mac before shipping" >&2
+                else
+                    "$out/$name/clothod" version >&2
+                fi
             fi
         esac
         id=$("$host" build-id "$out/$name/clothod")
