@@ -113,7 +113,7 @@ final class FileBrowserTests: XCTestCase {
     /// devbox → imac: read from one machine's files and write to the other's, through this Mac, with
     /// progress; neither side is this Mac.
     func testRemoteToRemoteCopyStreamsThroughTheApp() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("clt-files-\(UUID().uuidString)")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cmac-files-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         let from = root.appendingPathComponent("devbox"), to = root.appendingPathComponent("imac")
         try FileManager.default.createDirectory(at: from.appendingPathComponent("dir"), withIntermediateDirectories: true)
@@ -154,7 +154,7 @@ final class FileBrowserTests: XCTestCase {
         let manager = TransferManager()
         manager.files = { _ in LocalFileBackend() }
         let finished = expectation(description: "ended")
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("clt-files-\(UUID().uuidString)")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cmac-files-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("out"), withIntermediateDirectories: true)
         let source = root.appendingPathComponent("big.bin")
@@ -222,7 +222,7 @@ final class MachineSwitchTests: XCTestCase {
         let imac = Machine.add(label: "imac", target: "nobody@imac.invalid"), big = Machine.add(label: "devbox", target: "nobody@big.invalid")
         let manager = TransferManager()
         manager.files = { _ in LocalFileBackend() }
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("clt-switch-\(UUID().uuidString)")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("cmac-switch-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         for dir in ["a", "b"] {
             try FileManager.default.createDirectory(at: root.appendingPathComponent(dir), withIntermediateDirectories: true)

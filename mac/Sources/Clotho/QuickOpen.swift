@@ -31,6 +31,8 @@ struct CommandBarEntry {
     var panes = 1
     /// Where it is, shown dim: "machine › workspace" (nil shows the subtitle).
     var path: String? = nil
+    /// An icon in place of the kind's (commands).
+    var symbol: String? = nil
 }
 
 extension CommandTree.Node {
@@ -138,6 +140,21 @@ extension AppDelegate {
             self?.quickOpen?.dismiss()
         }
         overlay.onClose = { [weak self] entry in self?.commandBarClose(entry) }
+        // "Beside the current pane" means the one focused when ⌘P opened, not a tab it previewed since.
+        let origin = (machine: focusedMachine, pane: store.focusedPane?.id, tab: store.focusedTab?.id)
+        overlay.commandContext = { [weak self] node in self?.commandBarContext(node, origin: origin) ?? CommandContext() }
+        overlay.onCommand = { [weak self] item, subject, target in
+            originalAction?()
+            self?.quickOpen?.dismiss()
+            self?.commandBarRun(item, subject: subject, target: target, origin: origin)
+        }
+        overlay.onOpenBeside = { [weak self] entry in
+            guard let self, let node = CommandTree.Node(entryID: entry.item.id),
+                  commandBarContext(node, origin: origin).canOpenBeside else { return NSSound.beep() }
+            originalAction?()
+            quickOpen?.dismiss()
+            commandBarRun(CommandListItem(id: .openBeside, title: "", keywords: []), subject: node, target: nil, origin: origin)
+        }
         overlay.onNewTab = { [weak self] entry in
             self?.commandBarNewTab(entry)
             self?.quickOpen?.dismiss()
@@ -162,6 +179,128 @@ extension AppDelegate {
         ])
         quickOpen = overlay
         overlay.focusField()
+    }
+
+    /// The selected row's machine, workspace and tab, for the ">" commands.
+    func commandBarContext(_ node: CommandTree.Node?, origin: (machine: MachineKey, pane: PaneID?, tab: TabID?)) -> CommandContext {
+        let key = node?.machine ?? focusedMachine
+        let machine = ([Machine.local] + Machine.all().filter { !$0.isLocal }).first { $0.key == key }
+        let session = connections[key]
+        let state = session?.store.state
+        var context = CommandContext(machine: key, machineName: machine.map { $0.isLocal ? ComputerName.current : $0.label },
+                                     connected: session?.store.isConnected == true, enabled: machine?.isEnabled ?? true,
+                                     isLocal: key == Self.localKey,
+                                     unreachable: session?.store.retryPaused == true || machine?.id.flatMap { machineStatus[$0] }.map { if case .unreachable = $0 { true } else { false } } == true)
+        let (workspace, tab) = commandBarPlace(node)
+        if let workspace, let found = state?.workspaces.first(where: { $0.id == workspace }) {
+            context.workspace = workspace
+            context.workspaceName = found.name
+            if let tab, let found = found.tabs.first(where: { $0.id == tab }), let store = session?.store {
+                context.tab = tab
+                context.tabName = store.displayTitle(of: found)
+                context.canOpenBeside = key == origin.machine && origin.pane != nil && tab != origin.tab
+                    && store.hello?.features.contains(.paneMove) == true
+            }
+        }
+        return context
+    }
+
+    /// A row's workspace and tab: a tab's own, an agent's, a workspace's (no tab); a machine's focused
+    /// workspace.
+    func commandBarPlace(_ node: CommandTree.Node?) -> (workspace: WorkspaceID?, tab: TabID?) {
+        guard let node, let store = connections[node.machine]?.store else { return (nil, nil) }
+        switch node {
+        case let .tab(_, id): return (store.state.workspaces.first { $0.tabs.contains { $0.id == id } }?.id, id)
+        case let .workspace(_, id): return (id, nil)
+        case let .agent(_, pane):
+            let workspace = store.state.workspaces.first { $0.tabs.contains { $0.layout.panes.contains(pane) } }
+            return (workspace?.id, workspace?.tabs.first { $0.layout.panes.contains(pane) }?.id)
+        case .machine: return (store.focusedWorkspace?.id, nil)
+        }
+    }
+
+    /// Runs a ">" command (or ⌘↩) for the selected row; `target` is the workspace picked for Move Tab.
+    func commandBarRun(_ item: CommandListItem, subject: CommandTree.Node?, target: CommandTree.Node?,
+                       origin: (machine: MachineKey, pane: PaneID?, tab: TabID?)) {
+        let key = subject?.machine ?? focusedMachine
+        let store = connections[key]?.store
+        let (workspace, tab) = commandBarPlace(subject)
+        let machine = Machine.all().first { $0.key == key }
+        log("command bar: run \(item.id.rawValue) on \(subject.map { "\($0)" } ?? "nothing")")
+        switch item.id {
+        case .newTab:
+            if let workspace { newTab(in: workspace, on: key) } else { newWorkspace(on: key) }
+        case .newWorkspace:
+            newWorkspace(on: key)
+        case .closeTab:
+            if let tab { closeTab(tab, on: key) }
+        case .closeWorkspace:
+            if let workspace { closeWorkspace(workspace, on: key) }
+        case .splitRight, .splitDown:
+            guard let tab else { return }
+            focusNow(.tab(tab), on: key, trace: "command bar")
+            if let pane = self.store.focusedPane { split(pane, item.id == .splitRight ? .right : .down) }
+        case .claudeHere, .codexHere, .resumeClaude:
+            guard let workspace, let store else { return }
+            let command = item.id == .claudeHere ? "claude" : item.id == .codexHere ? "codex" : "claude --continue"
+            agentTab(command, in: workspace, tab: tab, on: key, store: store)
+        case .rename:
+            if let tab {
+                focusNow(.tab(tab), on: key, trace: "command bar")
+                DispatchQueue.main.async { self.renameTab(withID: tab) }
+            } else if let workspace {
+                focusNow(.workspace(workspace), on: key, trace: "command bar")
+                DispatchQueue.main.async { self.renameWorkspace(workspace) }
+            }
+        case .moveTab:
+            // Tabs move within one machine: each daemon only knows its own.
+            guard let tab, case let .workspace(targetKey, destination)? = target else { return }
+            guard targetKey == key, let store else {
+                log("command bar: a tab can't move to another machine")
+                return NSSound.beep()
+            }
+            let index = store.state.workspaces.first { $0.id == destination }?.tabs.count ?? 0
+            move(.tab(tab, workspace: destination, index: index, focus: false), on: key)
+        case .openBeside:
+            guard let tab, let store, key == origin.machine, let pane = origin.pane else { return NSSound.beep() }
+            Task { @MainActor in
+                do {
+                    try await store.move(.tabJoin(tab, beside: pane, direction: .right, ratio: nil, focus: true))
+                } catch {
+                    log("command bar: open beside failed: \(error)")
+                    NSSound.beep()
+                }
+            }
+        case .files: showFileBrowser(nil)
+        case .settings: showSettings(nil)
+        case .machines: showMachineManager(nil)
+        case .toggleSidebar: showOrHideSidebar(nil)
+        case .appearanceSystem: setAppearance(.system)
+        case .appearanceLight: setAppearance(.light)
+        case .appearanceDark: setAppearance(.dark)
+        case .machineOn, .machineOff:
+            if let machine { setMachineEnabled(machine, item.id == .machineOn) }
+        case .reconnect:
+            reconnect(key)
+        }
+    }
+
+    /// Claude Here, Codex Here, Resume Last Claude: a new tab in the row's workspace, in its folder (the
+    /// selected tab's, else the workspace's last active tab's), with a shell that starts the agent.
+    func agentTab(_ command: String, in workspace: WorkspaceID, tab: TabID?, on key: MachineKey, store: ModelStore) {
+        let shown = store.state.workspaces.first { $0.id == workspace }
+        let source = shown?.tabs.first { $0.id == tab } ?? shown?.tabs.first { $0.id == shown?.activeTab } ?? shown?.tabs.first
+        let cwd = source.flatMap { store.state.pane($0.activePane)?.cwd }
+        let options = spawnOptions(cwd: cwd)
+        let backend = store.backend
+        Task { @MainActor in
+            do {
+                let created = try await backend.createTab(in: workspace, spawn: options)
+                backend.sendInput(created.pane, Data((command + "\r").utf8))
+            } catch {
+                log("command bar: \(command) in workspace \(workspace) on \(key) failed: \(error)")
+            }
+        }
     }
 
     /// ⌘⌫ on a row: closes that tab or workspace, asking first as the menu does.
@@ -322,6 +461,12 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     var onClose: ((CommandBarEntry) -> Void)?
     /// ⌥↩ on a row.
     var onNewTab: ((CommandBarEntry) -> Void)?
+    /// ⌘↩ on a tab: its panes beside the current pane.
+    var onOpenBeside: ((CommandBarEntry) -> Void)?
+    /// A ">" command for the selected row (`subject`), with the picked `target` for one that needs it.
+    var onCommand: ((CommandListItem, _ subject: CommandTree.Node?, _ target: CommandTree.Node?) -> Void)?
+    /// What the commands apply to, for the selected row.
+    var commandContext: ((CommandTree.Node?) -> CommandContext)?
     /// The model now, after a change (a tab closed, an agent started waiting).
     var reload: (() -> (all: [CommandBarEntry], outline: CommandTree.Outline)?)?
 
@@ -351,7 +496,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         super.init(frame: .zero)
         index()
 
-        field.placeholderString = "Search workspaces, tabs and agents"
+        field.placeholderString = Self.placeholder
         field.font = .systemFont(ofSize: s(16))
         field.isBordered = false
         field.drawsBackground = false
@@ -434,25 +579,67 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     /// Esc or ⌘P: back to where you were, and close.
     func cancel() {
+        if picking != nil {
+            picking = nil
+            field.stringValue = ""
+            field.placeholderString = Self.placeholder
+            return update()
+        }
         if previewed { onRestore?() }
         dismiss()
     }
 
+    static let placeholder = "Search workspaces, tabs and agents, or > for commands"
+
     // MARK: State
 
     var query: String { field.stringValue }
-    var isSearching: Bool { !query.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// ">" typed: the commands for the selected row.
+    var isCommandMode: Bool { picking == nil && CommandList.commandQuery(query) != nil }
+    var isSearching: Bool { !isCommandMode && !query.trimmingCharacters(in: .whitespaces).isEmpty }
+    /// A command that needs a target (Move Tab) waits for a workspace to be picked in the tree.
+    private(set) var picking: (item: CommandListItem, subject: CommandTree.Node)?
+    private(set) var commands: [CommandListItem] = []
+    private var commandSelected = 0
     /// The search field (tests and TypeText).
     var fieldForTesting: NSTextField { field }
 
     /// Every row as it would be drawn (searching: the results; otherwise the tree), with the tree row.
     var rows: [(entry: CommandBarEntry, indices: [Int], row: CommandTree.Row?)] {
+        if isCommandMode { return commands.map { (Self.entry(for: $0), [], nil) } }
         if isSearching { return results.map { ($0.entry, $0.indices, nil) } }
         return tree.rows.map { row in (entry(for: row.node), [], row) }
     }
 
     /// The selected row's index in `rows`.
-    var selected: Int { isSearching ? searchSelected : tree.selectedIndex ?? 0 }
+    var selected: Int { isCommandMode ? commandSelected : isSearching ? searchSelected : tree.selectedIndex ?? 0 }
+
+    static func entry(for command: CommandListItem) -> CommandBarEntry {
+        CommandBarEntry(item: QuickOpenItem(kind: .agent, title: command.title, id: "cmd|\(command.id.rawValue)"), tier: 2,
+                        symbol: symbol(for: command.id))
+    }
+
+    static func symbol(for id: CommandListItem.ID) -> String {
+        switch id {
+        case .newTab: return "plus.rectangle"
+        case .newWorkspace: return "plus.rectangle.on.rectangle"
+        case .closeTab, .closeWorkspace: return "xmark.rectangle"
+        case .splitRight: return "rectangle.split.2x1"
+        case .splitDown: return "rectangle.split.1x2"
+        case .claudeHere, .codexHere: return "sparkles"
+        case .resumeClaude: return "arrow.uturn.backward"
+        case .rename: return "pencil"
+        case .moveTab: return "arrow.right.square"
+        case .openBeside: return "rectangle.righthalf.inset.filled"
+        case .files: return "folder"
+        case .settings: return "gearshape"
+        case .machines: return "server.rack"
+        case .toggleSidebar: return "sidebar.left"
+        case .appearanceSystem, .appearanceLight, .appearanceDark: return "circle.lefthalf.filled"
+        case .machineOn, .machineOff: return "power"
+        case .reconnect: return "arrow.clockwise"
+        }
+    }
 
     var selectedEntry: CommandBarEntry? {
         let rows = rows
@@ -529,6 +716,10 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             cancel()
             return true
         }
+        if key == "\r" {
+            openBeside()
+            return true
+        }
         if key == "\u{7f}" || event.keyCode == 51 {
             closeSelected()
             return true
@@ -543,6 +734,29 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// Return: a search result opens; in the tree, a tab, workspace or agent opens and a machine expands
     /// (or connects).
     func open() {
+        if isCommandMode {
+            guard commands.indices.contains(commandSelected) else { return }
+            let command = commands[commandSelected]
+            let subject = tree.selection
+            if command.target != nil, let subject {
+                // Move Tab: pick the workspace in the tree, then it moves.
+                picking = (command, subject)
+                field.stringValue = ""
+                field.placeholderString = command.title.replacingOccurrences(of: " to…", with: " to which workspace?")
+                return update()
+            }
+            return onCommand?(command, subject, nil) ?? ()
+        }
+        if let picking {
+            // The picked row's workspace: a workspace row (or result); a machine row expands as usual.
+            let node = isSearching ? selectedEntry.flatMap { CommandTree.Node(entryID: $0.item.id) } : tree.selection
+            if case .workspace = node {
+                self.picking = nil
+                return onCommand?(picking.item, picking.subject, node) ?? ()
+            }
+            if !isSearching, case .machine = node, tree.activate() == .expanded { return render() }
+            return NSSound.beep()
+        }
         if isSearching {
             if let entry = selectedEntry { onOpen?(entry) }
             return
@@ -559,7 +773,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     func pick(_ index: Int) {
         let absolute = windowStart + index
         guard rows.indices.contains(absolute), index < Self.visibleRows else { return }
-        if isSearching { searchSelected = absolute } else { tree.select(absolute) }
+        if isCommandMode { commandSelected = absolute } else if isSearching { searchSelected = absolute } else { tree.select(absolute) }
         open()
     }
 
@@ -569,11 +783,22 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     }
 
     func newTab() {
-        guard let entry = selectedEntry else { return }
+        guard !isCommandMode, picking == nil, let entry = selectedEntry else { return }
         onNewTab?(entry)
     }
 
+    /// ⌘↩: the selected tab's panes beside the current pane (the app checks it can).
+    func openBeside() {
+        guard !isCommandMode, picking == nil, let entry = selectedEntry, entry.item.kind == .tab else { return NSSound.beep() }
+        onOpenBeside?(entry)
+    }
+
     private func move(_ by: Int) {
+        if isCommandMode {
+            guard !commands.isEmpty else { return }
+            commandSelected = (commandSelected + by + commands.count) % commands.count
+            return render()
+        }
         if isSearching {
             guard !results.isEmpty else { return }
             searchSelected = (searchSelected + by + results.count) % results.count
@@ -582,7 +807,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         guard let node = tree.move(by) else { return }
         render()
         // Tabs show as they're selected; workspace, machine and agent rows only highlight.
-        if case .tab = node {
+        if picking == nil, case .tab = node {
             previewed = previewed || node != initialSelection
             onPreview?(entry(for: node))
         }
@@ -607,6 +832,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     private func update() {
         results = isSearching ? CommandBar.results(all: all, current: [], query: query) : []
         searchSelected = 0
+        if isCommandMode, let text = CommandList.commandQuery(query) {
+            let context = commandContext?(tree.selection) ?? CommandContext()
+            commands = CommandList.matching(CommandList.items(for: context), query: text)
+        } else {
+            commands = []
+        }
+        commandSelected = 0
         render()
     }
 
@@ -614,12 +846,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     private func render() {
         list.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        footer.stringValue = isSearching
-            ? "↑↓ move    ↩ open    tab expand    ⇧tab up    ⌥↩ new tab    ⌘⌫ close    esc back"
-            : "↑↓ move    → expand    ← back    ↩ open    ⌥↩ new tab    ⌘⌫ close    esc back"
+        footer.stringValue = isCommandMode ? "↑↓ move    ↩ run    esc back"
+            : picking != nil ? "↑↓ move    → expand    ↩ move here    esc cancel"
+            : isSearching ? "↑↓ move    ↩ open    ⌘↩ beside    tab expand    ⇧tab up    ⌥↩ new tab    ⌘⌫ close    esc back"
+            : "↑↓ move    → expand    ← back    ↩ open    ⌘↩ beside    ⌥↩ new tab    ⌘⌫ close    esc back"
         let rows = rows
         if rows.isEmpty {
-            empty.stringValue = isSearching ? "No matches" : "No workspaces"
+            empty.stringValue = isCommandMode ? "No commands" : isSearching ? "No matches" : "No workspaces"
             list.addArrangedSubview(empty)
             return
         }
@@ -724,12 +957,13 @@ final class QuickOpenRow: NSView {
             ])
             lead = holder
         } else {
-            let symbol = switch entry.item.kind {
+            let kindSymbol = switch entry.item.kind {
             case .agent: "sparkles"
             case .workspace: "macwindow.on.rectangle"
             case .tab: "rectangle.topthird.inset.filled"
             case .machine: entry.item.id == "machine|\(AppDelegate.localKey)" ? "laptopcomputer" : "server.rack"
             }
+            let symbol = entry.symbol ?? kindSymbol
             let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
             icon.contentTintColor = Theme.dimText
             lead = icon
@@ -760,11 +994,11 @@ final class QuickOpenRow: NSView {
         }
         views.append(NSView())
         if showPath { views.append(Self.dim(entry.path ?? entry.item.subtitle, compression: .defaultLow - 1, head: true)) }
-        if let shortcut {
-            let key = Self.dim("⌘\(shortcut)", compression: .required)
-            key.font = .monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
-            views.append(key)
-        }
+        // Rows past the ninth keep an empty slot, so every row is the same height.
+        let key = Self.dim(shortcut.map { "⌘\($0)" } ?? "", compression: .required)
+        key.font = .monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
+        key.widthAnchor.constraint(greaterThanOrEqualToConstant: s(22)).isActive = true
+        views.append(key)
 
         let row = NSStackView(views: views)
         row.orientation = .horizontal

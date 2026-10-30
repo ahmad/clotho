@@ -212,6 +212,79 @@ final class CommandBarTests: XCTestCase {
         XCTAssertEqual(newTabs.last, "tab|bb|31", "on a search result too")
     }
 
+    private var ran: [(String, String?, String?)] = []
+    private var beside: [String] = []
+
+    /// The bar with ">" commands wired as the app does: a context from the selected row.
+    private func openWithCommands() {
+        open()
+        bar.commandContext = { node in
+            switch node {
+            case let .tab(_, id)?:
+                return CommandContext(machine: "local", machineName: "MacBook", workspace: 1, workspaceName: "Platform", tab: id,
+                                      tabName: id == 12 ? "web" : "\(id)", canOpenBeside: id != 12)
+            case let .workspace(_, id)?:
+                return CommandContext(machine: "local", machineName: "MacBook", workspace: id, workspaceName: id == 1 ? "Platform" : "Notes")
+            default:
+                return CommandContext(machine: "local", machineName: "MacBook")
+            }
+        }
+        bar.onCommand = { [weak self] item, subject, target in self?.ran.append((item.id.rawValue, subject?.entryID, target?.entryID)) }
+        bar.onOpenBeside = { [weak self] in self?.beside.append($0.item.id) }
+    }
+
+    func testGreaterThanListsCommandsForTheSelectedRow() {
+        openWithCommands()
+        bar.setQuery(">")
+        XCTAssertTrue(bar.isCommandMode)
+        XCTAssertEqual(titles.first, "New Tab in Platform")
+        XCTAssertTrue(titles.contains("Rename Tab “web”"), "for the selected tab")
+        XCTAssertTrue(titles.contains("Close Tab “web”"))
+        XCTAssertFalse(titles.contains { $0.hasPrefix("Close Workspace") })
+        bar.setQuery(">split d")
+        XCTAssertEqual(titles.first, "Split Down")
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(ran.first?.0, "splitDown")
+        XCTAssertEqual(ran.first?.1, "tab|local|12", "on the selected row")
+        XCTAssertTrue(previewed.isEmpty)
+    }
+
+    func testMoveTabPicksTheWorkspaceInTheTree() {
+        openWithCommands()
+        bar.setQuery(">move")
+        XCTAssertEqual(titles.first, "Move Tab “web” to…")
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertNotNil(bar.picking, "now pick where to")
+        XCTAssertEqual(bar.query, "")
+        XCTAssertTrue(ran.isEmpty)
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertTrue(previewed.isEmpty, "no previews while picking")
+        command(#selector(NSResponder.moveDown(_:)))  // Notes
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(ran.first?.0, "moveTab")
+        XCTAssertEqual(ran.first?.1, "tab|local|12")
+        XCTAssertEqual(ran.first?.2, "ws|local|2")
+        // Esc while picking cancels the pick, not the bar.
+        openWithCommands()
+        bar.setQuery(">move")
+        command(#selector(NSResponder.insertNewline(_:)))
+        command(#selector(NSResponder.cancelOperation(_:)))
+        XCTAssertNil(bar.picking)
+        XCTAssertNotNil(bar.superview, "still open")
+    }
+
+    func testCommandReturnOpensATabBeside() {
+        openWithCommands()
+        command(#selector(NSResponder.moveUp(_:)))  // api
+        XCTAssertTrue(bar.performKeyEquivalent(with: key("\r", keyCode: 36)))
+        XCTAssertEqual(beside, ["tab|local|11"])
+        command(#selector(NSResponder.moveUp(_:)))  // Platform
+        bar.performKeyEquivalent(with: key("\r", keyCode: 36))
+        XCTAssertEqual(beside.count, 1, "only tabs open beside")
+        bar.setQuery(">beside")
+        XCTAssertTrue(titles.isEmpty || !titles.contains { $0.contains("Beside") }, "the workspace row has no Open Beside")
+    }
+
     func testOnlyTheRowsInViewAreDrawn() {
         var entries = all
         var workspaces: [CommandTree.Outline.Workspace] = []

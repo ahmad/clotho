@@ -758,6 +758,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                     if quickOpen == nil { showQuickOpen(nil) }
                     if query == "\r" || query == "open" { return quickOpen?.open() ?? () }
+                    // "quick:beside" presses ⌘↩ on the selected row.
+                    if query == "beside" { return quickOpen?.openBeside() ?? () }
                     quickOpen?.setQuery(query)
                     return log("quick open \"\(query)\": " + (quickOpen?.results.map { "\($0.entry.item.kind) \($0.entry.item.title) [\($0.entry.item.subtitle)]" }.joined(separator: " | ") ?? ""))
                 }
@@ -1071,6 +1073,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     guard let handler = chain.first(where: { $0.responds(to: action) }) else { return log("menutarget: \(title) reaches nothing") }
                     let enabled = (handler as? NSMenuItemValidation)?.validateMenuItem(item) ?? true
                     return log("menutarget: \(title) (\(NSStringFromSelector(action))) from \(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil") → \(type(of: handler)), enabled \(enabled)")
+                }
+                // "logtab" logs the focused tab's layout and tab count, for checking moves.
+                if step == "logtab" {
+                    let tabs = store.focusedWorkspace?.tabs.map { "\($0.id)" }.joined(separator: ",") ?? "-"
+                    return log("tab: \(store.focusedTab.map { "\($0.id) \($0.layout)" } ?? "none"); workspace tabs [\(tabs)]")
                 }
                 // "windowid" logs the main window's number, for `screencapture -l`.
                 if step == "windowid" { return log("window id \(window.windowNumber)") }

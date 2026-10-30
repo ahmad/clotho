@@ -4,7 +4,7 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd -P)
 pick=$here/clothod-dist.sh
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/clt-distcheck.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/cmac-distcheck.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 passed=0 failed=0
 
