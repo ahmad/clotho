@@ -5,8 +5,10 @@
 #
 #   scripts/release.sh [notes.html]
 #
-# sign_update reads the private key from the login keychain. Over SSH, unlock that first from ~/.keychain_pw
-# (README, "Releases"). The key never goes anywhere else (README, "Releases"). Output, in build/release/:
+# sign_update reads the private key from the keychain scripts/keychain.sh picks and unlocks: the build
+# keychain on the release build host (imac), else the login keychain (macbook, from ~/.keychain_pw). The key
+# never goes anywhere else (README, "Releases"). Output, in build/release/ ($CLOTHO_RELEASE_OUT for a dry
+# run elsewhere):
 #   Clotho-<version>-<build>.zip   upload to $CLOTHO_DOWNLOADS (default https://clotho.app/downloads/)
 #   appcast.xml                    replaces https://clotho.app/appcast.xml
 #
@@ -19,17 +21,48 @@ cd "$(dirname "$0")/.."
 FEED=https://clotho.app/appcast.xml
 DOWNLOADS=${CLOTHO_DOWNLOADS:-https://clotho.app/downloads/}
 NOTES=${1:-}
-OUT=build/release
+OUT=${CLOTHO_RELEASE_OUT:-build/release}
 die() { print -u2 "release: $*"; exit 1; }
+source scripts/keychain.sh
+clotho_unlock_keychain || die "the signing keychain isn't usable"
 
 [[ -s Resources/SparklePublicKey ]] || die "no Resources/SparklePublicKey. Make the key pair first (README, \"Releases\")."
 [[ -z "$NOTES" || -f "$NOTES" ]] || die "no notes file at $NOTES"
 TOOLS=$(scripts/sparkle-tools.sh)
 
-# The keychain's key must be the one the app trusts, or every update would be refused.
-KEYCHAIN_PUBLIC=$("$TOOLS/generate_keys" -p 2>/dev/null) || die "no Sparkle key in this Mac's keychain (or the keychain is locked: over SSH, unlock it from ~/.keychain_pw first)"
-[[ "$KEYCHAIN_PUBLIC" == "$(tr -d '[:space:]' < Resources/SparklePublicKey)" ]] \
-  || die "the keychain's Sparkle key doesn't match Resources/SparklePublicKey"
+# Signs a file with Clotho's EdDSA key; prints sign_update's enclosure attributes. On the build host the
+# Sparkle tools can't use the build keychain (they search the keychain list, and stop at imac's login
+# keychain, locked over SSH), so the key goes from the build keychain straight into sign_update through a
+# pipe: never to disk, the screen or a command line. Elsewhere sign_update finds it in the login keychain.
+sparkle_sign() {
+  if $CLOTHO_BUILD_HOST; then
+    security find-generic-password -s https://sparkle-project.org -a ed25519 -w "$CLOTHO_KEYCHAIN" \
+      | "$TOOLS/sign_update" --ed-key-file - "$1"
+  else
+    "$TOOLS/sign_update" "$1"
+  fi
+}
+# Fails unless the signature in sign_update's output verifies, for that file, against the key the app
+# trusts (Resources/SparklePublicKey): a zip signed with any other key would be refused by every install.
+verify_signature() {
+  local signature=${${2#*edSignature=\"}%%\"*}
+  [[ -n "$signature" && "$signature" != "$2" ]] || die "sign_update printed no signature: $2"
+  swift scripts/verify-ed25519.swift Resources/SparklePublicKey "$signature" "$1" >/dev/null \
+    || die "the signature of $1 doesn't verify against Resources/SparklePublicKey"
+}
+
+# The key must be the one the app trusts, or every update would be refused. Checked before the build.
+if $CLOTHO_BUILD_HOST; then
+  PROBE=$(mktemp)
+  print "clotho release key check" > "$PROBE"
+  PROBE_SIGNATURE=$(sparkle_sign "$PROBE") || { rm -f "$PROBE"; die "couldn't sign with the Sparkle key in $CLOTHO_KEYCHAIN"; }
+  verify_signature "$PROBE" "$PROBE_SIGNATURE"
+  rm -f "$PROBE"
+else
+  KEYCHAIN_PUBLIC=$("$TOOLS/generate_keys" -p 2>/dev/null) || die "no Sparkle key in $CLOTHO_KEYCHAIN (or another keychain on the search list)"
+  [[ "$KEYCHAIN_PUBLIC" == "$(tr -d '[:space:]' < Resources/SparklePublicKey)" ]] \
+    || die "the keychain's Sparkle key doesn't match Resources/SparklePublicKey"
+fi
 
 export CLOTHO_BUILD=${CLOTHO_BUILD:-$(date -u +%Y%m%d%H%M)}
 ./build-app.sh --package
@@ -43,8 +76,10 @@ ZIP="$OUT/Clotho-$VERSION-$BUILD.zip"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 # Prints: sparkle:edSignature="…" length="…"
-SIGNATURE=$("$TOOLS/sign_update" "$ZIP") || die "sign_update failed"
-[[ "$SIGNATURE" == *edSignature=* ]] || die "sign_update printed no signature: $SIGNATURE"
+SIGNATURE=$(sparkle_sign "$ZIP") || die "sign_update failed"
+verify_signature "$ZIP" "$SIGNATURE"
+[[ "$SIGNATURE" == *"length=\"$(stat -f %z "$ZIP")\""* ]] || die "sign_update's length isn't the zip's size: $SIGNATURE"
+print "release: the zip's signature verifies against Resources/SparklePublicKey"
 
 CURRENT="$OUT/appcast-current.xml"
 SOURCE=${CLOTHO_APPCAST_IN:-$FEED}
