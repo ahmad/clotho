@@ -726,7 +726,7 @@ final class QuickOpenRow: NSView {
         } else {
             let symbol = switch entry.item.kind {
             case .agent: "sparkles"
-            case .workspace: "rectangle.stack"
+            case .workspace: "macwindow.on.rectangle"
             case .tab: "rectangle.topthird.inset.filled"
             case .machine: entry.item.id == "machine|\(AppDelegate.localKey)" ? "laptopcomputer" : "server.rack"
             }
