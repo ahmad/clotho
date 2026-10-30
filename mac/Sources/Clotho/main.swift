@@ -637,10 +637,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         watchForWakeAndNetworkChanges()
         setUpAgentNotifications()
         installAgentsMenu()
+        // A write to a pipe or socket whose other end is gone must fail with EPIPE, never end the app.
+        signal(SIGPIPE, SIG_IGN)
         // A plain `kill` quits normally, so the dev build's cleanup runs then too.
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        term.setEventHandler { NSApp.terminate(nil) }
+        term.setEventHandler {
+            log("quitting: SIGTERM")
+            NSApp.terminate(nil)
+        }
         term.resume()
         termSource = term
         runTestScripts()
@@ -955,6 +960,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if connections[machine.key] != nil { return focus(machine: machine.key) }
                     return connect(machine, show: true)
                 }
+                // "machines" opens Manage Machines; "machineoff:name" / "machineon:name" flips its switch.
+                if step == "machines" { return showMachineManager(nil) }
+                if step.hasPrefix("machineoff:") || step.hasPrefix("machineon:") {
+                    let on = step.hasPrefix("machineon:"), name = String(step.drop { $0 != ":" }.dropFirst())
+                    guard let machine = Machine.all().first(where: { $0.label == name }) else { return log("TypeText: no machine \(name)") }
+                    return setMachineEnabled(machine, on)
+                }
+                // The file browser: "files" opens it; "files:left:name" / "files:right:name[:path]" picks a side's
+                // machine; "files:sort:left:size:desc" sorts a side; "files:filter:left:text" filters it; "files:send:left:name"
+                // copies that row to the other side; "files:close" closes it.
+                if step.hasPrefix("files") {
+                    if fileBrowser == nil { showFileBrowser(on: nil) }
+                    guard let browser = fileBrowser else { return }
+                    let parts = step.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+                    if step == "files:close" { return browser.dismiss() }
+                    guard parts.count >= 3 else { return }
+                    let pane = { (side: String) in side == "right" ? browser.right! : browser.left! }
+                    switch parts[1] {
+                    case "left", "right":
+                        let target = parts[2] == "local" ? Machine.local : Machine.enabled().first { $0.label == parts[2] }
+                        guard let target else { return log("TypeText: no machine \(parts[2])") }
+                        pane(parts[1]).switchTo(target)
+                        if parts.count > 3 { pane(parts[1]).load(parts[3...].joined(separator: ":")) }
+                    case "sort" where parts.count >= 4:
+                        guard let column = FileSort.Column(rawValue: parts[3]) else { return }
+                        pane(parts[2]).setSort(FileSort(column: column, ascending: parts.count < 5 || parts[4] != "desc"))
+                    case "send" where parts.count >= 4:
+                        // Selects that row and copies it to the other side, as the context menu does.
+                        let side = pane(parts[2])
+                        guard let row = side.shownNames.firstIndex(of: parts[3...].joined(separator: ":")) else { return log("TypeText: no row") }
+                        side.table.selectRowIndexes([row], byExtendingSelection: false)
+                        side.sendToOtherSide()
+                    case "filter" where parts.count >= 3:
+                        let side = parts[2], text = parts.count > 3 ? parts[3...].joined(separator: ":") : ""
+                        pane(side).filterField.stringValue = text
+                        pane(side).filterChanged()
+                    default: break
+                    }
+                    return
+                }
                 // "windowid" logs the main window's number, for `screencapture -l`.
                 if step == "windowid" { return log("window id \(window.windowNumber)") }
                 if step == "wait" { return }
@@ -1252,6 +1297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        log("quitting")
         // Only disconnects; every machine's daemon keeps its workspaces.
         connections.values.forEach { $0.store.stop() }
         // The dev build's daemons are temporary: shut them down and delete them, here and on every machine.
@@ -1506,7 +1552,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         log(parts.joined(separator: ", "))
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        log("quitting: the last window closed")
+        return true
+    }
 }
 
 MainActor.assumeIsolated {

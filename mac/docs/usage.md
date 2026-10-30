@@ -125,15 +125,17 @@ Hold **Option** while dropping to type the shell-quoted paths instead of copying
 Open **Window → File Browser** (**⇧⌘O**).
 
 - The left side starts on this Mac, in the focused pane's folder. Its machine menu switches to a saved SSH machine, where it opens in the folder you last visited there, or your home folder the first time.
-- The right side shows this Mac. It starts in `~/Downloads` and remembers the last folder.
+- The right side starts on this Mac in `~/Downloads`, and remembers the last folder. Its machine menu switches it to another machine too, so either side can show any connected machine.
 - Double-click a folder or press **Return** to open it. **Delete/Backspace** or **⌘↑** goes to the parent folder; these keys never delete files.
 - Click a breadcrumb to navigate, or click empty space in the path bar to type a path. **Return** navigates and **Escape** cancels.
 - The eye button shows hidden files, and the refresh button reloads the listing.
+- Click a column's header (**Name**, **Size**, **Modified**, **Kind**) to sort by it, and click again to reverse. Folders stay first. Each side remembers its sort.
+- Type in a side's **Filter** field (or press **⌘F** in its list) to show only the names in the folder that contain the text, ignoring case. Opening another folder clears it.
 - Double-clicking a local file opens it in its default app.
 
 Drag items between the sides, or right-click a selection and choose copy, upload or download. Dropping onto a folder row copies into that folder; dropping on the listing's background uses the folder shown. Drag from Finder into either side to copy there, and drag remote items to Finder to download them.
 
-Copies go local to local, local to remote, and remote to local. Direct remote-to-remote copies and moves within one remote machine aren't supported.
+Copies go between any two machines, remote to remote included: with devbox on one side and imac on the other, drag across or use **Copy to imac**. A remote-to-remote copy streams through this Mac, so the two machines need no SSH access to each other. Both must be connected in Clotho. Moves aren't supported; copies leave the source in place.
 
 ### Conflicts and progress
 
@@ -178,6 +180,10 @@ Right-click a machine's name for its menu:
 - **Reconnect** drops and re-establishes the connection; **Disconnect** stops showing its workspaces, which keep running there.
 - **Check Connection** runs the SSH check again (machines that aren't connected).
 - **Edit…** changes its name or SSH target, and **Remove…** takes it off Clotho's list. Neither touches the machine or its shells.
+
+### Switch a machine off
+
+**Machines** at the bottom of the sidebar lists every saved machine, each with a switch (this Mac has none). Switching a machine off closes Clotho's connection to it at once and stops every reconnect attempt. It leaves the sidebar, the Agents list, **⌘P** and the file browser, and Clotho shows no notifications from it. Its clothod and shells keep running on the machine. The machine stays in the list, dimmed and marked **Off**, and switching it back on reconnects and shows its workspaces again. The setting is saved.
 
 ### Updates
 

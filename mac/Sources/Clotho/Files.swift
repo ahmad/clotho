@@ -6,11 +6,15 @@ import UniformTypeIdentifiers
 // MARK: Machines
 
 // Local, or a saved SSH host whose clothod the app reaches with `clothod bridge` over ssh. The saved
-// hosts live in the "Machines" default as [{id, label, target}].
+// hosts live in the "Machines" default as [{id, label, target, off?}]. A machine switched off ("off":
+// "1") stays saved and listed in Manage Machines, but the app doesn't connect to it or show it anywhere
+// else; its clothod and shells keep running there.
 struct Machine: Equatable {
     let id: String?
     let label: String
     let target: String?
+    /// Switched on in Manage Machines (this Mac always is).
+    var isEnabled: Bool = true
 
     var isLocal: Bool { target == nil }
     /// This Mac, named by its Computer Name.
@@ -26,8 +30,21 @@ struct Machine: Equatable {
         let saved = store.array(forKey: "Machines") as? [[String: String]] ?? []
         return [.local] + saved.compactMap { entry in
             guard let id = entry["id"], let target = entry["target"] else { return nil }
-            return Machine(id: id, label: entry["label"] ?? target, target: target)
+            return Machine(id: id, label: entry["label"] ?? target, target: target, isEnabled: entry["off"] != "1")
         }
+    }
+
+    /// The machines the app uses: this Mac and every saved machine that's switched on.
+    static func enabled() -> [Machine] { all().filter(\.isEnabled) }
+
+    /// Switches a saved machine on or off (the caller connects or disconnects it).
+    static func setEnabled(_ id: String, _ on: Bool) {
+        save(saved().map { entry in
+            guard entry["id"] == id else { return entry }
+            var entry = entry
+            entry["off"] = on ? nil : "1"
+            return entry
+        })
     }
 
     /// Saves a new SSH host; `target` is anything ssh accepts (user@host, an alias, a Tailscale name).
@@ -39,8 +56,14 @@ struct Machine: Equatable {
 
     /// Changes a saved machine's name and SSH target.
     static func update(_ id: String, label: String, target: String) -> Machine {
-        let machine = Machine(id: id, label: label.isEmpty ? target : label, target: target)
-        save(saved().map { $0["id"] == id ? ["id": id, "label": machine.label, "target": target] : $0 })
+        let off = saved().first { $0["id"] == id }?["off"]
+        let machine = Machine(id: id, label: label.isEmpty ? target : label, target: target, isEnabled: off != "1")
+        save(saved().map { entry in
+            guard entry["id"] == id else { return entry }
+            var updated = ["id": id, "label": machine.label, "target": target]
+            updated["off"] = off
+            return updated
+        })
         return machine
     }
 
@@ -195,6 +218,14 @@ final class Transfer {
     }
 
     var isRunning: Bool { if case .running = state { return true } else { return false } }
+
+    /// "Upload" from this Mac, "Download" to it, otherwise "Copy" (within a machine, or between two
+    /// others, streamed through this Mac). `ing`: "Uploading", "Downloading", "Copying".
+    static func verb(from source: Machine, to destination: Machine, ing: Bool = false) -> String {
+        let verb = source == destination || (!source.isLocal && !destination.isLocal) ? "Copy"
+            : destination.isLocal ? "Download" : "Upload"
+        return ing ? (verb == "Copy" ? "Copying" : verb + "ing") : verb
+    }
 }
 
 // Copies with ClothoKit's FileTransfer, between any two machines (through the app when neither is
@@ -224,6 +255,15 @@ final class TransferManager {
         guard transfer.isRunning else { return remove(transfer) }
         transfer.state = .cancelled
         transfer.task?.cancel()
+    }
+
+    /// Cancels every running copy to or from `machine` (switched off: its connection is about to end, so
+    /// its copies end as cancelled rather than retrying against a backend that's gone).
+    func cancelAll(touching machine: Machine) {
+        for transfer in transfers where transfer.isRunning
+            && (transfer.destination.machine == machine || transfer.sources.contains { $0.machine == machine }) {
+            cancel(transfer)
+        }
     }
 
     func remove(_ transfer: Transfer) {
@@ -547,8 +587,7 @@ extension AppDelegate {
             let clashes = await FileTransfer.existing(names, in: destination.path, on: files)
             let begin = { (items: [Location]) in
                 guard !items.isEmpty else { return }
-                let verb = items.allSatisfy({ $0.machine == destination.machine }) ? "Copying"
-                    : destination.machine.isLocal ? "Downloading" : "Uploading"
+                let verb = Transfer.verb(from: items[0].machine, to: destination.machine, ing: true)
                 let what = items.count == 1 ? items[0].name : "\(items.count) items"
                 let place = "\(destination.machine.label):\((destination.path as NSString).abbreviatingWithTildeInPath)"
                 self.transfers.start(title: "\(verb) \(what) → \(place)", sources: items, to: destination, onFinish: done)
@@ -626,8 +665,10 @@ final class FileBrowserOverlay: NSView {
         let active = machine ?? override.flatMap { o in Machine.all().first { $0.label == o[0] } } ?? app.focusedConnection.machine
         let activePath = override.flatMap { $0.count > 1 ? $0[1] : nil }
         let localPath = UserDefaults.standard.string(forKey: "LocalBrowserPath") ?? "~/Downloads"
-        left = FilePane(app: app, machine: active, path: activePath, choosable: true)
-        right = FilePane(app: app, machine: .local, path: localPath, choosable: false)
+        left = FilePane(app: app, machine: active, path: activePath, choosable: true, side: "left")
+        // Either side can show any machine, so files go between any two, devbox → imac included
+        // (streamed through this Mac; see TransferManager).
+        right = FilePane(app: app, machine: .local, path: localPath, choosable: true, side: "right")
         left.other = right
         right.other = left
 
@@ -691,6 +732,14 @@ final class FileBrowserOverlay: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func focusFirstPane() { window?.makeFirstResponder(left.table) }
+
+    /// A machine was switched off in Manage Machines: a side showing it goes back to this Mac.
+    func machineSwitchedOff(_ machine: Machine) {
+        for pane in [left, right] {
+            guard let pane else { continue }
+            if pane.machine == machine { pane.switchTo(.local) } else { pane.rebuildMachineMenu() }
+        }
+    }
 
     func dismiss() {
         removeFromSuperview()
@@ -851,12 +900,17 @@ final class BreadcrumbBar: NSView, NSTextFieldDelegate {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .iBeam) }
 }
 
-// Return opens, Backspace or ⌘↑ goes up; Esc falls through to the overlay.
+// Return opens, Backspace or ⌘↑ goes up, ⌘F filters; Esc falls through to the overlay.
 final class FileTable: NSTableView {
     var onOpen: (() -> Void)?
     var onUp: (() -> Void)?
+    var onFind: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, event.charactersIgnoringModifiers == "f" {
+            onFind?()
+            return
+        }
         switch event.keyCode {
         case 36, 76: onOpen?()
         case 51: onUp?()
@@ -877,6 +931,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     private var entries: [FileEntry] = []
     private var shown: [FileEntry] = []
     private var showHidden = false
+    /// "left" or "right": which side's sort it remembers.
+    let side: String
+    private(set) var sort: FileSort
     private var generation = 0
     /// The machine's home folder, for breadcrumbs that start at "~".
     private var home: String?
@@ -886,14 +943,18 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     let status = ShortcutsOverlay.label("", size: 11, weight: .regular, color: Theme.dimText)
     let machineMenu = NSPopUpButton()
     let hiddenButton = NSButton()
+    /// Filters the folder by name as you type.
+    let filterField = NSSearchField()
     let promiseQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.qualityOfService = .userInitiated
         return queue
     }()
 
-    init(app: AppDelegate, machine: Machine, path: String?, choosable: Bool) {
+    init(app: AppDelegate, machine: Machine, path: String?, choosable: Bool, side: String = "left") {
         self.app = app
+        self.side = side
+        self.sort = FileSort.saved(for: side)
         self.machine = machine
         self.path = path ?? "~"
         self.requestedPath = path
@@ -915,7 +976,17 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         hiddenButton.action = #selector(toggleHidden)
         hiddenButton.toolTip = "Show hidden files"
 
-        let header = NSStackView(views: [machineMenu, NSView(), hiddenButton, refresh, up])
+        filterField.placeholderString = "Filter"
+        filterField.controlSize = .small
+        filterField.font = NSFont.systemFont(ofSize: s(12))
+        filterField.sendsSearchStringImmediately = true
+        filterField.target = self
+        filterField.action = #selector(filterChanged)
+        filterField.setAccessibilityLabel("Filter by name")
+        filterField.widthAnchor.constraint(equalToConstant: s(150)).isActive = true
+        machineMenu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let header = NSStackView(views: [machineMenu, NSView(), filterField, hiddenButton, refresh, up])
         header.orientation = .horizontal
         header.spacing = s(10)
 
@@ -964,7 +1035,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
 
     func rebuildMachineMenu() {
         machineMenu.removeAllItems()
-        for m in Machine.all() {
+        for m in Machine.enabled() {
             machineMenu.addItem(withTitle: m.label)
             machineMenu.lastItem?.representedObject = m.id
         }
@@ -986,10 +1057,14 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     }
 
     private func setUpTable() {
-        let columns: [(String, String, CGFloat)] = [("name", "Name", 260), ("size", "Size", 80), ("modified", "Modified", 120)]
+        // Name starts narrow and takes whatever width is left, so Kind fits in the panel's default size.
+        let columns: [(String, String, CGFloat)] = [("name", "Name", 140), ("size", "Size", 70), ("modified", "Modified", 105),
+                                                    ("kind", "Kind", 80)]
         for (id, title, width) in columns {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
+            // Click a header to sort by it, again to reverse.
+            column.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: true)
             column.width = width
             column.minWidth = id == "name" ? 120 : 60
             column.resizingMask = id == "name" ? .autoresizingMask : .userResizingMask
@@ -1009,13 +1084,46 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         table.target = self
         table.onOpen = { [weak self] in self?.openSelected() }
         table.onUp = { [weak self] in self?.goUp() }
+        table.onFind = { [weak self] in
+            guard let self else { return }
+            window?.makeFirstResponder(filterField)
+        }
         table.registerForDraggedTypes([.fileURL, .clothoRemoteFile])
         table.setDraggingSourceOperationMask(.copy, forLocal: false)
         table.setDraggingSourceOperationMask(.copy, forLocal: true)
         table.draggingDestinationFeedbackStyle = .regular
         table.menu = NSMenu()
         table.menu?.delegate = self
+        settingSort = true
+        table.sortDescriptors = [NSSortDescriptor(key: sort.column.rawValue, ascending: sort.ascending)]
+        settingSort = false
     }
+
+    private var settingSort = false
+
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard !settingSort, let first = tableView.sortDescriptors.first, let key = first.key,
+              let column = FileSort.Column(rawValue: key) else { return }
+        setSort(FileSort(column: column, ascending: first.ascending))
+    }
+
+    /// Sorts by a column (the header's click, or tests) and remembers it for this side.
+    func setSort(_ new: FileSort) {
+        sort = new
+        sort.save(for: side)
+        let descriptor = NSSortDescriptor(key: new.column.rawValue, ascending: new.ascending)
+        if table.sortDescriptors.first != descriptor {
+            settingSort = true
+            table.sortDescriptors = [descriptor]
+            settingSort = false
+        }
+        applyFilter()
+    }
+
+    @objc func filterChanged() { applyFilter() }
+
+    /// What the table lists, top down.
+    var shownNames: [String] { shown.map(\.name) }
 
     // MARK: Loading
 
@@ -1053,11 +1161,11 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
             do {
                 let listing = try await files.listAll(target, hidden: true)
                 guard let self, token == generation else { return }
+                // A new folder starts unfiltered.
+                if listing.dir.path != path { filterField.stringValue = "" }
                 path = listing.dir.path
                 home = files.homeDirectory
-                entries = listing.entries.sorted {
-                    $0.isDirectory != $1.isDirectory ? $0.isDirectory : $0.name.localizedStandardCompare($1.name) == .orderedAscending
-                }
+                entries = listing.entries
                 machine.lastFolder = path
                 applyFilter()
             } catch {
@@ -1067,12 +1175,25 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         }
     }
 
-    private func applyFilter() {
-        shown = showHidden ? entries : entries.filter { !$0.hidden }
+    func applyFilter() {
+        let visible = showHidden ? entries : entries.filter { !$0.hidden }
+        let query = filterField.stringValue.trimmingCharacters(in: .whitespaces)
+        shown = sort.sorted(FileSort.filter(visible, by: query))
         pathBar.show(path, home: home)
         table.reloadData()
-        let hidden = entries.count - shown.count
-        status.stringValue = "\(shown.count) item\(shown.count == 1 ? "" : "s")" + (hidden > 0 ? " · \(hidden) hidden" : "")
+        let hidden = entries.count - visible.count
+        if query.isEmpty {
+            status.stringValue = "\(shown.count) item\(shown.count == 1 ? "" : "s")" + (hidden > 0 ? " · \(hidden) hidden" : "")
+        } else {
+            status.stringValue = "\(shown.count) of \(visible.count) match “\(query)”"
+        }
+    }
+
+    /// Lists entries as if the folder had just loaded them (tests).
+    func show(_ listed: [FileEntry], in folder: String) {
+        path = folder
+        entries = listed
+        applyFilter()
     }
 
     @objc func reload() { load(path) }
@@ -1092,7 +1213,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     @objc func machineChosen(_ sender: NSPopUpButton) {
         if sender.selectedItem?.tag == Self.addMachineTag { return addMachine() }
         let id = sender.selectedItem?.representedObject as? String
-        guard let chosen = Machine.all().first(where: { $0.id == id }), chosen != machine else { return }
+        guard let chosen = Machine.enabled().first(where: { $0.id == id }), chosen != machine else { return }
         switchTo(chosen)
     }
 
@@ -1157,6 +1278,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         switch id {
         case "name": text.stringValue = entry.name
         case "size": text.stringValue = entry.isDirectory ? "—" : ByteCountFormatter.string(fromByteCount: Int64(entry.size), countStyle: .file)
+        case "kind": text.stringValue = FileSort.kind(of: entry)
         default: text.stringValue = Self.format(entry.modified)
         }
         text.translatesAutoresizingMaskIntoConstraints = false
@@ -1297,7 +1419,7 @@ extension FilePane: NSMenuDelegate {
         menu.removeAllItems()
         guard !selectedLocations().isEmpty else { return }
         if let other {
-            let verb = machine.isLocal ? (other.machine.isLocal ? "Copy" : "Upload") : "Download"
+            let verb = Transfer.verb(from: machine, to: other.machine)
             menu.addItem(withTitle: "\(verb) to \(other.machine.label): \((other.path as NSString).lastPathComponent)",
                          action: #selector(sendToOtherSide), keyEquivalent: "").target = self
         }

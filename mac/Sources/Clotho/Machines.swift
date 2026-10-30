@@ -28,8 +28,29 @@ enum MachineStatus: Equatable {
 }
 
 extension AppDelegate {
-    /// Saved machines, without Local.
-    var remoteMachines: [Machine] { Machine.all().filter { !$0.isLocal } }
+    /// Saved machines that are switched on, without Local: the ones the sidebar, Agents, ⌘P and the
+    /// file browser show. Manage Machines lists every saved machine (`Machine.all()`).
+    var remoteMachines: [Machine] { Machine.enabled().filter { !$0.isLocal } }
+
+    /// Switches a saved machine on or off in Clotho. Off closes the connection at once (its bridge and
+    /// ssh) and stops every retry; the machine's clothod and shells keep running there, and switching
+    /// it back on reconnects and shows them again. This Mac can't be switched off.
+    func setMachineEnabled(_ machine: Machine, _ on: Bool) {
+        guard !machine.isLocal, let id = machine.id else { return }
+        Machine.setEnabled(id, on)
+        log("\(machine.label): switched \(on ? "on" : "off")")
+        if on {
+            machineStatus[id] = .unknown
+            if let current = Machine.all().first(where: { $0.id == id }) { connect(current) }
+        } else {
+            // Its transfers can't go on without the connection: they end as cancelled, not as retries.
+            transfers.cancelAll(touching: machine)
+            disconnect(machine.key)
+            machineStatus[id] = nil
+            fileBrowser?.machineSwitchedOff(machine)
+        }
+        sync()
+    }
 
     // MARK: Connection checks
 

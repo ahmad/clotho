@@ -1,8 +1,9 @@
 import AppKit
 
 // Manage Machines… (the sidebar's footer, and each machine's menu): the saved machines in the order
-// the sidebar shows them, with Add, Edit and Remove, and drag to reorder. This Mac is listed first and
-// can't be removed, edited or moved. Removing only forgets a machine in Clotho.
+// the sidebar shows them, with Add, Edit and Remove, drag to reorder, and a switch on each to turn it
+// off in Clotho (dimmed, "Off"; see AppDelegate.setMachineEnabled). This Mac is listed first and can't
+// be removed, edited, moved or switched off. Removing only forgets a machine in Clotho.
 
 @MainActor
 final class MachineManagerController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
@@ -47,7 +48,7 @@ final class MachineManagerController: NSWindowController, NSTableViewDataSource,
         editButton.action = #selector(editSelected)
         removeButton.target = self
         removeButton.action = #selector(removeSelected)
-        let note = NSTextField(wrappingLabelWithString: "Drag to change the sidebar's order. Removing a machine only forgets it here; its clothod and shells keep running.")
+        let note = NSTextField(wrappingLabelWithString: "Drag to change the sidebar's order. Switching a machine off or removing it only changes Clotho; its clothod and shells keep running.")
         note.font = .systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
         let buttons = NSStackView(views: [add, editButton, removeButton, NSView()])
@@ -130,7 +131,7 @@ final class MachineManagerController: NSWindowController, NSTableViewDataSource,
         let machine = machines[row]
         let name = NSTextField(labelWithString: machine.isLocal ? "\(machine.label) (this Mac)" : machine.label)
         name.font = .systemFont(ofSize: 13, weight: .medium)
-        let detail = NSTextField(labelWithString: machine.target ?? "Always listed first, can't be removed")
+        let detail = NSTextField(labelWithString: Self.detail(for: machine))
         detail.font = .systemFont(ofSize: 11)
         detail.textColor = .secondaryLabelColor
         let icon = NSImageView(image: NSImage(systemSymbolName: machine.isLocal ? "laptopcomputer" : "server.rack",
@@ -140,11 +141,36 @@ final class MachineManagerController: NSWindowController, NSTableViewDataSource,
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
-        let cell = NSStackView(views: [icon, text])
+        var views: [NSView] = [icon, text]
+        if !machine.isLocal {
+            let toggle = NSSwitch()
+            toggle.controlSize = .small
+            toggle.state = machine.isEnabled ? .on : .off
+            toggle.tag = row
+            toggle.target = self
+            toggle.action = #selector(switchToggled(_:))
+            toggle.setAccessibilityLabel("\(machine.label) on")
+            toggle.toolTip = machine.isEnabled ? "Switch \(machine.label) off in Clotho" : "Switch \(machine.label) back on"
+            views += [NSView(), toggle]
+            // Off: dimmed, but still here to switch back on.
+            for view in [icon, text] { view.alphaValue = machine.isEnabled ? 1 : 0.45 }
+        }
+        let cell = NSStackView(views: views)
         cell.orientation = .horizontal
         cell.spacing = 8
-        cell.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 6)
+        cell.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 10)
         return cell
+    }
+
+    /// The line under a machine's name: its SSH target, with "Off" first when it's switched off.
+    static func detail(for machine: Machine) -> String {
+        guard let target = machine.target else { return "Always listed first, can't be removed" }
+        return machine.isEnabled ? target : "Off · \(target)"
+    }
+
+    @objc private func switchToggled(_ sender: NSSwitch) {
+        guard sender.tag < machines.count else { return }
+        app?.setMachineEnabled(machines[sender.tag], sender.state == .on)
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }

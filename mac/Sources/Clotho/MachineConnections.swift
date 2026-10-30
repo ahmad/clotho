@@ -76,6 +76,10 @@ extension AppDelegate {
     /// (opening a first workspace if it has none); `startWorkspace` always starts one there.
     func connect(_ machine: Machine, startWorkspace: Bool = false, show: Bool = false) {
         guard !machine.isLocal else { return }
+        // A machine switched off in Manage Machines isn't connected until it's switched on again.
+        guard Machine.all().first(where: { $0.id == machine.id })?.isEnabled ?? machine.isEnabled else {
+            return log("\(machine.label) is switched off; not connecting")
+        }
         if connections[machine.key] != nil {
             if startWorkspace || show { focus(machine: machine.key) }
             if startWorkspace { self.newWorkspace(nil) }
