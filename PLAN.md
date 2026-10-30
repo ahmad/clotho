@@ -497,3 +497,8 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The user runs `sudo pmset autorestart 1` on imac once, so it comes back after a power cut.
 - SSH from imac (user-approved): imac's key is in ahmad@macbook's authorized_keys; devbox admits it through Tailscale SSH. imac's known_hosts pins devbox (fingerprint checked against macbook's trusted entry) and macbook. imac→itself is not set up. test-all's remote suite uses devbox and macbook, and skips macbook with a clear note when it's asleep.
 - 2026-10-30 follow-ups (user): copy macbook's "Apple Development: Ahmad Amin (CERTID0000)" to imac's build keychain too (archives the iPhone app; nothing new in the Apple account); the user installs Rosetta on imac so Intel builds are test-run there. On imac, sign_update reads the Sparkle key from the build keychain through a pipe (`--ed-key-file -`), never to disk, and each release's signature is checked against the public key. The Rust toolchain is pinned (rust-toolchain.toml, 1.99.1).
+
+## Settings (user, 2026-10-30; Mac 1.0.11)
+
+- One Settings window with two toolbar tabs, General and Machines; the separate Machines window goes. The sidebar's Machines and Settings buttons open the matching tab. "Make it feel premium": grouped form sections, no scrolling, compact captions.
+- The window buttons (close, minimize, zoom) are the same size and placement in every Clotho window.
