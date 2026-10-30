@@ -475,3 +475,10 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The sidebar's bottom bar has three icon buttons: Machines, Settings, and a light/dark toggle (overrides the system; "Match System" stays available).
 - Hovering a pane's top-right corner shows a small × that closes the pane.
 - An empty workspace shows a centered empty state with a "New Tab" button (⌘T).
+
+## Restore: agents across a reboot (user, 2026-10-30; clothod 0.1.25)
+
+- An agent that quits just before a reboot is still resumed: layout.json keeps a pane's agent for 10 s after it leaves a live shell.
+- A Claude without hooks gets its session from Claude's own ~/.claude/sessions/<pid>.json (read-only).
+- With no known session, the user chose "only when unambiguous": `claude --continue` / `codex resume --last` runs only if that pane is the only saved pane with that agent in its folder; otherwise a bare shell. The pane is marked `restored.continued` and the apps say "Continued the latest conversation in this folder".
+- Unreachable machines: 3 tries, then "Can't reach <name>" and a Reconnect button; wake and network changes retry automatically.
