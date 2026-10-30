@@ -490,19 +490,70 @@ async fn resume_sends_only_missed_output_or_a_snapshot() {
 }
 
 #[tokio::test]
-async fn last_typer_sets_the_size() {
+async fn the_last_client_to_focus_sets_the_size() {
     let env = Env::new();
     let a = env.client().await;
+    assert!(a.hello["features"].as_array().unwrap().iter().any(|f| f == "pane.focus"));
     let p = new_pane(&a, sh()).await;
     let b = env.client().await;
     a.request("pane.subscribe", json!({"pane": p, "viewport": {"cols": 100, "rows": 30}})).await.unwrap();
     let r = b.request("pane.subscribe", json!({"pane": p, "viewport": {"cols": 60, "rows": 20}})).await.unwrap();
-    // Nobody typed yet: the latest subscriber's viewport wins.
+    // A subscribe with a viewport is a focus: the latest subscriber's viewport wins.
     assert_eq!((r["cols"].as_u64(), r["rows"].as_u64()), (Some(60), Some(20)));
+    // Typing doesn't take the size (it used to: the last typer won).
     a.input(p, b"stty size\r");
-    wait_for_text(&a, p, T, |l| has_line(l, "30 100")).await.unwrap();
-    b.input(p, b"stty size\r");
-    wait_for_text(&b, p, T, |l| has_line(l, "20 60")).await.unwrap();
+    wait_for_text(&a, p, T, |l| has_line(l, "20 60")).await.unwrap();
+    // Focusing does, and the reply carries the size.
+    let r = a.request("pane.focus", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["cols"].as_u64(), r["rows"].as_u64()), (Some(100), Some(30)));
+    b.input(p, b"clear; stty size\r");
+    wait_for_text(&b, p, T, |l| has_line(l, "30 100")).await.unwrap();
+    // A viewport from a client that doesn't own the size is only recorded...
+    b.request("pane.viewport", json!({"pane": p, "cols": 70, "rows": 25})).await.unwrap();
+    // ...one from the owner resizes (a window resize, a rotation).
+    a.request("pane.viewport", json!({"pane": p, "cols": 90, "rows": 28})).await.unwrap();
+    a.input(p, b"clear; stty size\r");
+    wait_for_text(&a, p, T, |l| has_line(l, "28 90")).await.unwrap();
+    // b focusing brings in the viewport it recorded.
+    let r = b.request("pane.focus", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["cols"].as_u64(), r["rows"].as_u64()), (Some(70), Some(25)));
+    a.input(p, b"clear; stty size\r");
+    wait_for_text(&a, p, T, |l| has_line(l, "25 70")).await.unwrap();
+    // pane.resize still forces a size, and the owner stays the owner.
+    a.request("pane.resize", json!({"pane": p, "cols": 50, "rows": 15})).await.unwrap();
+    b.request("pane.viewport", json!({"pane": p, "cols": 72, "rows": 26})).await.unwrap();
+    a.input(p, b"clear; stty size\r");
+    wait_for_text(&a, p, T, |l| has_line(l, "26 72")).await.unwrap();
+    // When the owner stops showing the pane, the next viewport takes the size.
+    b.request("pane.unsubscribe", json!({"pane": p})).await.unwrap();
+    a.request("pane.viewport", json!({"pane": p, "cols": 80, "rows": 24})).await.unwrap();
+    a.input(p, b"clear; stty size\r");
+    wait_for_text(&a, p, T, |l| has_line(l, "24 80")).await.unwrap();
+    // Errors: a pane this client doesn't show, a pane that doesn't exist.
+    let e = b.request("pane.focus", json!({"pane": p})).await.unwrap_err();
+    assert!(e.to_string().contains("bad_request"), "{e}");
+    let e = a.request("pane.focus", json!({"pane": 999_999})).await.unwrap_err();
+    assert!(e.to_string().contains("not_found"), "{e}");
+}
+
+#[tokio::test]
+async fn pane_resized_reaches_the_other_subscriber_on_focus() {
+    let env = Env::new();
+    let a = env.client().await;
+    let p = new_pane(&a, sh()).await;
+    let mut b = env.client().await;
+    a.request("pane.subscribe", json!({"pane": p, "viewport": {"cols": 100, "rows": 30}})).await.unwrap();
+    b.request("pane.subscribe", json!({"pane": p, "viewport": {"cols": 60, "rows": 20}})).await.unwrap();
+    a.request("pane.focus", json!({"pane": p})).await.unwrap();
+    let deadline = Instant::now() + T;
+    loop {
+        let f = tokio::time::timeout(deadline - Instant::now(), b.recv()).await.expect("no pane.resized").expect("closed");
+        if let Frame::Json(v) = f {
+            if v["event"] == "pane.resized" && v["data"]["pane"] == p && v["data"]["cols"] == 100 && v["data"]["rows"] == 30 {
+                break;
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -95,7 +95,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
-                  "restore", "move", "git", "pane.move"],
+                  "restore", "move", "git", "pane.move", "pane.focus"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -129,7 +129,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `move` (`workspace.move` and `tab.move`, see
   [Moving tabs and workspaces](#moving-tabs-and-workspaces); since 0.1.22), `git` (panes'
   `git` field, see [Git](#git); since 0.1.23), `pane.move` (`pane.move` and `tab.join`, see
-  [Moving panes](#moving-panes); since 0.1.26).
+  [Moving panes](#moving-panes); since 0.1.26), `pane.focus` (the `pane.focus` request; the
+  client that focused a pane last sets its size, not the one that typed last, see
+  [Resize](#resize); since 0.1.28).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -311,8 +313,8 @@ For "open beside the current pane" (⌘↩ on a ⌘P row; feature `pane.move`, s
 pane, or every pane of a tab, moves into a split beside another pane, also in another tab or
 workspace. As with [tab.move](#moving-tabs-and-workspaces), only places change: pane ids,
 shells, PTYs, agents (with their sessions and hints), `restored` marks, subscriptions and seqs
-are untouched, so an open pane needs nothing new. Its size changes only when a client sets a new
-viewport for it.
+are untouched, so an open pane needs nothing new. Its size changes only when a client focuses it or
+sets a new viewport for it.
 
 - **`pane.move {pane, to_pane, direction?, ratio?, focus?}`.** Take `pane` out of its tab, as
   `pane.close` would but without hanging it up: its parent split collapses, and the tab's
@@ -536,6 +538,7 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `pane.subscribe` | `pane`, `have_seq?`, `scrollback?`, `viewport?` | see Pane data |
 | `pane.unsubscribe` | `pane` | `{}` |
 | `pane.viewport` | `pane`, `cols`, `rows` | `{}` (see Resize) |
+| `pane.focus` | `pane` | `{"cols", "rows"}`: this client's viewport sets the size (see Resize; since 0.1.28) |
 | `pane.resize` | `pane`, `cols`, `rows` | `{}`: sets the size now, whatever the viewports say |
 | `pane.input` | `pane`, `data` (UTF-8 string) | `{}`: same as an INPUT frame, for clients without binary framing |
 | `pane.keys` | `pane`, `text?`, `keys?` (list of key names) | `{}`: input encoded for the pane's current modes (see below). Counts as input like an INPUT frame |
@@ -1282,9 +1285,23 @@ A PTY has one size, but several clients may show a pane. The rules:
 
 - A client gives the size it can show a pane at as its viewport, either in `pane.subscribe`
   (`viewport`) or later with `pane.viewport`.
-- The pane takes the viewport of the client that most recently sent it input (an INPUT frame or
-  `pane.input`). Until anyone types, the most recent subscriber with a viewport wins.
-- `pane.resize` sets the size directly, for a client that wants to force it.
+- **The pane takes the viewport of the client that focused it most recently** (since 0.1.28,
+  feature `pane.focus`). A client focuses a pane in two ways:
+  - `pane.focus {pane}` when the user brings it to the front (opens it, taps or clicks into it,
+    switches to its tab). The client's viewport from `pane.subscribe` or `pane.viewport` becomes the
+    size now. Reply: `{"cols", "rows"}`, the size after it. A client must be subscribed
+    (`bad_request` otherwise; an unknown pane is `not_found`). A client that gave no viewport yet
+    still takes the size: its next `pane.viewport` sets it.
+  - `pane.subscribe` with a `viewport`, always. Clients that never send `pane.focus` keep working.
+- Input (INPUT frames, `pane.input`) never picks the size. Focus and mouse reports are input, so a
+  hover on one device can't take the size from another.
+- `pane.viewport` from the client that owns the size resizes (a window resize, a rotation). From any
+  other client it only records that client's viewport, used when it next focuses. If the owner no
+  longer shows the pane (it unsubscribed or went away), the next `pane.viewport` takes the size.
+- `pane.resize` sets the size directly, for a client that wants to force it. It doesn't change who
+  owns the size.
+- Before 0.1.28 the client that sent input most recently owned the size, and until anyone typed the
+  most recent subscriber with a viewport did.
 - A `viewport` in `pane.subscribe` that changes the size is applied before the reply. The reply's
   `cols`/`rows` (and the SNAPSHOT) already reflect it, so the subscribing client gets no
   `pane.resized` for it. Other subscribers do.

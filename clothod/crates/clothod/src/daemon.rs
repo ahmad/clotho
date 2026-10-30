@@ -409,6 +409,9 @@ struct Pane {
     exited: Option<ExitStatus>,
     subs: HashMap<u64, Sub>,
     last_input_client: Option<u64>,
+    /// The client whose viewport sets the pane's size: the one that focused it last
+    /// (`pane.focus`, or `pane.subscribe` with a viewport). See "Resize" in docs/protocol.md.
+    size_client: Option<u64>,
     /// The client that last typed in or subscribed to the pane: its colors are the ones
     /// applications here get (`pane_palette`).
     colors_client: Option<u64>,
@@ -548,6 +551,7 @@ impl Pane {
             exited: info.exited,
             subs: HashMap::new(),
             last_input_client: None,
+            size_client: None,
             colors_client: None,
             last_input_at: None,
             pending: HashMap::new(),
@@ -1840,14 +1844,25 @@ impl Daemon {
         self.broadcast("pane", data);
     }
 
-    /// Apply the "last typer's viewport wins" rule after something changed for `client`.
-    fn apply_viewport_policy(&self, p: &mut Pane, client: u64) {
-        let owner = p.last_input_client.filter(|c| p.subs.contains_key(c));
-        if owner.is_some() && owner != Some(client) {
-            return;
-        }
+    /// The client whose viewport sets the size, while it still shows the pane.
+    fn size_owner(p: &Pane) -> Option<u64> {
+        p.size_client.filter(|c| p.subs.contains_key(c))
+    }
+
+    /// `client` focused the pane: its viewport (if it gave one) becomes the pane's size.
+    fn focus_size(&self, p: &mut Pane, client: u64) {
+        p.size_client = Some(client);
         if let Some((cols, rows)) = p.subs.get(&client).and_then(|s| s.viewport) {
             self.resize(p, cols, rows);
+        }
+    }
+
+    /// `client` gave a new viewport: it resizes the pane only if that client owns the size, or
+    /// nobody showing the pane does (then it takes it). Anyone else's is only recorded.
+    fn apply_viewport_policy(&self, p: &mut Pane, client: u64) {
+        match Self::size_owner(p) {
+            Some(owner) if owner != client => {}
+            _ => self.focus_size(p, client),
         }
     }
 
@@ -1856,11 +1871,9 @@ impl Daemon {
         let mut p = p.lock().unwrap();
         // Input never clears an agent's attention: opening a pane alone sends focus reports and
         // mouse motion. A reply makes the agent work again, and that clears it (set_agent).
+        // Input marks the user present, but never picks the size: focus does (`pane.focus`).
         p.last_input_at = Some(Instant::now());
-        if p.last_input_client != Some(client) {
-            p.last_input_client = Some(client);
-            self.apply_viewport_policy(&mut p, client);
-        }
+        p.last_input_client = Some(client);
         self.use_colors_of(&mut p, client);
         // The user typing in a restored pane has seen it: the note goes (stored at once, so a
         // serve restart doesn't bring it back).
@@ -2607,7 +2620,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -2891,6 +2904,17 @@ impl Daemon {
                 self.apply_viewport_policy(&mut pp, client.id);
                 Ok(json!({}))
             }
+            "pane.focus" => {
+                let pane = param_u64(p, "pane")?;
+                let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+                let mut pp = pp.lock().unwrap();
+                if !pp.subs.contains_key(&client.id) {
+                    return Err(err("bad_request", format!("not subscribed to pane {pane}")));
+                }
+                self.focus_size(&mut pp, client.id);
+                self.use_colors_of(&mut pp, client.id);
+                Ok(json!({"cols": pp.cols, "rows": pp.rows}))
+            }
             "pane.resize" => {
                 let pane = param_u64(p, "pane")?;
                 let (cols, rows) = param_size(p)?;
@@ -3083,8 +3107,9 @@ impl Daemon {
         let pp = &mut *pp;
         // A viewport may resize the pane. Do it before the subscriber is added and before the
         // reply: the reply carries the new size, so this client gets no `pane.resized` for it.
-        let owner = pp.last_input_client.filter(|c| pp.subs.contains_key(c) && *c != client.id);
-        if let (None, Some((cols, rows))) = (owner, viewport) {
+        // A subscribe with a viewport is a focus: this client now owns the size.
+        if let Some((cols, rows)) = viewport {
+            pp.size_client = Some(client.id);
             self.resize(pp, cols, rows);
         }
         // A connection that already has a full queue (a reconnect resubscribing many panes at
