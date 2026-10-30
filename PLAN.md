@@ -510,7 +510,7 @@ Navigation (phase 1, Mac 1.0.12):
 - With nothing typed: → expands the selected workspace (to its tabs) or machine (to its workspaces); ← collapses, and from a workspace level goes up to the machine list (every enabled machine, with status). Return on a workspace opens its last active tab; Return on a machine expands it.
 - ↑/↓ preview tabs live as today; workspace and machine rows only highlight. Esc goes back to where you were.
 - Typing searches everything, flat, as today, with a dim "machine › workspace" path on each result; clearing the text returns to the tree where you were. While typing, ←/→ edit text; Tab expands the selected row, ⇧Tab goes up.
-- Row keys: ⌘⌫ closes the selected tab or workspace (usual confirmation); ⌘↩ opens the selected tab beside the current pane; ⌥↩ opens a new tab in the selected workspace or machine; ⌘1–⌘9 still jump to rows.
+- Row keys: ⌘⌫ closes the selected tab or workspace (usual confirmation); ⌥↩ opens a new tab in the selected workspace or machine; ⌘1–⌘9 still jump to rows. ⌘↩ moves the selected tab's live pane(s) into a split beside the current pane (same shell, not a new one); it needs a clothod pane-move operation, so it ships in phase 2 with clothod 0.1.26.
 
 Commands (phase 2, typed after ">"): new tab / new workspace on any machine, close tab / workspace, split right / down; "Claude here", "Codex here" and "Resume last Claude in this folder"; rename the selected tab or workspace inline; move a tab to another workspace (pick the target in the same tree); open Files, Settings, Machines; toggle the sidebar; switch appearance; turn a machine on or off; reconnect.
 
