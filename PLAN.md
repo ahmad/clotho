@@ -467,3 +467,11 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - Disk (2026-10-29): the user allowed one dip below the 20 GiB floor on macbook, for the 0.1.24 test
   and release builds only (abort under 8 GiB). Most of the space went to swap from the user's own
   dev server and browser, not to our builds.
+
+## Mac UI batch (user, 2026-10-30)
+
+- Branch and PR appear only in the pane strip (bottom of the pane), not in workspace or tab names. ⌘P still matches them.
+- ⌘/ toggles the sidebar.
+- The sidebar's bottom bar has three icon buttons: Machines, Settings, and a light/dark toggle (overrides the system; "Match System" stays available).
+- Hovering a pane's top-right corner shows a small × that closes the pane.
+- An empty workspace shows a centered empty state with a "New Tab" button (⌘T).
