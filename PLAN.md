@@ -495,3 +495,4 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - The Sparkle key moved via a private temp folder on macbook erased right after (user-approved exception to "never export it to disk").
 - iOS signing on imac must not create new certificates, devices or profiles in the Apple account without the user's OK.
 - The user runs `sudo pmset autorestart 1` on imac once, so it comes back after a power cut.
+- SSH from imac (user-approved): imac's key is in ahmad@macbook's authorized_keys; devbox admits it through Tailscale SSH. imac's known_hosts pins devbox (fingerprint checked against macbook's trusted entry) and macbook. imac→itself is not set up. test-all's remote suite uses devbox and macbook, and skips macbook with a clear note when it's asleep.
