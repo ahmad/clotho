@@ -7,8 +7,9 @@ import UIKit
 //
 // The PTY size belongs to the daemon. The host sends the size it has room for as the pane's viewport,
 // and only ever resizes its terminal to the pane's actual size (from the subscribe reply, a snapshot or
-// `resized`). A pane larger than the screen (sized by another client) is scaled down to fit; a smaller
-// one sits top-left.
+// `resized`). With clothod 0.1.28 the pane takes the viewport of the client that focused it last, so the
+// host reports focus (noteFocus) when the pane gets the user's attention; typing doesn't resize. A pane
+// larger than the screen (sized by another client) is scaled down to fit; a smaller one sits top-left.
 
 final class PaneTerminalView: TerminalView {
     // Set around every feed. SwiftTerm parses synchronously inside feed, so whatever the emulator sends
@@ -25,6 +26,15 @@ final class PaneTerminalView: TerminalView {
     }
 
     override var canBecomeFirstResponder: Bool { !readOnly && super.canBecomeFirstResponder }
+
+    /// The terminal took the keyboard (or was asked to again): the pane has the user's attention.
+    var onFocus: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocus?() }
+        return became
+    }
 
     /// Paste with an image and no text on the clipboard; the host uploads it and pastes its path.
     var onImagePaste: ((Data) -> Void)?
@@ -114,6 +124,12 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
     /// Where pane copies go; tests swap in their own.
     var pasteboard: PaneClipboard.Target = PaneClipboard.general
     private var sentViewport: Size?
+    /// A pending `focusPane`: focus actions within `focusDelay` of each other send one call, after the
+    /// keyboard has settled the viewport.
+    private var focusWork: DispatchWorkItem?
+    static let focusDelay: TimeInterval = 0.3
+    /// Each `focusPane` sent, for tests.
+    var onFocusSent: (() -> Void)?
     private var subscribed = false
     private var wantsSubscription = false
     // Output arriving within one run loop turn is fed in one call.
@@ -146,6 +162,14 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         }
         store.register(self, for: pane.id)
         addGestures()
+        terminal.onFocus = { [weak self] in self?.noteFocus() }
+        // Back in front (or the window active again) with this pane showing.
+        NotificationCenter.default.addObserver(self, selector: #selector(becameActive),
+                                               name: UIApplication.didBecomeActiveNotification, object: nil)
+    }
+
+    @objc private func becameActive() {
+        if window != nil { noteFocus() }
     }
 
     /// Shows the palette for the current appearance, and tells the machine, so apps that ask the terminal
@@ -395,6 +419,33 @@ final class PaneHostView: UIView, PaneDataSink, TerminalViewDelegate {
         sentViewport = viewport
         let id = paneID
         Task { [backend] in try? await backend.setViewport(id, viewport) }
+    }
+
+    // MARK: Focus
+
+    /// The pane got the user's attention: it came on screen, its terminal took the keyboard, or the app came
+    /// back to the front with it showing. The machine then sizes the pane to this phone's viewport
+    /// (`pane.focus`, clothod 0.1.28); typing no longer does. Debounced, and the viewport goes first, so the
+    /// machine has the size the pane has room for once the keyboard is up.
+    func noteFocus() {
+        guard window != nil, !readOnly else { return }
+        focusWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.sendFocus() }
+        focusWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.focusDelay, execute: work)
+    }
+
+    private func sendFocus() {
+        focusWork = nil
+        guard subscribed, !readOnly, window != nil, UIApplication.shared.applicationState == .active,
+              bounds.width > 0, bounds.height > 0 else { return }
+        let id = paneID, viewport = fittedSize(), resend = viewport != sentViewport
+        sentViewport = viewport
+        onFocusSent?()
+        Task { [store] in
+            if resend { try? await store.backend.setViewport(id, viewport) }
+            do { try await store.focusPane(id) } catch { log("focus pane \(id) failed: \(error)") }
+        }
     }
 
     // Taps in the padding focus the terminal too.

@@ -217,6 +217,69 @@ final class SSHIntegrationTests: XCTestCase {
         try await backend.closeWorkspace(hidden.workspace)
     }
 
+    /// Focus picks the pane's size (pane.focus, clothod 0.1.28), typing doesn't: another client sizes the pane to
+    /// its own viewport, then focusing it on the phone sizes it back to the phone's, with nothing typed. Focus
+    /// actions close together send one request.
+    @MainActor
+    func testFocusResizesThePaneWithoutTyping() async throws {
+        let backend = ClothodBackend(configuration: .init(transport: SSHTransport(machine: machine), clientName: "clotho-ios-test"))
+        let store = ModelStore(backend: backend)
+        try await store.start()
+        defer { store.stop() }
+        func waitUntil(_ what: String, _ seconds: Double = 15, _ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition() {
+                guard Date() < deadline else { return XCTFail("timed out: \(what)") }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        try await waitUntil("hello") { store.hello != nil }
+        guard store.hello?.features.contains(.paneFocus) == true else {
+            throw XCTSkip("clothod \(store.hello?.version ?? "?") has no pane.focus")
+        }
+        let created = try await backend.createWorkspace(name: "ios-focus")
+        try await waitUntil("the pane in the model") { store.state.pane(created.pane) != nil }
+        guard let pane = store.state.pane(created.pane) else { return }
+
+        // The phone shows the pane: its subscribe carries its viewport, so the pane takes the phone's size.
+        let host = PaneHostView(pane: pane, store: store)
+        var sent = 0
+        host.onFocusSent = { sent += 1 }
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 600))
+        host.frame = window.bounds
+        window.addSubview(host)
+        window.isHidden = false
+        host.layoutIfNeeded()
+        let phone = host.fittedSize()
+        try await waitUntil("the phone's size") { host.paneSize == phone }
+
+        // Another client (the Mac, say) subscribes with a bigger viewport: that's a focus, so the pane is its size.
+        let other = ClothodBackend(configuration: .init(transport: SSHTransport(machine: machine), clientName: "clotho-ios-test-other"))
+        let otherStore = ModelStore(backend: other)
+        try await otherStore.start()
+        defer { otherStore.stop() }
+        let big = Size(cols: phone.cols + 30, rows: phone.rows + 10)
+        _ = try await other.subscribe(created.pane, haveSeq: nil, scrollback: 0, viewport: big)
+        try await waitUntil("the other client's size") { host.paneSize == big }
+
+        // Focus on the phone, three times in quick succession: one request, and the pane is the phone's size again.
+        host.noteFocus()
+        host.noteFocus()
+        host.noteFocus()
+        try await waitUntil("the phone's size after focus") { host.paneSize == phone }
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertEqual(sent, 1, "focus actions close together send one request")
+
+        // Read-only (a saved model) never focuses.
+        host.readOnly = true
+        host.noteFocus()
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertEqual(sent, 1)
+
+        host.removeFromSuperview()
+        try await backend.closeWorkspace(created.workspace)
+    }
+
     /// Mute over the wire (agent.mute, clothod 0.1.10): a hook-reported waiting agent needs the user until it's
     /// muted; while muted, another report raises nothing; unmuting doesn't bring attention back by itself.
     @MainActor
