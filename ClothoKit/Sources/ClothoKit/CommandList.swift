@@ -25,6 +25,13 @@ public struct CommandListItem: Hashable, Sendable, Identifiable {
     public var keywords: [String]
     public var target: Target?
 
+    public init(id: ID, title: String, keywords: [String] = [], target: Target? = nil) {
+        self.id = id
+        self.title = title
+        self.keywords = keywords
+        self.target = target
+    }
+
     /// Everything the matcher sees: title and keywords.
     public var searchText: String { ([title] + keywords).joined(separator: " ") }
 }
