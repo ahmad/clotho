@@ -51,6 +51,15 @@ pub enum Node {
     Split { id: u64, axis: Axis, ratio: f64, a: Box<Node>, b: Box<Node> },
 }
 
+/// Why `move_pane` or `join_tab` refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveError {
+    /// An unknown pane or tab.
+    NotFound,
+    /// Onto itself: the pane is `to`, or `to` is in the tab being joined.
+    Same,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Right,
@@ -99,14 +108,20 @@ impl Node {
 
     /// Replace the leaf `pane` with a split of it and `new`. Returns false if `pane` isn't here.
     fn split(&mut self, pane: u64, new: u64, dir: Direction, ratio: f64, split_id: u64) -> bool {
+        self.insert(pane, &mut Some(Node::Pane { pane: new }), dir, ratio, split_id)
+    }
+
+    /// Replace the leaf `at` with a split of it and `sub` (taken), `sub` on the `dir` side.
+    /// `ratio` is `at`'s share, whichever side it ends up on. Returns false if `at` isn't here.
+    fn insert(&mut self, at: u64, sub: &mut Option<Node>, dir: Direction, ratio: f64, split_id: u64) -> bool {
         match self {
-            Node::Pane { pane: p } if *p == pane => {
-                let old = Box::new(Node::Pane { pane });
-                let fresh = Box::new(Node::Pane { pane: new });
+            Node::Pane { pane: p } if *p == at => {
+                let old = Box::new(Node::Pane { pane: at });
+                let fresh = Box::new(sub.take().expect("inserted once"));
                 let (axis, a, b, ratio) = match dir {
                     Direction::Right => (Axis::Horizontal, old, fresh, ratio),
                     Direction::Down => (Axis::Vertical, old, fresh, ratio),
-                    // The new pane comes first, and gets the requested share.
+                    // The new side comes first; the stored ratio is always `a`'s share.
                     Direction::Left => (Axis::Horizontal, fresh, old, 1.0 - ratio),
                     Direction::Up => (Axis::Vertical, fresh, old, 1.0 - ratio),
                 };
@@ -114,9 +129,7 @@ impl Node {
                 true
             }
             Node::Pane { .. } => false,
-            Node::Split { a, b, .. } => {
-                a.split(pane, new, dir, ratio, split_id) || b.split(pane, new, dir, ratio, split_id)
-            }
+            Node::Split { a, b, .. } => a.insert(at, sub, dir, ratio, split_id) || b.insert(at, sub, dir, ratio, split_id),
         }
     }
 
@@ -395,6 +408,63 @@ impl Model {
         Some((dest_id, to, changed))
     }
 
+    /// Move the live pane `pane` into a split beside `to` (feature `pane.move`): out of its
+    /// tab (an emptied tab closes, its workspace stays), then `to`'s leaf becomes a split of
+    /// `to` and `pane`, as `pane.split` would make it. Returns (workspace, tab, split) of the
+    /// destination. The rules are docs/protocol.md, "Moving panes"; the Mac mirrors them.
+    pub fn move_pane(&mut self, pane: u64, to: u64, dir: Direction, ratio: f64, focus: bool) -> Result<(u64, u64, u64), MoveError> {
+        if pane == to {
+            return Err(MoveError::Same);
+        }
+        if !self.contains_pane(pane) || !self.contains_pane(to) {
+            return Err(MoveError::NotFound);
+        }
+        let follows = focus || self.focus.pane == Some(pane);
+        self.remove_pane(pane);
+        self.graft(to, Node::Pane { pane }, dir, ratio, follows.then_some(pane))
+    }
+
+    /// Move every pane of `tab`, its split tree as it is, into a split beside `to` (in another
+    /// tab); `tab` closes, its workspace stays. Returns (workspace, tab, split) of the
+    /// destination.
+    pub fn join_tab(&mut self, tab: u64, to: u64, dir: Direction, ratio: f64, focus: bool) -> Result<(u64, u64, u64), MoveError> {
+        let (_, to_tab) = self.locate(to).ok_or(MoveError::NotFound)?;
+        if to_tab == tab {
+            return Err(MoveError::Same);
+        }
+        let follows = focus || self.focus.tab == Some(tab);
+        let (wi, ti) = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(wi, w)| w.tabs.iter().position(|t| t.id == tab).map(|ti| (wi, ti)))
+            .ok_or(MoveError::NotFound)?;
+        let w = &mut self.workspaces[wi];
+        let t = w.tabs.remove(ti);
+        if w.active_tab == Some(tab) {
+            w.active_tab = w.tabs.get(ti.saturating_sub(1)).map(|t| t.id);
+        }
+        self.fix_focus();
+        self.graft(to, t.layout, dir, ratio, follows.then_some(t.active_pane))
+    }
+
+    /// Put `sub` beside the leaf `to`; focus `focus_on` if given, else keep focus where it is.
+    fn graft(&mut self, to: u64, sub: Node, dir: Direction, ratio: f64, focus_on: Option<u64>) -> Result<(u64, u64, u64), MoveError> {
+        let (ws, tab) = self.locate(to).ok_or(MoveError::NotFound)?;
+        let split = self.alloc();
+        let t = self.tab_mut(tab).expect("located");
+        if !t.layout.insert(to, &mut Some(sub), dir, ratio, split) {
+            unreachable!("located");
+        }
+        match focus_on {
+            Some(p) => {
+                self.focus_pane(p);
+            }
+            None => self.fix_focus(),
+        }
+        Ok((ws, tab, split))
+    }
+
     /// Give the panes new ids (`map`, old to new), as after a restore; a pane not in `map` is
     /// removed first, as if it had exited. Focus, active tabs and active panes follow.
     pub fn remap_panes(&mut self, map: &std::collections::HashMap<u64, u64>) {
@@ -522,6 +592,66 @@ mod tests {
         assert_eq!(m.workspaces[1].active_tab, Some(c));
         assert_eq!(m.focus, Focus { workspace: Some(w2), tab: Some(c), pane: Some(3) });
         assert_eq!(m.panes(), vec![2, 3, 4, 1], "panes untouched, in their tabs");
+    }
+
+    #[test]
+    fn move_pane_beside_another() {
+        let (mut m, [w1, w2, _], [_, b, c, d]) = three();
+        // Unfocused: focus stays on 2 (tab b); pane 1's tab a closes, b stays w1's active tab.
+        m.focus_tab(b);
+        assert_eq!(m.move_pane(1, 4, Direction::Right, 0.3, false), Ok((w2, d, m.next_id)));
+        assert_eq!(order(&m)[0..2], [(w1, vec![b, c]), (w2, vec![d])]);
+        assert_eq!(m.focus, Focus { workspace: Some(w1), tab: Some(b), pane: Some(2) });
+        let t = &m.workspaces[1].tabs[0];
+        assert_eq!((t.panes(), t.active_pane), (vec![4, 1], 4));
+        let Node::Split { ratio, axis, .. } = &t.layout else { panic!() };
+        assert_eq!((*ratio, *axis), (0.3, Axis::Horizontal), "the ratio is the target's share");
+        // The focused pane moves: focus follows even with focus: false; the tab before it
+        // becomes the source's active tab.
+        m.focus_tab(c);
+        assert_eq!(m.move_pane(3, 1, Direction::Up, 0.5, false).map(|r| r.1), Ok(d));
+        assert_eq!(m.focus, Focus { workspace: Some(w2), tab: Some(d), pane: Some(3) });
+        assert_eq!(m.workspaces[0].active_tab, Some(b));
+        assert_eq!(m.workspaces[1].tabs[0].panes(), vec![4, 3, 1]);
+        // Within one tab, and focus: true.
+        assert_eq!(m.move_pane(4, 1, Direction::Down, 0.5, true).map(|r| r.1), Ok(d));
+        assert_eq!(m.workspaces[1].tabs[0].panes(), vec![3, 1, 4]);
+        assert_eq!(m.focus.pane, Some(4));
+        // Refusals change nothing.
+        let before = m.clone();
+        assert_eq!(m.move_pane(4, 4, Direction::Right, 0.5, true), Err(MoveError::Same));
+        assert_eq!(m.move_pane(9, 4, Direction::Right, 0.5, true), Err(MoveError::NotFound));
+        assert_eq!(m.move_pane(4, 9, Direction::Right, 0.5, true), Err(MoveError::NotFound));
+        assert_eq!(m, before);
+    }
+
+    #[test]
+    fn join_tab_keeps_its_split() {
+        let (mut m, [w1, w2, _], [a, b, _, d]) = three();
+        m.split(2, 6, Direction::Down, 0.25);
+        m.focus_pane(2);
+        // The focused tab joins: focus goes to its active pane (2), its workspace keeps a tab.
+        assert_eq!(m.join_tab(b, 4, Direction::Left, 0.6, false).map(|r| (r.0, r.1)), Ok((w2, d)));
+        assert_eq!(order(&m)[0].1.len(), 2);
+        assert_eq!(m.workspaces[0].active_tab, Some(a));
+        let t = &m.workspaces[1].tabs[0];
+        assert_eq!(t.panes(), vec![2, 6, 4]);
+        let Node::Split { ratio, a: first, .. } = &t.layout else { panic!() };
+        assert!((ratio - 0.4).abs() < 1e-9, "4 keeps 0.6: {ratio}");
+        assert!(matches!(**first, Node::Split { ratio, .. } if ratio == 0.25), "the joined tab's split as it was");
+        assert_eq!(m.focus, Focus { workspace: Some(w2), tab: Some(d), pane: Some(2) });
+        // Into its own tab: refused.
+        let before = m.clone();
+        assert_eq!(m.join_tab(d, 6, Direction::Right, 0.5, true), Err(MoveError::Same));
+        assert_eq!(m.join_tab(999, 6, Direction::Right, 0.5, true), Err(MoveError::NotFound));
+        assert_eq!(m, before);
+        // w1's last tabs go: the workspace stays, empty.
+        let c = m.workspaces[0].tabs[1].id;
+        m.join_tab(a, 4, Direction::Right, 0.5, false).unwrap();
+        m.join_tab(c, 4, Direction::Right, 0.5, false).unwrap();
+        assert!(m.workspaces[0].tabs.is_empty() && m.workspaces[0].active_tab.is_none());
+        assert_eq!(m.workspaces[0].id, w1);
+        assert_eq!(m.focus.pane, Some(2));
     }
 
     #[test]

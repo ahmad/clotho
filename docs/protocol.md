@@ -95,7 +95,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
-                  "restore", "move", "git"],
+                  "restore", "move", "git", "pane.move"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -128,7 +128,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `pane.dismiss_restored`, see [Restore after restart](#restore-after-restart); since 0.1.21),
   `move` (`workspace.move` and `tab.move`, see
   [Moving tabs and workspaces](#moving-tabs-and-workspaces); since 0.1.22), `git` (panes'
-  `git` field, see [Git](#git); since 0.1.23).
+  `git` field, see [Git](#git); since 0.1.23), `pane.move` (`pane.move` and `tab.join`, see
+  [Moving panes](#moving-panes); since 0.1.26).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -292,6 +293,45 @@ exactly.
   An index past the end is not an error: it means last.
 - Every effective move sends one `state` event to every event subscriber, and the saved layout
   ([Restore after restart](#restore-after-restart)) follows it.
+
+## Moving panes
+
+For "open beside the current pane" (⌘↩ on a ⌘P row; feature `pane.move`, since 0.1.26). A live
+pane, or every pane of a tab, moves into a split beside another pane, also in another tab or
+workspace. As with [tab.move](#moving-tabs-and-workspaces), only places change: pane ids,
+shells, PTYs, agents (with their sessions and hints), `restored` marks, subscriptions and seqs
+are untouched, so an open pane needs nothing new. Its size changes only when a client sets a new
+viewport for it.
+
+- **`pane.move {pane, to_pane, direction?, ratio?, focus?}`.** Take `pane` out of its tab, as
+  `pane.close` would but without hanging it up: its parent split collapses, and the tab's
+  `active_pane`, if it was this one, becomes the pane that took its place. A tab left with no
+  panes closes, with `tab.close`'s rule for its workspace's `active_tab`; the workspace stays,
+  even when empty. Then `to_pane`'s leaf becomes a split of `to_pane` and `pane`, exactly as
+  `pane.split {pane: to_pane, direction, ratio}` would make it with `pane` as the new pane:
+  `direction` (`right`, `down`, `left`, `up`; default `right`) is the side `pane` goes on, and
+  `ratio` (default 0.5, clamped to 0.05–0.95) is `to_pane`'s share. Both may be in one tab.
+- **`tab.join {tab, to_pane, direction?, ratio?, focus?}`.** The same with the tab's whole split
+  tree, as it is (its splits keep their ids and ratios), in place of one pane. The tab goes
+  (`tab.close`'s rule for `active_tab`; the workspace stays). `to_pane` must be in another tab.
+  A one-pane tab joined is the same as `pane.move` of its pane.
+- **Focus.** If `focus` is `true` (the default), or the global focus was on the moved pane
+  (`pane.move`) or on the joined tab (`tab.join`): focus goes to the moved pane, or to the joined
+  tab's `active_pane`, which also becomes the destination tab's `active_pane` and its
+  workspace's `active_tab` (as `focus {pane}` does). Otherwise focus stays where it was, and the
+  destination's `active_pane` and `active_tab` don't change.
+- **Reply** `{"workspace", "tab", "split"}`: where the moved panes are now, and the id of the
+  new split (a fresh id, as from `pane.split`).
+- **Errors.** `not_found` for an unknown `pane`, `tab` or `to_pane`. `bad_request` for a missing
+  `pane`/`tab` or `to_pane`, `pane` equal to `to_pane`, a `to_pane` inside the joined tab, an
+  unknown `direction`, a non-number `ratio` or a non-boolean `focus`. Nothing changes on an
+  error.
+- **Machines.** A daemon only knows its own panes, so a move between machines can't be asked
+  for: the other machine's ids are `not_found` here (or, by chance, other panes). Clients offer
+  ⌘↩ only when both panes are on one machine, and otherwise open the tab instead.
+- Every move sends one `state` event to every event subscriber, and the saved layout
+  ([Restore after restart](#restore-after-restart)) follows it, agents included, so a restart
+  restores the new arrangement.
 
 ## Git
 
@@ -473,6 +513,8 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `tab.rename` | `tab`, `title` (null clears it) | `{}` |
 | `tab.close` | `tab` | `{}` |
 | `tab.move` | `tab`, `index`, `workspace?`, `focus?` | `{"workspace", "index"}`: the tab's final place; see [Moving tabs and workspaces](#moving-tabs-and-workspaces) |
+| `pane.move` | `pane`, `to_pane`, `direction?` (default `right`), `ratio?` (default 0.5), `focus?` (default true) | `{"workspace", "tab", "split"}`: moves the live pane beside `to_pane`; see [Moving panes](#moving-panes) |
+| `tab.join` | `tab`, `to_pane`, `direction?`, `ratio?`, `focus?` | `{"workspace", "tab", "split"}`: moves all of the tab's panes, its split as it is, beside `to_pane`; the tab closes. See [Moving panes](#moving-panes) |
 | `pane.split` | `pane`, `direction` (`right`, `down`, `left`, `up`), `ratio?` (default 0.5), spawn options | `{"pane", "split"}` |
 | `pane.close` | `pane` | `{}`: sends SIGHUP to the pane's process group and removes the pane from the layout |
 | `split.set_ratio` | `split`, `ratio` | `{}` |

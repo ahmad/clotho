@@ -261,7 +261,7 @@ const FULLSCREEN_APP: &str = r#"printf '\033[?1049h\033[H\033[2J\033[1;37;44m TO
 #[tokio::test]
 async fn a_snapshot_after_clear_shows_only_the_screen() {
     let env = Env::new();
-    let mut c = env.client().await;
+    let c = env.client().await;
     let mut params = sh();
     params["cols"] = json!(30);
     params["rows"] = json!(10);
@@ -4832,6 +4832,119 @@ async fn tabs_and_workspaces_move_and_every_client_sees_it() {
         ws[0]["name"] == "two" && ws[0]["tabs"][0]["id"] == t1 && ws[2]["tabs"][0]["id"] == t2
     })
     .await;
+}
+
+/// ⌘↩ in ⌘P: a live pane, or a whole tab, moves into a split beside another pane, also across
+/// tabs and workspaces. The shells and agents are the same ones; an emptied tab closes and its
+/// workspace stays; every client sees each move; the saved layout follows, and a reboot
+/// restores the new arrangement with the moved agent resumed.
+#[tokio::test]
+async fn panes_and_tabs_move_beside_another_pane() {
+    let mut r = RestoreEnv::new();
+    let a = r.env.client().await;
+    let mut b = r.env.client().await;
+    assert!(a.hello["features"].as_array().unwrap().contains(&json!("pane.move")), "{}", a.hello);
+    let w1 = a.request("workspace.create", with(sh(), json!({"name": "one"}))).await.unwrap();
+    let (ws1, t1, p1) = (w1["workspace"].as_u64().unwrap(), w1["tab"].as_u64().unwrap(), w1["pane"].as_u64().unwrap());
+    let t2r = a.request("tab.create", with(sh(), json!({"workspace": ws1}))).await.unwrap();
+    let (t2, p2) = (t2r["tab"].as_u64().unwrap(), t2r["pane"].as_u64().unwrap());
+    let w2 = a.request("workspace.create", with(sh(), json!({"name": "two"}))).await.unwrap();
+    let (ws2, t3, p3) = (w2["workspace"].as_u64().unwrap(), w2["tab"].as_u64().unwrap(), w2["pane"].as_u64().unwrap());
+    let p4 = a.request("pane.split", with(sh(), json!({"pane": p3, "direction": "down"}))).await.unwrap()["pane"].as_u64().unwrap();
+    r.agent(&a, p1, "claude", "move-sess-1").await;
+    b.request("events.subscribe", json!({})).await.unwrap();
+    next_state(&mut b, T).await.expect("the initial state");
+    let leaf = |n: &Value| n["pane"].clone();
+
+    // A pane into another workspace's tab: its own tab closes, focus follows it.
+    let reply = a.request("pane.move", json!({"pane": p1, "to_pane": p3, "direction": "right", "ratio": 0.4})).await.unwrap();
+    assert_eq!((reply["workspace"].as_u64(), reply["tab"].as_u64()), (Some(ws2), Some(t3)), "{reply}");
+    let s = next_state(&mut b, T).await.expect("a state event for the move");
+    assert_eq!(tab_order(&s), vec![(json!("one"), vec![json!(t2)]), (json!("two"), vec![json!(t3)])]);
+    let l = &s["workspaces"][1]["tabs"][0]["layout"];
+    assert_eq!((l["axis"].clone(), leaf(&l["b"])), (json!("vertical"), json!(p4)), "{l}");
+    assert_eq!((l["a"]["axis"].clone(), l["a"]["ratio"].clone(), l["a"]["id"].clone()), (json!("horizontal"), json!(0.4), reply["split"].clone()));
+    assert_eq!((leaf(&l["a"]["a"]), leaf(&l["a"]["b"])), (json!(p3), json!(p1)));
+    assert_eq!(s["focus"], json!({"workspace": ws2, "tab": t3, "pane": p1}));
+    assert_eq!(s["workspaces"][0]["active_tab"], t2);
+    assert_eq!(pane_of(&s, p1)["agent"]["session"], "move-sess-1", "the agent moved with its pane");
+    assert!(s["workspaces"][0]["tabs"].as_array().unwrap().iter().all(|t| t["id"] != t1));
+
+    // A whole tab, its split as it is, beside a pane in another tab; focus: false leaves focus.
+    let t4r = a.request("tab.create", with(sh(), json!({"workspace": ws1}))).await.unwrap();
+    let (t4, p5) = (t4r["tab"].as_u64().unwrap(), t4r["pane"].as_u64().unwrap());
+    let p6 = a.request("pane.split", with(sh(), json!({"pane": p5, "direction": "right", "ratio": 0.7}))).await.unwrap()["pane"].as_u64().unwrap();
+    a.input(p5, b"V=kept; echo shellpid=$$\r");
+    let lines = wait_for_text(&a, p5, T, |l| l.iter().any(|l| output(l).starts_with("shellpid="))).await.unwrap();
+    let pid = lines.iter().find_map(|l| output(l).strip_prefix("shellpid=")).unwrap().to_string();
+    a.request("focus", json!({"pane": p1})).await.unwrap();
+    while next_state(&mut b, Duration::from_millis(300)).await.is_some() {}
+    a.request("tab.join", json!({"tab": t4, "to_pane": p2, "direction": "down", "focus": false})).await.unwrap();
+    let s = next_state(&mut b, T).await.unwrap();
+    assert_eq!(tab_order(&s)[0], (json!("one"), vec![json!(t2)]));
+    let l = &s["workspaces"][0]["tabs"][0]["layout"];
+    assert_eq!((l["axis"].clone(), leaf(&l["a"])), (json!("vertical"), json!(p2)), "{l}");
+    assert_eq!((l["b"]["ratio"].clone(), leaf(&l["b"]["a"]), leaf(&l["b"]["b"])), (json!(0.7), json!(p5), json!(p6)), "the tab's split as it was");
+    assert_eq!(s["focus"], json!({"workspace": ws2, "tab": t3, "pane": p1}), "focus stayed");
+
+    // Within one tab: p4 goes to p1's left.
+    a.request("pane.move", json!({"pane": p4, "to_pane": p1, "direction": "left"})).await.unwrap();
+    let s = next_state(&mut b, T).await.unwrap();
+    let l = &s["workspaces"][1]["tabs"][0]["layout"];
+    assert_eq!((leaf(&l["a"]), l["axis"].clone(), leaf(&l["b"]["a"]), leaf(&l["b"]["b"])), (json!(p3), json!("horizontal"), json!(p4), json!(p1)), "{l}");
+    assert_eq!(s["focus"]["pane"], p4);
+
+    // The last tab of a workspace: the workspace stays, empty.
+    a.request("tab.join", json!({"tab": t2, "to_pane": p3, "direction": "down", "focus": false})).await.unwrap();
+    let s = next_state(&mut b, T).await.unwrap();
+    assert_eq!(tab_order(&s), vec![(json!("one"), vec![]), (json!("two"), vec![json!(t3)])]);
+    assert!(s["workspaces"][0]["active_tab"].is_null());
+    assert_eq!(s["focus"], json!({"workspace": ws2, "tab": t3, "pane": p4}));
+    assert_eq!(s["panes"].as_array().unwrap().len(), 6, "every pane still there");
+
+    // Errors, and nothing moved by them.
+    for (m, params, code) in [
+        ("pane.move", json!({"pane": p1, "to_pane": p1}), "bad_request"),
+        ("pane.move", json!({"pane": 999_999, "to_pane": p1}), "not_found"),
+        ("pane.move", json!({"pane": p1, "to_pane": 999_999}), "not_found"),
+        ("pane.move", json!({"pane": p1, "to_pane": p3, "direction": "sideways"}), "bad_request"),
+        ("pane.move", json!({"pane": p1, "to_pane": p3, "focus": "yes"}), "bad_request"),
+        ("pane.move", json!({"pane": p1}), "bad_request"),
+        ("tab.join", json!({"tab": t3, "to_pane": p3}), "bad_request"),
+        ("tab.join", json!({"tab": t1, "to_pane": p3}), "not_found"),
+    ] {
+        let e = a.request(m, params.clone()).await.unwrap_err().to_string();
+        assert!(e.contains(code), "{m} {params}: {e}");
+    }
+    assert!(next_state(&mut b, Duration::from_millis(300)).await.is_none(), "errors send nothing");
+
+    // The moved shell is the same one, with its state.
+    a.input(p5, b"echo $V-$$\r");
+    wait_for_text(&a, p5, T, |l| has_line(l, &format!("kept-{pid}"))).await.unwrap();
+
+    // The saved layout follows, and a reboot brings the new arrangement back.
+    r.wait_layout("with the moved panes", |l| {
+        let ws = &l["model"]["workspaces"];
+        ws[0]["tabs"].as_array().is_some_and(|t| t.is_empty()) && ws[1]["tabs"][0]["layout"]["b"]["b"]["pane"] == p1 && l["model"]["focus"]["pane"] == p4
+    })
+    .await;
+    drop((a, b));
+    r.reboot();
+    let c = r.env.client().await;
+    let s = c.request("state.get", json!({})).await.unwrap();
+    assert_eq!(tab_order(&s).iter().map(|t| (t.0.clone(), t.1.len())).collect::<Vec<_>>(), vec![(json!("one"), 0), (json!("two"), 1)]);
+    let l = &s["workspaces"][1]["tabs"][0]["layout"];
+    let shape = |n: &Value| n["type"] == "split";
+    assert!(shape(l) && shape(&l["a"]) && shape(&l["a"]["b"]) && shape(&l["a"]["b"]["b"]) && shape(&l["b"]), "{l}");
+    assert_eq!(l["a"]["b"]["b"]["ratio"], 0.7);
+    let (n1, n4) = (l["b"]["b"]["pane"].as_u64().unwrap(), l["b"]["a"]["pane"].as_u64().unwrap());
+    assert_eq!(s["focus"]["pane"], n4, "focus came back");
+    assert_eq!((pane_of(&s, n1)["restored"]["agent"].clone(), pane_of(&s, n1)["restored"]["session"].clone()), (json!("claude"), json!("move-sess-1")), "{s}");
+    let deadline = Instant::now() + T;
+    while !r.rec().contains("claude --resume=move-sess-1") {
+        assert!(Instant::now() < deadline, "the moved agent was not resumed: {}", r.rec());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Upgrading from a serve that didn't keep agents across restarts (0.1.21): the adopted holder

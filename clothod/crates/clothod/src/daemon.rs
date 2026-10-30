@@ -2607,7 +2607,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -2724,6 +2724,40 @@ impl Daemon {
                     self.model_changed();
                 }
                 Ok(json!({"workspace": ws, "index": index}))
+            }
+            "pane.move" | "tab.join" => {
+                let to = param_u64(p, "to_pane")?;
+                let dir = match p.get("direction") {
+                    None | Some(Value::Null) => Direction::Right,
+                    Some(v) => v
+                        .as_str()
+                        .and_then(Direction::parse)
+                        .ok_or_else(|| err("bad_request", "direction must be right, down, left or up"))?,
+                };
+                let ratio = match p.get("ratio") {
+                    None | Some(Value::Null) => 0.5,
+                    Some(v) => v.as_f64().ok_or_else(|| err("bad_request", "ratio must be a number"))?,
+                };
+                let focus = match p.get("focus") {
+                    None | Some(Value::Null) => true,
+                    Some(v) => v.as_bool().ok_or_else(|| err("bad_request", "focus must be a boolean"))?,
+                };
+                let (what, id) = if method == "pane.move" { ("pane", param_u64(p, "pane")?) } else { ("tab", param_u64(p, "tab")?) };
+                let r = {
+                    let mut m = self.model.lock().unwrap();
+                    if what == "pane" {
+                        m.move_pane(id, to, dir, ratio, focus)
+                    } else {
+                        m.join_tab(id, to, dir, ratio, focus)
+                    }
+                };
+                let (ws, tab, split) = r.map_err(|e| match e {
+                    crate::model::MoveError::NotFound => err("not_found", format!("no {what} {id} or pane {to}")),
+                    crate::model::MoveError::Same => err("bad_request", format!("pane {to} is in the {what} being moved")),
+                })?;
+                log(format_args!("{} moved {what} {id} beside pane {to}", client.label()));
+                self.model_changed();
+                Ok(json!({"workspace": ws, "tab": tab, "split": split}))
             }
             "workspace.rename" => {
                 let ws = param_u64(p, "workspace")?;
