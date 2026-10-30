@@ -487,8 +487,20 @@ async fn macos_shells_get_the_login_sessions_namespace() {
         let user = get("user=");
         assert!(!user.is_empty() && !user.chars().all(|c| c.is_ascii_digit()) && !user.contains("No user"), "pane {p}: {lines:?}");
     }
-    // The launch job and its plist are gone.
-    let (_, jobs, _) = h.r.clothod(&path, "version >/dev/null; launchctl list | grep -c nyc.amin.clotho.clothod.start; ls $CLOTHOD_RUNTIME_DIR/*.plist 2>/dev/null | wc -l").await.unwrap();
+    // The launch job and its plist are gone. Only this daemon's job counts: the other tests run
+    // in parallel, and their `start` jobs come and go in the same domain.
+    let (_, jobs, _) = h
+        .r
+        .clothod(
+            &path,
+            "version >/dev/null; \
+             for l in $(launchctl list | awk '/nyc.amin.clotho.clothod.start/ {print $3}'); do \
+               launchctl print gui/$(id -u)/$l 2>/dev/null | grep -qF -- \"$CLOTHOD_RUNTIME_DIR\" && echo $l; \
+             done | wc -l; \
+             ls $CLOTHOD_RUNTIME_DIR/*.plist 2>/dev/null | wc -l",
+        )
+        .await
+        .unwrap();
     let counts: Vec<&str> = jobs.split_whitespace().collect();
     assert_eq!(counts, vec!["0", "0"], "launch jobs or plists left: {jobs}");
 }
