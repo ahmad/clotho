@@ -21,8 +21,8 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
 - **The user's daemons.** Each machine (this one, devbox, imac) runs one clothod instance, and one
   version of it. Never stop or restart the user's default instance. Upgrading it in place is part of
   shipping (see Shipping): the upgrade swaps the holder in place, so shells survive.
-- **Tests and dev daemons.** These are temporary. Use `--ephemeral` and dev runtime dirs (`/tmp/clt*`,
-  `/tmp/cki-*`). Clean up after every run, and check `clothod ps` shows nothing marked extra.
+- **Tests and dev daemons.** These are temporary. Use `--ephemeral` and each role's own dev dirs: clothod
+  `/tmp/clt*`, mac `/tmp/cmac-*`, ios `/tmp/cki-*`, so roles can test in parallel. Clean up after every run, and check `clothod ps` shows nothing marked extra.
 - **Test Claude Code sessions.** Run them with `--setting-sources project,local`. The user's settings
   carry hooks that must not see test traffic.
 - **Agent hooks.** Never install them into `~/.claude` or `~/.codex` without the user's confirmation.
