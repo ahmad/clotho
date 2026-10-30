@@ -61,7 +61,13 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
   only the latest uploaded archive. Never delete `clothod/dist` (the released builds). Keep at least 20 GiB
   free; check with `df -h /System/Volumes/Data` before big builds. Don't touch `~/Library` caches or
   simulators without asking the user.
-- **imac** (macOS arm64, `macbook@imac`): a remote test host.
+- **imac** (macOS arm64, `macbook@imac`, always on): **the build host** (user, 2026-10-30). Run Mac and iOS
+  builds, tests and dists there with `CLOTHO_MAC=macbook@imac clotho-mac <command>`; macbook is the fallback.
+  Signing uses imac's dedicated build keychain (~/Library/Keychains/clotho-build.keychain-db, password in
+  ~/.config/clotho/build-keychain-pw; never print it). Unlock it in the same SSH session before codesign,
+  notarytool (profile `clotho-notary`, ASC API key) or Sparkle signing. The Sparkle key is read from it
+  into `sign_update --ed-key-file -` only, never to disk. imac also runs the user's own clothod and
+  Claude sessions: never touch them. The user is often at macbook: no UI test runs there.
 
 ## Build and test
 
