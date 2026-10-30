@@ -49,6 +49,7 @@ final class RestoredNoteTests: XCTestCase {
         XCTAssertEqual(PaneRestore(at: 1).note, "Restored after restart")
         XCTAssertEqual(PaneRestore(at: 1, agent: "claude", session: "abc").note, "Restored after restart · resumed Claude session")
         XCTAssertEqual(PaneRestore(at: 1, agent: "codex", session: "x").note, "Restored after restart · resumed Codex session")
+        XCTAssertEqual(PaneRestore(at: 1, agent: "claude", continued: true).note, "Continued the latest conversation in this folder")
     }
 
     func testShowsWithoutResizingAndDismissesEverywhere() async throws {

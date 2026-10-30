@@ -358,23 +358,39 @@ public struct PaneGit: Codable, Equatable, Sendable {
 }
 
 /// How a pane came back after a restart: a fresh shell in its folder, and the agent conversation the
-/// daemon resumed in it, if any (`claude --resume <id>` or `codex resume <id>`).
+/// daemon resumed in it, if any (`claude --resume <id>` or `codex resume <id>`). `continued` (clothod
+/// 0.1.25) means it had no session id to name and continued the folder's latest conversation instead.
 public struct PaneRestore: Codable, Equatable, Sendable {
     /// When it was restored, unix seconds.
     public var at: Double
     /// "claude" or "codex" when a conversation was resumed.
     public var agent: String?
     public var session: String?
+    /// Continued the latest conversation in the folder rather than a named session.
+    public var continued: Bool
 
-    public init(at: Double, agent: String? = nil, session: String? = nil) {
+    public init(at: Double, agent: String? = nil, session: String? = nil, continued: Bool = false) {
         self.at = at
         self.agent = agent
         self.session = session
+        self.continued = continued
     }
 
-    /// "Restored after restart", plus "· resumed Claude session" when one was.
+    private enum CodingKeys: String, CodingKey { case at, agent, session, continued }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        at = try c.decode(Double.self, forKey: .at)
+        agent = try c.decodeIfPresent(String.self, forKey: .agent)
+        session = try c.decodeIfPresent(String.self, forKey: .session)
+        continued = try c.decodeIfPresent(Bool.self, forKey: .continued) ?? false
+    }
+
+    /// "Restored after restart", plus "· resumed Claude session" when one was; "Continued the latest
+    /// conversation in this folder" when the daemon continued one without a session to name.
     public var note: String {
         let names = ["claude": "Claude", "codex": "Codex"]
+        if continued { return "Continued the latest conversation in this folder" }
         guard let agent else { return "Restored after restart" }
         return "Restored after restart · resumed \(names[agent] ?? agent) session"
     }
