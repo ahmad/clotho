@@ -4535,6 +4535,78 @@ async fn a_detected_claude_is_resumed_from_its_session_record() {
     assert_eq!(r.rec().trim(), format!("claude --resume=dddd4444-detected in {}", real(&dir)));
 }
 
+/// An agent whose session wasn't known is continued (`claude --continue`, `codex resume
+/// --last`: the latest conversation in its folder) only when no other saved pane had that kind
+/// of agent in that folder, with a session or without. Two in one folder both get bare shells,
+/// and so does one next to a pane with a known session.
+#[tokio::test]
+async fn agents_without_a_session_are_continued_only_when_unambiguous() {
+    let mut r = RestoreEnv::new();
+    let c = r.env.client().await;
+    let root = r.env.dir.path().to_path_buf();
+    let (alone, shared, known, fake) = (root.join("alone"), root.join("shared"), root.join("known"), root.join("fake"));
+    for d in [&alone, &shared, &known, &fake] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    // Stand-ins found by detection, with no hooks and no session record: never on PATH (the
+    // restore's lines run the recording stubs).
+    for kind in ["claude", "codex"] {
+        let f = fake.join(kind);
+        std::fs::write(&f, "#!/bin/sh\nsleep 120\n").unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    let w = c.request("workspace.create", with(with(sh(), json!({"cwd": alone.display().to_string()})), json!({"name": "w"}))).await.unwrap();
+    let ws = w["workspace"].clone();
+    let tab_in = |d: &std::path::Path| with(with(sh(), json!({"cwd": d.display().to_string()})), json!({"workspace": ws}));
+    let a = w["pane"].as_u64().unwrap();
+    let pane = |d: std::path::PathBuf| {
+        let req = tab_in(&d);
+        let c = &c;
+        async move { c.request("tab.create", req).await.unwrap()["pane"].as_u64().unwrap() }
+    };
+    let (f, b, b2, k, k2) = (pane(alone.clone()).await, pane(shared.clone()).await, pane(shared.clone()).await, pane(known.clone()).await, pane(known.clone()).await);
+    let detected = |p: u64, kind: &str| c.input(p, format!("'{}'\r", fake.join(kind).display()).as_bytes());
+    detected(a, "claude");
+    detected(f, "codex");
+    detected(b, "claude");
+    detected(b2, "claude");
+    detected(k2, "claude");
+    r.agent(&c, k, "claude", "eeee5555-known").await;
+    for (p, kind) in [(a, "claude"), (f, "codex"), (b, "claude"), (b2, "claude"), (k2, "claude")] {
+        wait_agent(&c, p, "a detected agent", |x| x["kind"] == kind).await;
+    }
+    r.wait_layout("saved with six agents", |l| l["panes"].as_object().unwrap().values().filter(|p| p.get("agent").is_some()).count() == 6).await;
+    let saved = r.layout().unwrap();
+    assert!(saved["panes"][a.to_string()]["agent"].get("session").is_none(), "{saved}");
+    drop(c);
+    r.reboot();
+
+    let c = r.env.client().await;
+    let deadline = Instant::now() + T;
+    while r.rec().lines().count() < 3 {
+        assert!(Instant::now() < deadline, "not resumed: {:?}\n{}", r.rec(), r.env.log());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    let mut rec: Vec<String> = r.rec().lines().map(String::from).collect();
+    rec.sort();
+    assert_eq!(
+        rec,
+        vec![
+            format!("claude --continue in {}", real(&alone)),
+            format!("claude --resume=eeee5555-known in {}", real(&known)),
+            format!("codex resume --last in {}", real(&alone)),
+        ]
+    );
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let marks: Vec<Value> = s["panes"].as_array().unwrap().iter().map(|p| p["restored"].clone()).collect();
+    let count = |agent: Value, session: Value, continued: bool| marks.iter().filter(|m| m["agent"] == agent && m["session"] == session && m["continued"] == continued).count();
+    assert_eq!(count(json!("claude"), Value::Null, true), 1, "{s}");
+    assert_eq!(count(json!("codex"), Value::Null, true), 1, "{s}");
+    assert_eq!(count(json!("claude"), json!("eeee5555-known"), false), 1, "{s}");
+    assert_eq!(count(Value::Null, Value::Null, false), 3, "bare shells: both in the shared folder, the guess next to the known one; {s}");
+}
+
 /// What must never restore: a serve that adopts a running holder (a crash, an in-place
 /// upgrade) restores nothing and duplicates nothing; a corrupt file is moved aside; an
 /// ordinary ephemeral instance keeps no layout file at all.

@@ -62,7 +62,10 @@ pub struct SavedPane {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SavedAgent {
     pub kind: String,
-    pub session: String,
+    /// None when no session was known (since 0.1.25): the agent may be continued instead
+    /// (`continue_line`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -153,14 +156,23 @@ pub fn safe_session(s: &str) -> bool {
 
 /// The line that resumes `agent` in a shell, if it is one we know how to resume.
 pub fn resume_line(agent: &SavedAgent) -> Option<String> {
-    if !safe_session(&agent.session) {
-        return None;
-    }
+    let session = agent.session.as_deref().filter(|s| safe_session(s))?;
     match agent.kind.as_str() {
         // Bound to its flag (`--resume` takes an optional value), and after `--` for Codex: the
         // id is never parsed as anything but the session.
-        "claude" => Some(format!("claude --resume={}\r", agent.session)),
-        "codex" => Some(format!("codex resume -- {}\r", agent.session)),
+        "claude" => Some(format!("claude --resume={session}\r")),
+        "codex" => Some(format!("codex resume -- {session}\r")),
+        _ => None,
+    }
+}
+
+/// The line that continues the latest conversation of an agent of `kind` in the shell's cwd,
+/// for an agent whose session wasn't known. Only used where that is unambiguous (the daemon's
+/// restore decides).
+pub fn continue_line(kind: &str) -> Option<&'static str> {
+    match kind {
+        "claude" => Some("claude --continue\r"),
+        "codex" => Some("codex resume --last\r"),
         _ => None,
     }
 }
@@ -185,7 +197,7 @@ mod tests {
         let tab = m.create_tab(ws, 3).unwrap();
         m.rename_tab(tab, Some("logs".into()));
         let mut panes = HashMap::new();
-        panes.insert("1".into(), SavedPane { cwd: Some("/tmp".into()), command: vec!["/bin/zsh".into(), "-l".into()], cols: 80, rows: 24, agent: Some(SavedAgent { kind: "claude".into(), session: "abc-123".into() }) });
+        panes.insert("1".into(), SavedPane { cwd: Some("/tmp".into()), command: vec!["/bin/zsh".into(), "-l".into()], cols: 80, rows: 24, agent: Some(SavedAgent { kind: "claude".into(), session: Some("abc-123".into()) }) });
         panes.insert("2".into(), SavedPane { cwd: None, command: vec![], cols: 80, rows: 24, agent: None });
         Saved { version: VERSION, host: "h".into(), runtime_dir: "/run/x".into(), saved_at: 1.0, model: m, panes }
     }
@@ -252,7 +264,11 @@ mod tests {
 
     #[test]
     fn resume_lines() {
-        let a = |k: &str, s: &str| SavedAgent { kind: k.into(), session: s.into() };
+        let a = |k: &str, s: &str| SavedAgent { kind: k.into(), session: Some(s.into()) };
+        assert_eq!(resume_line(&SavedAgent { kind: "claude".into(), session: None }), None);
+        assert_eq!(continue_line("claude"), Some("claude --continue\r"));
+        assert_eq!(continue_line("codex"), Some("codex resume --last\r"));
+        assert_eq!(continue_line("other"), None);
         assert_eq!(resume_line(&a("claude", "24e0052b-aa")).as_deref(), Some("claude --resume=24e0052b-aa\r"));
         assert_eq!(resume_line(&a("codex", "0199a-b")).as_deref(), Some("codex resume -- 0199a-b\r"));
         assert_eq!(resume_line(&a("other", "x")), None);

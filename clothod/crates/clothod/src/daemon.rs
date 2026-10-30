@@ -1317,12 +1317,13 @@ impl Daemon {
                 .agent
                 .as_ref()
                 .filter(|a| matches!(a.kind.as_str(), "claude" | "codex"))
-                .and_then(|a| Some(crate::layout::SavedAgent { kind: a.kind.clone(), session: a.session.clone().filter(|s| crate::layout::safe_session(s))? }));
+                .map(|a| crate::layout::SavedAgent { kind: a.kind.clone(), session: a.session.clone().filter(|s| crate::layout::safe_session(s)) });
+            let has_session = agent.as_ref().is_some_and(|a| a.session.is_some());
             {
                 let mut st = w.st.lock().unwrap();
                 if !st.hints.is_empty() {
                     let early = st.hints_until.is_some_and(|t| Instant::now() < t);
-                    match (&p.agent, agent.is_some()) {
+                    match (&p.agent, has_session) {
                         // Its own session (a hook reported one): the hint is done.
                         (Some(_), true) => {
                             st.hints.remove(&id);
@@ -1341,6 +1342,11 @@ impl Daemon {
                     }
                 }
                 match &agent {
+                    // The same agent, there all along since its session was known (a restored
+                    // one starting again without hooks): it keeps that session.
+                    Some(a) if a.session.is_none() && st.agents.get(&id).is_some_and(|(k, gone)| gone.is_none() && k.kind == a.kind && k.session.is_some()) => {
+                        agent = st.agents.get(&id).map(|(k, _)| k.clone());
+                    }
                     Some(a) => {
                         st.agents.insert(id, (a.clone(), None));
                     }
@@ -1377,12 +1383,22 @@ impl Daemon {
         let mut model = saved.model;
         let mut map = HashMap::new();
         let mut resumed = 0;
+        // Panes per (agent kind, cwd): an agent without a known session is continued (its latest
+        // conversation in that folder) only if no other saved pane had that kind there, with a
+        // session or without; otherwise two panes could open the same conversation.
+        let mut sharing: HashMap<(String, String), usize> = HashMap::new();
+        for sp in saved.panes.values() {
+            if let (Some(a), Some(cwd)) = (&sp.agent, &sp.cwd) {
+                *sharing.entry((a.kind.clone(), cwd.clone())).or_default() += 1;
+            }
+        }
         for old in model.panes() {
             let sp = saved.panes.get(&old.to_string()).cloned().unwrap_or_default();
-            let cwd = sp.cwd.filter(|c| Path::new(c).is_dir());
+            let cwd = sp.cwd.clone().filter(|c| Path::new(c).is_dir());
+            let alone = |kind: &str| cwd.as_ref().is_some_and(|c| sharing.get(&(kind.to_string(), c.clone())) == Some(&1));
             let command = if crate::layout::is_shell(&sp.command) { sp.command } else { default_shell() };
             let (cols, rows) = if sp.cols >= 2 && sp.rows >= 2 { (sp.cols, sp.rows) } else { (80, 24) };
-            let opts = SpawnOpts { command, cwd, env: Vec::new(), cols, rows, scrollback: None };
+            let opts = SpawnOpts { command, cwd: cwd.clone(), env: Vec::new(), cols, rows, scrollback: None };
             let new = match self.spawn_pane(opts).await {
                 Ok(n) => n,
                 Err(e) => {
@@ -1391,14 +1407,22 @@ impl Daemon {
                 }
             };
             map.insert(old, new);
-            let line = sp.agent.as_ref().and_then(crate::layout::resume_line);
+            let mut continued = false;
+            let line = sp.agent.as_ref().and_then(|a| {
+                crate::layout::resume_line(a).or_else(|| {
+                    // Only in the saved cwd itself (never $HOME instead), and alone there.
+                    let l = crate::layout::continue_line(&a.kind).filter(|_| a.session.is_none() && alone(&a.kind))?;
+                    continued = true;
+                    Some(l.to_string())
+                })
+            });
             let agent = sp.agent.filter(|_| line.is_some());
             if let (Some(a), Some(w)) = (&agent, &self.layout) {
                 // Kept while it starts again, as after an agent left (a second reboot soon after).
                 w.st.lock().unwrap().agents.insert(new, (a.clone(), None));
             }
             if let Some(p) = self.pane(new) {
-                p.lock().unwrap().restored = Some(json!({"at": at, "agent": agent.as_ref().map(|a| &a.kind), "session": agent.as_ref().map(|a| &a.session)}));
+                p.lock().unwrap().restored = Some(json!({"at": at, "agent": agent.as_ref().map(|a| &a.kind), "session": agent.as_ref().and_then(|a| a.session.as_ref()), "continued": continued}));
             }
             if let Some(line) = line {
                 resumed += 1;

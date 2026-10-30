@@ -373,8 +373,9 @@ saves the layout to a file and brings it back on the next start.
 
 - **What is saved.** The model: workspaces (names, order, active tab), tabs (titles, order,
   active pane), split trees (axes, ratios) and focus. For each pane it saves the cwd, the
-  command, the size, and the agent session: the pane's agent, if it is Claude Code or Codex and
-  its hooks reported a session id. Claude's hooks send `session_id`; Codex's notify payload
+  command, the size, and the agent: the pane's agent if it is Claude Code or Codex, with its
+  session id when one is known (hooks, or Claude Code's own record; see below). Before 0.1.25
+  only agents with a session were saved. Claude's hooks send `session_id`; Codex's notify payload
   sends `thread-id`. Since 0.1.22 the session also survives serve restarts and upgrades (see
   `source` under [Agents](#agents)). A serve that adopts a holder keeps the sessions the file
   already had, for panes where an agent of that kind still runs, until the agent's hooks
@@ -413,21 +414,30 @@ saves the layout to a file and brings it back on the next start.
   shell is the saved command if it was a shell, else the user's login shell. Workspace, tab and
   split ids are the saved ones; pane ids are new, and so is `instance`. A pane whose agent had a
   session gets one line typed into the shell once it is up: `claude --resume=<id>` or
-  `codex resume -- <id>`, so the id can only be read as the session. Flags from the original run are not carried over. The agent runs from the
+  `codex resume -- <id>`, so the id can only be read as the session. Flags from the original run are not carried over.
+  A pane whose agent (Claude Code or Codex) had no known session (since 0.1.25) gets
+  `claude --continue` or `codex resume --last` instead, which open the latest conversation in
+  the shell's folder. That happens only when it is unambiguous: the pane's saved cwd still
+  exists, and no other saved pane had an agent of that kind in that cwd, with a session or
+  without. Otherwise the pane gets a bare shell, so two panes never open the same
+  conversation. The agent runs from the
   shell, so the shell stays when it exits. If the resume fails (unknown session, agent not
   installed), the shell shows the error; nothing is retried. Only session ids matching
   `[A-Za-z0-9][A-Za-z0-9_-]{0,127}` are kept at all: one from `agent.report` or a hook that
   doesn't match (it could read as a flag, say) counts as no session. A pane that fails to spawn is left out.
 - **Marking.** A restored pane carries
-  `"restored": {"at": <unix secs>, "agent": "claude"|"codex"|null, "session": <id>|null}`.
-  `agent` and `session` are set when a resume line was typed. The field stays, also across
+  `"restored": {"at": <unix secs>, "agent": "claude"|"codex"|null, "session": <id>|null, "continued": <bool>}`.
+  `agent` is set when a line was typed: `session` when it resumed that session, or
+  `continued: true` (with `session: null`) when it continued the latest conversation in the
+  folder. `continued` is new in 0.1.25; it is false otherwise. The field stays, also across
   serve restarts and upgrades, until one of these clears it for every client (a `pane`
   event):
   - `pane.dismiss_restored`;
   - the user types in the pane: INPUT, `pane.input` or `pane.keys`, but not focus or mouse
     reports.
 
-  Clients can show a quiet note such as "Restored after restart" ("· resumed Claude session").
+  Clients can show a quiet note such as "Restored after restart" ("· resumed Claude session",
+  or "· continued the latest Claude conversation in this folder").
 
 ## Commands
 
