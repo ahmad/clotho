@@ -226,6 +226,9 @@ public enum SessionEvent: Sendable {
     case disconnected(String)
     /// A step on the way to connecting, such as "Connecting" or "Installing clothod".
     case progress(String)
+    /// It stopped retrying on its own after too many failures (the last one's reason); `reconnectNow()`
+    /// tries again. Only with a `RetryPolicy` limit.
+    case retryPaused(String)
 
     // Model events (after `events.subscribe`).
     /// Replaces the whole model.

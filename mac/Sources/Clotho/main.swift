@@ -498,6 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onCreateWorkspace = { [weak self] key in self?.createWorkspace(on: key) }
         sidebar.onManageMachines = { [weak self] in self?.showMachineManager(nil) }
+        sidebar.onReconnect = { [weak self] in self?.reconnect($0) }
         sidebar.footer.onSettings = { [weak self] in self?.showSettings(nil) }
         sidebar.footer.onSetAppearance = { [weak self] in self?.setAppearance($0) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }

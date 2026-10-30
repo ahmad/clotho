@@ -162,6 +162,8 @@ extension AppDelegate {
         }
         var configuration = ClothodBackend.Configuration(transport: transport, clientName: "clotho-mac", log: { log("\(label): \($0)") })
         if defaults.bool(forKey: "TraceFrames") { configuration.trace = { log("\(label) frame \($0)") } }
+        // A few quick tries, then a Reconnect button: no ssh in a loop for a machine that's off or away.
+        configuration.retry = .remote
         return (ClothodBackend(configuration: configuration), installer)
     }
 
@@ -282,9 +284,12 @@ extension AppDelegate {
                                    isConnected: true, isLocal: true, badges: workspaceBadges(local)))
         for machine in remoteMachines {
             if let session = connections[machine.key] {
-                groups.append(SidebarGroup(key: machine.key, title: machine.label, status: connectionStatus(session.store.connection, isLocal: false),
+                let paused = session.store.retryPaused
+                let status = paused ? Self.pausedStatus(machine.label) : connectionStatus(session.store.connection, isLocal: false)
+                groups.append(SidebarGroup(key: machine.key, title: machine.label, status: status,
                                            workspaces: session.store.state.workspaces, selected: selectedWorkspace(in: session),
-                                           isConnected: true, isLocal: false, badges: workspaceBadges(session)))
+                                           isConnected: true, isLocal: false, badges: workspaceBadges(session),
+                                           retryPaused: paused ? Self.pausedReason(session.store.connection) : nil))
             } else {
                 // Not connected: a grey dot when ssh works, red with ssh's message when it doesn't.
                 let check = machine.id.flatMap { machineStatus[$0] } ?? .unknown
@@ -313,6 +318,21 @@ extension AppDelegate {
         session.key == focusedMachine ? session.store.focusedWorkspace?.id : nil
     }
 
+    /// A machine that stopped retrying: a muted line, with the Reconnect button below it.
+    static func pausedStatus(_ name: String) -> (NSColor?, String?) { (Theme.dimText, "Can't reach \(name)") }
+
+    static func pausedReason(_ state: ConnectionState) -> String {
+        if case .reconnecting(let reason) = state, !reason.isEmpty { return reason }
+        return "The last attempts failed."
+    }
+
+    /// The sidebar's Reconnect: tries now, and starts the automatic retries again.
+    func reconnect(_ key: MachineKey) {
+        guard let session = connections[key] else { return }
+        log("\(session.machine.label): reconnecting (asked)")
+        session.store.backend.reconnectNow()
+    }
+
     private func connectionStatus(_ state: ConnectionState, isLocal: Bool) -> (NSColor?, String?) {
         switch state {
         case .connected: return (isLocal ? nil : Theme.success, nil)
@@ -336,6 +356,8 @@ struct SidebarGroup {
     let isLocal: Bool
     /// Agent badges for workspaces: each one's most urgent agent's.
     let badges: [WorkspaceID: NSColor]
+    /// The machine stopped retrying on its own: why (the Reconnect button's tooltip); nil while it isn't.
+    var retryPaused: String? = nil
 }
 
 /// The network path the monitor saw last (its handler runs on one serial queue).

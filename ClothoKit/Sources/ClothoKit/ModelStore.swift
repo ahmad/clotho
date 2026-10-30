@@ -38,6 +38,8 @@ public enum ConnectionState: Equatable, Sendable {
 public final class ModelStore: ObservableObject {
     public let backend: SessionBackend
     @Published public private(set) var state = ModelState()
+    /// The backend stopped retrying on its own (see `RetryPolicy`); `backend.reconnectNow()` asks again.
+    @Published public private(set) var retryPaused = false
     @Published public private(set) var hello: Hello?
     @Published public private(set) var connection = ConnectionState.idle
     public var isConnected: Bool { connection.isConnected }
@@ -277,6 +279,7 @@ public final class ModelStore: ObservableObject {
             }
             hello = newHello
             connection = .connected
+            retryPaused = false
             lostAt = nil
             onChange?()
         case .disconnected(let reason):
@@ -284,9 +287,15 @@ public final class ModelStore: ObservableObject {
             localFocus = nil
             localMoves.removeAll()
             connection = .reconnecting(reason)
+            retryPaused = false
             onChange?()
         case .progress(let step):
             connection = .connecting(step)
+            retryPaused = false
+            onChange?()
+        case .retryPaused(let reason):
+            connection = .reconnecting(reason)
+            retryPaused = true
             onChange?()
         case .state(var newState):
             daemonState = newState

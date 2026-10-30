@@ -88,4 +88,27 @@ final class ChromeControlsTests: XCTestCase {
         view.button.performClick(nil)
         XCTAssertEqual(opened, 1)
     }
+
+    func testUnreachableMachineOffersReconnect() throws {
+        UserDefaults.standard.removeObject(forKey: "CollapsedMachines")
+        let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 700))
+        var asked: [MachineKey] = []
+        sidebar.onReconnect = { asked.append($0) }
+        func buttons() -> [NSButton] {
+            func all(_ view: NSView) -> [NSButton] { (view as? NSButton).map { [$0] } ?? [] + view.subviews.flatMap(all) }
+            return all(sidebar).filter { $0.title.trimmingCharacters(in: .whitespaces) == "Reconnect" }
+        }
+        let group = { (paused: String?) in
+            SidebarGroup(key: "devbox", title: "devbox", status: paused == nil ? (nil, "Checking devbox…") : AppDelegate.pausedStatus("devbox"),
+                         workspaces: [], selected: nil, isConnected: true, isLocal: false, badges: [:], retryPaused: paused)
+        }
+        sidebar.update(agents: [], unreachable: [], groups: [group(nil)])
+        XCTAssertTrue(buttons().isEmpty, "no button while it's still trying")
+        sidebar.update(agents: [], unreachable: [], groups: [group("Can't resolve devbox")])
+        let button = try XCTUnwrap(buttons().first)
+        XCTAssertEqual(AppDelegate.pausedStatus("devbox").1, "Can't reach devbox")
+        XCTAssertTrue(button.toolTip?.contains("Can't resolve devbox") == true, "the reason, on hover")
+        button.performClick(nil)
+        XCTAssertEqual(asked, ["devbox"])
+    }
 }

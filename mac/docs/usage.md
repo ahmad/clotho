@@ -163,6 +163,8 @@ With Tailscale, connect both machines to the tailnet and use the remote machine'
 
 A machine you haven't connected to shows **Connect** under its name. Click it to connect and start a workspace there. The first time, Clotho installs its terminal daemon, clothod, on the machine: it uploads the matching build that ships inside the app into `~/.local/share/clothod/bin/` (Linux) or `~/Library/Application Support/clothod/bin/` (macOS). Nothing else is installed, and no root access is needed.
 
+If a remote machine can't be reached (it's off, asleep or off the network), Clotho tries three times a second or two apart, then stops and shows **Can't reach** with a **Reconnect** button under the machine's name (hover over it for ssh's reason). It also tries again by itself when the Mac wakes or the network changes.
+
 Once connected, a machine works like this Mac: **+ New Workspace** under its name starts another workspace, and every shortcut acts on the machine whose workspace is showing. **⇧⌘↑** and **⇧⌘↓** step through the workspaces of every connected machine in sidebar order. Dropping files on a remote pane copies them to that pane's folder on that machine.
 
 Shells on a machine keep running when you quit Clotho, disconnect, or lose the network, and normally when you log out of the machine. (On a Linux machine set to end a user's processes at logout, they survive only with lingering on, `loginctl enable-linger`; Clotho shows clothod's warning once if that's the case.) Clotho reconnects connected machines when it starts, after the Mac wakes, and when the network changes, and catches up on what each pane printed meanwhile.

@@ -729,6 +729,8 @@ final class SidebarView: NSView {
     private var pending: (() -> Void)?
     var onClose: ((MachineKey, WorkspaceID) -> Void)?
     var onConnect: ((MachineKey) -> Void)?
+    /// A machine's Reconnect, after it stopped retrying on its own.
+    var onReconnect: ((MachineKey) -> Void)?
     var onAddMachine: (() -> Void)?
     /// A machine's New Workspace (the header's +, or the row of a machine with none).
     var onCreateWorkspace: ((MachineKey) -> Void)?
@@ -981,11 +983,17 @@ final class SidebarView: NSView {
                 })
                 continue
             }
+            if let reason = group.retryPaused {
+                add(actionButton("Reconnect", symbol: "arrow.clockwise", tooltip: "Try \(group.title) again. \(reason)",
+                                 inset: MachineHeader.nameInset - 2) { [weak self] in
+                    self?.onReconnect?(key)
+                })
+            }
             for workspace in group.workspaces {
                 addWorkspace(workspace, of: group)
             }
             // The header's + makes workspaces; a machine with none also says so in its list.
-            if group.workspaces.isEmpty { addCreateWorkspace(for: group) }
+            if group.workspaces.isEmpty, group.retryPaused == nil { addCreateWorkspace(for: group) }
         }
         if let cursor, !order.contains(cursor) { self.cursor = selectedItem ?? order.first }
         updateCursor()
@@ -1094,7 +1102,7 @@ final class SidebarView: NSView {
         for machine in unreachable { parts.append("u \(machine.name) \(machine.reason)") }
         for group in groups {
             parts.append("g \(group.key) \(group.title) \(String(describing: group.status.color)) \(group.status.text ?? "") "
-                         + "\(group.isConnected) \(group.isLocal)")
+                         + "\(group.isConnected) \(group.isLocal) \(group.retryPaused ?? "-")")
             for workspace in group.workspaces {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 parts.append("w \(workspace.id) \(heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name) "

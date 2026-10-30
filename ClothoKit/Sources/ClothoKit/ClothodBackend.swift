@@ -16,6 +16,9 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         public var log: (@Sendable (String) -> Void)?
         /// One line per OUTPUT, SNAPSHOT and INPUT frame (pane, seq, length), for chasing stray input.
         public var trace: (@Sendable (String) -> Void)?
+        /// When to give up retrying on its own (nil: retry forever, up to the transport's delay). Once it
+        /// gives up it sends `retryPaused` and waits for `reconnectNow()`, which starts the count again.
+        public var retry: RetryPolicy?
 
         public init(transport: ClothodTransport, clientName: String = "clotho", log: (@Sendable (String) -> Void)? = nil) {
             self.transport = transport
@@ -95,9 +98,10 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             let retry: Bool = locked {
                 guard !stopped, !reconnecting else { return false }
                 reconnecting = true
+                lastFailure = error.localizedDescription
                 return true
             }
-            if retry { Task { await reconnectLoop() } }
+            if retry { Task { await reconnectLoop(failures: 1) } }
             throw error
         }
     }
@@ -154,6 +158,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     private var _fileStallTimeout: TimeInterval = 60
 
     private var skipBackoff = false
+    /// Why the first connect failed, for a pause right after it.
+    private var lastFailure = ""
     private var lastReceived = Date.distantPast
 
     /// A link can stall silently (a sleeping network, a wedged SSH connection), so when nothing has
@@ -274,9 +280,13 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         Task { await reconnectLoop() }
     }
 
-    /// Retries with a growing delay, up to the transport's limit; `reconnectNow()` cuts a wait short.
-    private func reconnectLoop() async {
-        var delay: TimeInterval = 0.1
+    /// Retries with a growing delay, up to the transport's limit; `reconnectNow()` cuts a wait short. With a
+    /// `retry` limit, it stops after that many failures in a row and waits for `reconnectNow()`. `failures`:
+    /// the attempts that already failed (the first connect's, from `start`).
+    private func reconnectLoop(failures startFailures: Int = 0) async {
+        let policy = configuration.retry ?? RetryPolicy(limit: nil, firstDelay: 0.1, maxDelay: configuration.transport.maxReconnectDelay)
+        var failures = startFailures
+        if failures > 0 { await waitBeforeRetry(after: failures, policy: policy, reason: lastFailure) }
         while !locked({ stopped }) {
             do {
                 try await connect()
@@ -292,15 +302,28 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 configuration.log?("reconnect to \(configuration.transport.name) failed: \(error.localizedDescription)")
                 locked { connection }?.close()
                 continuation.yield(.disconnected(error.localizedDescription))
-                let deadline = Date().addingTimeInterval(delay)
-                while Date() < deadline, !locked({ skipBackoff || stopped }) {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-                locked { skipBackoff = false }
-                delay = min(delay * 2, configuration.transport.maxReconnectDelay)
+                failures += 1
+                if await !waitBeforeRetry(after: failures, policy: policy, reason: error.localizedDescription) { failures = 0 }
             }
         }
         locked { reconnecting = false }
+    }
+
+    /// Waits as `policy` says after `failures` failures in a row, cut short by `reconnectNow()` or `stop()`.
+    /// Past the limit it pauses (`retryPaused`) until `reconnectNow()`, spawning nothing meanwhile, and
+    /// returns false: the count starts again.
+    private func waitBeforeRetry(after failures: Int, policy: RetryPolicy, reason: String) async -> Bool {
+        let delay = policy.delay(afterFailures: failures)
+        if delay == nil {
+            configuration.log?("\(configuration.transport.name): \(failures) attempts failed; waiting to be asked to reconnect")
+            continuation.yield(.retryPaused(reason))
+        }
+        let deadline = delay.map { Date().addingTimeInterval($0) } ?? .distantFuture
+        while Date() < deadline, !locked({ skipBackoff || stopped }) {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        locked { skipBackoff = false }
+        return delay != nil
     }
 
     // MARK: Commands
@@ -710,5 +733,29 @@ extension Data {
             _ = copyBytes(to: target, from: (startIndex + offset) ..< (startIndex + offset + MemoryLayout<T>.size))
         }
         return T(bigEndian: value)
+    }
+}
+
+/// When a backend retries a lost or failed connection: after each failure in a row it waits a growing
+/// delay, and with a `limit` it stops after that many failures, until asked again.
+public struct RetryPolicy: Sendable, Equatable {
+    /// Failures in a row before it stops retrying on its own (nil: never).
+    public var limit: Int?
+    /// The wait after the first failure; each later one doubles it, up to `maxDelay`.
+    public var firstDelay: TimeInterval
+    public var maxDelay: TimeInterval
+
+    public init(limit: Int?, firstDelay: TimeInterval, maxDelay: TimeInterval) {
+        (self.limit, self.firstDelay, self.maxDelay) = (limit, firstDelay, maxDelay)
+    }
+
+    /// For machines over SSH: three attempts a second or two apart, then a Reconnect button. Network
+    /// changes and wake ask again (`reconnectNow`).
+    public static let remote = RetryPolicy(limit: 3, firstDelay: 1, maxDelay: 30)
+
+    /// The wait after `failures` failures in a row (1 or more), or nil to stop retrying.
+    public func delay(afterFailures failures: Int) -> TimeInterval? {
+        if let limit, failures >= limit { return nil }
+        return min(firstDelay * pow(2, Double(max(failures, 1) - 1)), maxDelay)
     }
 }
