@@ -273,6 +273,14 @@ pub struct ProcInfo {
     pub started: Option<u64>,
 }
 
+/// The value of `name` in the environment `pid` started with: `Ok(None)` when it isn't set
+/// there, `Err(())` when the environment can't be read.
+pub fn process_env_var(pid: u32, name: &str) -> Result<Option<String>, ()> {
+    let env = os::process_env(pid).ok_or(())?;
+    let prefix = format!("{name}=");
+    Ok(env.iter().find_map(|e| e.strip_prefix(&prefix)).map(String::from))
+}
+
 /// Every process owned by this user (for `clothod ps` and `install --prune`).
 pub fn own_processes() -> Vec<ProcInfo> {
     os::own_processes(uid())

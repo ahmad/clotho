@@ -91,30 +91,43 @@ pub fn process_name(pid: u32) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// argv via sysctl KERN_PROCARGS2: int argc, exec path, NUL padding, then argv strings.
-pub fn process_args(pid: u32) -> Vec<String> {
+/// argv and the environment via sysctl KERN_PROCARGS2: int argc, exec path, NUL padding, the
+/// argv strings, then the environment strings (as at exec). `None` when it can't be read.
+fn procargs2(pid: u32) -> Option<(Vec<String>, Vec<String>)> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
     unsafe {
         if libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 || size < 4 {
-            return Vec::new();
+            return None;
         }
     }
     let mut buf = vec![0u8; size];
     unsafe {
         if libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) != 0 {
-            return Vec::new();
+            return None;
         }
     }
     buf.truncate(size);
     let argc = i32::from_ne_bytes(buf[..4].try_into().unwrap()).max(0) as usize;
     let mut rest = &buf[4..];
     // Skip the exec path and the padding after it.
-    let Some(end) = rest.iter().position(|&b| b == 0) else { return Vec::new() };
+    let end = rest.iter().position(|&b| b == 0)?;
     rest = &rest[end..];
     let start = rest.iter().position(|&b| b != 0).unwrap_or(rest.len());
     rest = &rest[start..];
-    rest.split(|&b| b == 0).take(argc).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+    let mut parts = rest.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned());
+    let args: Vec<String> = parts.by_ref().take(argc).collect();
+    let env = parts.take_while(|e| !e.is_empty()).collect();
+    Some((args, env))
+}
+
+pub fn process_args(pid: u32) -> Vec<String> {
+    procargs2(pid).map(|p| p.0).unwrap_or_default()
+}
+
+/// The environment `pid` was started with (`NAME=value` strings); `None` if it can't be read.
+pub fn process_env(pid: u32) -> Option<Vec<String>> {
+    procargs2(pid).map(|p| p.1)
 }
 
 pub fn parent_pid(pid: u32) -> Option<u32> {

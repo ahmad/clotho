@@ -4989,6 +4989,93 @@ async fn an_adopting_serve_keeps_the_files_sessions_for_running_agents() {
     r.wait_layout("dropped p's session", |l| l["model"]["workspaces"][0]["tabs"][0]["title"] == "y" && l["panes"][p.to_string()]["agent"].is_null()).await;
 }
 
+// ---- client commands against the wrong or a stuck instance ------------------------------
+
+/// A daemon that accepts but never answers (stopped, wedged, exiting): `status`, `stop` and
+/// `shutdown` give up after the client timeout and exit non-zero, and `shutdown` doesn't go
+/// around it to the holder.
+#[tokio::test]
+async fn client_commands_fail_fast_against_a_daemon_that_never_answers() {
+    let env = Env::new();
+    let serve = env.daemon.as_ref().unwrap().id();
+    let holder = holder_pid(&env);
+    unsafe { libc::kill(serve as i32, libc::SIGSTOP) };
+    for cmd in ["status", "stop", "shutdown"] {
+        let started = Instant::now();
+        let out = Command::new(test_bin())
+            .args([cmd, "--runtime-dir"])
+            .arg(env.path())
+            .env("CLOTHOD_STATE_DIR", env.state())
+            .env("CLOTHOD_RUNTIME_DIR", env.path())
+            .env("CLOTHOD_CLIENT_TIMEOUT", "1")
+            .output()
+            .unwrap();
+        let took = started.elapsed();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{cmd} succeeded against a stopped daemon");
+        assert!(err.contains("did not answer within 1 s"), "{cmd}: {err}");
+        assert!(took < Duration::from_secs(5), "{cmd} took {took:?}");
+    }
+    assert!(clotho_proto::platform::process_alive(holder), "shutdown went around the daemon to the holder");
+    unsafe { libc::kill(serve as i32, libc::SIGCONT) };
+}
+
+/// `clothod ps` shows the runtime dir a process really uses: one set only through
+/// $CLOTHOD_RUNTIME_DIR (as clients and tests run `shutdown`, `bridge`, …) is that dir and
+/// EXTRA, never the default.
+#[tokio::test]
+async fn ps_shows_a_runtime_dir_set_in_the_environment() {
+    let env = Env::new();
+    let mut bridge = Command::new(test_bin())
+        .arg("bridge")
+        .env("CLOTHOD_RUNTIME_DIR", env.path())
+        .env("CLOTHOD_STATE_DIR", env.state())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = bridge.id().to_string();
+    let dir = env.path().display().to_string();
+    let deadline = Instant::now() + T;
+    let row = loop {
+        let out = Command::new(test_bin()).arg("ps").env_remove("CLOTHOD_RUNTIME_DIR").output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        if let Some(row) = text.lines().find(|l| l.split_whitespace().next() == Some(pid.as_str())) {
+            break row.to_string();
+        }
+        assert!(Instant::now() < deadline, "bridge {pid} not in ps:\n{text}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(row.contains(" bridge ") && row.contains(&format!(" {dir} ")) && row.ends_with("EXTRA"), "{row}");
+    drop(bridge.stdin.take());
+    let _ = bridge.kill();
+    let _ = bridge.wait();
+}
+
+/// `shutdown --forget` aimed at a test instance's dir, from a process that isn't ephemeral and
+/// names no layout file (a client's cleanup), deletes no layout but its own: here the "user's"
+/// layout in the state dir it would otherwise reach stays.
+#[tokio::test]
+async fn shutdown_forget_never_deletes_another_instances_layout() {
+    let mut env = Env::new();
+    let user_state = env.dir.path().join("user-state");
+    std::fs::create_dir_all(&user_state).unwrap();
+    let user_layout = user_state.join("layout.json");
+    std::fs::write(&user_layout, r#"{"version":1,"host":"h","runtime_dir":"/default"}"#).unwrap();
+    env.daemon.take();
+    let out = Command::new(test_bin())
+        .args(["shutdown", "--forget"])
+        .env_remove("CLOTHOD_EPHEMERAL")
+        .env_remove("CLOTHOD_LAYOUT_FILE")
+        .env("CLOTHOD_RUNTIME_DIR", env.path())
+        .env("CLOTHOD_STATE_DIR", &user_state)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(user_layout.exists(), "a test dir's shutdown --forget deleted another instance's layout");
+}
+
 // ---- git ---------------------------------------------------------------------------------
 
 const GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";

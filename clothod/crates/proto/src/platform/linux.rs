@@ -79,6 +79,12 @@ pub fn process_args(pid: u32) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The environment `pid` was started with (`NAME=value` strings); `None` if it can't be read.
+pub fn process_env(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    Some(raw.split(|&b| b == 0).filter(|e| !e.is_empty()).map(|e| String::from_utf8_lossy(e).into_owned()).collect())
+}
+
 pub fn parent_pid(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     stat[stat.rfind(')')? + 2..].split_whitespace().nth(1)?.parse().ok()

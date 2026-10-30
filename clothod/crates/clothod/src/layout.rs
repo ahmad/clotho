@@ -27,6 +27,27 @@ pub fn path() -> Option<PathBuf> {
     Some(platform::state_dir().join("layout.json"))
 }
 
+/// The layout file `clothod shutdown --forget` may delete for the instance in `runtime_dir`: one
+/// that instance owns. A file named by `$CLOTHOD_LAYOUT_FILE` (tests name their own), else the
+/// user's file only when `runtime_dir` is the machine's default instance and this isn't an
+/// ephemeral run. A test instance's dir never reaches the user's layout.
+pub fn owned_path(runtime_dir: &Path) -> Option<PathBuf> {
+    forget_target(
+        runtime_dir,
+        &platform::default_runtime_dir(),
+        std::env::var_os("CLOTHOD_LAYOUT_FILE").filter(|p| !p.is_empty()).map(PathBuf::from),
+        platform::ephemeral().is_some(),
+        platform::state_dir(),
+    )
+}
+
+fn forget_target(runtime_dir: &Path, default: &Path, explicit: Option<PathBuf>, ephemeral: bool, state_dir: PathBuf) -> Option<PathBuf> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    (runtime_dir == default && !ephemeral).then(|| state_dir.join("layout.json"))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Saved {
     pub version: u32,
@@ -187,6 +208,18 @@ pub fn is_shell(command: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forget_only_deletes_the_targets_own_layout() {
+        use std::path::{Path, PathBuf};
+        let (def, test, state) = (Path::new("/rt/clothod"), Path::new("/tmp/clt-x/rt"), PathBuf::from("/home/u/.local/state/clothod"));
+        let mine = Some(PathBuf::from("/home/u/.local/state/clothod/layout.json"));
+        assert_eq!(super::forget_target(def, def, None, false, state.clone()), mine, "the default instance forgets the user's layout");
+        assert_eq!(super::forget_target(test, def, None, false, state.clone()), None, "a test dir never reaches it");
+        assert_eq!(super::forget_target(def, def, None, true, state.clone()), None, "nor an ephemeral run");
+        let own = Some(PathBuf::from("/tmp/clt-x/layout.json"));
+        assert_eq!(super::forget_target(test, def, own.clone(), true, state), own, "a file the test named");
+    }
+
     use super::*;
     use crate::model::Direction;
 

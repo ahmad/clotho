@@ -192,7 +192,18 @@ instance (the default runtime dir).
    - Exit 3 means the holder is incompatible (only `shutdown` + `start` fixes that).
 4. **Check:** `<base>/current/clothod status --print-builds` prints `serve=<build>`,
    `holder=<build>`, `holder_can_upgrade=` and `holder_outdated=` lines. `clothod ps` lists
-   every clothod process of the user and marks anything that isn't the default instance.
+   every clothod process of the user, with the runtime dir it really uses (`--runtime-dir`,
+   else `CLOTHOD_RUNTIME_DIR` from the environment it started with, else the default; `?`
+   when that environment can't be read), and marks `EXTRA` anything that isn't provably the
+   default instance (since 0.1.27; before, a dir set only in the environment showed as the
+   default).
+
+`clothod status`, `stop` and `shutdown` wait at most 15 s for the daemon's reply
+(`CLOTHOD_CLIENT_TIMEOUT` seconds overrides it). A daemon whose socket accepts but never
+answers (stopped, wedged, exiting) makes them exit non-zero with `clothod at <dir> did not
+answer within 15 s`; `shutdown` then leaves the holder alone. `upgrade` gives up after
+waiting 120 s for another upgrade's lock (since 0.1.27; before, all of these could wait
+forever).
 
 Temporary instances (tests, experiments) must use another runtime dir **and**
 `--ephemeral[=SECS|exit]` (or `CLOTHOD_EPHEMERAL`). Without it, `start` and `serve` refuse
@@ -449,7 +460,10 @@ saves the layout to a file and brings it back on the next start.
   follows. A shutdown (`clothod shutdown`, `daemon.shutdown`) ends every shell but keeps the
   layout, so the next start brings it back (for example after the one-time restart a legacy
   holder needs). `clothod shutdown --forget`, or `daemon.shutdown` with `"forget": true`, also
-  deletes the saved layout. The CLI deletes it even when no daemon is running.
+  deletes the saved layout. The CLI deletes it even when no daemon is running, but only a
+  layout the targeted instance owns (since 0.1.27): the file `CLOTHOD_LAYOUT_FILE` names, else
+  the user's own layout only when the target is the default runtime dir and the run isn't
+  ephemeral. `shutdown --forget` aimed at a test instance never deletes the user's layout.
 - **How.** Each saved pane gets a fresh shell in its saved cwd (`$HOME` if that is gone). The
   shell is the saved command if it was a shell, else the user's login shell. Workspace, tab and
   split ids are the saved ones; pane ids are new, and so is `instance`. A pane whose agent had a

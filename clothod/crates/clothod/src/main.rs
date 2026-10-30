@@ -142,10 +142,11 @@ fn run() -> Result<()> {
         "stop" => rt.block_on(call(dir, "daemon.stop", json!({}))),
         "shutdown" => {
             let forget = flags.iter().any(|f| f == "--forget");
-            rt.block_on(call(dir, "daemon.shutdown", json!({"forget": forget})))?;
+            rt.block_on(call(dir.clone(), "daemon.shutdown", json!({"forget": forget})))?;
             // Also when no daemon was running to do it.
             if forget {
-                if let Some(path) = clothod::layout::path() {
+                // Only a layout the targeted instance owns: never the user's for a test dir.
+                if let Some(path) = clothod::layout::owned_path(&dir) {
                     clothod::layout::forget(&path);
                 }
             }
@@ -365,18 +366,25 @@ async fn call(dir: PathBuf, method: &str, params: Value) -> Result<()> {
         }
     };
     let hello = json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "clothod-cli"}});
-    write_frame(&mut s, &Frame::Json(hello)).await?;
-    write_frame(&mut s, &Frame::Json(json!({"id": 2, "method": method, "params": params}))).await?;
-    while let Some(f) = read_frame(&mut s).await? {
-        if let Frame::Json(v) = f {
-            if v["id"] == 2 {
-                if let Some(e) = v.get("error") {
-                    bail!("{method}: {e}");
+    // A listening socket accepts even when the daemon behind it never answers (stopped,
+    // wedged, exiting): bounded, so a command against it fails instead of hanging.
+    let exchange = async {
+        write_frame(&mut s, &Frame::Json(hello)).await?;
+        write_frame(&mut s, &Frame::Json(json!({"id": 2, "method": method, "params": params}))).await?;
+        while let Some(f) = read_frame(&mut s).await? {
+            if let Frame::Json(v) = f {
+                if v["id"] == 2 {
+                    if let Some(e) = v.get("error") {
+                        bail!("{method}: {e}");
+                    }
+                    break;
                 }
-                break;
             }
         }
-    }
+        Ok(())
+    };
+    let limit = client_timeout();
+    tokio::time::timeout(limit, exchange).await.map_err(|_| no_answer(&dir, limit))??;
     // Wait for the daemon (and on shutdown the holder) to go away, so a `start` right after
     // gets a fresh instance rather than a dying one.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -390,13 +398,29 @@ async fn call(dir: PathBuf, method: &str, params: Value) -> Result<()> {
     Ok(())
 }
 
+/// How long `stop`, `shutdown` and `status` wait for the daemon's reply: 15 s, or
+/// $CLOTHOD_CLIENT_TIMEOUT seconds (tests).
+fn client_timeout() -> Duration {
+    std::env::var("CLOTHOD_CLIENT_TIMEOUT").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0).map_or(Duration::from_secs(15), Duration::from_secs_f64)
+}
+
+fn no_answer(dir: &std::path::Path, limit: Duration) -> anyhow::Error {
+    anyhow::anyhow!("clothod at {} did not answer within {} s", dir.display(), limit.as_secs_f64())
+}
+
 async fn status(dir: PathBuf) -> Result<()> {
     let sock = clothod::daemon::socket_path(&dir);
     println!("this binary: clothod {} ({})", env!("CARGO_PKG_VERSION"), std::env::current_exe()?.display());
     if let Ok(mut s) = connect(&dir).await {
         let hello = json!({"id": 1, "method": "hello", "params": {"protocol": clotho_proto::PROTOCOL, "client": "clothod-status"}});
-        write_frame(&mut s, &Frame::Json(hello)).await?;
-        if let Some(Frame::Json(v)) = read_frame(&mut s).await? {
+        let limit = client_timeout();
+        let reply = tokio::time::timeout(limit, async {
+            write_frame(&mut s, &Frame::Json(hello)).await?;
+            read_frame(&mut s).await
+        })
+        .await
+        .map_err(|_| no_answer(&dir, limit))??;
+        if let Some(Frame::Json(v)) = reply {
             let r = &v["result"];
             let h = &r["holder"];
             println!("daemon: running, pid {}, version {}, {} ({})", r["pid"], r["version"].as_str().unwrap_or("?"), r["exe"].as_str().unwrap_or("?"), sock.display());
@@ -715,7 +739,20 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
     // than bring back the old one while serve is switching. A second upgrade waits its turn.
     platform::ensure_private_dir(&dir)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(upgrade_lock_path(&dir))?;
-    let _upgrade_lock = nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusive).map_err(|(_, e)| e)?;
+    // Bounded: a stuck upgrade elsewhere makes this one fail rather than wait forever.
+    let mut lock = lock;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let _upgrade_lock = loop {
+        match nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Ok(l) => break l,
+            Err((f, nix::errno::Errno::EWOULDBLOCK)) if Instant::now() < deadline => {
+                lock = f;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) => bail!("another clothod upgrade has held {} for 120 s", upgrade_lock_path(&dir).display()),
+            Err((_, e)) => return Err(e.into()),
+        }
+    };
     // `current` first: a client or login unit that restarts the daemon through it (and doesn't
     // know the lock: older builds) gets the new build. The rollback below restores it.
     point_current_at(&base, &id)?;
@@ -832,15 +869,23 @@ fn ps() {
         if role == "ps" || role.is_empty() {
             continue;
         }
-        let runtime = p
-            .args
-            .iter()
-            .position(|a| a == "--runtime-dir")
-            .and_then(|i| p.args.get(i + 1))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default.clone());
+        // The dir it actually uses: `--runtime-dir`, else $CLOTHOD_RUNTIME_DIR from the
+        // environment it started with, else the default. Unknown (an environment we can't
+        // read) shows as "?", never as the default.
+        let runtime: Option<PathBuf> = match p.args.iter().position(|a| a == "--runtime-dir").and_then(|i| p.args.get(i + 1)) {
+            Some(d) => Some(PathBuf::from(d)),
+            None => match platform::process_env_var(p.pid, "CLOTHOD_RUNTIME_DIR") {
+                Ok(Some(d)) if !d.is_empty() => Some(PathBuf::from(d)),
+                Ok(_) => Some(default.clone()),
+                Err(()) => None,
+            },
+        };
         let exe = p.exe.clone().unwrap_or_default();
-        let known = reported.entry(runtime.clone()).or_insert_with(|| reported_builds(&runtime));
+        let empty = HashMap::new();
+        let known = match &runtime {
+            Some(r) => reported.entry(r.clone()).or_insert_with(|| reported_builds(r)),
+            None => &empty,
+        };
         // macOS: the launchd namespace it reported. Anything but Aqua means its shells (holder)
         // or its gh lookups (serve) can lose system services.
         let ns = known.get(&p.pid).and_then(|k| k.1.clone()).map(|n| format!("  launchd: {n}")).unwrap_or_default();
@@ -855,8 +900,9 @@ fn ps() {
         };
         let age = p.started.map(|s| now.saturating_sub(s)).unwrap_or(0);
         let age = if age >= 3600 { format!("{}h{:02}m", age / 3600, age % 3600 / 60) } else { format!("{}m{:02}s", age / 60, age % 60) };
-        let extra = if runtime == default { "" } else { "  EXTRA" };
-        rows.push(format!("{:>7}  {:<7} {:>7}  {:<30} {}  {}{ns}{extra}", p.pid, role, age, build, runtime.display(), exe.display()));
+        let extra = if runtime.as_ref() == Some(&default) { "" } else { "  EXTRA" };
+        let shown = runtime.as_ref().map_or_else(|| "?".to_string(), |r| r.display().to_string());
+        rows.push(format!("{:>7}  {:<7} {:>7}  {:<30} {}  {}{ns}{extra}", p.pid, role, age, build, shown, exe.display()));
     }
     println!("{:>7}  {:<7} {:>7}  {:<30} {}  {}", "PID", "ROLE", "AGE", "BUILD", "RUNTIME", "EXE");
     for r in rows {
