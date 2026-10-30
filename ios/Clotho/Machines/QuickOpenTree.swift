@@ -192,7 +192,7 @@ extension QuickOpenTreeRow {
 /// Quick open's search field. A UITextField, so the hardware keys reach the tree before the field: ↑/↓ move,
 /// and with nothing typed ←/→ close and open rows (with text they move the caret, as usual); Tab and ⇧Tab
 /// open the selected row or go up (from a search, they leave it at that row or its parent); Return and ⌘1–9
-/// open a row; Esc closes.
+/// open a row; ⌘Return opens the selected tab beside the pane on screen; Esc backs out of commands, then closes.
 struct QuickOpenField: UIViewRepresentable {
     @Binding var text: String
     var onKey: (QuickOpenKey) -> Void
@@ -248,6 +248,7 @@ struct QuickOpenField: UIViewRepresentable {
                 command(UIKeyCommand.inputEscape, action: #selector(escape)),
                 // Return from a hardware keyboard (the software keyboard's Go comes through textFieldShouldReturn).
                 command("\r", action: #selector(returnKey)),
+                command("\r", modifiers: .command, action: #selector(openBeside)),
             ]
             if (text ?? "").isEmpty {
                 commands += [command(UIKeyCommand.inputLeftArrow, action: #selector(left)),
@@ -271,6 +272,7 @@ struct QuickOpenField: UIViewRepresentable {
         @objc private func backTab() { onKey(.backTab) }
         @objc private func escape() { onKey(.escape) }
         @objc private func returnKey() { onKey(.activate) }
+        @objc private func openBeside() { onKey(.openBeside) }
         @objc private func number(_ sender: UIKeyCommand) {
             if let input = sender.input, let digit = Int(input) { onKey(.number(digit)) }
         }
@@ -278,5 +280,5 @@ struct QuickOpenField: UIViewRepresentable {
 }
 
 enum QuickOpenKey: Equatable {
-    case move(Int), collapse, expand, tab, backTab, escape, activate, number(Int)
+    case move(Int), collapse, expand, tab, backTab, escape, activate, number(Int), openBeside
 }

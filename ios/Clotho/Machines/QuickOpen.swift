@@ -90,6 +90,8 @@ struct QuickOpenView: View {
     /// The tab on screen, selected in the tree.
     var focusedTab: TabID?
     let open: (Route) -> Void
+    /// Open Machines: back to the machine list.
+    var home: () -> Void = {}
     @EnvironmentObject private var machines: MachineList
     @EnvironmentObject private var connections: Connections
     @Environment(\.dismiss) private var dismiss
@@ -98,13 +100,36 @@ struct QuickOpenView: View {
     @State private var tree: CommandTree?
     /// A machine a tap is connecting: it opens to its workspaces once they arrive.
     @State private var connecting: String?
+    /// ">" typed: the commands for the row selected in the tree.
+    @State private var commandSelected = 0
+    /// Move Tab waits for a workspace picked in the tree.
+    @State private var picking: (item: CommandListItem, subject: CommandTree.Node)?
+    @State private var renaming: Renaming?
+    @State private var newName = ""
+    @State private var files: FilesTarget?
+    /// The pane on screen as quick open opened (Open Beside puts tabs next to it).
+    @State private var origin: QuickOpenCommands.Origin?
+
+    struct Renaming { var current: String; var apply: (String) -> Void }
+    struct FilesTarget: Hashable {
+        let machine: UUID
+        let path: String
+    }
+
+    private var commandText: String? { picking == nil ? CommandList.commandQuery(query) : nil }
 
     var body: some View {
-        let results = query.isEmpty ? [] : QuickOpenEntry.ranked(QuickOpenEntry.all(machines: machines.all, connections: connections, focused: focusedMachine), query: query)
+        let commands = commandText.map { CommandList.matching(commandItems, query: $0) } ?? []
+        let results = query.isEmpty || commandText != nil ? [] : QuickOpenEntry.ranked(QuickOpenEntry.all(machines: machines.all, connections: connections, focused: focusedMachine), query: query)
         NavigationStack {
             ScrollViewReader { proxy in
                 List {
-                    if query.isEmpty {
+                    if let picking {
+                        pickHeader(picking)
+                        treeSections
+                    } else if commandText != nil {
+                        commandRows(commands)
+                    } else if query.isEmpty {
                         treeSections
                     } else {
                         searchRows(results)
@@ -115,14 +140,16 @@ struct QuickOpenView: View {
                 }
             }
             .overlay {
-                if !query.isEmpty, results.isEmpty {
+                if commandText != nil, commands.isEmpty {
+                    ContentUnavailableView("No Commands", systemImage: "command")
+                } else if commandText == nil, !query.isEmpty, results.isEmpty {
                     ContentUnavailableView.search(text: query)
                 }
             }
             .safeAreaInset(edge: .top) {
                 HStack {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    QuickOpenField(text: $query) { key(key: $0, results: results) }
+                    QuickOpenField(text: $query) { key(key: $0, results: results, commands: commands) }
                         .frame(height: 22)
                 }
                 .padding(10)
@@ -131,12 +158,38 @@ struct QuickOpenView: View {
                 .padding(.vertical, 8)
                 .background(.bar)
             }
-            .onChange(of: query) { highlighted = 0 }
+            .onChange(of: query) { highlighted = 0; commandSelected = 0 }
             .navigationTitle("Quick Open")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    // The touch way to ">": the commands for the selected row.
+                    Button { picking = nil; query = ">" } label: { Label("Commands", systemImage: "command") }
+                        .accessibilityIdentifier("commands")
+                }
+            }
+            .navigationDestination(item: $files) { target in
+                if let connection = connections.existing(target.machine) {
+                    FileBrowserView(connection: connection, path: target.path)
+                }
+            }
+            .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                TextField("Name", text: $newName)
+                    .accessibilityIdentifier("renameField")
+                Button("Rename") {
+                    let apply = renaming?.apply
+                    renaming = nil
+                    apply?(newName)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            }
         }
-        .onAppear { if tree == nil { startTree() } }
+        .onAppear {
+            if tree == nil { startTree() }
+            origin = QuickOpenCommands.origin(machine: focusedMachine, tab: focusedTab, connections: connections)
+        }
         .onReceive(connections.modelChanged) { updateTree() }
         .task {
             await connections.refresh(machines.all)
@@ -175,9 +228,14 @@ struct QuickOpenView: View {
                                 activate: { activate(index) },
                                 toggle: { toggle(index) })
             .id(row.node)
+            .opacity(picking.map { canTake(row.node, $0.subject) } == false ? 0.4 : 1)
             .listRowBackground(selected ? Color.selection.opacity(0.22) : nil)
             .swipeActions(allowsFullSwipe: false) { rowActions(row.node) }
-            .contextMenu { rowActions(row.node) }
+            .contextMenu {
+                rowActions(row.node)
+                // The touch way to the ">" commands for a row other than the selected one.
+                Button { commands(for: index) } label: { Label("Commands…", systemImage: "command") }
+            }
     }
 
     @ViewBuilder private func scopeHeader(_ scope: CommandTree.Scope) -> some View {
@@ -253,6 +311,16 @@ struct QuickOpenView: View {
 
     private func activate(_ index: Int) {
         guard var current = tree else { return }
+        if let picking, current.rows.indices.contains(index) {
+            let node = current.rows[index].node
+            if case .workspace = node {
+                guard QuickOpenCommands.move(tab: picking.subject, to: node, connections: connections) else { return }
+                self.picking = nil
+                return dismiss()
+            }
+            // A machine opens to its workspaces; anything else can't take the tab.
+            guard case .machine = node else { return }
+        }
         current.select(index)
         let result = current.activate()
         tree = current
@@ -278,6 +346,82 @@ struct QuickOpenView: View {
         if let route = QuickOpenTree.route(node, connections: connections) { open(route) }
     }
 
+    // MARK: Commands
+
+    private var commandItems: [CommandListItem] {
+        let context = QuickOpenCommands.context(for: tree?.selection, machines: machines.all, connections: connections, origin: origin)
+        return CommandList.items(for: context, supported: QuickOpenCommands.supported)
+    }
+
+    @ViewBuilder private func commandRows(_ commands: [CommandListItem]) -> some View {
+        Section {
+            ForEach(Array(commands.enumerated()), id: \.element.id) { index, item in
+                Button { run(item) } label: {
+                    Label(item.title, systemImage: QuickOpenCommands.symbol(for: item.id))
+                }
+                .tint(.primary)
+                .listRowBackground(index == commandSelected ? Color.selection.opacity(0.22) : nil)
+                .accessibilityAddTraits(index == commandSelected ? .isSelected : [])
+                .accessibilityIdentifier("command")
+            }
+        } header: {
+            if let node = tree?.selection {
+                Text("For \(QuickOpenTree.display(node, machines: machines.all, connections: connections).title)").textCase(nil)
+            }
+        }
+    }
+
+    private func pickHeader(_ picking: (item: CommandListItem, subject: CommandTree.Node)) -> some View {
+        Section {
+            HStack {
+                Label("Pick a workspace on the same machine", systemImage: "arrow.right.square").font(.callout)
+                Spacer()
+                Button("Cancel") { self.picking = nil }.buttonStyle(.borderless).accessibilityIdentifier("cancelPick")
+            }
+        } header: {
+            Text(picking.item.title).textCase(nil)
+        }
+    }
+
+    /// While picking where a tab goes: another workspace on its machine, or its machine (to open it).
+    private func canTake(_ node: CommandTree.Node, _ subject: CommandTree.Node) -> Bool {
+        switch node {
+        case let .workspace(machine, id):
+            return machine == subject.machine && QuickOpenCommands.place(subject, connections: connections).workspace != id
+        case let .machine(machine): return machine == subject.machine
+        case .tab, .agent: return false
+        }
+    }
+
+    /// ">" for row `index`: selects it and lists its commands.
+    private func commands(for index: Int) {
+        guard var current = tree else { return }
+        current.select(index)
+        tree = current
+        picking = nil
+        query = ">"
+    }
+
+    private func run(_ item: CommandListItem) {
+        let subject = tree?.selection
+        switch QuickOpenCommands.run(item, subject: subject, machines: machines.all, connections: connections, origin: origin, open: open) {
+        case .open(let route): open(route)
+        case .close: dismiss()
+        case .home: home()
+        case .pickWorkspace:
+            guard let subject else { return }
+            query = ""
+            picking = (item, subject)
+        case .rename(let current, let apply):
+            newName = current
+            renaming = Renaming(current: current, apply: apply)
+        case .files(let connection, let path):
+            files = FilesTarget(machine: connection.machine.id, path: path)
+        case .nothing:
+            break
+        }
+    }
+
     // MARK: Search
 
     @ViewBuilder private func searchRows(_ results: [(entry: QuickOpenEntry, indices: [Int])]) -> some View {
@@ -300,8 +444,26 @@ struct QuickOpenView: View {
 
     // MARK: Keys
 
-    private func key(key: QuickOpenKey, results: [(entry: QuickOpenEntry, indices: [Int])]) {
-        if key == .escape { return dismiss() }
+    private func key(key: QuickOpenKey, results: [(entry: QuickOpenEntry, indices: [Int])], commands: [CommandListItem]) {
+        if key == .escape {
+            // Back out of a pick or the commands first.
+            if picking != nil { picking = nil; return }
+            if commandText != nil { query = ""; return }
+            return dismiss()
+        }
+        if key == .openBeside {
+            guard let item = commandItems.first(where: { $0.id == .openBeside }) else { return }
+            return run(item)
+        }
+        if commandText != nil {
+            switch key {
+            case .move(let by): commandSelected = min(max(commandSelected + by, 0), max(commands.count - 1, 0))
+            case .activate: if commands.indices.contains(commandSelected) { run(commands[commandSelected]) }
+            case .number(let n): if commands.indices.contains(n - 1) { run(commands[n - 1]) }
+            default: break
+            }
+            return
+        }
         if query.isEmpty {
             guard var current = tree else { return }
             switch key {
@@ -316,7 +478,7 @@ struct QuickOpenView: View {
                 tree = current
                 if current.rows.indices.contains(n - 1) { activate(n - 1) }
                 return
-            case .escape: break
+            case .escape, .openBeside: break
             }
             tree = current
             return
@@ -332,7 +494,7 @@ struct QuickOpenView: View {
             if key == .tab { current.reveal(node) } else { current.revealParent(of: node) }
             tree = current
             query = ""
-        case .expand, .collapse, .escape: break
+        case .expand, .collapse, .escape, .openBeside: break
         }
     }
 }

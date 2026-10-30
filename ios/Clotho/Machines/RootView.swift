@@ -121,10 +121,17 @@ struct RootView: View {
             .onAppear { AgentNotifier.shared.deferPrompt = true }
         }
         .sheet(isPresented: $navigator.quickOpen) {
-            QuickOpenView(focusedMachine: navigator.focusedMachine, focusedTab: navigator.focusedTab) { route in
+            QuickOpenView(focusedMachine: navigator.focusedMachine, focusedTab: navigator.focusedTab, open: { route in
                 navigator.quickOpen = false
                 navigator.open(route)
-            }
+            }, home: {
+                navigator.quickOpen = false
+                if navigator.regular {
+                    if let machine = navigator.focusedMachine { navigator.selection = .machine(machine) }
+                } else {
+                    navigator.path = []
+                }
+            })
             .environmentObject(machines)
             .environmentObject(connections)
         }

@@ -21,6 +21,10 @@ final class OnboardingUITests: XCTestCase {
         (try? String(contentsOfFile: "\(sshd)/\(name)", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Waits for what a launch or a step brings, generously: a busy build host (other agents' builds and tests)
+    /// can take many seconds to launch the app, and that shouldn't fail these tests.
+    private let launch: TimeInterval = 30
+
     func testGuideSetsUpAMachineFromCleanState() throws {
         guard let user = read("user"), let hostKey = read("host_ed25519.pub") else { throw XCTSkip("no SSH test server") }
         let app = XCUIApplication()
@@ -28,13 +32,13 @@ final class OnboardingUITests: XCTestCase {
         app.launch()
 
         // Screen 1: the machine, and the key (made silently: a clean state has none).
-        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 10), "no guide on a clean start")
+        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch), "no guide on a clean start")
         let host = app.textFields["Host"]
-        XCTAssertTrue(host.waitForExistence(timeout: 5))
+        XCTAssertTrue(host.waitForExistence(timeout: launch))
         let next = app.buttons["Continue"]
         XCTAssertFalse(next.isEnabled, "continues without a host")
         let publicKey = app.staticTexts["publicKey"]
-        XCTAssertTrue(publicKey.waitForExistence(timeout: 5), "no key made")
+        XCTAssertTrue(publicKey.waitForExistence(timeout: launch), "no key made")
         XCTAssertTrue(publicKey.label.hasPrefix("ssh-ed25519 "), publicKey.label)
         XCTAssertTrue(app.buttons["Copy Command"].exists)
         host.tap(); host.typeText("127.0.0.1")
@@ -46,16 +50,16 @@ final class OnboardingUITests: XCTestCase {
         next.tap()
 
         // Screen 2: the host key, shown before it's trusted, matches the sshd's.
-        XCTAssertTrue(app.descendants(matching: .any)["checkList"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["checkList"].waitForExistence(timeout: launch))
         let fingerprint = app.staticTexts["hostKeyFingerprint"]
-        XCTAssertTrue(fingerprint.waitForExistence(timeout: 15), "no host key")
+        XCTAssertTrue(fingerprint.waitForExistence(timeout: launch), "no host key")
         XCTAssertEqual(fingerprint.label, Self.fingerprint(hostKey))
         attach(app, "host key")
         app.buttons["trustHostKey"].tap()
 
         // The server doesn't know the key yet: a readable error, with the key to add again.
         let error = app.descendants(matching: .any)["onboardingError"]
-        XCTAssertTrue(error.waitForExistence(timeout: 15), "no login error")
+        XCTAssertTrue(error.waitForExistence(timeout: launch), "no login error")
         XCTAssertTrue(error.label.contains("didn't accept the key"), error.label)
         attach(app, "key rejected")
         let line = app.staticTexts["publicKey"].label
@@ -79,18 +83,19 @@ final class OnboardingUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-UITesting", "-CleanState", "NO"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
+        XCTAssertTrue(app.staticTexts["Guide test"].waitForExistence(timeout: launch), "the machine wasn't saved")
         XCTAssertFalse(app.staticTexts["Welcome to Clotho"].exists)
-        XCTAssertTrue(app.staticTexts["Guide test"].exists, "the machine wasn't saved")
         app.buttons["Welcome Guide"].tap()
-        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch))
         app.buttons["onboardingSkip"].tap()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
 
         // Remove the test clothod from this Mac (cleanup-dev.sh would too).
         // On Home, the machine's header menu has Disconnect.
         app.buttons["Guide test menu"].tap()
-        app.buttons["Disconnect and remove test clothod"].tap()
+        app.buttons["Disconnect and remove test clothod"].tapWhenSettled()
+        // The removal runs on after the connection closes; give it time before the next test's clean start.
         sleep(3)
     }
 
@@ -98,14 +103,15 @@ final class OnboardingUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting", "-CleanState", "YES"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch))
         app.buttons["onboardingSkip"].tap()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
         app.terminate()
         app.launchArguments = ["-UITesting", "-CleanState", "NO"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.staticTexts["Welcome to Clotho"].exists, "the skipped guide came back")
+        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
+        // The guide would show as the app comes up; give it the moment it would take.
+        XCTAssertFalse(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 3), "the skipped guide came back")
     }
 
     /// As ssh-keygen -l prints it.

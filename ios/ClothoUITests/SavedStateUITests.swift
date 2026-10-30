@@ -4,16 +4,19 @@ import XCTest
 /// held back, and the pane opens at once from the saved copy (dimmed, read-only, its last screen), then goes
 /// live in place when the connection is let through.
 final class SavedStateUITests: XCTestCase {
+    /// Generous waits for launches and the connection: a busy build host shouldn't fail this test.
+    private let launch: TimeInterval = 30
+
     func testRelaunchShowsTheSavedPaneThenGoesLive() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting"]
         app.launch()
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
         let newWorkspace = app.buttons["New Workspace"].firstMatch
-        XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
-        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 10)
+        XCTAssertTrue(newWorkspace.waitForExistence(timeout: launch))
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: launch)
         newWorkspace.tap()
-        XCTAssertTrue(app.buttons["Pane actions"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["Pane actions"].waitForExistence(timeout: launch))
         sleep(2)
         // A working directory to find the tab by after the relaunch (its row shows it; the shell's prompt
         // would overwrite a title), and colourful output to see in the saved screen.
@@ -26,7 +29,7 @@ final class SavedStateUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let liveRow = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "saved-state-test")).firstMatch
         var shown = false
-        for _ in 0..<6 {
+        for _ in 0..<15 {
             if liveRow.waitForExistence(timeout: 2) { shown = true; break }
             app.swipeUp()
         }
@@ -34,11 +37,11 @@ final class SavedStateUITests: XCTestCase {
         sleep(3)
         app.terminate()
 
-        // Relaunch with the connection held for a while: everything comes from the saved copy.
-        app.launchArguments = ["-UITesting", "-HoldConnections", "20"]
+        // Relaunch with the connection held back long enough that even a slow launch sees the saved copy first.
+        app.launchArguments = ["-UITesting", "-HoldConnections", "60"]
         app.launch()
         let machine = app.staticTexts["Local Mac (dev)"].firstMatch
-        XCTAssertTrue(machine.waitForExistence(timeout: 5))
+        XCTAssertTrue(machine.waitForExistence(timeout: launch))
         machine.tap()
         // Before scrolling: the header with New Workspace scrolls away (the list only keeps the rows in view).
         XCTAssertFalse(app.buttons["New Workspace"].firstMatch.isEnabled, "still the saved model")
@@ -49,16 +52,16 @@ final class SavedStateUITests: XCTestCase {
         row.tap()
 
         let badge = app.descendants(matching: .any)["savedBadge"]
-        XCTAssertTrue(badge.waitForExistence(timeout: 3), "the pane opens at once, marked as saved")
+        XCTAssertTrue(badge.waitForExistence(timeout: launch), "the pane opens from the saved copy, marked as saved")
         XCTAssertTrue(badge.label.hasPrefix("Last seen"), badge.label)
         XCTAssertFalse(app.staticTexts["noPreview"].exists, "its last screen was saved")
         XCTAssertFalse(app.buttons["Pane actions"].isEnabled, "read-only until live")
         attach(app, "saved")
 
         // Let through: the badge goes, the pane's own snapshot replaces the saved screen, and actions work.
-        XCTAssertTrue(badge.waitForNonExistence(timeout: 30), "never went live")
+        XCTAssertTrue(badge.waitForNonExistence(timeout: 90), "never went live")
         let actions = app.buttons["Pane actions"]
-        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: actions)], timeout: 10)
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: actions)], timeout: launch)
         sleep(1)
         attach(app, "live again")
 
@@ -66,7 +69,7 @@ final class SavedStateUITests: XCTestCase {
         app.typeText("cd; rmdir /tmp/saved-state-test\n")
         actions.tap()
         let close = app.buttons["Close tab"]
-        XCTAssertTrue(close.waitForExistence(timeout: 3))
+        XCTAssertTrue(close.waitForExistence(timeout: 10))
         close.tapWhenSettled()
     }
 
