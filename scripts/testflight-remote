@@ -1,7 +1,8 @@
 #!/bin/bash
-# Uploads the iOS app at the current commit to TestFlight, from devbox, over SSH on the Mac.
+# Uploads the iOS app at the current commit to TestFlight, from devbox, over SSH on the build Mac.
+# The build Mac is imac (macbook@imac); CLOTHO_MAC=ahmad@macbook picks the fallback.
 #
-# Usage: scripts/testflight-remote [--dry-run]
+# Usage: scripts/testflight-remote [--dry-run | --no-upload]
 #
 # 1. Hashes the app's sources at HEAD (from git, so stray files don't count) with ios/scripts/sources-sha.sh.
 # 2. Syncs the working tree to the Mac's mirror (clotho-mac).
@@ -10,9 +11,10 @@
 # The App Store Connect key ids come from ~/.config/clotho/asc.env (mode 600, never in the repo); the key itself
 # and the keychain password stay on the Mac. Don't run clotho-mac from anywhere else while this runs.
 set -euo pipefail
+export CLOTHO_MAC=${CLOTHO_MAC:-macbook@imac}
 cd "$(dirname "$0")/.."
 
-case "${1:-}" in "" | --dry-run) ;; *) echo "usage: scripts/testflight-remote [--dry-run]" >&2; exit 64 ;; esac
+case "${1:-}" in "" | --dry-run | --no-upload) ;; *) echo "usage: scripts/testflight-remote [--dry-run | --no-upload]" >&2; exit 64 ;; esac
 
 env_file=$HOME/.config/clotho/asc.env
 [ -r "$env_file" ] || { echo "testflight-remote: missing $env_file" >&2; exit 2; }
@@ -33,6 +35,6 @@ sha=$(ios/scripts/sources-sha.sh "$tmp")
 echo "==> $(git log --oneline -1 HEAD) | sources $sha | clothod $(cat clothod/RELEASED)"
 
 clotho-mac true
-# The Mac has little disk: after a successful upload keep only the newest archive in ~/Builds/testflight.
-ssh ahmad@macbook "cd ~/Builds/clotho-clothod && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
-ssh ahmad@macbook 'cd ~/Builds/testflight 2>/dev/null && ls -dt Clotho-* | tail -n +2 | xargs rm -rf; rm -rf ~/Builds/clotho-clothod/ios/build/Index.noindex; df -h /System/Volumes/Data | tail -1'
+# Keep only the newest archive in ~/Builds/testflight on the build Mac.
+ssh "$CLOTHO_MAC" "cd ~/Builds/clotho-clothod && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
+ssh "$CLOTHO_MAC" 'cd ~/Builds/testflight 2>/dev/null && ls -dt Clotho-* | tail -n +2 | xargs rm -rf; rm -rf ~/Builds/clotho-clothod/ios/build/Index.noindex; df -h /System/Volumes/Data | tail -1'
