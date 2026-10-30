@@ -62,6 +62,8 @@ extension AppDelegate {
         let tab = store.focusedTab
 
         settingsWindow?.refreshIfNeeded()
+        // An open command bar picks up the change once, after this pass.
+        quickOpen?.setNeedsReload()
         let agents = agentEntries()
         ClickTrace.measure("sidebar update") {
             sidebar.update(agents: agents, unreachable: unreachableMonitoredMachines(), groups: sidebarGroups())

@@ -3,9 +3,10 @@ import ClothoKit
 import XCTest
 @testable import Clotho
 
-/// ⌘P, the command bar: the current workspace's tabs with nothing typed (arrows preview each, Esc goes
-/// back), a search across every machine's workspaces, tabs and agents (best names first, workspaces leading), Return or
-/// ⌘1–9 to go, and ⌘P again to close.
+/// ⌘P, the command bar: with nothing typed a tree (Needs you, then this machine's workspaces with the
+/// current one open; → expands, ← collapses and climbs to the machine list; arrows preview tabs; Esc goes
+/// back); typing searches every machine flat (best names first, workspaces leading); Tab/⇧Tab leave the
+/// search; ⌘⌫ closes, ⌥↩ opens a new tab, ⌘1–9 pick a row, and ⌘P again closes the bar.
 @MainActor
 final class CommandBarTests: XCTestCase {
     private var window: NSWindow!
@@ -24,76 +25,127 @@ final class CommandBarTests: XCTestCase {
         window.close()
     }
 
-    private func tab(_ title: String, machine: String, workspace: String, tier: Int, panes: Int = 1, dot: NSColor? = nil, detail: String? = nil) -> CommandBarEntry {
-        CommandBarEntry(item: QuickOpenItem(kind: .tab, title: title, subtitle: "\(machine) · \(workspace)", id: "tab|\(machine)|\(title)"),
-                        tier: tier, dot: dot, detail: detail, panes: panes)
+    private func tab(_ title: String, machine: String, workspace: String, tier: Int, panes: Int = 1, dot: NSColor? = nil, detail: String? = nil,
+                     id: String? = nil) -> CommandBarEntry {
+        CommandBarEntry(item: QuickOpenItem(kind: .tab, title: title, subtitle: "\(machine) · \(workspace)", id: id ?? "tab|\(machine)|\(title)"),
+                        tier: tier, dot: dot, detail: detail, panes: panes, path: "\(machine) › \(workspace)")
     }
 
-    /// This Mac's "Platform" (current: api, web, docs), its "Notes", and devbox's "Infra" (api-gateway), with
-    /// a waiting agent on devbox.
+    /// This Mac ("local", MacBook) with "Platform" (current: api 11, web 12, docs 13) and "Notes" (notes
+    /// 21); devbox ("bb") with "Infra" (api-gateway 31) and an agent waiting on its pane 7.
     private var current: [CommandBarEntry] {
-        [tab("api", machine: "MacBook", workspace: "Platform", tier: 1),
-         tab("web", machine: "MacBook", workspace: "Platform", tier: 1, panes: 2),
-         tab("docs", machine: "MacBook", workspace: "Platform", tier: 1, dot: .systemOrange, detail: "waiting: Allow Bash?")]
+        [tab("api", machine: "MacBook", workspace: "Platform", tier: 1, id: "tab|local|11"),
+         tab("web", machine: "MacBook", workspace: "Platform", tier: 1, panes: 2, id: "tab|local|12"),
+         tab("docs", machine: "MacBook", workspace: "Platform", tier: 1, dot: .systemOrange, detail: "waiting: Allow Bash?", id: "tab|local|13")]
     }
 
     private var all: [CommandBarEntry] {
-        [CommandBarEntry(item: QuickOpenItem(kind: .agent, title: "Claude Code: deploy api", subtitle: "devbox · Infra › deploy", id: "agent|devbox|7"),
-                         tier: 0, dot: .systemOrange, detail: "waiting: Allow Bash?"),
-         CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Platform", subtitle: "MacBook", id: "ws|MacBook|1"), tier: 1)]
+        [CommandBarEntry(item: QuickOpenItem(kind: .agent, title: "Claude Code: deploy api", subtitle: "devbox · Infra › deploy", id: "agent|bb|7"),
+                         tier: 0, dot: .systemOrange, detail: "waiting: Allow Bash?", path: "devbox › Infra › deploy"),
+         CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Platform", subtitle: "MacBook", id: "ws|local|1"), tier: 1, path: "MacBook")]
             + current
-            + [CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Notes", subtitle: "MacBook", id: "ws|MacBook|2"), tier: 2),
-               tab("notes", machine: "MacBook", workspace: "Notes", tier: 2),
-               CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Infra", subtitle: "devbox", id: "ws|devbox|3"), tier: 2),
-               tab("api-gateway", machine: "devbox", workspace: "Infra", tier: 2)]
+            + [CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Notes", subtitle: "MacBook", id: "ws|local|2"), tier: 2, path: "MacBook"),
+               tab("notes", machine: "MacBook", workspace: "Notes", tier: 2, id: "tab|local|21"),
+               CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Infra", subtitle: "devbox", id: "ws|bb|3"), tier: 2, path: "devbox"),
+               tab("api-gateway", machine: "devbox", workspace: "Infra", tier: 2, id: "tab|bb|31"),
+               CommandBarEntry(item: QuickOpenItem(kind: .machine, title: "MacBook", subtitle: "Connected", id: "machine|local"), tier: 2, path: "Connected"),
+               CommandBarEntry(item: QuickOpenItem(kind: .machine, title: "devbox", subtitle: "Connected", id: "machine|bb"), tier: 2, path: "Connected")]
     }
 
-    private func open(selected: Int? = 1) {
-        bar = QuickOpenOverlay(all: all, current: current, selected: selected)
+    private var outline: CommandTree.Outline {
+        CommandTree.Outline(machines: [.init(key: "local", workspaces: [.init(id: 1, tabs: [11, 12, 13]), .init(id: 2, tabs: [21])]),
+                                       .init(key: "bb", workspaces: [.init(id: 3, tabs: [31])])],
+                            needsYou: [(machine: "bb", pane: 7)])
+    }
+
+    private var closed: [String] = []
+    private var newTabs: [String] = []
+
+    /// Opens the bar as ⌘P does with "web" (12) current in Platform.
+    private func open(tab current: TabID = 12) {
+        bar = QuickOpenOverlay(all: all, tree: CommandTree(outline: outline, machine: "local", workspace: 1, tab: current))
         bar.frame = window.contentView!.bounds
         window.contentView!.addSubview(bar)
         bar.onOpen = { [weak self] in self?.opened.append($0.item.id) }
         bar.onPreview = { [weak self] in self?.previewed.append($0.item.id) }
         bar.onRestore = { [weak self] in self?.restored += 1 }
         bar.onDismiss = { [weak self] in self?.dismissed += 1 }
+        bar.onClose = { [weak self] in self?.closed.append($0.item.id) }
+        bar.onNewTab = { [weak self] in self?.newTabs.append($0.item.id) }
         bar.focusField()
     }
 
-    private var titles: [String] { bar.results.map(\.entry.item.title) }
+    private var titles: [String] { bar.rows.map(\.entry.item.title) }
+    private var selectedTitle: String? { bar.selectedEntry?.item.title }
 
-    private func command(_ selector: Selector) {
+    @discardableResult
+    private func command(_ selector: Selector) -> Bool {
         let field = bar.fieldForTesting
         let editor = field.currentEditor() as? NSTextView ?? NSTextView()
-        XCTAssertTrue(bar.control(field, textView: editor, doCommandBy: selector))
+        return bar.control(field, textView: editor, doCommandBy: selector)
     }
 
-    private func key(_ characters: String) -> NSEvent {
+    private func key(_ characters: String, keyCode: UInt16 = 0) -> NSEvent {
         NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber,
-                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 0)!
+                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)!
     }
 
-    func testEmptyQueryListsTheCurrentWorkspacesTabs() {
-        open(selected: 1)
-        XCTAssertEqual(titles, ["api", "web", "docs"], "the current workspace's tabs, in order")
-        XCTAssertEqual(bar.selected, 1, "the current tab is selected")
-        XCTAssertEqual(bar.results[1].entry.panes, 2)
-        XCTAssertEqual(bar.results[2].entry.detail, "waiting: Allow Bash?")
+    func testEmptyViewIsThisMachineWithTheCurrentWorkspaceOpen() {
+        open()
+        XCTAssertEqual(titles, ["Claude Code: deploy api", "Platform", "api", "web", "docs", "Notes"],
+                       "Needs you on top, then this machine only: Platform open to its tabs, Notes collapsed")
+        XCTAssertEqual(selectedTitle, "web", "the current tab is selected")
+        XCTAssertEqual(bar.rows.map { $0.row?.depth ?? -1 }, [0, 0, 1, 1, 1, 0])
+        XCTAssertEqual(bar.rows.first?.row?.section, .needsYou)
+        XCTAssertFalse(titles.contains("api-gateway"), "other machines stay out of the empty view")
     }
 
-    func testArrowsPreviewAndReturnSwitches() {
-        open(selected: 0)
+    func testArrowsPreviewTabsOnly() {
+        open()
         command(#selector(NSResponder.moveDown(_:)))
-        command(#selector(NSResponder.insertTab(_:)))  // Tab works as ↓
-        XCTAssertEqual(previewed, ["tab|MacBook|web", "tab|MacBook|docs"], "each tab shows as it's selected")
-        command(#selector(NSResponder.insertBacktab(_:)))  // ⇧Tab as ↑
-        XCTAssertEqual(bar.selected, 1)
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(selectedTitle, "Notes")
+        XCTAssertEqual(previewed, ["tab|local|13"], "docs previews; the Notes workspace row only highlights")
         command(#selector(NSResponder.insertNewline(_:)))
-        XCTAssertEqual(opened, ["tab|MacBook|web"])
-        XCTAssertEqual(restored, 0)
+        XCTAssertEqual(opened, ["ws|local|2"], "Return on a workspace opens it (at its last tab)")
+    }
+
+    func testRightExpandsLeftCollapsesAndGoesUpToTheMachines() {
+        open()
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveDown(_:)))  // Notes
+        XCTAssertTrue(command(#selector(NSResponder.moveRight(_:))))
+        XCTAssertEqual(titles.suffix(2), ["Notes", "notes"], "→ shows its tabs")
+        command(#selector(NSResponder.moveLeft(_:)))
+        XCTAssertEqual(titles.last, "Notes", "← collapses")
+        command(#selector(NSResponder.moveLeft(_:)))
+        XCTAssertEqual(titles, ["Claude Code: deploy api", "MacBook", "devbox"], "← again: the machine list")
+        XCTAssertEqual(selectedTitle, "MacBook")
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(titles, ["Claude Code: deploy api", "MacBook", "devbox", "Infra"], "Return on a machine expands it")
+        XCTAssertTrue(opened.isEmpty)
+        // Tab and ⇧Tab act as → and ← with nothing typed.
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.insertTab(_:)))
+        XCTAssertEqual(titles.last, "api-gateway")
+        command(#selector(NSResponder.insertBacktab(_:)))
+        XCTAssertEqual(titles.last, "Infra")
+    }
+
+    func testReturnOpensTabsAndAgents() {
+        open()
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(opened, ["tab|local|12"])
+        open()
+        for _ in 0..<3 { command(#selector(NSResponder.moveUp(_:))) }
+        XCTAssertEqual(selectedTitle, "Claude Code: deploy api")
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(opened.last, "agent|bb|7", "Needs you jumps to the agent's pane")
     }
 
     func testEscRestoresAndCloses() {
-        open(selected: 0)
+        open()
         command(#selector(NSResponder.moveDown(_:)))
         command(#selector(NSResponder.cancelOperation(_:)))
         XCTAssertEqual(restored, 1, "back to the tab that was current")
@@ -107,6 +159,93 @@ final class CommandBarTests: XCTestCase {
         command(#selector(NSResponder.cancelOperation(_:)))
         XCTAssertEqual(restored, 0)
         XCTAssertEqual(dismissed, 1)
+    }
+
+    func testTypingSearchesFlatAndClearingReturnsToTheTree() {
+        open()
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveRight(_:)))  // Notes open
+        bar.setQuery("api")
+        XCTAssertTrue(titles.contains("api-gateway"), "every machine")
+        XCTAssertTrue(bar.rows.allSatisfy { $0.row == nil }, "flat")
+        XCTAssertEqual(bar.rows.first { $0.entry.item.title == "api-gateway" }?.entry.path, "devbox › Infra")
+        XCTAssertFalse(command(#selector(NSResponder.moveLeft(_:))), "← and → edit the text")
+        XCTAssertFalse(command(#selector(NSResponder.moveRight(_:))))
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(previewed, ["tab|local|13"], "no previews while searching")
+        bar.setQuery("")
+        XCTAssertEqual(selectedTitle, "Notes", "back where you were")
+        XCTAssertEqual(titles.suffix(2), ["Notes", "notes"])
+    }
+
+    func testTabLeavesSearchAtTheRowAndShiftTabAtItsParent() {
+        open()
+        bar.setQuery("gateway")
+        XCTAssertEqual(selectedTitle, "api-gateway")
+        command(#selector(NSResponder.insertTab(_:)))
+        XCTAssertEqual(bar.query, "")
+        XCTAssertEqual(selectedTitle, "api-gateway", "the tree, at that tab")
+        XCTAssertTrue(titles.contains("Infra"))
+        open()
+        bar.setQuery("gateway")
+        command(#selector(NSResponder.insertBacktab(_:)))
+        XCTAssertEqual(selectedTitle, "Infra", "⇧Tab: its workspace")
+    }
+
+    func testRowKeys() {
+        open()
+        XCTAssertTrue(bar.performKeyEquivalent(with: key("\u{7f}", keyCode: 51)))
+        XCTAssertEqual(closed, ["tab|local|12"], "⌘⌫ closes the selected tab (the app asks first)")
+        command(#selector(NSResponder.moveUp(_:)))
+        command(#selector(NSResponder.moveUp(_:)))
+        bar.performKeyEquivalent(with: key("\u{7f}", keyCode: 51))
+        XCTAssertEqual(closed.last, "ws|local|1", "or workspace")
+        command(#selector(NSResponder.moveUp(_:)))
+        bar.performKeyEquivalent(with: key("\u{7f}", keyCode: 51))
+        XCTAssertEqual(closed.count, 2, "an agent row has nothing to close")
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertTrue(command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))))
+        XCTAssertEqual(newTabs, ["ws|local|1"], "⌥↩ opens a new tab there")
+        bar.setQuery("gate")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(newTabs.last, "tab|bb|31", "on a search result too")
+    }
+
+    func testOnlyTheRowsInViewAreDrawn() {
+        var entries = all
+        var workspaces: [CommandTree.Outline.Workspace] = []
+        for w in 0..<300 {
+            entries.append(CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "W\(w)", id: "ws|local|\(1000 + w)"), tier: 2))
+            workspaces.append(.init(id: WorkspaceID(1000 + w), tabs: []))
+        }
+        let big = CommandTree.Outline(machines: [.init(key: "local", workspaces: workspaces)], needsYou: [])
+        bar = QuickOpenOverlay(all: entries, tree: CommandTree(outline: big, machine: "local", workspace: nil, tab: nil))
+        window.contentView!.addSubview(bar)
+        bar.focusField()
+        XCTAssertEqual(bar.rows.count, 300)
+        let start = Date()
+        for _ in 0..<40 { command(#selector(NSResponder.moveDown(_:))) }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "40 moves through 300 workspaces")
+        XCTAssertEqual(selectedTitle, "W40")
+        XCTAssertGreaterThan(bar.windowStart, 0, "the view follows the selection")
+        XCTAssertLessThanOrEqual(40 - bar.windowStart, QuickOpenOverlay.visibleRows - 1)
+    }
+
+    func testNeedsYouIsWaitingOrErrorNotMuted() {
+        XCTAssertTrue(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .waiting, attention: true)))
+        XCTAssertTrue(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .error, attention: true)))
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .done, attention: true)), "finished isn't waiting")
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .running, attention: true)))
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .waiting, attention: true, muted: true)), "muted")
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .waiting, attention: false)), "already seen")
+    }
+
+    func testNodeIDsRoundTrip() {
+        for node: CommandTree.Node in [.agent(machine: "bb", pane: 7), .machine("local"), .workspace(machine: "x-y", 3), .tab(machine: "bb", 31)] {
+            XCTAssertEqual(CommandTree.Node(entryID: node.entryID), node)
+        }
+        XCTAssertNil(CommandTree.Node(entryID: "tab|bb|api"))
     }
 
     func testAQueryFiltersAcrossMachines() {
@@ -133,7 +272,7 @@ final class CommandBarTests: XCTestCase {
         XCTAssertEqual(bar.results.map(\.entry.tier), [1, 2, 0])
         let ranked = CommandBar.results(all: all, current: current, query: "plat")
         XCTAssertEqual(ranked.first?.entry.item.title, "Platform", "the workspace by name before its tabs (by subtitle)")
-        XCTAssertEqual(ranked.dropFirst().map(\.entry.item.title), ["api", "web", "docs"])
+        XCTAssertEqual(Array(ranked.dropFirst().map(\.entry.item.title).prefix(3)), ["api", "web", "docs"])
     }
 
     private func workspace(_ name: String, machine: String = "devbox") -> CommandBarEntry {
@@ -183,13 +322,13 @@ final class CommandBarTests: XCTestCase {
     func testWaitingAgentsLeadTheirBand() {
         let entries = [tab("deploy api", machine: "MacBook", workspace: "Platform", tier: 1), all[0]]
         XCTAssertEqual(CommandBar.results(all: entries, current: [], query: "api").map(\.entry.item.id),
-                       ["agent|devbox|7", "tab|MacBook|deploy api"])
+                       ["agent|bb|7", "tab|MacBook|deploy api"])
     }
 
     func testCommandNumbersPickARow() {
         open()
-        XCTAssertTrue(bar.performKeyEquivalent(with: key("3")))
-        XCTAssertEqual(opened, ["tab|MacBook|docs"])
+        XCTAssertTrue(bar.performKeyEquivalent(with: key("5")))
+        XCTAssertEqual(opened, ["tab|local|13"], "⌘5: the fifth row, docs")
         bar.setQuery("zzz")
         XCTAssertTrue(bar.results.isEmpty)
         XCTAssertTrue(bar.performKeyEquivalent(with: key("1")), "taken, even with nothing to pick")
@@ -197,7 +336,7 @@ final class CommandBarTests: XCTestCase {
     }
 
     func testCommandPCloses() {
-        open(selected: 0)
+        open()
         command(#selector(NSResponder.moveDown(_:)))
         XCTAssertTrue(bar.performKeyEquivalent(with: key("p")))
         XCTAssertEqual(dismissed, 1)
@@ -219,5 +358,25 @@ final class CommandBarTests: XCTestCase {
             _ = CommandBar.results(all: many, current: [], query: query)
         }
         XCTAssertLessThan(Date().timeIntervalSince(start) / 7, 0.05, "under 50 ms a keystroke for 600 tabs")
+    }
+
+    /// Review images of the bar as the app draws it, with an agent in Needs you, light and dark. Runs
+    /// only with CLOTHO_SNAPSHOT_DIR set (CLOTHO_SNAPSHOT_DIR=/tmp/orch-ui-shots swift test --filter …).
+    func testSnapshotsForReview() throws {
+        guard let folder = ProcessInfo.processInfo.environment["CLOTHO_SNAPSHOT_DIR"] else { throw XCTSkip("no CLOTHO_SNAPSHOT_DIR") }
+        let saved = NSApp.appearance
+        defer { NSApp.appearance = saved; Theme.followAppAppearance() }
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+            NSApp.appearance = NSAppearance(named: appearance)
+            Theme.followAppAppearance()
+            window.appearance = NSApp.appearance
+            open(tab: 12)
+            bar.layoutSubtreeIfNeeded()
+            let card = bar.card
+            guard let rep = card.bitmapImageRepForCachingDisplay(in: card.bounds) else { return XCTFail("no image") }
+            card.cacheDisplay(in: card.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(folder)/u-cmdp-needs-you-\(name).png"))
+            bar.removeFromSuperview()
+        }
     }
 }

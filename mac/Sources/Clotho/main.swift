@@ -743,10 +743,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let query = String(step.dropFirst(6))
                     // "quick:close" dismisses it, so the next "quick:" lists the model as it is then.
                     if query == "close" { return quickOpen?.cancel() ?? () }
-                    if query == "down" || query == "up" {
+                    // "quick:down|up|right|left|tab|backtab|altreturn" press that key in it.
+                    let keys: [String: Selector] = [
+                        "down": #selector(NSResponder.moveDown(_:)), "up": #selector(NSResponder.moveUp(_:)),
+                        "right": #selector(NSResponder.moveRight(_:)), "left": #selector(NSResponder.moveLeft(_:)),
+                        "tab": #selector(NSResponder.insertTab(_:)), "backtab": #selector(NSResponder.insertBacktab(_:)),
+                        "altreturn": #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+                    ]
+                    if let selector = keys[query] {
                         guard let field = quickOpen.flatMap({ $0.window?.firstResponder as? NSTextView }), let control = quickOpen?.fieldForTesting else { return }
-                        _ = quickOpen?.control(control, textView: field, doCommandBy: query == "down" ? #selector(NSResponder.moveDown(_:)) : #selector(NSResponder.moveUp(_:)))
-                        return log("command bar: selected \(quickOpen?.selected ?? -1), focus \(store.focusedTab.map { store.displayTitle(of: $0) } ?? "none")")
+                        _ = quickOpen?.control(control, textView: field, doCommandBy: selector)
+                        let row = quickOpen.flatMap { bar in bar.selectedEntry.map { "\($0.item.kind) \($0.item.title)" } } ?? "none"
+                        return log("command bar: \(query) → \(row), focus \(store.focusedTab.map { store.displayTitle(of: $0) } ?? "none")")
                     }
                     if quickOpen == nil { showQuickOpen(nil) }
                     if query == "\r" || query == "open" { return quickOpen?.open() ?? () }
