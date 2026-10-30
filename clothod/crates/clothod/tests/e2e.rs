@@ -78,6 +78,8 @@ impl Env {
         cmd.env("CLOTHOD_RUNTIME_DIR", self.path()).env("CLOTHOD_REGISTRY_DIR", self.dir.path().join("registry"));
         // Never the user's ~/.config/clothod/config.toml.
         cmd.env("CLOTHOD_CONFIG", self.dir.path().join("config.toml"));
+        // Never the user's ~/.claude (detection reads Claude Code's session records there).
+        cmd.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude-config"));
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -4225,6 +4227,22 @@ impl RestoreEnv {
         std::fs::read_to_string(self.env.dir.path().join("data/layout.json")).ok().and_then(|t| serde_json::from_str(&t).ok())
     }
 
+    /// The machine restarts: serve and holder die at once, the runtime dir is wiped, and a
+    /// fresh daemon starts.
+    fn reboot(&mut self) {
+        let holder = holder_pid(&self.env);
+        self.env.kill();
+        unsafe { libc::kill(holder as i32, libc::SIGKILL) };
+        let deadline = Instant::now() + T;
+        while clotho_proto::platform::process_alive(holder) {
+            assert!(Instant::now() < deadline, "holder {holder} still running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::remove_dir_all(self.env.path()).unwrap();
+        std::fs::create_dir_all(self.env.path()).unwrap();
+        self.start();
+    }
+
     fn rec(&self) -> String {
         std::fs::read_to_string(self.env.dir.path().join("agents.rec")).unwrap_or_default()
     }
@@ -4421,6 +4439,100 @@ async fn a_restart_restores_the_layout_and_resumes_agents() {
     r.start();
     let c = r.env.client().await;
     assert!(c.request("state.get", json!({})).await.unwrap()["workspaces"].as_array().unwrap().is_empty());
+}
+
+/// A reboot ends the agents first: Claude and Codex quit on the SIGTERM at once, while an
+/// interactive shell ignores it and clothod lives on for a moment. The agent's end must not
+/// cost the pane its session: it is resumed after the restart. An agent the user quits, with
+/// the shell staying on, is forgotten once that has lasted a while (shortened here).
+#[tokio::test]
+async fn an_agent_that_ends_just_before_a_reboot_is_still_resumed() {
+    let mut r = RestoreEnv::new();
+    r.vars.push(("CLOTHOD_TEST_AGENT_GONE_MS".into(), "3000".into()));
+    r.env.kill();
+    r.start();
+    let c = r.env.client().await;
+    let dir = r.env.dir.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = json!({"cwd": dir.display().to_string()});
+    let w = c.request("workspace.create", with(with(sh(), cwd.clone()), json!({"name": "w"}))).await.unwrap();
+    let (p1, ws) = (w["pane"].as_u64().unwrap(), w["workspace"].clone());
+    let p2 = c.request("tab.create", with(with(sh(), cwd), json!({"workspace": ws}))).await.unwrap()["pane"].as_u64().unwrap();
+    r.agent(&c, p1, "claude", "aaaa1111-ends-at-reboot").await;
+    r.agent(&c, p2, "codex", "bbbb2222-quit-by-user").await;
+    r.wait_layout("saved with both sessions", |l| {
+        let s = l.to_string();
+        s.contains("aaaa1111-ends-at-reboot") && s.contains("bbbb2222-quit-by-user")
+    })
+    .await;
+
+    // The user quits p2's agent; its shell stays. After the quiet time the file forgets it.
+    c.input(p2, b"\x03");
+    wait_agent(&c, p2, "p2's agent to end", |a| a.is_null()).await;
+    r.wait_layout("without p2's session", |l| !l.to_string().contains("bbbb2222-quit-by-user")).await;
+
+    // The reboot: p1's agent ends, clothod sees it, and dies 1.5 s later (past the debounce).
+    c.input(p1, b"\x03");
+    wait_agent(&c, p1, "p1's agent to end", |a| a.is_null()).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(r.layout().unwrap().to_string().contains("aaaa1111-ends-at-reboot"), "{:?}", r.layout());
+    drop(c);
+    r.reboot();
+
+    let c = r.env.client().await;
+    let deadline = Instant::now() + T;
+    while r.rec().lines().count() < 1 {
+        assert!(Instant::now() < deadline, "not resumed: {:?}\n{}", r.layout(), r.env.log());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(r.rec().trim(), format!("claude --resume=aaaa1111-ends-at-reboot in {}", real(&dir)));
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let marks: Vec<Value> = s["panes"].as_array().unwrap().iter().map(|p| p["restored"]["agent"].clone()).collect();
+    assert_eq!(marks.iter().filter(|m| **m == json!("claude")).count(), 1, "{s}");
+    assert_eq!(marks.iter().filter(|m| m.is_null()).count(), 1, "{s}");
+}
+
+/// A Claude Code found by detection (no hooks) has its session read from its own record
+/// (`$CLAUDE_CONFIG_DIR/sessions/<pid>.json`), and is resumed after a reboot. A record for
+/// another pid or cwd is ignored.
+#[tokio::test]
+async fn a_detected_claude_is_resumed_from_its_session_record() {
+    let mut r = RestoreEnv::new();
+    let c = r.env.client().await;
+    let dir = r.env.dir.path().join("work");
+    let fake = r.env.dir.path().join("fake");
+    let sessions = r.env.dir.path().join("claude-config/sessions");
+    for d in [&dir, &fake, &sessions] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    // A stand-in Claude Code, not on PATH (the resume line runs the recording stub): writes
+    // its record as Claude Code does, then stays in the foreground.
+    let claude = fake.join("claude");
+    std::fs::write(
+        &claude,
+        format!(
+            "#!/bin/sh\nprintf '{{\"pid\": %s, \"sessionId\": \"%s\", \"cwd\": \"%s\"}}' $$ \"$1\" \"$PWD\" > '{}'/$$.json\nsleep 120\n",
+            sessions.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let w = c.request("workspace.create", with(with(sh(), json!({"cwd": dir.display().to_string()})), json!({"name": "w"}))).await.unwrap();
+    let p = w["pane"].as_u64().unwrap();
+    c.input(p, format!("'{}' dddd4444-detected\r", claude.display()).as_bytes());
+    let a = wait_agent(&c, p, "a detected claude with its session", |a| a["session"] == "dddd4444-detected").await;
+    assert_eq!(a["kind"], "claude");
+    r.wait_layout("saved with the detected session", |l| l.to_string().contains("dddd4444-detected")).await;
+    drop(c);
+    r.reboot();
+    let _c = r.env.client().await;
+    let deadline = Instant::now() + T;
+    while r.rec().lines().count() < 1 {
+        assert!(Instant::now() < deadline, "not resumed: {:?}\n{}", r.layout(), r.env.log());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(r.rec().trim(), format!("claude --resume=dddd4444-detected in {}", real(&dir)));
 }
 
 /// What must never restore: a serve that adopts a running holder (a crash, an in-place

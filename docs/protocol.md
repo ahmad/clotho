@@ -380,6 +380,17 @@ saves the layout to a file and brings it back on the next start.
   already had, for panes where an agent of that kind still runs, until the agent's hooks
   report its own. That covers upgrading from 0.1.21, which didn't keep them. Scrollback, screen
   contents and pane titles (set by applications) are not saved.
+- **Sessions without hooks (since 0.1.25).** A Claude Code found by detection (no hooks
+  installed) has its session read from Claude Code's own record of the process,
+  `$CLAUDE_CONFIG_DIR/sessions/<pid>.json` (default `~/.claude/sessions/`), at most every 5 s.
+  The daemon only reads it. The record must name that pid and the process's cwd, and the id must
+  match the pattern below; otherwise the pane has no session, as before. The session then shows
+  in the pane's `agent.session` too. Codex without its notify hook still has none.
+- **Agents that end before a reboot (since 0.1.25).** A reboot or logout ends the agents first
+  (they quit on SIGTERM; an interactive shell ignores it) and the daemon a moment later. So when
+  a pane's agent goes away and its shell stays, the file keeps that agent and session for 10 s
+  more. An agent the user quits is dropped from the file after that. A restored pane's agent is
+  kept the same way while it starts again.
 - **Where.** `layout.json` in the state dir: `~/.local/state/clothod/` (or
   `$XDG_STATE_HOME/clothod/`) on Linux, and `~/Library/Application Support/clothod/` on macOS.
   It is written atomically (temp file, fsync, rename) with mode 0600, 0.5 s after the layout

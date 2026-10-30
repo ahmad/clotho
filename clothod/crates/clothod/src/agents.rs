@@ -292,6 +292,39 @@ fn send_report(socket: &Path, method: &str, params: &Value, timeout: Option<Dura
     }
 }
 
+// ---- sessions of agents without hooks --------------------------------------------------------
+
+/// Where Claude Code keeps its per-process records (`<pid>.json`): `$CLAUDE_CONFIG_DIR/sessions`,
+/// or `~/.claude/sessions`.
+fn claude_sessions_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(PathBuf::from).or_else(|| home().ok().map(|h| h.join(".claude")))?;
+    Some(base.join("sessions"))
+}
+
+/// The session of the running Claude Code with this pid, from the record Claude Code keeps for
+/// it (`<pid>.json`: `pid`, `sessionId`, `cwd`), for an agent found by detection, which no hook
+/// told its session. Read only. The record must name this pid and the process's own cwd (a
+/// stale record of a dead process whose pid was reused never matches), and the id must be one
+/// clothod would type; anything else (no record, another format) is `None`.
+pub fn claude_session_of(pid: u32) -> Option<String> {
+    claude_session_in(&claude_sessions_dir()?, pid, &platform::process_cwd(pid)?)
+}
+
+fn claude_session_in(dir: &Path, pid: u32, cwd: &Path) -> Option<String> {
+    let mut text = String::new();
+    std::fs::File::open(dir.join(format!("{pid}.json"))).ok()?.take(64 * 1024).read_to_string(&mut text).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let named = v.get("pid").and_then(|p| p.as_u64().or_else(|| p.as_str()?.parse().ok()));
+    if named != Some(pid as u64) {
+        return None;
+    }
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if canon(Path::new(v.get("cwd")?.as_str()?)) != canon(cwd) {
+        return None;
+    }
+    v.get("sessionId")?.as_str().filter(|s| safe_session(s)).map(String::from)
+}
+
 // ---- hooks ---------------------------------------------------------------------------------
 
 fn home() -> Result<PathBuf> {
@@ -639,6 +672,27 @@ pub fn hooks(args: &[String], install_self: impl Fn() -> Result<()>) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_session_records_must_match_the_process() {
+        let dir = std::env::temp_dir().join(format!("clothod-unit-sessions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = std::env::temp_dir();
+        let write = |pid: u32, v: Value| std::fs::write(dir.join(format!("{pid}.json")), v.to_string()).unwrap();
+        let c = cwd.to_string_lossy();
+        write(10, json!({"pid": 10, "sessionId": "d151d209-1192-4acc-8667-80be46e13a93", "cwd": c}));
+        assert_eq!(claude_session_in(&dir, 10, &cwd).as_deref(), Some("d151d209-1192-4acc-8667-80be46e13a93"));
+        // Another pid's record (a reused file name), another cwd, or an id clothod won't type.
+        write(11, json!({"pid": 12, "sessionId": "abc", "cwd": c}));
+        write(13, json!({"pid": 13, "sessionId": "abc", "cwd": "/nonexistent-elsewhere"}));
+        write(14, json!({"pid": 14, "sessionId": "-rf", "cwd": c}));
+        write(15, json!({"pid": 15, "cwd": c}));
+        std::fs::write(dir.join("16.json"), "not json").unwrap();
+        for pid in [11, 13, 14, 15, 16, 17] {
+            assert_eq!(claude_session_in(&dir, pid, &cwd), None, "pid {pid}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
 
     #[test]

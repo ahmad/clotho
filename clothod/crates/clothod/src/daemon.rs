@@ -429,6 +429,8 @@ struct Pane {
     /// Brought back after a restart (`{at, agent, session}`, docs/protocol.md "Restore after
     /// restart") until a client dismisses it or the user types in the pane.
     restored: Option<Value>,
+    /// When detection last read the session of the pane's Claude Code (`claude_session_of`).
+    session_probe: Option<Instant>,
     /// The cwd git info was last looked up for, where its work tree is, and the `git` field
     /// (docs/protocol.md, "Git").
     git_cwd: Option<String>,
@@ -555,6 +557,7 @@ impl Pane {
             polled_cwd: None,
             history: VecDeque::new(),
             restored: None,
+            session_probe: None,
             git_cwd: None,
             git_loc: None,
             git: None,
@@ -673,12 +676,25 @@ struct LayoutState {
     hints: HashMap<u64, crate::layout::SavedAgent>,
     /// Until then a pane without an agent keeps its hint: detection hasn't looked yet.
     hints_until: Option<Instant>,
+    /// Each pane's last saved agent, and since when the pane has had none (`agent_gone_quiet`).
+    agents: HashMap<u64, (crate::layout::SavedAgent, Option<Instant>)>,
 }
 
 /// A layout change is written once nothing changed for this long.
 const LAYOUT_DEBOUNCE: Duration = Duration::from_millis(500);
 /// And not until this long after a pane exited.
 const LAYOUT_EXIT_QUIET: Duration = Duration::from_secs(5);
+
+/// A pane's agent stays in the file this long after it left a shell that lives on. A reboot or
+/// logout ends the agents first (they quit on the SIGTERM; an interactive shell ignores it)
+/// and clothod a moment later: the session must survive that. An agent the user quits is
+/// forgotten once this has passed.
+fn agent_gone_quiet() -> Duration {
+    std::env::var("CLOTHOD_TEST_AGENT_GONE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(Duration::from_secs(10))
+}
+
+/// Detection reads a Claude Code's session record at most this often.
+const CLAUDE_SESSION_PROBE: Duration = Duration::from_secs(5);
 
 impl LayoutWriter {
     fn offer(&self, saved: crate::layout::Saved) {
@@ -687,6 +703,13 @@ impl LayoutWriter {
             return;
         }
         st.pending = Some((saved, Instant::now()));
+    }
+
+    /// Whether an agent's time in the file after it left is up (the layout must be offered
+    /// again to drop it: nothing else may change).
+    fn agent_gone_due(&self) -> bool {
+        let quiet = agent_gone_quiet();
+        self.st.lock().unwrap().agents.values().any(|(_, gone)| gone.is_some_and(|t| t.elapsed() >= quiet))
     }
 
     /// Remove the saved layout and write no more (the daemon is shutting down).
@@ -1317,9 +1340,25 @@ impl Daemon {
                         }
                     }
                 }
+                match &agent {
+                    Some(a) => {
+                        st.agents.insert(id, (a.clone(), None));
+                    }
+                    None => {
+                        let quiet = agent_gone_quiet();
+                        if let Some((a, gone)) = st.agents.get_mut(&id) {
+                            if gone.get_or_insert_with(Instant::now).elapsed() < quiet {
+                                agent = Some(a.clone());
+                            } else {
+                                st.agents.remove(&id);
+                            }
+                        }
+                    }
+                }
             }
             panes.insert(id.to_string(), crate::layout::SavedPane { cwd, command: p.command.clone(), cols: p.cols, rows: p.rows, agent });
         }
+        w.st.lock().unwrap().agents.retain(|id, _| panes.contains_key(&id.to_string()));
         crate::layout::Saved {
             version: crate::layout::VERSION,
             host: w.host.clone(),
@@ -1354,6 +1393,10 @@ impl Daemon {
             map.insert(old, new);
             let line = sp.agent.as_ref().and_then(crate::layout::resume_line);
             let agent = sp.agent.filter(|_| line.is_some());
+            if let (Some(a), Some(w)) = (&agent, &self.layout) {
+                // Kept while it starts again, as after an agent left (a second reboot soon after).
+                w.st.lock().unwrap().agents.insert(new, (a.clone(), None));
+            }
             if let Some(p) = self.pane(new) {
                 p.lock().unwrap().restored = Some(json!({"at": at, "agent": agent.as_ref().map(|a| &a.kind), "session": agent.as_ref().map(|a| &a.session)}));
             }
@@ -2037,6 +2080,20 @@ impl Daemon {
                     turn_started: None,
                     requests: Vec::new(),
                 });
+                // Another process of that kind (quit and started again): not the same agent.
+                let pgrp = fg.as_ref().map(|f| f.pgrp);
+                if a.pid != pgrp {
+                    a.pid = pgrp;
+                    a.session = None;
+                    p.session_probe = None;
+                }
+                // No hook tells a detected Claude Code's session: its own record does.
+                if kind == "claude" && p.session_probe.is_none_or(|t| t.elapsed() >= CLAUDE_SESSION_PROBE) {
+                    p.session_probe = Some(Instant::now());
+                    if let Some(s) = a.pid.and_then(crate::agents::claude_session_of) {
+                        a.session = Some(s);
+                    }
+                }
                 let fresh = a.state == "starting" && p.agent.is_none();
                 if !fresh {
                     // Claude Code's title says it best: a spinner glyph while it works, ✳ when
@@ -2236,7 +2293,7 @@ impl Daemon {
         if snapshot_check && self.live.load(Ordering::Relaxed) {
             self.refresh_git();
         }
-        if snapshot_check && self.dirty.load(Ordering::Relaxed) {
+        if snapshot_check && (self.dirty.load(Ordering::Relaxed) || self.layout.as_ref().is_some_and(|w| w.agent_gone_due())) {
             self.persist();
         }
         if let Some(w) = &self.layout {
