@@ -515,3 +515,18 @@ Navigation (phase 1, Mac 1.0.12):
 Commands (phase 2, typed after ">"): new tab / new workspace on any machine, close tab / workspace, split right / down; "Claude here", "Codex here" and "Resume last Claude in this folder"; rename the selected tab or workspace inline; move a tab to another workspace (pick the target in the same tree); open Files, Settings, Machines; toggle the sidebar; switch appearance; turn a machine on or off; reconnect.
 
 The iPhone and iPad get the same model after the Mac ships.
+
+## Notification text (user, 2026-10-31)
+
+- The user asked for notifications written by a smaller, cheaper model, "so its clear and easy to follow", and for Markdown never to show raw.
+- Decisions:
+  - Claude Haiku, run through the machine's own claude login (`claude -p --model haiku`). No API key.
+  - Run in clothod before encryption, since pushes are end-to-end encrypted.
+  - Rewrite every kind: done, error, question and permission ask.
+- Safety:
+  - A permission ask still shows the exact tool and command next to the summary, so Allow approves what's shown.
+  - The helper runs from an empty cwd with the user's settings and hooks excluded, no tools and no session history.
+  - Tests use a fake summarizer, never a real claude.
+- Fallback: on a timeout (about 6 s) or any failure, the cleaned original is sent. A push is never blocked or dropped.
+- A settings switch turns the rewrite off.
+- Fields: `sm` in the push record and `agent.summary` in the protocol. Clients prefer them, else they use the msg converted from Markdown to plain text.
