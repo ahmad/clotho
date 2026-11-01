@@ -19,11 +19,15 @@ public struct AgentNotice: Equatable, Sendable {
     /// The longest body, in characters; longer results are cut at a word with an ellipsis.
     public static let bodyLimit = 240
 
-    /// From plain fields, as a push record carries them (`k`, `s`, `w`, `pj`, `d`, `msg`, `tool`, `cmd`).
-    /// `state` is the raw state name; `result` is the agent's message (for done, its last reply).
-    /// `fallback` is the body when there is no result (the prompt, a tab title).
+    /// From plain fields, as a push record carries them (`k`, `s`, `w`, `pj`, `d`, `msg`, `tool`, `cmd`, `sm`).
+    /// `state` is the raw state name; `result` is the agent's message (for done, its last reply), in
+    /// Markdown. `summary` is the daemon's one-line summary of it. `fallback` is the body when there is
+    /// neither (the prompt, a tab title).
+    ///
+    /// The body: for a permission ask, "Allow Bash: npm test?" whole, then the summary in the room left.
+    /// Otherwise the summary, else the message as plain text (`PlainText`), else the fallback.
     public init(kind: String, state: String, machine: String, workspace: String?, project: String?, duration: TimeInterval?,
-                result: String?, tool: String?, toolInput: String?, fallback: String? = nil) {
+                result: String?, tool: String?, toolInput: String?, fallback: String? = nil, summary: String? = nil) {
         let state = AgentInfo.State(rawValue: state) ?? .unknown
         let what = "\(AgentInfo.shortName(ofKind: kind)) \(state.noticeVerb)"
         let machine = machine.nonEmpty
@@ -34,8 +38,15 @@ public struct AgentNotice: Equatable, Sendable {
             title = machine.map { "\(what) on \($0)" } ?? what
             subtitle = [project?.nonEmpty, duration.flatMap(Self.duration)].compactMap { $0 }.joined(separator: " · ")
         }
-        let text = Self.result(state: state, message: result, tool: tool, toolInput: toolInput) ?? fallback?.nonEmpty ?? ""
-        body = Self.clip(text, to: Self.bodyLimit)
+        let summary = summary.map(PlainText.oneLine)?.nonEmpty
+        if let ask = Self.permissionAsk(state: state, message: result, tool: tool, toolInput: toolInput) {
+            let flat = Self.clip(ask, to: .max)
+            let room = Self.bodyLimit - flat.count - 1
+            body = flat + (summary.flatMap { room >= 8 ? " " + Self.clip($0, to: room) : nil } ?? "")
+        } else {
+            let text = summary ?? result.map(PlainText.oneLine)?.nonEmpty ?? fallback.map(PlainText.oneLine)?.nonEmpty ?? ""
+            body = Self.clip(text, to: Self.bodyLimit)
+        }
     }
 
     /// From a pane's agent. `cwd` is the pane's; its last part names the project. With no result the body
@@ -44,20 +55,26 @@ public struct AgentNotice: Equatable, Sendable {
         self.init(kind: info.kind, state: info.state.rawValue, machine: machine, workspace: workspace,
                   project: cwd.flatMap(Self.project), duration: info.turnDuration, result: info.message,
                   tool: info.pendingRequests.first?.tool ?? info.tool,
-                  toolInput: info.pendingRequests.first.map(\.summary) ?? info.toolInput, fallback: info.prompt)
+                  toolInput: info.pendingRequests.first.map(\.summary) ?? info.toolInput, fallback: info.prompt,
+                  summary: info.summary)
     }
 
     /// What the agent came to. A permission wait (waiting, with a tool, and a message that mentions
     /// permission or is empty) reads "Allow Bash: npm test?" ("Allow Bash?" without input). The check
     /// matters because the tool is the turn's last one: a question ("Which database should I use?")
     /// must not read as "Allow Bash: ls?". Anything else, done turns included, is the message.
+    /// The message comes back as plain text (`PlainText.oneLine`).
     public static func result(state: AgentInfo.State, message: String?, tool: String?, toolInput: String?) -> String? {
+        permissionAsk(state: state, message: message, tool: tool, toolInput: toolInput) ?? message.map(PlainText.oneLine)?.nonEmpty
+    }
+
+    /// "Allow Bash: npm test?" for a permission wait, else nil. The command stays exactly as given
+    /// (only its whitespace is collapsed): it's what the user is asked to allow.
+    public static func permissionAsk(state: AgentInfo.State, message: String?, tool: String?, toolInput: String?) -> String? {
         let message = message?.nonEmpty
-        if state == .waiting, let tool = tool?.nonEmpty, message == nil || message!.lowercased().contains("permission") {
-            let input = toolInput.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }?.nonEmpty
-            return "Allow \(tool)" + (input.map { ": \($0)" } ?? "") + "?"
-        }
-        return message
+        guard state == .waiting, let tool = tool?.nonEmpty, message == nil || message!.lowercased().contains("permission") else { return nil }
+        let input = toolInput.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }?.nonEmpty
+        return "Allow \(tool)" + (input.map { ": \($0)" } ?? "") + "?"
     }
 
     /// The project a cwd is in: its last component ("/home/me/api-server/" is "api-server"); nil for
@@ -107,6 +124,14 @@ extension AgentInfo {
     /// What the agent came to (see `AgentNotice.result`): "Allow Bash: npm test?" for a permission wait,
     /// else its message.
     public var result: String? { AgentNotice.result(state: state, message: message, tool: tool, toolInput: toolInput) }
+
+    /// What the agent is at, on one line, for rows and subtitles: a permission ask ("Allow Bash: npm
+    /// test?") exactly, else the daemon's summary, else the message as plain text. Nil when there's none.
+    public var headline: String? {
+        AgentNotice.permissionAsk(state: state, message: message, tool: tool, toolInput: toolInput)
+            ?? summary.map(PlainText.oneLine).flatMap { $0.isEmpty ? nil : $0 }
+            ?? message.map(PlainText.oneLine).flatMap { $0.isEmpty ? nil : $0 }
+    }
 }
 
 extension AgentInfo.State {

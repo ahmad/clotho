@@ -132,7 +132,7 @@ final class AgentHistoryWindowController: NSWindowController, NSWindowDelegate, 
     /// How an entry reads: an icon, a few words, and the detail (its message, and what reported it).
     static func describe(_ entry: AgentHistoryEntry) -> (symbol: String, color: NSColor, what: String, detail: String) {
         let state = entry.state ?? .unknown
-        var detail = entry.message ?? ""
+        var detail = entry.message.map(PlainText.oneLine) ?? ""
         let origin = entry.guess == true ? "detected from output" : entry.source.map { "from \($0)" }
         if let origin { detail += detail.isEmpty ? origin.capitalizedFirst : " (\(origin))" }
         switch entry.event {

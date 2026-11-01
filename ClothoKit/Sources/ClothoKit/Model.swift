@@ -134,9 +134,12 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     /// Permission requests the agent waits on, oldest first (`agent.decide` answers one). Absent (older
     /// daemons, Codex) means none; see `pendingRequests`.
     public var requests: [PermissionRequest]?
+    /// A one-line summary of `message` the daemon had Haiku write (`agent.summary`, clothod 0.1.29), plain
+    /// text. Notifications prefer it to the message; absent on older daemons or until it's written.
+    public var summary: String?
 
     enum CodingKeys: String, CodingKey {
-        case kind, state, source, message, since, attention, session, muted, prompt, tool, requests
+        case kind, state, source, message, since, attention, session, muted, prompt, tool, requests, summary
         case quietRise = "quiet"
         case toolInput = "tool_input"
         case turnStarted = "turn_started"
@@ -145,7 +148,7 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     public init(kind: String, state: State, source: String? = nil, message: String? = nil, since: Double? = nil,
                 attention: Bool? = nil, session: String? = nil, muted: Bool? = nil, quietRise: Bool? = nil,
                 prompt: String? = nil, tool: String? = nil, toolInput: String? = nil, turnStarted: Double? = nil,
-                requests: [PermissionRequest]? = nil) {
+                requests: [PermissionRequest]? = nil, summary: String? = nil) {
         self.kind = kind
         self.state = state
         self.source = source
@@ -160,6 +163,7 @@ public struct AgentInfo: Codable, Equatable, Sendable {
         self.toolInput = toolInput
         self.turnStarted = turnStarted
         self.requests = requests
+        self.summary = summary
     }
 
     /// The permission requests waiting for an answer; empty when none.

@@ -438,7 +438,7 @@ extension AppDelegate {
     /// "waiting: Allow Bash?", "running", "done: Tests pass".
     static func agentDetail(_ info: AgentInfo) -> String {
         let state = info.shownState.label.lowercased()
-        guard let what = info.prompt ?? info.message, !what.isEmpty else { return state }
+        guard let what = info.prompt ?? info.headline, !what.isEmpty else { return state }
         return "\(state): \(what)"
     }
 

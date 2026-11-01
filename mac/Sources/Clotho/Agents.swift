@@ -244,7 +244,7 @@ extension AppDelegate {
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         let alert = NSAlert()
         alert.messageText = "Reply to \(agent.kindName) on \(session.title)"
-        alert.informativeText = agent.message ?? "Sends your text, then Enter."
+        alert.informativeText = agent.message.map(PlainText.fromMarkdown).flatMap { $0.isEmpty ? nil : $0 } ?? "Sends your text, then Enter."
         alert.addButton(withTitle: "Send")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: s(24)))
@@ -544,7 +544,7 @@ final class AgentRow: ChromeItem {
         label.allowsExpansionToolTips = true
         detail.allowsExpansionToolTips = true
         // Which agent, then what it says.
-        detail.stringValue = [info.kind, info.message ?? (shown.label == "Idle" ? "idle" : nil)].compactMap { $0 }.joined(separator: " · ")
+        detail.stringValue = [info.kind, info.headline ?? (shown.label == "Idle" ? "idle" : nil)].compactMap { $0 }.joined(separator: " · ")
         detail.font = NSFont.systemFont(ofSize: s(11))
         detail.textColor = Theme.dimText
         detail.lineBreakMode = .byTruncatingTail
@@ -559,6 +559,7 @@ final class AgentRow: ChromeItem {
             "\(info.kindName) on \(entry.machineName): \(shown.label)",
             entry.place.isEmpty ? nil : entry.place,
             info.prompt.map { "Asked: \($0)" },
+            info.summary.map(PlainText.oneLine),
             info.result,
             info.tool.flatMap { tool in info.state == .waiting ? nil : "Last tool: \(tool)" + (info.toolInput.map { " \($0)" } ?? "") },
             info.turnDuration.flatMap(AgentNotice.duration).map { "Took \($0)" },
