@@ -28,7 +28,7 @@ struct AgentsSection: View {
             if !parts.quiet.isEmpty {
                 Section {
                     ForEach(parts.quiet) { row in
-                        AgentRowView(row: row, open: { open(row) }, mute: muteAction(row), openID: "quietAgent")
+                        AgentRowView(row: row, open: { open(row) }, openID: "quietAgent")
                             .listRowInsets(Self.insets)
                             .swipeActions(edge: .trailing) { muteButton(row) }
                             .contextMenu { muteButton(row); historyButton(row) }
@@ -46,7 +46,7 @@ struct AgentsSection: View {
     private func attentionRow(_ row: AgentRow) -> some View {
         let connection = connections.existing(row.machineID)
         return VStack(alignment: .leading, spacing: 8) {
-            AgentRowView(row: row, open: { open(row) }, mute: muteAction(row), openID: "needsYouAgent")
+            AgentRowView(row: row, open: { open(row) }, openID: "needsYouAgent")
             if let connection {
                 PermissionButtons(row: row, connection: connection)
             }
@@ -104,56 +104,43 @@ struct AgentsSection: View {
         }
     }
 
-    /// The row's own Mute/Unmute toggle (as in the swipe and the menu); nil where the daemon can't mute.
-    private func muteAction(_ row: AgentRow) -> (() -> Void)? {
-        guard let connection = connections.existing(row.machineID), connection.canMute else { return nil }
-        return { connection.muteAgent(row.pane, !row.isMuted) }
-    }
-
     /// `agent.ack`: the daemon clears attention for every client; the row moves to Quiet.
     private func resolve(_ row: AgentRow) {
         connections.existing(row.machineID)?.ackAgent(row.pane)
     }
 }
 
-/// One agent, as in a mail inbox: where it is, what it said and who it is, and on the trailing edge its age,
-/// a Mute toggle and its status dot, in line with the caption.
+/// One agent, as in a mail inbox: where it is, what it said, and who it is with how long ago.
 ///
-///     Platform › api-server                          4m
-///     Ran the tests; two failures in push.rs. Wants   🔔
+///     Platform › api-server
+///     Ran the tests; two failures in push.rs. Wants
 ///     to know whether to fix them now.
-///     devbox · Claude · Needs you                     ●
+///     devbox · Claude · 4m
 ///
-/// The dot and the status word take the status's colour (needs you orange, error red, done green, running
-/// blue); an agent that doesn't need the user has a hollow dot, dimmer text and one line of summary. A muted
-/// agent's bell is crossed out and tinted.
+/// The sections say whether it needs the user, so the row doesn't repeat a status; only an error says so, in
+/// red. A muted agent has a crossed-out bell in its caption (Mute and Unmute are in the swipe and the menu).
+/// Quiet rows are dimmer, with one line of summary.
 struct AgentRowView: View {
     let row: AgentRow
     /// Opens the agent's pane; nil shows the row on its own (the quick reply sheet's header).
     var open: (() -> Void)? = nil
-    /// Mutes or unmutes; nil hides the toggle (a daemon without `agent.mute`).
-    var mute: (() -> Void)? = nil
     var openID: String? = nil
 
     private var needsYou: Bool { row.wantsAttention }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            if let open {
-                Button(action: open) { content }
-                    .buttonStyle(.plain)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(accessibilityText)
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityIdentifier(openID ?? "agentRow")
-            } else {
-                content
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(accessibilityText)
-            }
-            trailing
+        if let open {
+            Button(action: open) { content }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilityText)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityIdentifier(openID ?? "agentRow")
+        } else {
+            content
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilityText)
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var content: some View {
@@ -169,75 +156,35 @@ struct AgentRowView: View {
                     .lineLimit(needsYou ? 2 : 1)
             }
             HStack(spacing: 4) {
-                Text("\(row.machineName) · \(row.info.shortKindName) ·").foregroundStyle(.tertiary)
-                Text(row.status).foregroundStyle(row.statusColor).fontWeight(.medium)
+                Text("\(row.machineName) · \(row.info.shortKindName)")
+                if let since = row.info.sinceDate {
+                    // Compact, as on the Mac ("1m", "2h"), updated each minute.
+                    TimelineView(.everyMinute) { context in
+                        Text("· " + AgentRowView.age(since, now: context.date)).monospacedDigit()
+                    }
+                }
+                if row.info.state == .error {
+                    Text("· Error").foregroundStyle(.red).fontWeight(.medium)
+                }
+                if row.isMuted {
+                    Image(systemName: "bell.slash").imageScale(.small)
+                }
             }
             .font(.footnote)
+            .foregroundStyle(.tertiary)
             .lineLimit(1)
-            .frame(height: Self.captionHeight)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
-    /// Age on top, the Mute toggle between, the status dot at the bottom, centred on the caption's line.
-    private var trailing: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            if let since = row.info.sinceDate {
-                // Compact, as on the Mac ("1m", "2h"), updated each minute.
-                TimelineView(.everyMinute) { context in
-                    Text(AgentRowView.age(since, now: context.date))
-                }
-                .font(.footnote).foregroundStyle(.tertiary).monospacedDigit()
-            }
-            Spacer(minLength: 0)
-            if let mute {
-                Button(action: mute) {
-                    Image(systemName: row.isMuted ? "bell.slash.fill" : "bell")
-                        .font(.subheadline)
-                        .foregroundStyle(row.isMuted ? Color.indigo : Color.secondary.opacity(0.6))
-                        .frame(width: 30, height: 26)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(row.isMuted ? "Unmute agent" : "Mute agent")
-                .accessibilityIdentifier("muteToggle")
-            }
-            Spacer(minLength: 0)
-            StatusDot(color: row.statusColor, filled: needsYou || row.info.state == .running)
-                .frame(width: 30, height: Self.captionHeight)
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    /// One caption line, so the dot sits centred on it.
-    static let captionHeight: CGFloat = 18
-
-    /// What VoiceOver (and the UI tests) read: the four lines, then "Muted".
+    /// What VoiceOver (and the UI tests) read: the lines, then the status and "Muted".
     private var accessibilityText: String {
         var parts = ["\(row.workspace) › \(row.title)"]
         if let summary = row.summary { parts.append(summary) }
         parts.append("\(row.machineName) · \(row.info.shortKindName) · \(row.status)")
         if row.isMuted { parts.append("Muted") }
         return parts.joined(separator: ", ")
-    }
-}
-
-/// The status, at a glance: a filled dot for an agent that needs the user (or is running), hollow otherwise.
-private struct StatusDot: View {
-    let color: Color
-    let filled: Bool
-
-    var body: some View {
-        Group {
-            if filled {
-                Circle().fill(color)
-            } else {
-                Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1.5)
-            }
-        }
-        .frame(width: 9, height: 9)
-        .accessibilityHidden(true)
     }
 }
 

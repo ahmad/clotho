@@ -49,11 +49,9 @@ final class TabsUITests: XCTestCase {
         app.buttons["Mute"].tapWhenSettled()
         // Under Quiet, which may be below the screen when earlier tests left agents (rows exist once shown).
         let muted = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Muted'")).firstMatch
-        let unmute = app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch
         sleep(1)
         reveal(muted, in: app)
         XCTAssertTrue(muted.exists, "no muted row")
-        XCTAssertTrue(unmute.exists, "no crossed-out bell on the muted row")
         for _ in 0..<8 where !asking.isHittable { app.swipeDown() }
         sleep(1)
         attach(app, "agents light")
@@ -80,8 +78,9 @@ final class TabsUITests: XCTestCase {
         // without a real agent shows a fake one).
         app.showTab("Agents")
         let place = asking.label.components(separatedBy: ", ").first ?? ""
-        reveal(unmute, in: app)
-        unmute.tap()
+        reveal(muted, in: app)
+        muted.press(forDuration: 1.2)
+        app.buttons["Unmute"].tapWhenSettled()
         XCTAssertTrue(muted.waitForNonExistence(timeout: 5))
         for _ in 0..<8 where !app.buttons["denyRequest"].isHittable { app.swipeDown() }
         app.buttons["denyRequest"].tap()
