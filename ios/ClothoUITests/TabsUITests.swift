@@ -86,9 +86,15 @@ final class TabsUITests: XCTestCase {
         for _ in 0..<8 where !app.buttons["denyRequest"].isHittable { app.swipeDown() }
         app.buttons["denyRequest"].tap()
         XCTAssertTrue(app.buttons["denyRequest"].waitForNonExistence(timeout: 10))
-        for predicate in [NSPredicate(format: "label CONTAINS 'Running'"), NSPredicate(format: "label BEGINSWITH %@", place)] {
-            let row = app.buttons.matching(predicate).firstMatch
-            guard row.waitForExistence(timeout: 10) else { continue }
+        // The fake agents' workspace was made right after the permission one: "Workspace N+1".
+        let number = Int(place.split(separator: " ").dropFirst().first ?? "") ?? 0
+        let running = "Workspace \(number + 1) ›"
+        let rows = app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'quietAgent'}"))
+        for predicate in [NSPredicate(format: "label CONTAINS 'Running' AND label BEGINSWITH %@", running),
+                          NSPredicate(format: "label BEGINSWITH %@", place)] {
+            let row = rows.matching(predicate).firstMatch
+            reveal(row, in: app)
+            guard row.exists else { continue }
             row.tap()
             XCTAssertTrue(actions.waitForExistence(timeout: 10))
             actions.tap()
@@ -97,9 +103,10 @@ final class TabsUITests: XCTestCase {
         }
     }
 
-    /// Scrolls down until `element` exists (a List builds rows only once they're on screen).
+    /// Scrolls down, then up, until `element` is on screen (a List builds rows only once they're on screen).
     private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
         for _ in 0..<10 where !(element.exists && element.isHittable) { app.swipeUp() }
+        for _ in 0..<20 where !(element.exists && element.isHittable) { app.swipeDown() }
     }
 
     private func newWorkspace(_ app: XCUIApplication) {
