@@ -530,3 +530,13 @@ The iPhone and iPad get the same model after the Mac ships.
 - Fallback: on a timeout (about 6 s) or any failure, the cleaned original is sent. A push is never blocked or dropped.
 - A settings switch turns the rewrite off.
 - Fields: `sm` in the push record and `agent.summary` in the protocol. Clients prefer them, else they use the msg converted from Markdown to plain text.
+
+## iPhone tab layout (user, 2026-11-01)
+
+- A tab bar with three tabs: **Agents**, **Machines** and **Settings**. The user chose Settings as a third tab rather than a gear inside Machines.
+- Each Agents row is compact and shows:
+  - Workspace › Tab;
+  - a summary of at most 2 lines (the Haiku summary or the cleaned message);
+  - a small caption: machine · agent (Claude/Codex) · status.
+- Both checkmark buttons are gone from the rows. Resolve and Mute move to swipe actions and the long-press menu.
+- "Needs you" comes first. A permission ask keeps "Allow <tool>: <cmd>?".
