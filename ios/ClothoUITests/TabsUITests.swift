@@ -47,9 +47,14 @@ final class TabsUITests: XCTestCase {
         XCTAssertTrue(erring.waitForExistence(timeout: 5))
         erring.press(forDuration: 1.2)
         app.buttons["Mute"].tapWhenSettled()
+        // Under Quiet, which may be below the screen when earlier tests left agents (rows exist once shown).
         let muted = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Muted'")).firstMatch
-        XCTAssertTrue(muted.waitForExistence(timeout: 5), "no muted row")
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch.exists)
+        let unmute = app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch
+        sleep(1)
+        reveal(muted, in: app)
+        XCTAssertTrue(muted.exists, "no muted row")
+        XCTAssertTrue(unmute.exists, "no crossed-out bell on the muted row")
+        for _ in 0..<8 where !asking.isHittable { app.swipeDown() }
         sleep(1)
         attach(app, "agents light")
 
@@ -75,8 +80,10 @@ final class TabsUITests: XCTestCase {
         // without a real agent shows a fake one).
         app.showTab("Agents")
         let place = asking.label.components(separatedBy: ", ").first ?? ""
-        app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch.tap()
+        reveal(unmute, in: app)
+        unmute.tap()
         XCTAssertTrue(muted.waitForNonExistence(timeout: 5))
+        for _ in 0..<8 where !app.buttons["denyRequest"].isHittable { app.swipeDown() }
         app.buttons["denyRequest"].tap()
         XCTAssertTrue(app.buttons["denyRequest"].waitForNonExistence(timeout: 10))
         for predicate in [NSPredicate(format: "label CONTAINS 'Running'"), NSPredicate(format: "label BEGINSWITH %@", place)] {
@@ -88,6 +95,11 @@ final class TabsUITests: XCTestCase {
             app.buttons["Close tab"].tapWhenSettled()
             XCTAssertTrue(app.navigationBars["Agents"].waitForExistence(timeout: 10))
         }
+    }
+
+    /// Scrolls down until `element` exists (a List builds rows only once they're on screen).
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication) {
+        for _ in 0..<10 where !(element.exists && element.isHittable) { app.swipeUp() }
     }
 
     private func newWorkspace(_ app: XCUIApplication) {
