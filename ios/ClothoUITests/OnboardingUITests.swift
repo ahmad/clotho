@@ -32,7 +32,7 @@ final class OnboardingUITests: XCTestCase {
         app.launch()
 
         // Screen 1: the machine, and the key (made silently: a clean state has none).
-        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch), "no guide on a clean start")
+        XCTAssertTrue(guideShows(app), "no guide on a clean start")
         let host = app.textFields["Host"]
         XCTAssertTrue(host.waitForExistence(timeout: launch))
         let next = app.buttons["Continue"]
@@ -103,7 +103,7 @@ final class OnboardingUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting", "-CleanState", "YES"]
         app.launch()
-        XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch))
+        XCTAssertTrue(guideShows(app), "no guide on a clean start")
         app.buttons["onboardingSkip"].tap()
         XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
         app.terminate()
@@ -118,6 +118,17 @@ final class OnboardingUITests: XCTestCase {
     static func fingerprint(_ openSSH: String) -> String {
         let blob = Data(base64Encoded: String(openSSH.split(separator: " ")[1]))!
         return "SHA256:" + Data(SHA256.hash(data: blob)).base64EncodedString().replacingOccurrences(of: "=", with: "")
+    }
+
+    /// Whether the guide comes up after a clean launch; if not, what the app shows instead, for the report.
+    private func guideShows(_ app: XCUIApplication) -> Bool {
+        if app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch) { return true }
+        attach(app, "no guide")
+        let tree = XCTAttachment(string: "state \(app.state.rawValue)\n" + app.debugDescription)
+        tree.name = "no guide: hierarchy"
+        tree.lifetime = .keepAlways
+        add(tree)
+        return false
     }
 
     private func attach(_ app: XCUIApplication, _ name: String) {

@@ -1,5 +1,6 @@
 #if LIVE_ACTIVITIES
 import ActivityKit
+import ClothoKit
 import Foundation
 
 /// A Live Activity that follows one agent (docs/push.md, "Live Activities"). Its content is what the machine
@@ -92,8 +93,8 @@ extension AgentActivityAttributes.ContentState {
     /// The command or file, one line; only while the agent is in a tool.
     var detailLine: String? { isOver ? nil : detail.flatMap { AgentActivityAttributes.line($0, max: 200) } }
 
-    /// The last message or the question; not while running.
-    var messageLine: String? { state == "running" ? nil : msg.flatMap { AgentActivityAttributes.line($0, max: 300) } }
+    /// The last message or the question, as plain text (a machine's push may carry Markdown); not while running.
+    var messageLine: String? { state == "running" ? nil : msg.flatMap { AgentActivityAttributes.line(PlainText.oneLine($0), max: 300) } }
 
     var symbol: String {
         switch state {

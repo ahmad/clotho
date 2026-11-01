@@ -79,7 +79,7 @@ struct AgentHistoryRow: View {
                     Text(entry.date, format: .dateTime.hour().minute().second())
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                if let message = entry.message, !message.isEmpty {
+                if let message = entry.message.map(PlainText.fromMarkdown), !message.isEmpty {
                     Text(message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 if let detail = Self.detail(entry) {

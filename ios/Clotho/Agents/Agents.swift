@@ -244,7 +244,56 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     func agentChanged(machine: Machine, pane: PaneID, place: Place, before: AgentInfo?, after: AgentInfo?) {
-        guard authorized, let request = Self.banner(machine: machine, pane: pane, place: place, before: before, after: after) else { return }
+        let key = HeldKey(machine: machine.id, pane: pane)
+        if var entry = held[key] {
+            // A held banner follows the agent: it goes once the summary lands, and not at all if the agent moved on.
+            entry.machine = machine
+            entry.place = place
+            entry.agent = after
+            held[key] = entry
+            if after?.isSummaryPending != true { release(key) }
+            return
+        }
+        guard authorized, let after, after.notifiesRise(from: before) else { return }
+        // The machine is rewriting the message (clothod 0.1.29): wait for it, as the push does, up to
+        // `summaryWait`, then go with whatever summary there is.
+        if after.isSummaryPending {
+            let timer = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.release(key) } }
+            held[key] = Held(machine: machine, place: place, state: after.state, agent: after, timer: timer)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.summaryWait, execute: timer)
+            return
+        }
+        post(machine: machine, pane: pane, place: place, agent: after)
+    }
+
+    /// How long a banner waits for the machine's summary: as long as clothod holds a push for it.
+    static var summaryWait: TimeInterval = 6
+
+    private struct HeldKey: Hashable {
+        var machine: UUID
+        var pane: PaneID
+    }
+
+    private struct Held {
+        var machine: Machine
+        var place: Place
+        var state: AgentInfo.State
+        var agent: AgentInfo?
+        var timer: DispatchWorkItem
+    }
+
+    private var held: [HeldKey: Held] = [:]
+
+    /// Posts a held banner with the agent as it is now, unless it no longer needs the user in the same state.
+    private func release(_ key: HeldKey) {
+        guard let entry = held.removeValue(forKey: key) else { return }
+        entry.timer.cancel()
+        guard let agent = entry.agent, agent.needsAttention, agent.state == entry.state else { return }
+        post(machine: entry.machine, pane: key.pane, place: entry.place, agent: agent)
+    }
+
+    private func post(machine: Machine, pane: PaneID, place: Place, agent: AgentInfo) {
+        guard authorized, let request = Self.banner(machine: machine, pane: pane, place: place, before: nil, after: agent) else { return }
         UNUserNotificationCenter.current().add(request)
     }
 
@@ -275,7 +324,7 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
                     // The oldest pending request, as the push for this wait describes it (and AgentNotice(info:)).
                     tool: agent.pendingRequests.first?.tool ?? agent.tool,
                     toolInput: agent.pendingRequests.first.map { $0.summary } ?? agent.toolInput,
-                    fallback: agent.prompt ?? place.tab)
+                    fallback: agent.prompt ?? place.tab, summary: agent.summary)
     }
 
     /// Removes delivered agent notifications (local or pushed) for a machine's panes that no longer want attention.

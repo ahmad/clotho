@@ -14,6 +14,9 @@ final class Navigator: ObservableObject {
     var initialPane: PaneID?
     /// The welcome guide, or only its machine setup (the + button).
     @Published var guide: OnboardingView.Mode?
+    /// The welcome guide on first launch. It is the window's content, not a presentation: a full-screen cover
+    /// asked for while a slow launch was still bringing the window up was sometimes dropped, leaving Home.
+    @Published var firstRun = false
     /// Quick open (⌘P, or the search button).
     @Published var quickOpen = false
     var regular = false
@@ -95,7 +98,9 @@ struct RootView: View {
 
     var body: some View {
         Group {
-            if sizeClass == .regular { SplitRootView() } else { HomeView() }
+            if navigator.firstRun {
+                guide(.firstRun)
+            } else if sizeClass == .regular { SplitRootView() } else { HomeView() }
         }
         .environmentObject(navigator)
         .onAppear { navigator.switchLayout(regular: sizeClass == .regular) }
@@ -107,19 +112,7 @@ struct RootView: View {
                 await AlertActionRunner.run(action, machines: machines, connections: connections)
             }
         }
-        .fullScreenCover(item: $navigator.guide) { mode in
-            OnboardingView(mode: mode) { opened in
-                navigator.guide = nil
-                AgentNotifier.shared.deferPrompt = false
-                // The guide no longer asks: right after it, with a machine set up, is the moment.
-                AgentNotifier.shared.promptIfUndecided()
-                // On the iPad the sidebar selects it; on the iPhone, Home already shows it.
-                if let opened, navigator.regular { navigator.open(.machine(opened)) }
-            }
-            .environmentObject(machines)
-            .environmentObject(connections)
-            .onAppear { AgentNotifier.shared.deferPrompt = true }
-        }
+        .fullScreenCover(item: $navigator.guide) { mode in guide(mode) }
         .sheet(isPresented: $navigator.quickOpen) {
             QuickOpenView(focusedMachine: navigator.focusedMachine, focusedTab: navigator.focusedTab, open: { route in
                 navigator.quickOpen = false
@@ -151,11 +144,28 @@ struct RootView: View {
             }
         }
         .task {
+            log("launch: guide done \(Onboarding.isDone), \(machines.machines.count) saved machines")
             if navigator.guide == nil, Onboarding.showsAtLaunch(savedMachines: machines.machines.count) {
                 AgentNotifier.shared.deferPrompt = true
-                navigator.guide = .firstRun
+                navigator.firstRun = true
             }
         }
+    }
+
+    /// The guide, in place on first launch or as a cover from the Machines screen.
+    private func guide(_ mode: OnboardingView.Mode) -> some View {
+        OnboardingView(mode: mode) { opened in
+            navigator.guide = nil
+            navigator.firstRun = false
+            AgentNotifier.shared.deferPrompt = false
+            // The guide no longer asks: right after it, with a machine set up, is the moment.
+            AgentNotifier.shared.promptIfUndecided()
+            // On the iPad the sidebar selects it; on the iPhone, Home already shows it.
+            if let opened, navigator.regular { navigator.open(.machine(opened)) }
+        }
+        .environmentObject(machines)
+        .environmentObject(connections)
+        .onAppear { AgentNotifier.shared.deferPrompt = true }
     }
 
     /// From a notification: the machine may not be connected yet, so wait for its model. Opening doesn't

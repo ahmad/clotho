@@ -22,7 +22,9 @@ if [ "$action" = test ]; then
   trap 'scripts/cleanup-dev.sh' EXIT
   mkdir -p /tmp/cki-ios-bin && rm -f /tmp/cki-ios-bin/clothod && cp "$CLOTHOD_DIST/macos-aarch64/clothod" /tmp/cki-ios-bin/clothod
   # Its own config file, so settings tests never write the user's ~/.config/clothod/config.toml.
-  CLOTHOD_CONFIG=/tmp/cki-ios/config.toml /tmp/cki-ios-bin/clothod start --runtime-dir /tmp/cki-ios --ephemeral
+  # Notification summaries come from a fake (scripts/fake-summarizer.sh), never a real claude.
+  CLOTHOD_SUMMARIZER=$PWD/scripts/fake-summarizer.sh CLOTHOD_CONFIG=/tmp/cki-ios/config.toml \
+    /tmp/cki-ios-bin/clothod start --runtime-dir /tmp/cki-ios --ephemeral
   scripts/ssh-test-server.sh
 fi
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -destination "platform=iOS Simulator,id=$sim" \

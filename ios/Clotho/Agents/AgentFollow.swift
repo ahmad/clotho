@@ -73,15 +73,16 @@ extension MachineConnection {
         let tool = inTool ? (request?.tool ?? agent.tool) : nil
         let message: String?
         switch state {
-        case "waiting": message = request?.question ?? agent.message
-        case "done", "error": message = agent.message
+        // The summary when there is one; the headline and detail already name a permission ask's tool and command.
+        case "waiting": message = agent.summary ?? request?.question ?? agent.message
+        case "done", "error": message = agent.summary ?? agent.message
         default: message = nil
         }
         return AgentActivityAttributes.ContentState(
             state: state, kind: kind.isEmpty ? "other" : kind, since: since, started: started,
             tool: tool.flatMap { AgentActivityAttributes.line($0, max: 64) },
             detail: tool == nil ? nil : (request.map { $0.summary } ?? agent.toolInput).flatMap { AgentActivityAttributes.line($0, max: 200) },
-            msg: message.flatMap { AgentActivityAttributes.line($0, max: 300) })
+            msg: message.flatMap { AgentActivityAttributes.line(PlainText.oneLine($0), max: 300) })
     }
 }
 #endif

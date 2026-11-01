@@ -156,7 +156,8 @@ struct AgentRowView: View {
                         .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
                     }
                 }
-                if let message = row.info.message, !message.isEmpty {
+                // The permission ask, else the summary, else the message as plain text (never raw Markdown).
+                if let message = row.info.headline, !message.isEmpty {
                     Text(message).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Text("\(row.machineName) · \(row.workspace) › \(row.title)")

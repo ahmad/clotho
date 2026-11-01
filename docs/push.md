@@ -88,23 +88,30 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
     the terminal) or is gone. Only the first request of a wait pushes; others show in the agent's
     `requests` (docs/protocol.md, Permission requests).
   - `d`: done and error only. Seconds since the turn started.
+  - `sm` (since clothod 0.1.29, feature `summary`): what the notification should say. It is `msg`
+    rewritten by Claude Haiku on the machine as one or two plain sentences (at most 200 characters, no
+    Markdown), or `msg` cleaned of Markdown when the rewrite failed or took over 6 s. Present whenever
+    `msg` is. The machine's `notification_rewrite` setting (default on) turns the rewrite off.
 
   `msg` is now the result: the last reply on done, the error on error, the question or permission on waiting.
 - How the phone shows it, the same for a push (the extension) and for the app's own foreground
   notification:
   - title: "Platform · Claude finished" (workspace · agent state)
   - subtitle: "devbox · api-server · 4m" (machine · project · duration)
-  - body: the result. A permission wait (waiting, with `tool`, and a `msg` that is a permission
-    message or absent) reads "Allow Bash: npm test?". clothod sends `tool` only for permission waits, so
-    "waiting with `tool`" is enough; the `msg` check is a guard.
+  - body: `sm`, else `msg` cleaned of Markdown (ClothoKit's `PlainText`); raw Markdown never shows. A
+    permission wait (waiting, with `tool`, and a `msg` that is a permission message or absent) always reads
+    "Allow Bash: npm test?" first, never cut, and then `sm` in the room left: Allow approves the exact
+    `tool` and `cmd`, not the summary. clothod sends `tool` only for permission waits, so "waiting with
+    `tool`" is enough; the `msg` check is a guard. The app's own banner uses the agent's `summary` the same
+    way.
   - Alerts thread by machine and `wid`, so one workspace's alerts stack together.
   - An older record without these keys reads as before: "Claude finished on devbox", body `msg`,
     threaded by machine. Each missing part simply drops out.
 - Sizes: every text is first held to its own cap, in bytes and cut on a character boundary: `msg` 400,
-  `q` 240, `cmd` 240, `w`, `tb`, `pj` and `tool` 96 each. (At the source they are shorter still: a
+  `q` 240, `cmd` 240, `sm` 320, `w`, `tb`, `pj` and `tool` 96 each. (At the source they are shorter still: a
   reply is at most 300 characters, a prompt 120, a tool input 160.) If the padded record would still pass
   2048 bytes (long names, text that JSON escapes heavily), clothod halves texts in this order until it
-  fits: `msg`, `q`, `cmd`, `pj`, `tb`, `w`, and the label `m` last. A text is shortened only when every
+  fits: `msg`, `q`, `cmd`, `sm`, `pj`, `tb`, `w`, and the label `m` last. A text is shortened only when every
   text before it in that order is already empty.
 - Padding: clothod adds `"pad":"<spaces>"` as the last key, so every plaintext is a multiple of 1024
   bytes: 1024 for nearly every record, 2048 only for unusually long or escape-heavy texts, and never
@@ -241,7 +248,8 @@ tool?, detail?, msg?}, timestamp, stale?, dismiss?}`, authorised by the same pus
   summary: the command, file path or pattern; at most 200): with `running` and `waiting` only. While
   waiting on a permission request they are the request's tool and summary, as in the alert.
 - `msg` (at most 300): `done`, the last message; `error`, the error; `waiting`, the text the alert shows.
-  Never while running.
+  Never while running. Since 0.1.29 it is the agent's summary (the rewrite, else the cleaned message);
+  a rewrite that lands late updates the activity. The app shows it as plain text either way.
 - Each is left out when it doesn't apply, never `""` or null. The caps count UTF-8 bytes of the
   JSON-escaped string, which is never less than the relay's count; a cut string ends with "…", counted
   inside the cap. Control characters, U+2028 and U+2029 become spaces, runs of spaces fold to one, and

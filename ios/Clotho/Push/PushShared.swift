@@ -78,19 +78,22 @@ struct PushAlert: Codable, Equatable, Sendable {
     var d: Double?
     /// A permission request's id (clothod 0.1.13): the alert can answer it with Allow or Deny.
     var rq: String?
+    /// A short summary of `msg` by a small model (clothod 0.1.29): the body when it's there.
+    var sm: String?
 
     init(v: Int = 1, m: String, p: UInt64, k: String, s: String, msg: String? = nil, t: Double? = nil,
          w: String? = nil, wid: UInt64? = nil, tb: String? = nil, pj: String? = nil, q: String? = nil,
-         tool: String? = nil, cmd: String? = nil, d: Double? = nil, rq: String? = nil) {
+         tool: String? = nil, cmd: String? = nil, d: Double? = nil, rq: String? = nil, sm: String? = nil) {
         self.v = v; self.m = m; self.p = p; self.k = k; self.s = s; self.msg = msg; self.t = t
-        self.w = w; self.wid = wid; self.tb = tb; self.pj = pj; self.q = q; self.tool = tool; self.cmd = cmd; self.d = d; self.rq = rq
+        self.w = w; self.wid = wid; self.tb = tb; self.pj = pj; self.q = q; self.tool = tool; self.cmd = cmd; self.d = d; self.rq = rq; self.sm = sm
     }
 
-    /// The alert's text (ClothoKit's AgentNotice, the same as the app's own banner and the Mac's). With no
-    /// result the body is the prompt, then the tab title.
+    /// The alert's text (ClothoKit's AgentNotice, the same as the app's own banner and the Mac's): the summary
+    /// when there is one, else the message as plain text; a permission ask always names its tool and command
+    /// first. With neither, the body is the prompt, then the tab title.
     func notice(machine name: String) -> AgentNotice {
         AgentNotice(kind: k, state: s, machine: name, workspace: w, project: pj, duration: d, result: msg,
-                    tool: tool, toolInput: cmd, fallback: q ?? tb)
+                    tool: tool, toolInput: cmd, fallback: q ?? tb, summary: sm)
     }
 
     static let info = Data("clotho push v1".utf8)

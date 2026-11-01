@@ -312,5 +312,17 @@ final class AgentActivityTests: XCTestCase {
         XCTAssertEqual(MachineConnection.activityState(done),
                        .init(state: "done", kind: "claude", since: 300, started: 300, msg: "All tests pass."))
     }
+
+    /// The Live Activity's message line: the summary when there is one, else the message as plain text.
+    @MainActor
+    func testActivityMessageIsTheSummaryOrPlainText() {
+        var done = AgentInfo(kind: "claude", state: .done, message: "**All** tests pass in `push.rs`.", since: 300)
+        XCTAssertEqual(MachineConnection.activityState(done).msg, "All tests pass in push.rs.")
+        done.summary = "Tests pass."
+        XCTAssertEqual(MachineConnection.activityState(done).msg, "Tests pass.")
+        // What a machine's push carries is cleaned on the way to the screen too.
+        XCTAssertEqual(AgentActivityAttributes.ContentState(state: "done", kind: "claude", since: 1, started: 1,
+                                                            msg: "## Done\n\n- **one**").messageLine, "Done • one")
+    }
 }
 #endif

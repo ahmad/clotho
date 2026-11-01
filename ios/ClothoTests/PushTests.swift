@@ -85,6 +85,74 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(out.body, "Allow Bash: date > /tmp/clotho-phone-test.txt?")
     }
 
+    private func delivered(_ alert: PushAlert) throws -> UNNotificationContent {
+        let key = Curve25519.KeyAgreement.PrivateKey()
+        let collapse = PushLabel.collapseID(label: alert.m, pane: alert.p)
+        let content = UNMutableNotificationContent()
+        content.threadIdentifier = collapse
+        content.userInfo = ["e": try PushAlert.seal(alert, collapseID: collapse, to: key.publicKey)]
+        return try XCTUnwrap(PushAlert.decrypt(content, key: key))
+    }
+
+    static let markdown = "## Done\n\nI fixed **the flaky test** in `push.rs`:\n\n- measure from the report\n- [docs](https://example.com/push)"
+
+    /// clothod 0.1.29's `sm`, a small model's summary of the message, is the body when it's there; without it
+    /// the message shows as plain text, never raw Markdown.
+    func testSummaryOrPlainMessageIsTheBody() throws {
+        var alert = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: "done", msg: Self.markdown, w: "clotho",
+                              sm: "Fixed the flaky push test.")
+        XCTAssertEqual(try delivered(alert).body, "Fixed the flaky push test.")
+
+        alert.sm = nil
+        let body = try delivered(alert).body
+        for raw in ["##", "**", "`", "](", "- measure"] { XCTAssertFalse(body.contains(raw), "raw Markdown \(raw) in \(body)") }
+        XCTAssertTrue(body.contains("the flaky test"), body)
+        XCTAssertTrue(body.contains("push.rs"), body)
+    }
+
+    /// A permission ask always shows the exact tool and command the user approves, summary or not.
+    func testPermissionAskKeepsToolAndCommandWithASummary() throws {
+        let alert = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: "waiting", msg: "Claude needs your permission to use Bash",
+                              w: "clotho", tool: "Bash", cmd: "rm -rf build && npm test", rq: "87b99bd3910be450",
+                              sm: "Wants to clean the build and run the tests.")
+        let out = try delivered(alert)
+        XCTAssertTrue(out.body.hasPrefix("Allow Bash: rm -rf build && npm test?"), out.body)
+        XCTAssertTrue(out.body.contains("Wants to clean the build"), out.body)
+        XCTAssertEqual(out.categoryIdentifier, AlertActions.permissionCategory)
+
+        // A command long enough to fill the body is never cut; the summary gives way.
+        let long = String(repeating: "x", count: 230)
+        var big = alert
+        big.cmd = long
+        XCTAssertTrue(try delivered(big).body.hasPrefix("Allow Bash: \(long)?"))
+    }
+
+    /// The extension has about 30 seconds and 24 MB: a full record with a Markdown message (the largest it gets)
+    /// decrypts and renders in milliseconds, with nothing loaded beyond the record.
+    func testExtensionWorkStaysSmall() throws {
+        let msg = String((Self.markdown + "\n\n" + String(repeating: "**word** `code` ", count: 40)).utf8.prefix(400))!
+        let alert = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: "done", msg: msg, w: "clotho", tb: "tab", pj: "clotho",
+                              q: "fix it", d: 254, sm: String(repeating: "Short summary. ", count: 8))
+        let key = Curve25519.KeyAgreement.PrivateKey()
+        let collapse = PushLabel.collapseID(label: alert.m, pane: alert.p)
+        let content = UNMutableNotificationContent()
+        content.threadIdentifier = collapse
+        content.userInfo = ["e": try PushAlert.seal(alert, collapseID: collapse, to: key.publicKey)]
+        var noSummary = alert
+        noSummary.sm = nil
+        let plainContent = UNMutableNotificationContent()
+        plainContent.threadIdentifier = collapse
+        plainContent.userInfo = ["e": try PushAlert.seal(noSummary, collapseID: collapse, to: key.publicKey)]
+        let start = Date()
+        for _ in 0..<50 {
+            XCTAssertNotNil(PushAlert.decrypt(content, key: key))
+            XCTAssertNotNil(PushAlert.decrypt(plainContent, key: key))
+        }
+        let each = Date().timeIntervalSince(start) / 100
+        XCTAssertLessThan(each, 0.05, "one alert took \(each) s")
+        print("extension: one alert in \(String(format: "%.2f", each * 1000)) ms")
+    }
+
     func testWrongCollapseIDOrKeyFails() throws {
         XCTAssertThrowsError(try PushAlert.open(Self.vectorCiphertext, collapseID: "00000000000000000000000000000000",
                                                 key: try vectorPrivateKey()))
