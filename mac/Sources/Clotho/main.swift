@@ -382,6 +382,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Agents whose hooks on a machine came from an older clothod (`hooks status` says "outdated").
     var outdatedHooks: [MachineKey: Set<String>] = [:]
     var lastAgentNotification: [String: (state: AgentInfo.State, date: Date)] = [:]
+    /// Notifications waiting for the daemon's summary (Agents.swift).
+    lazy var summaryHold = SummaryHold(current: { [weak self] key in
+        self?.connections[key.machine]?.store.state.pane(key.pane)?.agent
+    }, post: { [weak self] key, info in
+        self?.postAgentNotice(machine: key.machine, pane: key.pane, info: info)
+    })
     /// Machines whose daemon runs an older build than the one installed, waiting for the user.
     var pendingDaemonUpdates: Set<MachineKey> = []
     /// Machines whose legacy holder needs a clothod restart to finish an update, waiting for the user.

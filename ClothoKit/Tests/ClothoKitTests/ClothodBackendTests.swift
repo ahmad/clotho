@@ -6,6 +6,8 @@ import XCTest
 final class ClothodBackendTests: XCTestCase {
     var clothod: String!
     var runtimeDir: String!
+    /// More environment for the daemon a test starts (a fake `CLOTHOD_SUMMARIZER`).
+    var daemonEnvironment: [String: String] = [:]
 
     override func setUpWithError() throws {
         let package = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -33,7 +35,7 @@ final class ClothodBackendTests: XCTestCase {
             // A private runtime dir needs an ephemeral instance; it also cleans itself up if a test dies.
             // Its own config too, so settings.set never writes the user's.
             return try TestClothod.run(executable, args, runtimeDir: runtimeDir,
-                                       environment: ["CLOTHOD_EPHEMERAL": "60", "CLOTHOD_CONFIG": runtimeDir + "/config.toml"])
+                                       environment: daemonEnvironment.merging(["CLOTHOD_EPHEMERAL": "60", "CLOTHOD_CONFIG": runtimeDir + "/config.toml"]) { $1 })
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)

@@ -126,5 +126,19 @@ final class PlainTextTests: XCTestCase {
         XCTAssertEqual(info.summary, "All good.")
         let old = try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"kind":"claude","state":"done"}"#.utf8))
         XCTAssertNil(old.summary)
+        XCTAssertFalse(old.isSummaryPending, "absent is false")
+        let pending = try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"kind":"claude","state":"done","summary":"ok","summary_pending":true}"#.utf8))
+        XCTAssertTrue(pending.isSummaryPending)
+        XCTAssertEqual(Hello.Feature(rawValue: "summary"), .summary)
+    }
+
+    func testTheRewriteSetting() throws {
+        let json = #"{"scrollback_lines":10000,"notification_rewrite":false,"limits":{"scrollback_lines":{"min":0,"max":100000,"default":10000}}}"#
+        let settings = try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8))
+        XCTAssertEqual(settings.notificationRewrite, false)
+        let older = try JSONDecoder().decode(DaemonSettings.self, from: Data(json.replacingOccurrences(of: #""notification_rewrite":false,"#, with: "").utf8))
+        XCTAssertNil(older.notificationRewrite)
+        XCTAssertEqual(DaemonSettings.Change(notificationRewrite: true).params as? [String: Bool], ["notification_rewrite": true])
+        XCTAssertEqual(DaemonSettings.Change(scrollbackLines: 5).params.count, 1, "only what's given changes")
     }
 }

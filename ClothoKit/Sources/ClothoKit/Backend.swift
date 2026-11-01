@@ -103,6 +103,9 @@ public struct Hello: Codable, Equatable, Sendable {
         /// `pane.focus`: the pane takes the viewport of the client that focused it most recently; typing
         /// no longer picks the size (0.1.28).
         case paneFocus = "pane.focus"
+        /// Agents carry `summary` (Haiku's one-line rewrite of their message, plain text) and
+        /// `summary_pending`; the `notification_rewrite` setting turns the rewrite off (0.1.29).
+        case summary
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -598,6 +601,9 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
     /// History kept per pane, for new panes and panes spawned without their own value.
     public var scrollbackLines: Int
     public var limits: Limits
+    /// Whether notifications get Haiku's rewrite of an agent's message (`notification_rewrite`, 0.1.29;
+    /// default true). Off: the message cleaned of Markdown, and no model runs. Nil on older daemons.
+    public var notificationRewrite: Bool?
     /// The config file that holds them.
     public var config: String?
     /// After a set: the panes whose scrollback changed.
@@ -618,24 +624,31 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
     /// The fields a `settings.set` changes; nil ones stay as they are.
     public struct Change: Equatable, Sendable {
         public var scrollbackLines: Int?
-        public init(scrollbackLines: Int? = nil) { self.scrollbackLines = scrollbackLines }
+        public var notificationRewrite: Bool?
+        public init(scrollbackLines: Int? = nil, notificationRewrite: Bool? = nil) {
+            self.scrollbackLines = scrollbackLines
+            self.notificationRewrite = notificationRewrite
+        }
 
         var params: [String: Any] {
             var params: [String: Any] = [:]
             if let scrollbackLines { params["scrollback_lines"] = scrollbackLines }
+            if let notificationRewrite { params["notification_rewrite"] = notificationRewrite }
             return params
         }
     }
 
-    public init(scrollbackLines: Int, limits: Limits, config: String? = nil, appliedPanes: [PaneID]? = nil) {
+    public init(scrollbackLines: Int, limits: Limits, notificationRewrite: Bool? = nil, config: String? = nil, appliedPanes: [PaneID]? = nil) {
         self.scrollbackLines = scrollbackLines
         self.limits = limits
+        self.notificationRewrite = notificationRewrite
         self.config = config
         self.appliedPanes = appliedPanes
     }
 
     enum CodingKeys: String, CodingKey {
         case scrollbackLines = "scrollback_lines", limits, config, appliedPanes = "applied_panes"
+        case notificationRewrite = "notification_rewrite"
     }
 }
 

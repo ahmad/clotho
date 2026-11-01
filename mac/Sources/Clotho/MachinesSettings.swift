@@ -381,6 +381,17 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
                                     control: control)
         }
 
+        // Haiku's rewrite of agent messages in notifications (clothod 0.1.29): only where the daemon has it.
+        var rewriteRow: FormRow?
+        if unavailable == nil, hello?.features.contains(.summary) == true, let settings = session?.store.settings {
+            let (rewrite, target) = SettingsStyle.toggle(on: settings.notificationRewrite ?? true, label: "Summarize agent messages") { [weak self] on in
+                self?.setNotificationRewrite(on, on: key)
+            }
+            targets.append(target)
+            rewriteRow = FormRow("Summarize agent messages",
+                                 caption: "Claude Haiku writes one line for notifications; off shows the message itself", control: rewrite)
+        }
+
         let loginRow: FormRow
         if unavailable == nil, hello?.features.contains(.service) == true, let service = session?.store.service {
             loginRow = loginControl(service, key: key)
@@ -394,7 +405,7 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
                                control: off)
         }
 
-        let section = formSection(machine.isLocal ? "\(name) (this Mac)" : name, FormGroup([agentsRow, scrollbackRow, loginRow]))
+        let section = formSection(machine.isLocal ? "\(name) (this Mac)" : name, FormGroup([agentsRow, scrollbackRow] + (rewriteRow.map { [$0] } ?? []) + [loginRow]))
         details.addArrangedSubview(section)
         section.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
 
@@ -519,6 +530,21 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
                 let message = (error as? BackendError)?.message ?? error.localizedDescription
                 self?.errors[key] = on ? "Couldn't turn on start at login: \(message)" : "Couldn't turn off start at login: \(message)"
                 log("settings: \(key) service failed: \(error)")
+            }
+            self?.reloadDetails()
+        }
+    }
+
+    func setNotificationRewrite(_ on: Bool, on key: MachineKey) {
+        guard let store = app?.connections[key]?.store else { return }
+        log("settings: \(key) notification rewrite → \(on)")
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await store.changeSettings(.init(notificationRewrite: on))
+                self?.errors[key] = nil
+            } catch {
+                self?.errors[key] = "Couldn't change it: \(error.localizedDescription)"
+                log("settings: \(key) failed: \(error)")
             }
             self?.reloadDetails()
         }

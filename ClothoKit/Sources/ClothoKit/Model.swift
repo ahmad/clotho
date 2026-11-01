@@ -137,9 +137,16 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     /// A one-line summary of `message` the daemon had Haiku write (`agent.summary`, clothod 0.1.29), plain
     /// text. Notifications prefer it to the message; absent on older daemons or until it's written.
     public var summary: String?
+    /// True while the daemon's rewrite of `summary` is on its way (at most ~30 s); a `pane` event brings
+    /// the new summary with this false. Absent means false. See `isSummaryPending`.
+    public var summaryPending: Bool?
+
+    /// Whether a better summary is still coming.
+    public var isSummaryPending: Bool { summaryPending == true }
 
     enum CodingKeys: String, CodingKey {
         case kind, state, source, message, since, attention, session, muted, prompt, tool, requests, summary
+        case summaryPending = "summary_pending"
         case quietRise = "quiet"
         case toolInput = "tool_input"
         case turnStarted = "turn_started"
@@ -148,7 +155,7 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     public init(kind: String, state: State, source: String? = nil, message: String? = nil, since: Double? = nil,
                 attention: Bool? = nil, session: String? = nil, muted: Bool? = nil, quietRise: Bool? = nil,
                 prompt: String? = nil, tool: String? = nil, toolInput: String? = nil, turnStarted: Double? = nil,
-                requests: [PermissionRequest]? = nil, summary: String? = nil) {
+                requests: [PermissionRequest]? = nil, summary: String? = nil, summaryPending: Bool? = nil) {
         self.kind = kind
         self.state = state
         self.source = source
@@ -164,6 +171,7 @@ public struct AgentInfo: Codable, Equatable, Sendable {
         self.turnStarted = turnStarted
         self.requests = requests
         self.summary = summary
+        self.summaryPending = summaryPending
     }
 
     /// The permission requests waiting for an answer; empty when none.

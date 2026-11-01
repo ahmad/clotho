@@ -311,6 +311,9 @@ extension AppDelegate {
         agentHistoryWindows[PaneKey(machine: machine, pane: pane)]?.refresh()
         log("agent \(machine)/\(pane): \(before?.state.rawValue ?? "none") → \(after.map { "\($0.kind) \($0.state.rawValue) (\($0.source ?? "?"))\($0.message.map { ": " + $0 } ?? "")" } ?? "none")")
         if after?.isHookSourced == true { hookSourcedMachines.insert(machine) }
+        // A notification held for its summary goes out once the summary lands (or the agent moved on).
+        let paneKey = PaneKey(machine: machine, pane: pane)
+        summaryHold.agentChanged(paneKey, to: after)
         // Only when the daemon raises attention (a hook-reported waiting, done or error, or a bell): quiet
         // output alone never alerts. A quiet rise (a turn that ended while the user was at the pane) is
         // badged but not announced.
@@ -326,6 +329,16 @@ extension AppDelegate {
         let key = "\(machine)/\(pane)"
         if let last = lastAgentNotification[key], last.state == after.state, Date().timeIntervalSince(last.date) < 60 { return }
         lastAgentNotification[key] = (after.state, Date())
+        // The daemon is rewriting the message (clothod 0.1.29): wait for it, as the phone's push does, up
+        // to `summaryWait`, then go with whatever summary there is. Never twice.
+        if after.isSummaryPending {
+            summaryHold.hold(paneKey, state: after.state)
+            return
+        }
+        postAgentNotice(machine: machine, pane: pane, info: after)
+    }
+
+    func postAgentNotice(machine: MachineKey, pane: PaneID, info after: AgentInfo) {
         guard let session = connections[machine] else { return }
         let location = session.store.state.location(of: pane)
         // "Platform · Claude finished" / "devbox · api-server · 4m" / the result: the same shape as on iOS.
@@ -710,5 +723,53 @@ final class ActionsOverlay: NSView {
         CATransaction.setDisableActions(true)
         fade.frame = CGRect(x: 0, y: 0, width: Self.fadeWidth, height: bounds.height)
         CATransaction.commit()
+    }
+}
+
+/// Agent notifications waiting for the daemon's summary (clothod 0.1.29): the rise comes with
+/// `summary_pending`, and the rewrite follows in a `pane` event, usually in 1–3 s. A held notification
+/// goes out once, when the summary lands or after `wait` (with whatever summary there is then), and
+/// only if the agent still needs the user in the state it rose to.
+@MainActor
+final class SummaryHold {
+    /// The agent as it is now, from the model.
+    var current: (PaneKey) -> AgentInfo?
+    var post: (PaneKey, AgentInfo) -> Void
+    var dropped: (PaneKey) -> Void = { _ in }
+    /// How long to wait (the push waits as long). The `SummaryWait` default overrides it, for tests.
+    var wait: TimeInterval = {
+        let override = UserDefaults.standard.double(forKey: "SummaryWait")
+        return override > 0 ? override : 6
+    }()
+
+    private var held: [PaneKey: (state: AgentInfo.State, timer: DispatchWorkItem)] = [:]
+
+    init(current: @escaping (PaneKey) -> AgentInfo?, post: @escaping (PaneKey, AgentInfo) -> Void) {
+        self.current = current
+        self.post = post
+    }
+
+    var isHolding: Bool { !held.isEmpty }
+    func isHolding(_ key: PaneKey) -> Bool { held[key] != nil }
+
+    func hold(_ key: PaneKey, state: AgentInfo.State) {
+        held[key]?.timer.cancel()
+        let timer = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.release(key) } }
+        held[key] = (state, timer)
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: timer)
+    }
+
+    /// The pane's agent changed: a held notification goes out once its summary is no longer pending.
+    func agentChanged(_ key: PaneKey, to info: AgentInfo?) {
+        guard held[key] != nil, info?.isSummaryPending != true else { return }
+        release(key)
+    }
+
+    /// Posts the held notification now, with the agent as it is (or drops it if the agent moved on).
+    func release(_ key: PaneKey) {
+        guard let entry = held.removeValue(forKey: key) else { return }
+        entry.timer.cancel()
+        guard let info = current(key), info.needsAttention, info.state == entry.state else { return dropped(key) }
+        post(key, info)
     }
 }
