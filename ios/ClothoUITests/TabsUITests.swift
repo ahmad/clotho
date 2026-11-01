@@ -42,6 +42,14 @@ final class TabsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Resolve"].exists, "a Resolve button shows on the row")
         let badge = app.tabBars.buttons["Agents"].value as? String ?? ""
         XCTAssertFalse(badge.isEmpty, "no badge on Agents")
+        // One muted agent for the screenshots: its bell is crossed out, and it moves under Quiet.
+        let erring = app.buttons.matching(NSPredicate(format: "identifier == 'needsYouAgent' AND label CONTAINS 'Error'")).firstMatch
+        XCTAssertTrue(erring.waitForExistence(timeout: 5))
+        erring.press(forDuration: 1.2)
+        app.buttons["Mute"].tapWhenSettled()
+        let muted = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Muted'")).firstMatch
+        XCTAssertTrue(muted.waitForExistence(timeout: 5), "no muted row")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch.exists)
         sleep(1)
         attach(app, "agents light")
 
@@ -63,10 +71,12 @@ final class TabsUITests: XCTestCase {
         sleep(1)
         attach(app, "machines light")
 
-        // Clean up: answer the request (the hook ends), then close both tabs from their agents' rows (a pane
+        // Clean up: unmute, answer the request (the hook ends), then close both tabs from their agents' rows (a pane
         // without a real agent shows a fake one).
         app.showTab("Agents")
         let place = asking.label.components(separatedBy: ", ").first ?? ""
+        app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch.tap()
+        XCTAssertTrue(muted.waitForNonExistence(timeout: 5))
         app.buttons["denyRequest"].tap()
         XCTAssertTrue(app.buttons["denyRequest"].waitForNonExistence(timeout: 10))
         for predicate in [NSPredicate(format: "label CONTAINS 'Running'"), NSPredicate(format: "label BEGINSWITH %@", place)] {

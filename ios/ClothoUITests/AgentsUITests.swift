@@ -70,6 +70,17 @@ final class AgentsUITests: XCTestCase {
         unmute.tapWhenSettled()
         XCTAssertTrue(muted.waitForNonExistence(timeout: 5), "still marked muted after Unmute")
 
+        // The row's own bell does the same, without a menu.
+        let topBeforeBell = onTop.count
+        let bell = app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Mute agent'")).firstMatch
+        XCTAssertTrue(bell.waitForExistence(timeout: 3), "no Mute toggle on the rows")
+        bell.tap()
+        wait(for: [expectation(for: NSPredicate(format: "count == %d", topBeforeBell - 1), evaluatedWith: onTop)], timeout: 5)
+        XCTAssertTrue(muted.waitForExistence(timeout: 5), "the bell didn't mute")
+        attach(app, "muted by bell")
+        app.buttons.matching(NSPredicate(format: "identifier == 'muteToggle' AND label == 'Unmute agent'")).firstMatch.tap()
+        XCTAssertTrue(muted.waitForNonExistence(timeout: 5), "the bell didn't unmute")
+
         // Opening an agent never resolves it, and Back returns to Agents with it still on top.
         let stillOnTop = onTop.count
         waiting.tap()

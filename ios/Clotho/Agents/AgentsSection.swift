@@ -28,9 +28,7 @@ struct AgentsSection: View {
             if !parts.quiet.isEmpty {
                 Section {
                     ForEach(parts.quiet) { row in
-                        Button { open(row) } label: { AgentRowView(row: row) }
-                            .tint(.primary)
-                            .accessibilityIdentifier("quietAgent")
+                        AgentRowView(row: row, open: { open(row) }, mute: muteAction(row), openID: "quietAgent")
                             .listRowInsets(Self.insets)
                             .swipeActions(edge: .trailing) { muteButton(row) }
                             .contextMenu { muteButton(row); historyButton(row) }
@@ -42,18 +40,15 @@ struct AgentsSection: View {
         }
     }
 
-    /// Tight rows, so many fit on screen.
-    static let insets = EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14)
+    /// Room around each row, so the list reads easily.
+    static let insets = EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20)
 
     private func attentionRow(_ row: AgentRow) -> some View {
         let connection = connections.existing(row.machineID)
-        return VStack(alignment: .leading, spacing: 4) {
-            Button { open(row) } label: { AgentRowView(row: row) }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("needsYouAgent")
+        return VStack(alignment: .leading, spacing: 8) {
+            AgentRowView(row: row, open: { open(row) }, mute: muteAction(row), openID: "needsYouAgent")
             if let connection {
                 PermissionButtons(row: row, connection: connection)
-                    .padding(.leading, AgentRowView.textInset)
             }
         }
         .listRowInsets(Self.insets)
@@ -109,68 +104,122 @@ struct AgentsSection: View {
         }
     }
 
+    /// The row's own Mute/Unmute toggle (as in the swipe and the menu); nil where the daemon can't mute.
+    private func muteAction(_ row: AgentRow) -> (() -> Void)? {
+        guard let connection = connections.existing(row.machineID), connection.canMute else { return nil }
+        return { connection.muteAgent(row.pane, !row.isMuted) }
+    }
+
     /// `agent.ack`: the daemon clears attention for every client; the row moves to Quiet.
     private func resolve(_ row: AgentRow) {
         connections.existing(row.machineID)?.ackAgent(row.pane)
     }
 }
 
-/// One agent, as in a mail inbox: a status dot on the leading edge, then where it is, what it said and who
-/// it is.
+/// One agent, as in a mail inbox: where it is, what it said and who it is, and on the trailing edge its age,
+/// a Mute toggle and its status dot, in line with the caption.
 ///
-///     ●  Platform › api-server                      4m
-///        Ran the tests; two failures in push.rs. Wants
-///        to know whether to fix them now.
-///        devbox · Claude · Needs you
+///     Platform › api-server                          4m
+///     Ran the tests; two failures in push.rs. Wants   🔔
+///     to know whether to fix them now.
+///     devbox · Claude · Needs you                     ●
 ///
 /// The dot and the status word take the status's colour (needs you orange, error red, done green, running
-/// blue); an agent that doesn't need the user has a hollow dot, dimmer text and one line of summary.
+/// blue); an agent that doesn't need the user has a hollow dot, dimmer text and one line of summary. A muted
+/// agent's bell is crossed out and tinted.
 struct AgentRowView: View {
     let row: AgentRow
-
-    /// Where the text starts, past the dot: the separator and the permission buttons line up with it.
-    static let textInset: CGFloat = 19
+    /// Opens the agent's pane; nil shows the row on its own (the quick reply sheet's header).
+    var open: (() -> Void)? = nil
+    /// Mutes or unmutes; nil hides the toggle (a daemon without `agent.mute`).
+    var mute: (() -> Void)? = nil
+    var openID: String? = nil
 
     private var needsYou: Bool { row.wantsAttention }
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            StatusDot(color: row.statusColor, filled: needsYou || row.info.state == .running)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("\(row.workspace) › \(row.title)")
-                        .font(.subheadline.weight(needsYou ? .semibold : .medium))
-                        .foregroundStyle(needsYou ? .primary : .secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    if let since = row.info.sinceDate {
-                        // Compact, as on the Mac ("1m", "2h"), updated each minute.
-                        TimelineView(.everyMinute) { context in
-                            Text(AgentRowView.age(since, now: context.date))
-                        }
-                        .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
-                    }
-                }
-                if let summary = row.summary {
-                    Text(summary)
-                        .font(.subheadline)
-                        .foregroundStyle(needsYou ? .secondary : .tertiary)
-                        .lineLimit(needsYou ? 2 : 1)
-                }
-                HStack(spacing: 4) {
-                    Text("\(row.machineName) · \(row.info.shortKindName) ·").foregroundStyle(.tertiary)
-                    Text(row.status).foregroundStyle(row.statusColor).fontWeight(.medium)
-                    if row.isMuted {
-                        Image(systemName: "bell.slash").foregroundStyle(.tertiary).accessibilityLabel("Muted")
-                    }
-                }
-                .font(.caption)
-                .lineLimit(1)
+        HStack(alignment: .top, spacing: 8) {
+            if let open {
+                Button(action: open) { content }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(accessibilityText)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityIdentifier(openID ?? "agentRow")
+            } else {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(accessibilityText)
             }
-            .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
+            trailing
         }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\(row.workspace) › \(row.title)")
+                .font(.body.weight(needsYou ? .semibold : .medium))
+                .foregroundStyle(needsYou ? .primary : .secondary)
+                .lineLimit(1).truncationMode(.middle)
+            if let summary = row.summary {
+                Text(summary)
+                    .font(.callout)
+                    .foregroundStyle(needsYou ? .secondary : .tertiary)
+                    .lineLimit(needsYou ? 2 : 1)
+            }
+            HStack(spacing: 4) {
+                Text("\(row.machineName) · \(row.info.shortKindName) ·").foregroundStyle(.tertiary)
+                Text(row.status).foregroundStyle(row.statusColor).fontWeight(.medium)
+            }
+            .font(.footnote)
+            .lineLimit(1)
+            .frame(height: Self.captionHeight)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
+    }
+
+    /// Age on top, the Mute toggle between, the status dot at the bottom, centred on the caption's line.
+    private var trailing: some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            if let since = row.info.sinceDate {
+                // Compact, as on the Mac ("1m", "2h"), updated each minute.
+                TimelineView(.everyMinute) { context in
+                    Text(AgentRowView.age(since, now: context.date))
+                }
+                .font(.footnote).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            Spacer(minLength: 0)
+            if let mute {
+                Button(action: mute) {
+                    Image(systemName: row.isMuted ? "bell.slash.fill" : "bell")
+                        .font(.subheadline)
+                        .foregroundStyle(row.isMuted ? Color.indigo : Color.secondary.opacity(0.6))
+                        .frame(width: 30, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(row.isMuted ? "Unmute agent" : "Mute agent")
+                .accessibilityIdentifier("muteToggle")
+            }
+            Spacer(minLength: 0)
+            StatusDot(color: row.statusColor, filled: needsYou || row.info.state == .running)
+                .frame(width: 30, height: Self.captionHeight)
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    /// One caption line, so the dot sits centred on it.
+    static let captionHeight: CGFloat = 18
+
+    /// What VoiceOver (and the UI tests) read: the four lines, then "Muted".
+    private var accessibilityText: String {
+        var parts = ["\(row.workspace) › \(row.title)"]
+        if let summary = row.summary { parts.append(summary) }
+        parts.append("\(row.machineName) · \(row.info.shortKindName) · \(row.status)")
+        if row.isMuted { parts.append("Muted") }
+        return parts.joined(separator: ", ")
     }
 }
 
@@ -204,6 +253,8 @@ private struct SectionCount: View {
         }
         .font(.footnote.weight(.semibold))
         .textCase(nil)
+        .padding(.top, 10)
+        .padding(.bottom, 2)
     }
 }
 
