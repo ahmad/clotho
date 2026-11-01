@@ -921,10 +921,25 @@ final class FileTable: NSTableView {
     }
 }
 
-// One side of the browser: a machine, a folder and its contents.
-final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFilePromiseProviderDelegate {
+// One side of the browser: a machine, a folder and its contents. Compact, it's the file sidebar's list
+// (FileSidebar.swift): no machine menu or Kind column, and the sidebar decides what opening a file,
+// the context menu and each row's badge do.
+final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFilePromiseProviderDelegate, NSTextFieldDelegate {
     weak var app: AppDelegate?
     weak var other: FilePane?
+    let compact: Bool
+    /// Opens a file (not a folder) instead of the default: the sidebar downloads remote ones.
+    var onOpenFile: ((Location, FileEntry) -> Void)?
+    /// The user went to another folder (a breadcrumb, a folder, Up), not the sidebar following its pane.
+    var onUserNavigate: (() -> Void)?
+    /// A folder finished loading.
+    var onLoaded: ((String) -> Void)?
+    /// A short badge after a row's name ("synced"), and its colour.
+    var badge: ((Location) -> (String, NSColor)?)?
+    /// Fills the context menu instead of the browser's items.
+    var fillMenu: ((NSMenu, [Location]) -> Void)?
+    /// A row's inline rename ended with a new name.
+    var onRename: ((Location, String) -> Void)?
     private(set) var machine: Machine
     private(set) var path: String
     private var requestedPath: String?
@@ -951,8 +966,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         return queue
     }()
 
-    init(app: AppDelegate, machine: Machine, path: String?, choosable: Bool, side: String = "left") {
+    init(app: AppDelegate, machine: Machine, path: String?, choosable: Bool, side: String = "left", compact: Bool = false) {
         self.app = app
+        self.compact = compact
         self.side = side
         self.sort = FileSort.saved(for: side)
         self.machine = machine
@@ -983,14 +999,16 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         filterField.target = self
         filterField.action = #selector(filterChanged)
         filterField.setAccessibilityLabel("Filter by name")
-        filterField.widthAnchor.constraint(equalToConstant: s(150)).isActive = true
+        if !compact { filterField.widthAnchor.constraint(equalToConstant: s(150)).isActive = true }
+        filterField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         machineMenu.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let header = NSStackView(views: [machineMenu, NSView(), filterField, hiddenButton, refresh, up])
+        let header = NSStackView(views: compact ? [filterField, hiddenButton, refresh, up] : [machineMenu, NSView(), filterField, hiddenButton, refresh, up])
         header.orientation = .horizontal
-        header.spacing = s(10)
+        header.spacing = s(compact ? 8 : 10)
 
         pathBar.onNavigate = { [weak self] target in
+            self?.onUserNavigate?()
             self?.load(target)
             self?.window?.makeFirstResponder(self?.table)
         }
@@ -1006,8 +1024,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         let stack = NSStackView(views: [header, pathBar, scroll, status])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = s(8)
-        stack.edgeInsets = NSEdgeInsets(top: s(4), left: s(16), bottom: s(12), right: s(16))
+        stack.spacing = s(compact ? 6 : 8)
+        let inset = s(compact ? 10 : 16)
+        stack.edgeInsets = NSEdgeInsets(top: s(4), left: inset, bottom: s(compact ? 8 : 12), right: inset)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1015,9 +1034,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            header.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: s(-32)),
-            pathBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: s(-32)),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: s(-32)),
+            header.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset),
+            pathBar.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset),
+            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -2 * inset),
         ])
     }
 
@@ -1058,15 +1077,16 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
 
     private func setUpTable() {
         // Name starts narrow and takes whatever width is left, so Kind fits in the panel's default size.
-        let columns: [(String, String, CGFloat)] = [("name", "Name", 140), ("size", "Size", 70), ("modified", "Modified", 105),
-                                                    ("kind", "Kind", 80)]
+        let columns: [(String, String, CGFloat)] = compact
+            ? [("name", "Name", 120), ("size", "Size", 58), ("modified", "Modified", 92)]
+            : [("name", "Name", 140), ("size", "Size", 70), ("modified", "Modified", 105), ("kind", "Kind", 80)]
         for (id, title, width) in columns {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = title
             // Click a header to sort by it, again to reverse.
             column.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: true)
             column.width = width
-            column.minWidth = id == "name" ? 120 : 60
+            column.minWidth = id == "name" ? (compact ? 80 : 120) : (compact ? 44 : 60)
             column.resizingMask = id == "name" ? .autoresizingMask : .userResizingMask
             table.addTableColumn(column)
         }
@@ -1074,7 +1094,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         table.backgroundColor = Theme.background
         table.usesAlternatingRowBackgroundColors = false
         table.gridStyleMask = []
-        table.rowHeight = 22
+        table.rowHeight = compact ? s(20) : 22
         table.intercellSpacing = NSSize(width: 6, height: s(2))
         table.allowsMultipleSelection = true
         table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
@@ -1166,8 +1186,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
                 path = listing.dir.path
                 home = files.homeDirectory
                 entries = listing.entries
-                machine.lastFolder = path
+                if !compact { machine.lastFolder = path }
                 applyFilter()
+                onLoaded?(path)
             } catch {
                 guard let self, token == generation else { return }
                 status.stringValue = error.localizedDescription
@@ -1199,6 +1220,7 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     @objc func reload() { load(path) }
 
     @objc func goUp() {
+        onUserNavigate?()
         let parent = (path as NSString).deletingLastPathComponent
         load(parent.isEmpty ? "/" : parent)
     }
@@ -1217,6 +1239,29 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         switchTo(chosen)
     }
 
+    /// Shows `folder` on `machine` (the sidebar following its pane).
+    func show(machine chosen: Machine, folder: String) {
+        if chosen != machine {
+            machine = chosen
+            entries = []
+            applyFilter()
+        }
+        requestedPath = folder
+        load(folder)
+    }
+
+    /// The listed entry at a location, if it's in this folder.
+    func entry(for location: Location) -> FileEntry? {
+        guard location.machine == machine else { return nil }
+        return shown.first { fullPath($0) == location.path }
+    }
+
+    /// Redraws the rows (their badges changed), keeping the selection.
+    func refreshRows() {
+        guard !isRenaming else { return }
+        table.reloadData()
+    }
+
     func switchTo(_ chosen: Machine) {
         machine = chosen
         rebuildMachineMenu()
@@ -1227,13 +1272,17 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
     }
 
     func fullPath(_ entry: FileEntry) -> String { (path as NSString).appendingPathComponent(entry.name) }
+    func fullPathNamed(_ name: String) -> String { (path as NSString).appendingPathComponent(name) }
 
     @objc func openSelected() {
         let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
         guard row >= 0, row < shown.count else { return }
         let entry = shown[row]
         if entry.isDirectory {
+            onUserNavigate?()
             load(fullPath(entry))
+        } else if let onOpenFile {
+            onOpenFile(Location(machine: machine, path: fullPath(entry)), entry)
         } else if machine.isLocal {
             NSWorkspace.shared.open(URL(fileURLWithPath: fullPath(entry)))
         }
@@ -1260,6 +1309,20 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         Calendar.current.isDateInToday(date) ? "Today " + timeFormatter.string(from: date) : dayFormatter.string(from: date)
     }
 
+    static let shortDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("MMM d")
+        return f
+    }()
+
+    /// The sidebar's narrow column: "3:07 PM" today, "Oct 22" this year, else "Oct 22, 2024".
+    static func compactFormat(_ date: Date, now: Date = Date()) -> String {
+        let calendar = Calendar.current
+        if calendar.isDate(date, inSameDayAs: now) { return timeFormatter.string(from: date) }
+        if calendar.component(.year, from: date) == calendar.component(.year, from: now) { return shortDayFormatter.string(from: date) }
+        return dayFormatter.string(from: date)
+    }
+
     func icon(for entry: FileEntry) -> NSImage {
         if machine.isLocal { return NSWorkspace.shared.icon(forFile: fullPath(entry)) }
         if entry.isDirectory { return NSWorkspace.shared.icon(for: .folder) }
@@ -1279,7 +1342,9 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
         case "name": text.stringValue = entry.name
         case "size": text.stringValue = entry.isDirectory ? "—" : ByteCountFormatter.string(fromByteCount: Int64(entry.size), countStyle: .file)
         case "kind": text.stringValue = FileSort.kind(of: entry)
-        default: text.stringValue = Self.format(entry.modified)
+        default:
+            text.stringValue = compact ? Self.compactFormat(entry.modified) : Self.format(entry.modified)
+            if compact { cell.toolTip = Self.format(entry.modified) }
         }
         text.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(text)
@@ -1298,13 +1363,82 @@ final class FilePane: NSView, NSTableViewDataSource, NSTableViewDelegate, NSFile
             ])
             leading = text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: s(6))
         }
+        var trailing = text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: s(-2))
+        if id == "name", let (title, color) = badge?(Location(machine: machine, path: fullPath(entry))) {
+            let tag = NSTextField(labelWithString: title)
+            tag.font = NSFont.systemFont(ofSize: s(9.5), weight: .medium)
+            tag.textColor = color
+            tag.setAccessibilityLabel("Copy \(title)")
+            tag.translatesAutoresizingMaskIntoConstraints = false
+            tag.setContentCompressionResistancePriority(.required, for: .horizontal)
+            cell.addSubview(tag)
+            NSLayoutConstraint.activate([
+                tag.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: s(-2)),
+                tag.leadingAnchor.constraint(equalTo: text.trailingAnchor, constant: s(5)),
+                tag.firstBaselineAnchor.constraint(equalTo: text.firstBaselineAnchor),
+            ])
+            trailing = text.trailingAnchor.constraint(lessThanOrEqualTo: tag.leadingAnchor, constant: s(-5))
+            text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
         NSLayoutConstraint.activate([
             leading,
-            text.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: s(-2)),
+            trailing,
             text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
     }
+
+    // MARK: Renaming in place (Finder's way: the name selected, without its extension)
+
+    private(set) var isRenaming = false
+    private var renaming: (field: NSTextField, location: Location, old: String)?
+
+    func beginRename(row: Int) {
+        guard row >= 0, row < shown.count, let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+              let field = cell.textField else { return }
+        let entry = shown[row]
+        isRenaming = true
+        renaming = (field, Location(machine: machine, path: fullPath(entry)), entry.name)
+        field.isEditable = true
+        field.isSelectable = true
+        field.drawsBackground = true
+        field.backgroundColor = Theme.background
+        field.delegate = self
+        window?.makeFirstResponder(field)
+        let stem = entry.isDirectory ? entry.name : (entry.name as NSString).deletingPathExtension
+        field.currentEditor()?.selectedRange = NSRange(location: 0, length: (stem.isEmpty ? entry.name : stem).utf16.count)
+    }
+
+    private func endRename(commit: Bool) {
+        guard let (field, location, old) = renaming else { return }
+        renaming = nil
+        isRenaming = false
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        field.isEditable = false
+        field.drawsBackground = false
+        field.delegate = nil
+        if commit, !name.isEmpty, name != old, !name.contains("/") {
+            onRename?(location, name)
+        } else {
+            field.stringValue = old
+        }
+        window?.makeFirstResponder(table)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard renaming != nil else { return false }
+        if selector == #selector(NSResponder.cancelOperation(_:)) {
+            endRename(commit: false)
+            return true
+        }
+        if selector == #selector(NSResponder.insertNewline(_:)) {
+            endRename(commit: true)
+            return true
+        }
+        return false
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) { endRename(commit: true) }
 
     // MARK: Dragging out
 
@@ -1418,6 +1552,7 @@ extension FilePane: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard !selectedLocations().isEmpty else { return }
+        if let fillMenu { return fillMenu(menu, selectedLocations()) }
         if let other {
             let verb = Transfer.verb(from: machine, to: other.machine)
             menu.addItem(withTitle: "\(verb) to \(other.machine.label): \((other.path as NSString).lastPathComponent)",

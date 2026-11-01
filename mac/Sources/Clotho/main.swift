@@ -349,6 +349,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var tabBar: TabBarView!
     var tabBarLeading: NSLayoutConstraint!
     var sidebarToggle: QuietButton?
+    /// The file sidebar on the right (FileSidebar.swift), its toggle and where it sits.
+    var fileSidebar: FileSidebarView!
+    var fileSidebarToggle: QuietButton?
+    var fileSidebarWidth: NSLayoutConstraint!
+    var fileSidebarTrailing: NSLayoutConstraint!
+    var tabBarTrailing: NSLayoutConstraint!
+    /// Remote files opened through local copies, made on first use.
+    var remoteEditsStore: RemoteEdits?
+    var openingFiles: Set<String> = []
+    var shownConflicts: Set<String> = []
+    var openFileCleanupTimer: Timer?
     var splitView: SplitLayoutView!
     var emptyLabel: NSTextField!
     /// A workspace with no tabs, or a machine with no workspaces (EmptyState.swift).
@@ -622,11 +633,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             sidebarWidth,
             tabBar.topAnchor.constraint(equalTo: notchExtension.bottomAnchor),
             tabBarLeading,
-            tabBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             tabBarHeight,
             splitTop,
             splitView.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
-            splitView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             emptyState.topAnchor.constraint(equalTo: splitView.topAnchor),
             emptyState.bottomAnchor.constraint(equalTo: splitView.bottomAnchor),
@@ -639,11 +648,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             corner.widthAnchor.constraint(equalToConstant: WindowButtons.width),
             // Centred on the tab bar, as a titled window centres its buttons in its title bar.
             corner.heightAnchor.constraint(equalTo: tabBar.heightAnchor),
-        ] + Self.sidebarToggleConstraints(toggle, corner: corner, sidebar: sidebar))
+        ] + Self.sidebarToggleConstraints(toggle, corner: corner, sidebar: sidebar) + makeFileSidebar(corner: corner))
         updateTabBarInset()
 
         window.contentView = container
         installTransferToast()
+        startOpenFileCleanup()
         // Testing aid: LaunchInBackground=YES shows the window behind others without taking keyboard focus,
         // so scripted runs never catch keystrokes meant for another app.
         if UserDefaults.standard.bool(forKey: "LaunchInBackground") {
@@ -1100,6 +1110,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 // "agentspanel:on" / "agentspanel:off" shows or hides the sidebar's Agents panel (the setting).
                 if step.hasPrefix("agentspanel:") { return setShowsAgentsPanel(step.hasSuffix(":on")) }
+                // "sidebarfiles:on" / "sidebarfiles:off" shows or hides the file sidebar; "sidebarfiles:<path>"
+                // browses to a folder (the follow button shows). (Not "files…": that's the browser's.)
+                if step.hasPrefix("sidebarfiles:") {
+                    let arg = String(step.dropFirst("sidebarfiles:".count))
+                    if arg == "on" || arg == "off" {
+                        if (arg == "on") != isFileSidebarShown { showOrHideFileSidebar(nil) }
+                    } else {
+                        fileSidebar.pane.onUserNavigate?()
+                        fileSidebar.pane.load(arg)
+                    }
+                    return
+                }
+                // "fileopen:name" opens that row of the file sidebar as a double-click does; "fileedit:name"
+                // appends a line to its open copy, as an editor's save would.
+                if step.hasPrefix("fileopen:") || step.hasPrefix("fileedit:") {
+                    let name = String(step.dropFirst(9))
+                    let pane = fileSidebar.pane
+                    let location = Location(machine: pane.machine, path: pane.fullPathNamed(name))
+                    if step.hasPrefix("fileopen:") { return openFile(location, size: pane.entry(for: location)?.size) }
+                    guard let edit = remoteEditsStore?.edit(machine: location.machine.key, path: location.path),
+                          let handle = try? FileHandle(forWritingTo: edit.localURL) else { return log("TypeText: \(name) isn't open") }
+                    _ = try? handle.seekToEnd()
+                    try? handle.write(contentsOf: Data("Edited in Clotho on this Mac.\n".utf8))
+                    try? handle.close()
+                    return
+                }
                 // "logtab" logs the focused tab's layout and tab count, for checking moves.
                 if step == "logtab" {
                     let tabs = store.focusedWorkspace?.tabs.map { "\($0.id)" }.joined(separator: ",") ?? "-"

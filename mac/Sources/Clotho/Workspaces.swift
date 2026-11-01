@@ -62,6 +62,7 @@ extension AppDelegate {
         let tab = store.focusedTab
 
         settingsWindow?.refreshIfNeeded()
+        followFocusedPaneInFileSidebar()
         // An open command bar picks up the change once, after this pass.
         quickOpen?.setNeedsReload()
         let agents = agentEntries()
