@@ -52,7 +52,8 @@ struct AgentsTab: View {
                 }, replying: $replying, history: $history)
             }
             .agentSheets(replying: $replying, history: $history, connections: connections)
-            .listStyle(.insetGrouped)
+            // Edge to edge, like an inbox: easier to scan than cards.
+            .listStyle(.plain)
             .environment(\.defaultMinListRowHeight, 0)
             .refreshable { await connections.refresh(machines.all) }
             .overlay {
@@ -67,6 +68,8 @@ struct AgentsTab: View {
                 }
             }
             .navigationTitle("Agents")
+            // A small title, so more rows fit.
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button { navigator.quickOpen = true } label: { Label("Quick Open", systemImage: "magnifyingglass") }

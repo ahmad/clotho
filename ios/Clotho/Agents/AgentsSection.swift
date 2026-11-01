@@ -22,7 +22,7 @@ struct AgentsSection: View {
                         attentionRow(row)
                     }
                 } header: {
-                    Text("Needs you")
+                    SectionCount(title: "Needs you", count: parts.attention.count)
                 }
             }
             if !parts.quiet.isEmpty {
@@ -36,22 +36,25 @@ struct AgentsSection: View {
                             .contextMenu { muteButton(row); historyButton(row) }
                     }
                 } header: {
-                    Text("Quiet")
+                    SectionCount(title: "Quiet", count: parts.quiet.count)
                 }
             }
         }
     }
 
     /// Tight rows, so many fit on screen.
-    static let insets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 14)
+    static let insets = EdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14)
 
     private func attentionRow(_ row: AgentRow) -> some View {
         let connection = connections.existing(row.machineID)
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 4) {
             Button { open(row) } label: { AgentRowView(row: row) }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("needsYouAgent")
-            if let connection { PermissionButtons(row: row, connection: connection) }
+            if let connection {
+                PermissionButtons(row: row, connection: connection)
+                    .padding(.leading, AgentRowView.textInset)
+            }
         }
         .listRowInsets(Self.insets)
         .swipeActions(edge: .trailing) {
@@ -112,51 +115,95 @@ struct AgentsSection: View {
     }
 }
 
-/// One agent, in four short lines:
+/// One agent, as in a mail inbox: a status dot on the leading edge, then where it is, what it said and who
+/// it is.
 ///
-///     Platform › api-server                       4m
-///     Ran the tests; two failures in push.rs. Wants to
-///     know whether to fix them now.
-///     devbox · Claude · Needs you
+///     ●  Platform › api-server                      4m
+///        Ran the tests; two failures in push.rs. Wants
+///        to know whether to fix them now.
+///        devbox · Claude · Needs you
 ///
-/// Where it is (workspace › tab), what it said (its summary, else its message as plain text; a permission ask
-/// reads "Allow Bash: npm test?"), and in small letters the machine, the agent and its status, tinted.
+/// The dot and the status word take the status's colour (needs you orange, error red, done green, running
+/// blue); an agent that doesn't need the user has a hollow dot, dimmer text and one line of summary.
 struct AgentRowView: View {
     let row: AgentRow
 
+    /// Where the text starts, past the dot: the separator and the permission buttons line up with it.
+    static let textInset: CGFloat = 19
+
+    private var needsYou: Bool { row.wantsAttention }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("\(row.workspace) › \(row.title)")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 4)
-                if let since = row.info.sinceDate {
-                    // Compact, as on the Mac ("1m", "2h"), updated each minute.
-                    TimelineView(.everyMinute) { context in
-                        Text(AgentRowView.age(since, now: context.date))
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            StatusDot(color: row.statusColor, filled: needsYou || row.info.state == .running)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(row.workspace) › \(row.title)")
+                        .font(.subheadline.weight(needsYou ? .semibold : .medium))
+                        .foregroundStyle(needsYou ? .primary : .secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    if let since = row.info.sinceDate {
+                        // Compact, as on the Mac ("1m", "2h"), updated each minute.
+                        TimelineView(.everyMinute) { context in
+                            Text(AgentRowView.age(since, now: context.date))
+                        }
+                        .font(.caption).foregroundStyle(.tertiary).monospacedDigit()
                     }
-                    .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
                 }
-            }
-            if let summary = row.summary {
-                Text(summary).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
-            }
-            HStack(spacing: 4) {
-                Text("\(row.machineName) · \(row.info.shortKindName) ·").foregroundStyle(.tertiary)
-                if row.info.state == .running || row.info.state == .starting {
-                    Circle().fill(Color.blue.opacity(0.8)).frame(width: 5, height: 5)
+                if let summary = row.summary {
+                    Text(summary)
+                        .font(.subheadline)
+                        .foregroundStyle(needsYou ? .secondary : .tertiary)
+                        .lineLimit(needsYou ? 2 : 1)
                 }
-                Text(row.status).foregroundStyle(row.statusColor).fontWeight(.medium)
-                if row.isMuted {
-                    Image(systemName: "bell.slash").foregroundStyle(.tertiary).accessibilityLabel("Muted")
+                HStack(spacing: 4) {
+                    Text("\(row.machineName) · \(row.info.shortKindName) ·").foregroundStyle(.tertiary)
+                    Text(row.status).foregroundStyle(row.statusColor).fontWeight(.medium)
+                    if row.isMuted {
+                        Image(systemName: "bell.slash").foregroundStyle(.tertiary).accessibilityLabel("Muted")
+                    }
                 }
+                .font(.caption)
+                .lineLimit(1)
             }
-            .font(.caption)
-            .lineLimit(1)
+            .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The status, at a glance: a filled dot for an agent that needs the user (or is running), hollow otherwise.
+private struct StatusDot: View {
+    let color: Color
+    let filled: Bool
+
+    var body: some View {
+        Group {
+            if filled {
+                Circle().fill(color)
+            } else {
+                Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1.5)
+            }
+        }
+        .frame(width: 9, height: 9)
+        .accessibilityHidden(true)
+    }
+}
+
+/// "Needs you  6": a section's name and how many agents are in it.
+private struct SectionCount: View {
+    let title: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title)
+            Text("\(count)").foregroundStyle(.secondary).monospacedDigit()
+        }
+        .font(.footnote.weight(.semibold))
+        .textCase(nil)
     }
 }
 
@@ -266,25 +313,18 @@ struct PermissionButtons: View {
         } else if let request = row.info.pendingRequests.first, connection.canDecide, row.wantsAttention {
             // The question itself is the row's summary line ("Allow Bash: npm test?"): only the answers here.
             HStack(spacing: 8) {
-                Button { answer(request, .allow) } label: {
-                    Label("Allow", systemImage: "checkmark").foregroundStyle(.white).padding(.horizontal, 6)
-                }
-                .buttonStyle(.borderedProminent).tint(.green)
-                .accessibilityIdentifier("allowRequest")
-                Button(role: .destructive) { answer(request, .deny) } label: {
-                    Label("Deny", systemImage: "xmark").foregroundStyle(.red).padding(.horizontal, 6)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("denyRequest")
+                Button { answer(request, .allow) } label: { Label("Allow", systemImage: "checkmark") }
+                    .buttonStyle(Pill(fill: .green, text: .white))
+                    .accessibilityIdentifier("allowRequest")
+                Button(role: .destructive) { answer(request, .deny) } label: { Label("Deny", systemImage: "xmark") }
+                    .buttonStyle(Pill(fill: Color(.tertiarySystemFill), text: .red))
+                    .accessibilityIdentifier("denyRequest")
                 if row.info.pendingRequests.count > 1 {
                     Text("+\(row.info.pendingRequests.count - 1)")
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         .accessibilityLabel("\(row.info.pendingRequests.count - 1) more waiting after this one")
                 }
             }
-            .font(.footnote.weight(.semibold))
-            .buttonBorderShape(.capsule)
-            .controlSize(.small)
             .disabled(working)
         }
         if let note {
@@ -303,6 +343,34 @@ struct PermissionButtons: View {
             case .failed(let message): note = "Couldn't answer: \(message)"
             }
             working = false
+        }
+    }
+}
+
+/// A small capsule button (Allow, Deny): smaller than the system's smallest bordered button.
+private struct Pill: ButtonStyle {
+    let fill: Color
+    let text: Color
+    @Environment(\.isEnabled) private var enabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .labelStyle(PillLabel())
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(text)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(fill, in: Capsule())
+            .opacity(configuration.isPressed || !enabled ? 0.6 : 1)
+            .contentShape(Capsule())
+    }
+}
+
+private struct PillLabel: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 4) {
+            configuration.icon.imageScale(.small)
+            configuration.title
         }
     }
 }
