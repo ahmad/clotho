@@ -540,3 +540,14 @@ The iPhone and iPad get the same model after the Mac ships.
   - a small caption: machine · agent (Claude/Codex) · status.
 - Both checkmark buttons are gone from the rows. Resolve and Mute move to swipe actions and the long-press menu.
 - "Needs you" comes first. A permission ask keeps "Allow <tool>: <cmd>?".
+
+## Mac file sidebar (user, 2026-11-01)
+
+- A file sidebar on the right of the Mac app. An icon at the far right of the title row toggles it, and it shows even when the sidebar is closed.
+- It follows the focused pane's machine and cwd. A "Follow pane" button returns to it after you browse elsewhere.
+- Double-clicking a remote file opens it in the default Mac app, and saves sync back (the user's choice):
+  - the file is downloaded to an app cache copy, which is watched;
+  - each save is uploaded through a temp file plus a rename;
+  - if the remote file changed since it was opened, the app asks first: Overwrite, Save a Copy Beside, or Discard.
+- A local-machine file opens in place.
+- A copy with unsynced edits is never deleted.
