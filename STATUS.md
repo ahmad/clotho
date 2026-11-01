@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-30, after Mac 1.0.15, clothod 0.1.29, iOS 202611011257)
+# Status and handoff (2026-10-30, after Mac 1.0.15, clothod 0.1.29, iOS 202611011351)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
@@ -52,7 +52,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
   - The site deploys ONLY from the CLI (vercel.json git.deploymentEnabled=false). The zips are
     gitignored, so a git-built deploy 404s every download; that broke the first 1.0.1 update.
   - UPDATES_LIVE=true (93b3da6): every non-dev build checks the feed.
-- **iOS:** TestFlight build 202611011257 (66368db: agent rows with the status dot on the caption line, a Mute bell, larger type and more room). Before: 202611010600 (11fb536: three tabs, Agents / Machines / Settings; the Agents tab as an inbox with status dots and compact rows; iPad keeps the sidebar). Before: 202611010139 (870b0f8: summaries and plain text in alerts, banners, Live Activity; onboarding as window content). Before: 202610302317 (8f201c2: a pane takes the phone's size on focus, not on typing; clothod 0.1.28). Before: 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on imac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
+- **iOS:** TestFlight build 202611011351 (36af5b3: agent rows without status dot, status word or bell; the age in the caption; red Error kept). Before: 202611011257 (66368db: agent rows with the status dot on the caption line, a Mute bell, larger type and more room). Before: 202611010600 (11fb536: three tabs, Agents / Machines / Settings; the Agents tab as an inbox with status dots and compact rows; iPad keeps the sidebar). Before: 202611010139 (870b0f8: summaries and plain text in alerts, banners, Live Activity; onboarding as window content). Before: 202610302317 (8f201c2: a pane takes the phone's size on focus, not on typing; clothod 0.1.28). Before: 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on imac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
   one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
   failed; iPad passed.
