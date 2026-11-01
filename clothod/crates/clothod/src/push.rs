@@ -71,6 +71,9 @@ pub struct Alert {
     pub tab: Option<String>,
     /// The agent's directory's name: the project.
     pub project: Option<String>,
+    /// `message` (or, without one, the tool it asks about) as one or two plain sentences: a
+    /// small model's rewrite (crate::summary), else the message cleaned of Markdown.
+    pub summary: Option<String>,
 }
 
 impl Alert {
@@ -269,12 +272,12 @@ pub fn open(private_b64: &str, ciphertext_b64: &str, aad: &[u8]) -> Option<Vec<u
 }
 
 /// The record a phone decrypts: `{"v":1, "m", "p", "k", "s", "msg", "t"}`, plus what of
-/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `d`, `rq` the alert has (docs/push.md).
+/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `sm`, `d`, `rq` the alert has (docs/push.md).
 ///
 /// Each text is first held to its own cap (bytes, on a char boundary). If the record would still
 /// pass MAX_RECORD padded (long names, escape-heavy text), texts are halved in this order until
-/// it fits: the result (`msg`), the prompt (`q`), the tool input (`cmd`), the project, tab and
-/// workspace names, and last the label.
+/// it fits: the result (`msg`), the prompt (`q`), the tool input (`cmd`), the summary (`sm`),
+/// the project, tab and workspace names, and last the label.
 fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
     let cut = |m: &str, max: usize| {
         let mut end = m.len().min(max);
@@ -289,6 +292,7 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
         ("msg", capped(&a.message, MAX_MSG)),
         ("q", capped(&a.prompt, MAX_PROMPT)),
         ("cmd", capped(&a.tool_input, MAX_TOOL_INPUT)),
+        ("sm", capped(&a.summary, MAX_SUMMARY)),
         ("pj", capped(&a.project, MAX_NAME)),
         ("tb", capped(&a.tab, MAX_NAME)),
         ("w", capped(&a.workspace, MAX_NAME)),
@@ -339,6 +343,8 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
 const MAX_PROMPT: usize = 240;
 const MAX_TOOL_INPUT: usize = 240;
 const MAX_NAME: usize = 96;
+/// The summary is asked for in at most 160 characters and kept to 200 (crate::summary).
+pub const MAX_SUMMARY: usize = 320;
 
 /// Largest record sealed: 2048 bytes is about 2,800 base64 characters of ciphertext, under the
 /// relay's 3,000 (ios/relay, MAX_CIPHERTEXT).
@@ -537,8 +543,10 @@ impl Push {
     /// A pane's attention, every time it changes. A rise pushes to every registered phone, at
     /// most once per pane per `per_pane` (a later rise waits and goes out with the latest alert).
     /// A `quiet` rise (the user is at the pane) sends nothing.
-    pub fn attention(self: &Arc<Self>, pane: u64, on: bool, alert: Option<Alert>, quiet: bool) {
-        let t = timing();
+    ///
+    /// `rewrite`: a notification rewrite under way (crate::summary). The push waits for it up
+    /// to `summary::push_wait()`, then goes with whatever `alert.summary` holds.
+    pub fn attention(self: &Arc<Self>, pane: u64, on: bool, alert: Option<Alert>, quiet: bool, rewrite: Option<tokio::sync::watch::Receiver<Option<String>>>) {
         let mut g = self.inner.lock().unwrap();
         if g.regs.is_empty() && !on {
             g.panes.remove(&pane);
@@ -556,9 +564,37 @@ impl Push {
         if quiet {
             return;
         }
+        let Some(mut rx) = rewrite else {
+            self.schedule(&mut g, pane);
+            return;
+        };
+        let rise = ps.rise;
+        drop(g);
+        let me = self.clone();
+        tokio::spawn(async move {
+            let text = match tokio::time::timeout(crate::summary::push_wait(), rx.wait_for(Option::is_some)).await {
+                Ok(Ok(v)) => v.clone(),
+                _ => None,
+            };
+            let mut g = me.inner.lock().unwrap();
+            let Some(ps) = g.panes.get_mut(&pane) else { return };
+            if ps.rise != rise || !ps.attention || ps.quiet {
+                return;
+            }
+            if let (Some(t), Some(a)) = (text, ps.alert.as_mut()) {
+                a.summary = Some(t);
+            }
+            me.schedule(&mut g, pane);
+        });
+    }
+
+    /// Push the pane's alert now, or once its per-pane interval has passed.
+    fn schedule(self: &Arc<Self>, g: &mut Inner, pane: u64) {
+        let t = timing();
+        let Some(ps) = g.panes.get_mut(&pane) else { return };
         let wait = ps.last_sent.map(|at| (at + t.per_pane).saturating_duration_since(Instant::now())).unwrap_or_default();
         if wait.is_zero() {
-            self.dispatch(&mut g, pane);
+            self.dispatch(g, pane);
         } else if !ps.delayed {
             ps.delayed = true;
             let me = self.clone();
@@ -889,7 +925,25 @@ mod tests {
             workspace: Some("clotho".into()),
             tab: Some("clothod".into()),
             project: Some("clotho".into()),
+            summary: None,
         }
+    }
+
+    #[test]
+    fn the_summary_goes_in_sm_only_when_there_is_one() {
+        let v: Value = serde_json::from_slice(&plaintext(LABEL, 7, &full())).unwrap();
+        assert!(v.get("sm").is_none(), "{v}");
+        let a = Alert { summary: Some("All tests pass. The flaky test is fixed.".into()), ..full() };
+        let v: Value = serde_json::from_slice(&plaintext(LABEL, 7, &a)).unwrap();
+        assert_eq!(v["sm"], "All tests pass. The flaky test is fixed.");
+        assert_eq!(v["msg"], full().message.unwrap(), "msg is kept");
+        // Long and escape-heavy everything: the record still fits, and msg is cut before sm.
+        let big = |c: &str| Some(c.repeat(2000));
+        let a = Alert { message: big("\\"), prompt: big("\\"), tool_input: big("\\"), summary: big("s"), ..full() };
+        let raw = plaintext(LABEL, 7, &a);
+        assert!(raw.len() <= MAX_RECORD, "{}", raw.len());
+        let v: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(v["sm"].as_str().unwrap().len(), MAX_SUMMARY, "{v}");
     }
 
     #[test]

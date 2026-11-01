@@ -196,6 +196,11 @@ struct Agent {
     turn_started: Option<f64>,
     /// Permission requests waiting for an answer from a client (`agent.decide`), oldest first.
     requests: Vec<Request>,
+    /// A small model's rewrite of `message` for notifications (crate::summary), for this state
+    /// and message; `summary` falls back to the message cleaned of Markdown.
+    rewrite: Option<String>,
+    /// A rewrite is under way: `summary` may still change.
+    rewrite_pending: bool,
 }
 
 /// A tool call the agent asks permission for, answerable from a client (`agent.decide`) while
@@ -362,6 +367,8 @@ impl Agent {
             tool_input: text("tool_input"),
             turn_started: v.get("turn_started").and_then(Value::as_f64),
             requests: Vec::new(),
+            rewrite: None,
+            rewrite_pending: false,
         })
     }
 
@@ -381,7 +388,48 @@ impl Agent {
             "turn_started": self.turn_started,
             "requests": self.requests.iter().map(|r| json!({"id": r.id, "tool": r.tool, "summary": r.summary})).collect::<Vec<_>>(),
             "session": self.session,
+            "summary": self.summary(),
+            "summary_pending": self.rewrite_pending,
         })
+    }
+
+    /// The notification text: the rewrite, else the message cleaned of Markdown.
+    fn summary(&self) -> Option<String> {
+        self.rewrite.clone().or_else(|| self.message.as_deref().map(crate::summary::plain).filter(|t| !t.is_empty()))
+    }
+
+    /// What the rewrite is made from.
+    fn summary_input(&self) -> crate::summary::Input {
+        let waiting = self.state == "waiting";
+        let req = self.requests.last().filter(|_| waiting);
+        crate::summary::Input {
+            kind: self.kind.clone(),
+            state: self.state.clone(),
+            message: self.message.clone(),
+            prompt: self.prompt.clone(),
+            tool: req.map(|r| r.tool.clone()).or(self.tool.clone()).filter(|_| waiting),
+            tool_input: req.map(|r| r.summary.clone()).unwrap_or(self.tool_input.clone()).filter(|_| waiting),
+            permission: req.is_some(),
+        }
+    }
+
+    /// What a Live Activity following it shows (None: nothing it can show).
+    fn live(&self) -> Option<crate::push::Live> {
+        let state = match self.state.as_str() {
+            "starting" | "running" => "running",
+            s @ ("waiting" | "done" | "error") => s,
+            _ => return None,
+        };
+        let since = self.since as u64;
+        // Waiting on a permission request: what it asks about, as the alert says it.
+        let req = self.requests.last().filter(|_| state == "waiting");
+        let (tool, detail) = match (state, req) {
+            (_, Some(r)) => (Some(r.tool.clone()), r.summary.clone()),
+            ("running" | "waiting", None) => (self.tool.clone(), self.tool_input.clone()),
+            _ => (None, None),
+        };
+        let msg = self.summary().filter(|_| state != "running");
+        Some(crate::push::Live { kind: self.kind.clone(), state: state.into(), since, started: self.turn_started.map(|t| t as u64).unwrap_or(since), tool, detail, msg })
     }
 }
 
@@ -631,6 +679,10 @@ pub struct Daemon {
     git: Mutex<GitCache>,
     /// At most this many `gh` lookups at once.
     gh_slots: Arc<tokio::sync::Semaphore>,
+    /// Notification text rewrites (crate::summary; setting `notification_rewrite`).
+    summary: Arc<crate::summary::Summarizer>,
+    /// This daemon, for tasks that come back to it later.
+    me: std::sync::OnceLock<std::sync::Weak<Daemon>>,
 }
 
 /// Work trees panes are in, and pull request lookups, shared by every pane on them.
@@ -990,6 +1042,8 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
         git: Mutex::new(GitCache::default()),
         gh_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        summary: crate::summary::Summarizer::new(&dir, crate::config::notification_rewrite()),
+        me: std::sync::OnceLock::new(),
         layout: crate::layout::path().map(|path| LayoutWriter {
             path,
             host: platform::hostname(),
@@ -997,6 +1051,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
             st: Mutex::new(LayoutState::default()),
         }),
     });
+    let _ = d.me.set(Arc::downgrade(&d));
 
     // Recovery: panes with their snapshots and buffered output, up to `ready`.
     let started = Instant::now();
@@ -1950,6 +2005,7 @@ impl Daemon {
         }
         let old = p.agent.clone();
         let from = old.as_ref().map(|a| a.state.clone());
+        let mut rewrite = None;
         if let Some(a) = new.as_mut() {
             // Muting belongs to this agent: kept while it's the same one, restored after a
             // restart when it shows up again, gone with a new one.
@@ -1986,31 +2042,28 @@ impl Daemon {
                 Some(o) if !changed => o.since,
                 _ => unix_now(),
             };
+            // A rewrite belongs to its state and message: kept while they are, gone with them.
+            match old.as_ref().filter(|o| o.state == a.state && o.message == a.message && o.since == a.since) {
+                Some(o) => (a.rewrite, a.rewrite_pending) = (o.rewrite.clone(), o.rewrite_pending),
+                None => (a.rewrite, a.rewrite_pending) = (None, false),
+            }
+            // Each rise that notifies gets its text rewritten (crate::summary).
+            if rose && !a.quiet {
+                rewrite = self.summary.start(a.summary_input());
+                a.rewrite = None;
+                a.rewrite_pending = rewrite.is_some();
+            }
         }
         if new == old {
             return;
         }
         p.agent = new;
+        if let (Some(rx), Some(a)) = (rewrite.clone(), p.agent.as_ref()) {
+            self.await_rewrite(p.id, a, rx);
+        }
         // Live Activities following this pane: kind, state, times, and the detail a
-        // notification carries (the tool and its input; the message when it waits or ends).
-        let live = p.agent.as_ref().and_then(|a| {
-            let state = match a.state.as_str() {
-                "starting" | "running" => "running",
-                s @ ("waiting" | "done" | "error") => s,
-                _ => return None,
-            };
-            let since = a.since as u64;
-            // Waiting on a permission request: what it asks about, as the alert says it.
-            let req = a.requests.last().filter(|_| state == "waiting");
-            let (tool, detail) = match (state, req) {
-                (_, Some(r)) => (Some(r.tool.clone()), r.summary.clone()),
-                ("running" | "waiting", None) => (a.tool.clone(), a.tool_input.clone()),
-                _ => (None, None),
-            };
-            let msg = a.message.clone().filter(|_| state != "running");
-            Some(crate::push::Live { kind: a.kind.clone(), state: state.into(), since, started: a.turn_started.map(|t| t as u64).unwrap_or(since), tool, detail, msg })
-        });
-        self.push.agent(p.id, live);
+        // notification carries (the tool and its input; the summary when it waits or ends).
+        self.push.agent(p.id, p.agent.as_ref().and_then(Agent::live));
         match (&old, &p.agent) {
             (Some(o), None) => p.record("gone", Some(&o.state), Some(o)),
             // Detection's output-only guesses flip with every redraw: an agent's arrival is
@@ -2048,9 +2101,10 @@ impl Daemon {
                 workspace,
                 tab,
                 project: dir,
+                summary: a.summary(),
             });
             let quiet = p.agent.as_ref().is_some_and(|a| a.quiet);
-            self.push.attention(p.id, attention(&p.agent), alert, quiet);
+            self.push.attention(p.id, attention(&p.agent), alert, quiet, rewrite);
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
         let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str()) || (!attention(&old) && attention(&p.agent));
@@ -2058,6 +2112,25 @@ impl Daemon {
         if transition {
             self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": from}));
         }
+    }
+
+    /// When the rewrite started for `a` ends: its text becomes the agent's `summary` (a `pane`
+    /// event, and Live Activities follow), if the agent is still in that state with that message.
+    /// A failed rewrite only clears `summary_pending`.
+    fn await_rewrite(&self, pane: u64, a: &Agent, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
+        let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) else { return };
+        let (state, message, since) = (a.state.clone(), a.message.clone(), a.since);
+        tokio::spawn(async move {
+            let text = rx.wait_for(Option::is_some).await.ok().and_then(|v| v.clone());
+            let Some(pp) = me.pane(pane) else { return };
+            let mut p = pp.lock().unwrap();
+            let Some(a) = p.agent.as_mut().filter(|a| a.state == state && a.message == message && a.since == since && a.rewrite_pending) else { return };
+            a.rewrite_pending = false;
+            a.rewrite = text;
+            let live = a.live();
+            me.push.agent(pane, live);
+            me.pane_event(&p);
+        });
     }
 
     /// `agent.mute`: set or clear the pane's agent's `muted`. Muting clears attention.
@@ -2074,7 +2147,7 @@ impl Daemon {
         p.agent = Some(a);
         p.record(if on { "mute" } else { "unmute" }, Some(&old.state), None);
         if old.attention && on {
-            self.push.attention(p.id, false, None, false);
+            self.push.attention(p.id, false, None, false, None);
         }
         self.pane_event(p);
         self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": old.state}));
@@ -2116,6 +2189,8 @@ impl Daemon {
                     tool_input: None,
                     turn_started: None,
                     requests: Vec::new(),
+                    rewrite: None,
+                    rewrite_pending: false,
                 });
                 // Another process of that kind (quit and started again): not the same agent.
                 let pgrp = fg.as_ref().map(|f| f.pgrp);
@@ -2291,6 +2366,8 @@ impl Daemon {
                 }
                 None => pp.agent.as_ref().map(|a| a.requests.clone()).unwrap_or_default(),
             },
+            rewrite: None,
+            rewrite_pending: false,
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))
@@ -2620,7 +2697,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -3041,6 +3118,7 @@ impl Daemon {
     fn settings_json(&self) -> Value {
         json!({
             "scrollback_lines": self.scrollback.load(Ordering::Relaxed),
+            "notification_rewrite": self.summary.enabled(),
             "limits": {"scrollback_lines": {"min": 0, "max": crate::config::MAX_SCROLLBACK, "default": crate::config::DEFAULT_SCROLLBACK}},
             "config": crate::config::path().map(|p| p.to_string_lossy().into_owned()),
         })
@@ -3051,9 +3129,13 @@ impl Daemon {
     /// created from here on; panes spawned with their own `scrollback_lines` keep it.
     fn set_settings(&self, p: &Value) -> RpcResult {
         let Some(obj) = p.as_object() else { return Err(err("bad_request", "params must be an object")) };
-        if let Some(k) = obj.keys().find(|k| *k != "scrollback_lines") {
+        if let Some(k) = obj.keys().find(|k| !["scrollback_lines", "notification_rewrite"].contains(&k.as_str())) {
             return Err(err("bad_request", format!("unknown setting `{k}`")));
         }
+        let rewrite = match obj.get("notification_rewrite") {
+            None => None,
+            Some(v) => Some(v.as_bool().ok_or_else(|| err("bad_request", "notification_rewrite must be true or false"))?),
+        };
         let max = crate::config::MAX_SCROLLBACK;
         let lines = match obj.get("scrollback_lines") {
             None => None,
@@ -3062,6 +3144,10 @@ impl Daemon {
                     as usize,
             ),
         };
+        if let Some(on) = rewrite {
+            crate::config::set_notification_rewrite(on).map_err(|e| err("config_failed", e))?;
+            self.summary.set_enabled(on);
+        }
         let mut changed = Vec::new();
         if let Some(n) = lines {
             crate::config::set_scrollback_lines(n).map_err(|e| err("config_failed", e))?;

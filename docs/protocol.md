@@ -95,7 +95,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
      "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push",
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
-                  "restore", "move", "git", "pane.move", "pane.focus"],
+                  "restore", "move", "git", "pane.move", "pane.focus",
+                  "summary"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -131,7 +132,9 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `git` field, see [Git](#git); since 0.1.23), `pane.move` (`pane.move` and `tab.join`, see
   [Moving panes](#moving-panes); since 0.1.26), `pane.focus` (the `pane.focus` request; the
   client that focused a pane last sets its size, not the one that typed last, see
-  [Resize](#resize); since 0.1.28).
+  [Resize](#resize); since 0.1.28), `summary` (agents' `summary` and `summary_pending`, the
+  `notification_rewrite` setting and push records' `sm`, see
+  [Notification text](#notification-text); since 0.1.29).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -546,7 +549,7 @@ restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
 | `pane.search` | `pane`, `query`; optional `regex`, `case_sensitive` (both default false), `limit` (1–1000, default 100), `before` (`{line, col}`) | matches in the scrollback and screen, newest first; see [Searching scrollback](#searching-scrollback) |
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
 | `settings.get` | – | the settings object; see [Settings](#settings) |
-| `settings.set` | any settings to change, e.g. `scrollback_lines` | the settings object, plus `applied_panes`; see [Settings](#settings) |
+| `settings.set` | any settings to change, e.g. `scrollback_lines`, `notification_rewrite` | the settings object, plus `applied_panes`; see [Settings](#settings) |
 | `service.status` | – | the service object; see [Start at login](#start-at-login) |
 | `service.install` | – | the service object, after the login unit is written and registered |
 | `service.uninstall` | – | the service object, after the login unit is removed (the daemon keeps running) |
@@ -613,6 +616,7 @@ them per machine, like "Start at login".
 → {"id": 7, "method": "settings.get"}
 ← {"id": 7, "result": {
      "scrollback_lines": 2000,
+     "notification_rewrite": true,
      "limits": {"scrollback_lines": {"min": 0, "max": 50000, "default": 2000}},
      "config": "/home/me/.config/clothod/config.toml"}}
 
@@ -633,6 +637,12 @@ them per machine, like "Start at login".
     full 120-column pane takes 8 MB of daemon memory at 2000 lines, 31 MB at 10,000 and 142 MB at
     50,000, and every pane that fills up costs that much. A client choosing large values should
     say so to the user.
+- **`notification_rewrite`** (since 0.1.29, feature `summary`): whether a small model rewrites
+  notification text ([Notification text](#notification-text)). Boolean, default `true`. Off,
+  agents' `summary` and push records' `sm` are the agent's message cleaned of Markdown, and no
+  model runs. Clients show it per machine (a switch such as "Rewrite notification text with
+  Claude Haiku"), reading it from `settings.get` and the `settings` event; a daemon without the
+  `summary` feature doesn't have it, so the switch is hidden there.
 - `settings.set` takes only the keys it changes. It checks all of them first, so a bad value
   (`bad_request`: unknown key, wrong type, out of range) changes nothing. Then it writes the
   config file atomically, keeping its comments and other keys, and applies the change. A config
@@ -734,6 +744,8 @@ and otherwise:
 | `quiet` | the last rise of `attention` was quiet: the agent's turn ended (`done`) while the user was at the pane, meaning a client that shows the pane (subscribed) sent it input within the last 60 s. The user sees that turn end, so `attention` is raised (badge it, show it in the pane) but the daemon sends no push, and **clients must not post a notification for it** either. Decided when `attention` rises and kept until the next rise (through `agent.ack`), so it is in the `agent` and `pane` events of that rise. Always false for a rise into `waiting` or `error`: those notify even when the user just typed, since they may have stepped away and the agent is stuck until they answer. Absent (older daemons) means false |
 | `muted` | the user muted this agent (`agent.mute`). While muted, nothing raises its `attention` (hook `waiting`/`done`/`error`, BEL), so it never notifies or pushes; its `state` still updates as usual. Muting clears `attention`. It lasts for this agent: through restarts and upgrades of the daemon while the agent's process lives, and until `agent.mute` with `muted: false`. It is gone when the agent goes away (session end, exit), and a new agent in the pane starts unmuted. Owned by the daemon, like `attention`: muting on one device mutes it everywhere. Absent (older daemons) means false. Feature flag: `agent.mute` |
 | `session` | the agent's own session id, if it reports one |
+| `summary` | what a notification about this agent should say: `message` as one or two plain sentences (at most 200 chars, no Markdown, one line), or `null` when there is no `message`. A small model's rewrite once it's ready, before that (and when there is none) `message` cleaned of Markdown. **Clients show `summary` in notifications and the Agents list, and fall back to `message` (cleaned of Markdown themselves) when it is absent** (older daemons). See [Notification text](#notification-text). Feature flag: `summary` |
+| `summary_pending` | a rewrite of this rise's text is under way, so `summary` may still change (a `pane` event brings it). Absent (older daemons) means false |
 
 Changes reach clients in two ways. Every change to the field comes as a `pane` event, because
 the pane object changed. State transitions (including an agent appearing or going away) also
@@ -742,6 +754,44 @@ the previous state (or `null`), so clients can notify without diffing.
 
 **Clearing:** the field goes back to `null` when the agent reports that its session ended, when
 the agent's process exits (it's watched by pid), or when the pane closes.
+
+### Notification text
+
+Since 0.1.29 (feature `summary`). Agents write Markdown and long replies; a lock screen wants one
+or two plain sentences. So when an agent's `attention` rises and the rise isn't quiet, the daemon
+has a small model rewrite the agent's words, and every client and phone shows the same text
+(PLAN.md, "Notification text").
+
+- **Who writes it:** Claude Haiku, run through the machine's own `claude` login
+  (`claude -p --model haiku`), no API key. It gets the agent kind, the state (finished, error,
+  a question, or a permission ask), `message`, `prompt`, and for a wait the tool and its input,
+  and answers with at most about 160 characters of plain text. A permission ask says plainly
+  what the agent wants to do. **Clients still show the exact tool and command** (`tool`/
+  `tool_input`, `requests`) next to it, so what Allow approves is never only the model's words.
+- **Where it goes:** the agent's `summary`, and the push record's `sm` (docs/push.md). `message`
+  and the record's `msg` stay exactly as the agent said them.
+- **Timing:** a push waits up to about 6 s for the rewrite. Without it by then it goes with the
+  cleaned original in `sm`, and the rewrite still reaches the model if it finishes (within 30 s):
+  `summary` changes in a `pane` event and `summary_pending` turns false. A client notifying on the
+  rise can wait for that event while `summary_pending` is true (up to about 6 s, like the push),
+  or notify at once with the current `summary`.
+- **Failures:** no `claude`, not logged in, out of quota, a timeout, an empty answer: `summary`
+  stays the cleaned original. Nothing is ever held back or dropped for it.
+- **Cost:** at most two rewrites run at once. The same input is rewritten once (cached).
+- **Cleaning** (also applied to the model's answer): no `**`, `_`, `` ` `` or `~~` marks, no
+  code fences, headings, quote marks or rules, link and image syntax replaced by their text,
+  list items as `• item`, whitespace collapsed to single spaces.
+- **Safety:** the helper runs in a fresh empty private directory with
+  `--setting-sources project,local` (the user's own settings, hooks, plugins and MCP servers are
+  not loaded), `--tools ""`, `--strict-mcp-config`, `--no-session-persistence` (nothing in the
+  user's Claude history) and a clean environment (no `CLOTHO_*` pane variables, no API keys).
+  It isn't in any pane, so agent detection never sees it. An ephemeral (test) instance never runs
+  the real `claude`, only a program named by `$CLOTHOD_SUMMARIZER` (tests point it at a fake);
+  set on a normal instance, that variable replaces `claude` too.
+- **Off switch:** the `notification_rewrite` setting (see [Settings](#settings)). Off, `summary`
+  is the cleaned original and nothing runs.
+- **By hand:** `echo '{"state": "done", "message": "..."}' | clothod summarize` prints the cleaned
+  text and the rewrite (or why there is none) as this machine's daemon would make them.
 
 **Hooks and detection:**
 

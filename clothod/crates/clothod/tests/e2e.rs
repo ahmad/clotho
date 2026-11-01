@@ -33,6 +33,8 @@ impl Env {
             std::env::set_var("CLOTHOD_EPHEMERAL", "60");
             // Never the user's real gh (and GitHub login): tests that want one use a stub.
             std::env::set_var("CLOTHOD_GH", "/nonexistent/gh");
+            // Never the real claude for notification text: tests that want one use a fake.
+            std::env::set_var("CLOTHOD_SUMMARIZER", "/nonexistent/summarizer");
             sweep_stale_test_instances();
         });
         // Short path: Unix socket paths are limited to ~104 bytes.
@@ -5319,4 +5321,156 @@ async fn a_start_in_the_login_session_moves_a_stuck_serve() {
     let out = start("Aqua");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(env.client().await.hello["pid"], moved, "adopted");
+}
+
+// MARK: Notification text (crate::summary)
+
+/// A stand-in summarizer: keeps its stdin in `<name>.in`, counts its runs in `<name>.runs`.
+fn fake_summarizer(env: &Env, name: &str, then: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let d = env.dir.path();
+    let f = d.join(name);
+    std::fs::write(&f, format!("#!/bin/sh\ncat > '{0}.in'; echo run >> '{0}.runs'\n{then}\n", d.join(name).display())).unwrap();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    f.display().to_string()
+}
+
+fn runs(env: &Env, name: &str) -> usize {
+    std::fs::read_to_string(env.dir.path().join(format!("{name}.runs"))).map(|t| t.lines().count()).unwrap_or(0)
+}
+
+fn summary_env(extra: &[(&str, &str)], fake: impl Fn(&Env) -> String) -> Env {
+    let mut env = Env::empty();
+    let f = fake(&env);
+    let mut vars = vec![("CLOTHOD_TEST_PUSH_FAST", "1"), ("CLOTHOD_SUMMARIZER", f.as_str())];
+    vars.extend_from_slice(extra);
+    env.start_with(&std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into()), &vars);
+    env
+}
+
+async fn report(c: &Client, p: u64, state: &str, message: &str) {
+    c.request("agent.report", json!({"pane": p, "state": state, "kind": "claude", "message": message})).await.unwrap();
+}
+
+const MD: &str = "## Done\n\nThe **build** is fixed:\n- `npm test` passes";
+const MD_PLAIN: &str = "The build is fixed: • npm test passes";
+
+#[tokio::test]
+async fn notification_text_is_rewritten_before_the_push() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[], |e| fake_summarizer(e, "fake", "echo '**Fixed.** All tests pass.'"));
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    assert_eq!(c.request("settings.get", json!({})).await.unwrap()["notification_rewrite"], true);
+
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", MD).await;
+    let r = opened(&relay.next().1);
+    assert_eq!(r["msg"], MD, "msg is kept as the agent said it: {r}");
+    assert_eq!(r["sm"], "Fixed. All tests pass.", "the rewrite, cleaned: {r}");
+    let a = wait_agent(&c, p, "summary", |a| a["summary_pending"] == false).await;
+    assert_eq!(a["summary"], "Fixed. All tests pass.");
+    let input = std::fs::read_to_string(env.dir.path().join("fake.in")).unwrap();
+    assert!(input.contains("State: done") && input.contains("The **build** is fixed"), "{input}");
+    assert_eq!(runs(&env, "fake"), 1);
+
+    // Switched off: the cleaned original, and nothing runs.
+    let e = c.request("settings.set", json!({"notification_rewrite": "no"})).await.unwrap_err();
+    assert!(e.to_string().contains("bad_request"), "{e}");
+    let s = c.request("settings.set", json!({"notification_rewrite": false})).await.unwrap();
+    assert_eq!(s["notification_rewrite"], false);
+    let config = std::fs::read_to_string(env.dir.path().join("config.toml")).unwrap();
+    assert!(config.contains("notification_rewrite = false"), "{config}");
+    report(&c, p, "running", "").await;
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    report(&c, p, "done", "Second **turn**.").await;
+    let r = opened(&relay.next().1);
+    assert_eq!((r["msg"].as_str(), r["sm"].as_str()), (Some("Second **turn**."), Some("Second turn.")), "{r}");
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["summary"].as_str(), a["summary_pending"].as_bool()), (Some("Second turn."), Some(false)), "{a}");
+    assert_eq!(runs(&env, "fake"), 1, "no run while it's off");
+
+    // A state with no text has no summary.
+    c.request("settings.set", json!({"notification_rewrite": true})).await.unwrap();
+    report(&c, p, "running", "").await;
+    assert!(pane_agent(&c, p).await["summary"].is_null());
+}
+
+#[tokio::test]
+async fn a_slow_rewrite_pushes_the_cleaned_text_then_fills_the_model() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[("CLOTHOD_SUMMARY_WAIT_MS", "300")], |e| fake_summarizer(e, "slow", "sleep 2; echo 'Late but better.'"));
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    let t = Instant::now();
+    report(&c, p, "done", MD).await;
+    assert_eq!(pane_agent(&c, p).await["summary_pending"], true);
+    let (at, body) = relay.next();
+    let r = opened(&body);
+    assert!(at.duration_since(t) < Duration::from_millis(1500), "the push didn't wait for the rewrite: {:?}", at.duration_since(t));
+    assert_eq!(r["sm"], MD_PLAIN, "the cleaned original: {r}");
+    // The rewrite lands in the model later, in a `pane` event.
+    let deadline = Instant::now() + T;
+    loop {
+        let f = tokio::time::timeout(deadline - Instant::now(), c.recv()).await.expect("no summary").unwrap();
+        if let Frame::Json(v) = f {
+            if v["event"] == "pane" && v["data"]["id"] == p && v["data"]["agent"]["summary"] == "Late but better." {
+                assert_eq!(v["data"]["agent"]["summary_pending"], false);
+                break;
+            }
+        }
+    }
+    relay.none_for(Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn a_failed_rewrite_falls_back_to_the_cleaned_text() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[], |e| fake_summarizer(e, "broken", "echo 'Not logged in · Please run /login'; exit 1"));
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", MD).await;
+    let r = opened(&relay.next().1);
+    assert_eq!(r["sm"], MD_PLAIN, "{r}");
+    let a = wait_agent(&c, p, "pending cleared", |a| a["summary_pending"] == false).await;
+    assert_eq!(a["summary"], MD_PLAIN);
+    assert_eq!(runs(&env, "broken"), 1);
+}
+
+/// An ephemeral (test) instance never runs the user's claude, even with one on PATH and in
+/// ~/.local/bin: only a summarizer named by CLOTHOD_SUMMARIZER.
+#[tokio::test]
+async fn test_instances_never_run_a_real_claude() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut env = Env::empty();
+    let (home, bin) = (env.dir.path().join("home"), env.dir.path().join("bin"));
+    let marker = env.dir.path().join("claude-ran");
+    for d in [home.join(".local/bin"), bin.clone()] {
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("claude");
+        std::fs::write(&f, format!("#!/bin/sh\ntouch '{}'\necho hi\n", marker.display())).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let relay = FakeRelay::start();
+    env.start_with(
+        &std::env::var("CLOTHOD_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_clothod").into()),
+        &[("CLOTHOD_TEST_PUSH_FAST", "1"), ("CLOTHOD_SUMMARIZER", ""), ("HOME", home.to_str().unwrap()), ("PATH", &path)],
+    );
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", MD).await;
+    assert_eq!(pane_agent(&c, p).await["summary_pending"], false, "nothing to wait for");
+    let r = opened(&relay.next().1);
+    assert_eq!(r["sm"], MD_PLAIN);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!marker.exists(), "a claude ran");
 }

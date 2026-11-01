@@ -45,6 +45,9 @@ with no clients and no panes, or when its last client disconnects (exit).
              Linux needs lingering (`loginctl enable-linger`). Prints the status as JSON.
   ps         list every clothod process of this user (role, runtime dir, build, pid, age);
              anything not belonging to the default instance is marked extra
+  summarize  read an agent's status as JSON on stdin (kind, state, message, and optional
+             prompt, tool, tool_input, permission) and print what a notification would say:
+             the message cleaned of Markdown, and the claude (Haiku) rewrite or why there is none
   build-id [FILE]
              print the install id (<version>-<hash>) of FILE, or of this binary
   version    print the version and build id
@@ -139,6 +142,7 @@ fn run() -> Result<()> {
             println!("{}", build_id(&file.map_or_else(std::env::current_exe, Ok)?)?);
             Ok(())
         }
+        "summarize" => rt.block_on(summarize()),
         "stop" => rt.block_on(call(dir, "daemon.stop", json!({}))),
         "shutdown" => {
             let forget = flags.iter().any(|f| f == "--forget");
@@ -469,6 +473,39 @@ async fn shutdown_holder(dir: &std::path::Path) -> Result<()> {
 
 /// FNV-1a over the file: identifies a build, so two builds with one version number get
 /// separate install dirs. Not a security measure.
+/// `clothod summarize`: what clothod::summary makes of one status, for checking it by hand.
+async fn summarize() -> Result<()> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text)?;
+    let v: Value = serde_json::from_str(&text).context("stdin must be a JSON object")?;
+    let s = |k: &str| v.get(k).and_then(Value::as_str).map(String::from);
+    let input = clothod::summary::Input {
+        kind: s("kind").unwrap_or_else(|| "claude".into()),
+        state: s("state").unwrap_or_else(|| "done".into()),
+        message: s("message"),
+        prompt: s("prompt"),
+        tool: s("tool"),
+        tool_input: s("tool_input"),
+        permission: v.get("permission").and_then(Value::as_bool).unwrap_or(false),
+    };
+    let plain = input.message.as_deref().map(clothod::summary::plain);
+    let scratch = std::env::temp_dir().join(format!("clothod-summarize-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
+    let started = std::time::Instant::now();
+    let rewrite = match clothod::summary::program() {
+        None => Err("no claude found (or an ephemeral instance without CLOTHOD_SUMMARIZER)".to_string()),
+        Some(p) => clothod::summary::Summarizer::new(&scratch, true).rewrite(&p, &input).await,
+    };
+    let _ = std::fs::remove_dir_all(&scratch);
+    let out = match rewrite {
+        Ok(t) => json!({"plain": plain, "rewrite": t, "ms": started.elapsed().as_millis() as u64}),
+        Err(e) => json!({"plain": plain, "error": e, "ms": started.elapsed().as_millis() as u64}),
+    };
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 fn build_id(path: &std::path::Path) -> Result<String> {
     Ok(platform::build_id(path)?)
 }
