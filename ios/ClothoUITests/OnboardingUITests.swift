@@ -83,13 +83,18 @@ final class OnboardingUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-UITesting", "-CleanState", "NO"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
+        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: launch))
         XCTAssertTrue(app.staticTexts["Guide test"].waitForExistence(timeout: launch), "the machine wasn't saved")
         XCTAssertFalse(app.staticTexts["Welcome to Clotho"].exists)
-        app.buttons["Welcome Guide"].tap()
+        // The guide again, from Settings.
+        app.showTab("Settings")
+        let guide = app.buttons["Welcome Guide"]
+        for _ in 0..<6 where !(guide.exists && guide.isHittable) { app.swipeUp() }
+        guide.tap()
         XCTAssertTrue(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: launch))
         app.buttons["onboardingSkip"].tap()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: launch))
+        app.showTab("Machines")
 
         // Remove the test clothod from this Mac (cleanup-dev.sh would too).
         // On Home, the machine's header menu has Disconnect.
@@ -105,11 +110,11 @@ final class OnboardingUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(guideShows(app), "no guide on a clean start")
         app.buttons["onboardingSkip"].tap()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
+        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: launch))
         app.terminate()
         app.launchArguments = ["-UITesting", "-CleanState", "NO"]
         app.launch()
-        XCTAssertTrue(app.navigationBars["Clotho"].waitForExistence(timeout: launch))
+        XCTAssertTrue(app.navigationBars["Machines"].waitForExistence(timeout: launch))
         // The guide would show as the app comes up; give it the moment it would take.
         XCTAssertFalse(app.staticTexts["Welcome to Clotho"].waitForExistence(timeout: 3), "the skipped guide came back")
     }

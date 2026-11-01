@@ -1,15 +1,18 @@
 import XCTest
 
 /// Light and dark against the Mac's clothod: the terminal takes the palette of the app's appearance (the
-/// System/Light/Dark choice in the Machines toolbar), checked by sampling the pane's background in screenshots.
+/// System/Light/Dark choice in Settings), checked by sampling the pane's background in screenshots.
 final class AppearanceUITests: XCTestCase {
     func testTerminalFollowsTheChosenAppearance() throws {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting"]
         app.launch()
-        // Through Home's Display menu, as the user would (a launch argument would pin the value for the whole run).
-        app.buttons["Display"].tap()
-        app.buttons["Light"].tap()
+        // Through Settings, as the user would (a launch argument would pin the value for the whole run).
+        app.showTab("Settings")
+        app.buttons["appearancePicker"].tap()
+        app.buttons["Light"].tapWhenSettled()
+        attach(app, "settings light")
+        app.showTab("Machines")
         attach(app, "machines light")
         app.staticTexts["Local Mac (dev)"].firstMatch.tap()
         let newWorkspace = app.buttons["New Workspace"].firstMatch

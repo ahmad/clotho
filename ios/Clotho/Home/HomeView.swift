@@ -1,8 +1,7 @@
 import ClothoKit
 import SwiftUI
 
-/// The iPhone's one screen (docs/ios-redesign.md, phase 2): agents that need the user pinned on top, then every
-/// machine's workspaces. Each machine's header says whether it's live ("connected", "last seen 3m ago",
+/// The iPhone's Machines tab: every machine's workspaces (agents have their own tab, PhoneTabs). Each machine's header says whether it's live ("connected", "last seen 3m ago",
 /// "connecting…") and holds its New Workspace button and a menu with its files, settings and the rest. A
 /// workspace row opens its last tab. Machines show their saved model at once (phase 1), dimmed until live.
 struct HomeView: View {
@@ -21,11 +20,8 @@ struct HomeView: View {
     #endif
 
     var body: some View {
-        NavigationStack(path: $navigator.path) {
+        NavigationStack(path: $navigator.machinesPath) {
             List {
-                AgentsSection(rows: connections.agentRows, connections: connections) { row in
-                    navigator.open(.pane(row.machineID, row.tab, row.pane))
-                }
                 ForEach(machines.all) { machine in
                     HomeMachineSection(machine: machine, connection: connections.connection(for: machine), editing: $editing, sheet: $sheet)
                 }
@@ -44,30 +40,14 @@ struct HomeView: View {
                     }
                 }
             }
-            .navigationTitle("Clotho")
+            .navigationTitle("Machines")
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { navigator.quickOpen = true } label: { Label("Quick Open", systemImage: "magnifyingglass") }
                     Button { navigator.guide = .addMachine } label: { Label("Add machine", systemImage: "plus") }
                 }
-                ToolbarItemGroup(placement: .topBarLeading) {
-                    Button { navigator.guide = .firstRun } label: { Label("Welcome Guide", systemImage: "questionmark.circle") }
-                    AppearanceMenu()
-                }
             }
-            .navigationDestination(for: Route.self) { route in
-                switch route {
-                case .machine(let id):
-                    // Kept for old links (a notification for a machine): Home shows every machine already.
-                    if let machine = machines.machine(id) {
-                        MachineView(connection: connections.connection(for: machine))
-                    }
-                case .pane(let id, let tab, let pane):
-                    if let machine = machines.machine(id) {
-                        PaneScreen(connection: connections.connection(for: machine), initialTab: tab, initialPane: pane)
-                    }
-                }
-            }
+            .navigationDestination(for: Route.self) { RouteDestination(route: $0) }
             .sheet(item: $editing) { machine in
                 MachineEditor(machine: machine) { machines.save($0) }
             }
@@ -179,6 +159,7 @@ private struct HomeMachineSection: View {
                 Button { sheet = .files(machine.id) } label: { Label("Files", systemImage: "folder") }
                     .disabled(!store.isConnected)
                 Button { sheet = .settings(machine.id) } label: { Label("Settings", systemImage: "gearshape") }
+                    .accessibilityIdentifier("machineSettings")
                 if machine.kind == .ssh {
                     Divider()
                     Button { editing = machine } label: { Label("Edit", systemImage: "pencil") }

@@ -13,7 +13,7 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(newWorkspace.waitForExistence(timeout: 10))
         wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: newWorkspace)], timeout: 15)
         app.buttons["Local Mac (dev) menu"].tap()
-        let settings = app.buttons["Settings"]
+        let settings = app.buttons["machineSettings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
         let picker = app.buttons["scrollbackPicker"]

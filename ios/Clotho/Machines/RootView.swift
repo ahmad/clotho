@@ -1,13 +1,59 @@
 import ClothoKit
 import SwiftUI
 
-/// What one window shows. On a narrow width (iPhone, Slide Over, a narrow Split View) it's a stack of screens;
-/// on a regular width (iPad full screen or a wide split) a sidebar of machines, workspaces and agents next to
-/// the selected machine or tab. Both layouts read the same state, so resizing the window keeps the place.
+/// The iPhone's tabs: the agents (and their panes), the machines (and theirs), and the app's settings.
+enum AppTab: String, Hashable, CaseIterable {
+    case agents, machines, settings
+}
+
+/// What one window shows. On a narrow width (iPhone, Slide Over, a narrow Split View) three tabs, Agents,
+/// Machines and Settings, the first two each a stack of screens; on a regular width (iPad full screen or a wide
+/// split) a sidebar of machines, workspaces and agents next to the selected machine or tab. Both layouts read
+/// the same state, so resizing the window keeps the place.
 @MainActor
 final class Navigator: ObservableObject {
-    /// The stack on narrow widths.
-    @Published var path: [Route] = []
+    /// The tab shown on narrow widths, and each list tab's own stack: a pane opened from Agents goes back to Agents.
+    @Published var tab: AppTab = .machines {
+        didSet { if tab != oldValue { tabChosen = true; UserDefaults.standard.set(tab.rawValue, forKey: Self.lastTabKey) } }
+    }
+    @Published var agentsPath: [Route] = []
+    @Published var machinesPath: [Route] = []
+    /// The stack of the tab on screen (Machines' while Settings shows).
+    var path: [Route] {
+        get { tab == .agents ? agentsPath : machinesPath }
+        set {
+            if tab == .settings, !newValue.isEmpty { tab = .machines }
+            if tab == .agents { agentsPath = newValue } else { machinesPath = newValue }
+        }
+    }
+    static let lastTabKey = "LastTab"
+    private var launchDone = false
+
+    /// The agents have had their moment to come in: later ones don't change the tab.
+    func launchSettled() { launchDone = true }
+    /// Set once the user (or the app) picked a tab, so the launch's choice doesn't override it.
+    private(set) var tabChosen = false
+
+    /// The tab a launch starts on: the last one used. Agents instead when an agent needs the user (`launchTab`).
+    /// UI tests start on Machines (or `-StartTab agents`), and only `-AutoAgentsTab YES` switches at launch.
+    init() {
+        let defaults = UserDefaults.standard
+        if Self.uiTesting {
+            tab = defaults.string(forKey: "StartTab").flatMap(AppTab.init) ?? .machines
+        } else {
+            tab = defaults.string(forKey: Self.lastTabKey).flatMap(AppTab.init) ?? .machines
+        }
+    }
+
+    private static var uiTesting: Bool { ProcessInfo.processInfo.arguments.contains("-UITesting") }
+
+    /// At launch, once the machines' agents are known: Agents when any needs the user, unless a tab or a pane
+    /// was opened meanwhile.
+    func launchTab(needingYou: Int) {
+        guard !launchDone, !tabChosen, agentsPath.isEmpty, machinesPath.isEmpty, needingYou > 0 else { return }
+        if Self.uiTesting, !UserDefaults.standard.bool(forKey: "AutoAgentsTab") { return }
+        tab = .agents
+    }
     /// The sidebar's selection on regular widths.
     @Published var selection: SidebarItem?
     /// The pane to show first when a tab opens (from an agent or a notification).
@@ -52,6 +98,7 @@ final class Navigator: ObservableObject {
             if regular { selection = .machine(id) } else { path = [route] }
         case .pane(let id, let tab, let pane):
             initialPane = pane
+            // On the iPhone, onto the stack of the tab it's opened from (Machines from Settings).
             if regular { selection = .tab(id, tab) } else { path = [route] }
         }
     }
@@ -100,7 +147,7 @@ struct RootView: View {
         Group {
             if navigator.firstRun {
                 guide(.firstRun)
-            } else if sizeClass == .regular { SplitRootView() } else { HomeView() }
+            } else if sizeClass == .regular { SplitRootView() } else { PhoneTabs() }
         }
         .environmentObject(navigator)
         .onAppear { navigator.switchLayout(regular: sizeClass == .regular) }
@@ -194,18 +241,22 @@ struct SplitRootView: View {
     @EnvironmentObject private var navigator: Navigator
     @State private var editing: Machine?
     @State private var columns = NavigationSplitViewVisibility.all
+    @State private var replying: AgentRow?
+    @State private var history: AgentRow?
+    @State private var showingSettings = false
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
             List(selection: $navigator.selection) {
-                AgentsSection(rows: connections.agentRows, connections: connections) { row in
+                AgentsSection(rows: connections.agentRows, connections: connections, open: { row in
                     navigator.open(.pane(row.machineID, row.tab, row.pane))
-                }
+                }, replying: $replying, history: $history)
                 ForEach(machines.all) { machine in
                     SidebarMachine(machine: machine, connection: connections.connection(for: machine), editing: $editing)
                 }
             }
             .listStyle(.sidebar)
+            .agentSheets(replying: $replying, history: $history, connections: connections)
             .refreshable { await connections.refresh(machines.all) }
             .navigationTitle("Clotho")
             .toolbar {
@@ -216,6 +267,7 @@ struct SplitRootView: View {
                 // One menu, so the sidebar's title keeps its room.
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
+                        Button { showingSettings = true } label: { Label("Settings", systemImage: "gearshape") }
                         Button { navigator.guide = .firstRun } label: { Label("Welcome Guide", systemImage: "questionmark.circle") }
                         AppearancePicker()
                         KeepPreviewsToggle()
@@ -233,6 +285,12 @@ struct SplitRootView: View {
         }
         .sheet(item: $editing) { machine in
             MachineEditor(machine: machine) { machines.save($0) }
+        }
+        .sheet(isPresented: $showingSettings) {
+            NavigationStack {
+                SettingsView()
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingSettings = false } } }
+            }
         }
         .background {
             Button("Toggle Sidebar") {

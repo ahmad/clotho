@@ -16,3 +16,12 @@ extension XCUIElement {
         tap()
     }
 }
+
+extension XCUIApplication {
+    /// Shows one of the iPhone's tabs (Agents, Machines, Settings).
+    func showTab(_ name: String) {
+        let tab = tabBars.buttons[name]
+        XCTAssertTrue(tab.waitForExistence(timeout: 10), "no \(name) tab")
+        tab.tap()
+    }
+}

@@ -2,70 +2,58 @@ import ClothoKit
 import SwiftUI
 import UIKit
 
-/// The top of the home screen: agents on every connected machine that need the user, each with Resolve,
-/// then a folded "Quiet" group with the rest (running, idle and resolved ones).
+/// The agents on every connected machine: those that need the user first ("Needs you"), then the rest (running,
+/// idle, resolved). Rows are compact; Resolve, Mute, Reply and History are swipe actions and the long-press menu.
+/// The Agents tab on the iPhone, and the top of the iPad's sidebar.
 struct AgentsSection: View {
     let rows: [AgentRow]
     let connections: Connections
     let open: (AgentRow) -> Void
-    @State private var replying: AgentRow?
-    @State private var history: AgentRow?
-    @SceneStorage("AgentsQuietExpanded") private var quietExpanded = false
+    /// The quick reply and history sheets, presented by the list that holds the section (`agentSheets`).
+    @Binding var replying: AgentRow?
+    @Binding var history: AgentRow?
 
     var body: some View {
         if !rows.isEmpty {
             let parts = AgentRow.split(rows)
-            Section {
-                ForEach(parts.attention) { row in
-                    attentionRow(row)
-                }
-                .sheet(item: $history) { row in
-                    if let connection = connections.existing(row.machineID) {
-                        AgentHistoryView(connection: connection, pane: row.pane)
+            if !parts.attention.isEmpty {
+                Section {
+                    ForEach(parts.attention) { row in
+                        attentionRow(row)
                     }
+                } header: {
+                    Text("Needs you")
                 }
-                .sheet(item: $replying) { row in
-                    if let connection = connections.existing(row.machineID) {
-                        QuickReplySheet(row: row, connection: connection)
+            }
+            if !parts.quiet.isEmpty {
+                Section {
+                    ForEach(parts.quiet) { row in
+                        Button { open(row) } label: { AgentRowView(row: row) }
+                            .tint(.primary)
+                            .accessibilityIdentifier("quietAgent")
+                            .listRowInsets(Self.insets)
+                            .swipeActions(edge: .trailing) { muteButton(row) }
+                            .contextMenu { muteButton(row); historyButton(row) }
                     }
+                } header: {
+                    Text("Quiet")
                 }
-                if !parts.quiet.isEmpty {
-                    DisclosureGroup(isExpanded: $quietExpanded) {
-                        ForEach(parts.quiet) { row in
-                            Button { open(row) } label: { AgentRowView(row: row) }
-                                .tint(.primary)
-                                .swipeActions(edge: .trailing) { muteButton(row) }
-                                .contextMenu { muteButton(row); historyButton(row) }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text("Quiet").foregroundStyle(.secondary)
-                            Text("\(parts.quiet.count)").foregroundStyle(.tertiary).monospacedDigit()
-                        }
-                        .font(.subheadline)
-                    }
-                    .accessibilityIdentifier("quietAgents")
-                }
-            } header: {
-                Text("Agents")
             }
         }
     }
 
+    /// Tight rows, so many fit on screen.
+    static let insets = EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 14)
+
     private func attentionRow(_ row: AgentRow) -> some View {
         let connection = connections.existing(row.machineID)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Button { open(row) } label: { AgentRowView(row: row) }
-                    .buttonStyle(.plain)
-                Button { resolve(row) } label: {
-                    Image(systemName: "checkmark.circle").font(.title3)
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Resolve")
-            }
+        return VStack(alignment: .leading, spacing: 6) {
+            Button { open(row) } label: { AgentRowView(row: row) }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("needsYouAgent")
             if let connection { PermissionButtons(row: row, connection: connection) }
         }
+        .listRowInsets(Self.insets)
         .swipeActions(edge: .trailing) {
             Button { resolve(row) } label: { Label("Resolve", systemImage: "checkmark") }
                 .tint(.green)
@@ -124,48 +112,92 @@ struct AgentsSection: View {
     }
 }
 
+/// One agent, in four short lines:
+///
+///     Platform › api-server                       4m
+///     Ran the tests; two failures in push.rs. Wants to
+///     know whether to fix them now.
+///     devbox · Claude · Needs you
+///
+/// Where it is (workspace › tab), what it said (its summary, else its message as plain text; a permission ask
+/// reads "Allow Bash: npm test?"), and in small letters the machine, the agent and its status, tinted.
 struct AgentRowView: View {
     let row: AgentRow
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: row.info.state.symbol)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(row.info.state.color)
-                .frame(width: 24)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(row.info.kind.capitalized).font(.body.weight(.medium))
-                    Text(row.info.state.label)
-                        .font(.caption.weight(.semibold))
-                        // A waiting agent that hasn't asked for anything is shown quietly.
-                        .foregroundStyle(row.info.state == .waiting && !row.wantsAttention ? .secondary : row.info.state.color)
-                    if row.wantsAttention {
-                        Circle().fill(Color.accentColor).frame(width: 7, height: 7).accessibilityLabel("Needs attention")
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(row.workspace) › \(row.title)")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                if let since = row.info.sinceDate {
+                    // Compact, as on the Mac ("1m", "2h"), updated each minute.
+                    TimelineView(.everyMinute) { context in
+                        Text(AgentRowView.age(since, now: context.date))
                     }
-                    if row.isMuted {
-                        Image(systemName: "bell.slash").font(.caption).foregroundStyle(.secondary).accessibilityLabel("Muted")
-                    }
-                    Spacer()
-                    if let since = row.info.sinceDate {
-                        // Compact, as on the Mac ("1m", "2h"), updated each minute.
-                        TimelineView(.everyMinute) { context in
-                            Text(AgentRowView.age(since, now: context.date))
-                        }
-                        .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
-                    }
+                    .font(.caption2).foregroundStyle(.tertiary).monospacedDigit()
                 }
-                // The permission ask, else the summary, else the message as plain text (never raw Markdown).
-                if let message = row.info.headline, !message.isEmpty {
-                    Text(message).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+            }
+            if let summary = row.summary {
+                Text(summary).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+            }
+            HStack(spacing: 4) {
+                Text("\(row.machineName) · \(row.info.shortKindName) ·").foregroundStyle(.tertiary)
+                if row.info.state == .running || row.info.state == .starting {
+                    Circle().fill(Color.blue.opacity(0.8)).frame(width: 5, height: 5)
                 }
-                Text("\(row.machineName) · \(row.workspace) › \(row.title)")
-                    .font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                Text(row.status).foregroundStyle(row.statusColor).fontWeight(.medium)
+                if row.isMuted {
+                    Image(systemName: "bell.slash").foregroundStyle(.tertiary).accessibilityLabel("Muted")
+                }
+            }
+            .font(.caption)
+            .lineLimit(1)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+extension View {
+    /// An agent's quick reply and history, for the list that shows an AgentsSection.
+    func agentSheets(replying: Binding<AgentRow?>, history: Binding<AgentRow?>, connections: Connections) -> some View {
+        sheet(item: history) { row in
+            if let connection = connections.existing(row.machineID) {
+                AgentHistoryView(connection: connection, pane: row.pane)
             }
         }
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .combine)
+        .sheet(item: replying) { row in
+            if let connection = connections.existing(row.machineID) {
+                QuickReplySheet(row: row, connection: connection)
+            }
+        }
+    }
+}
+
+extension AgentRow {
+    /// The row's two lines: the pending permission request's question ("Allow Bash: npm test?"), else the
+    /// permission ask, the summary or the plain message (`AgentInfo.headline`).
+    var summary: String? {
+        if wantsAttention, let request = info.pendingRequests.first { return request.question }
+        return info.headline.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// "Needs you" for a waiting agent that asked for the user; else its state ("Running", "Done", "Error").
+    var status: String {
+        if info.state == .waiting && wantsAttention { return "Needs you" }
+        return info.state.label
+    }
+
+    var statusColor: Color {
+        switch info.state {
+        case .waiting: return wantsAttention ? .orange : .secondary
+        case .done: return .green
+        case .error: return .red
+        case .running: return .blue
+        case .starting, .unknown: return .secondary
+        }
     }
 }
 
@@ -228,33 +260,32 @@ struct PermissionButtons: View {
     var body: some View {
         if let answered = connection.answered[row.pane] {
             Label(answered == .allow ? "Allowed" : "Denied", systemImage: answered == .allow ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .font(.callout.weight(.medium))
+                .font(.subheadline.weight(.medium))
                 .foregroundStyle(answered == .allow ? .green : .red)
                 .accessibilityIdentifier("answered")
         } else if let request = row.info.pendingRequests.first, connection.canDecide, row.wantsAttention {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(request.question).font(.callout.weight(.medium)).lineLimit(3)
-                HStack(spacing: 10) {
-                    // The icons take their label's colour: white on the green Allow, red on Deny.
-                    Button { answer(request, .allow) } label: {
-                        Label("Allow", systemImage: "checkmark").foregroundStyle(.white).frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent).tint(.green)
-                    .accessibilityIdentifier("allowRequest")
-                    Button(role: .destructive) { answer(request, .deny) } label: {
-                        Label("Deny", systemImage: "xmark").foregroundStyle(.red).frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityIdentifier("denyRequest")
+            // The question itself is the row's summary line ("Allow Bash: npm test?"): only the answers here.
+            HStack(spacing: 8) {
+                Button { answer(request, .allow) } label: {
+                    Label("Allow", systemImage: "checkmark").foregroundStyle(.white).padding(.horizontal, 6)
                 }
-                .controlSize(.large)
-                .disabled(working)
+                .buttonStyle(.borderedProminent).tint(.green)
+                .accessibilityIdentifier("allowRequest")
+                Button(role: .destructive) { answer(request, .deny) } label: {
+                    Label("Deny", systemImage: "xmark").foregroundStyle(.red).padding(.horizontal, 6)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("denyRequest")
                 if row.info.pendingRequests.count > 1 {
-                    Text("\(row.info.pendingRequests.count - 1) more waiting after this one")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text("+\(row.info.pendingRequests.count - 1)")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        .accessibilityLabel("\(row.info.pendingRequests.count - 1) more waiting after this one")
                 }
             }
-            .padding(.leading, 30)
+            .font(.footnote.weight(.semibold))
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
+            .disabled(working)
         }
         if let note {
             Text(note).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("decideNote")

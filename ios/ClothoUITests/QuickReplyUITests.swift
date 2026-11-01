@@ -9,10 +9,11 @@ final class QuickReplyUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-UITesting"]
         app.launch()
-        // Home connects every machine; give the local one a moment to report its agents.
+        // Every machine connects at launch; give the local one a moment to report its agents.
         sleep(2)
+        app.showTab("Agents")
 
-        let row = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Claude' AND label CONTAINS 'Waiting'")).firstMatch
+        let row = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Claude' AND label CONTAINS 'Needs you'")).firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10), "no waiting Claude in the Agents list")
         row.press(forDuration: 1)
         let reply = app.buttons["Reply"]

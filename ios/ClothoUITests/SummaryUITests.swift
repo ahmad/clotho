@@ -19,6 +19,7 @@ final class SummaryUITests: XCTestCase {
         // The reporter stays in the foreground (the daemon follows the pane's foreground process as the agent).
         app.typeText(###"sh -c '/tmp/cki-ios-bin/clothod report waiting --agent claude --session ios-summary-test --message "## summary-test: **All** tests pass in \`push.rs\`"; sleep 120'"### + "\n")
         app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.showTab("Agents")
 
         // While the rewrite runs: the message, cleaned.
         let plain = app.buttons.matching(NSPredicate(format: "label CONTAINS 'summary-test: All tests pass in push.rs'")).firstMatch
