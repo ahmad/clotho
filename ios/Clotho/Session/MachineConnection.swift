@@ -498,6 +498,12 @@ final class Connections: ObservableObject {
         recomputeScheduled = false
         let rows = AgentRow.sorted(connections.values.flatMap(\.agentRows))
         if rows != agentRows { agentRows = rows }
+        // Pins go with their pane or agent, judged only from the daemon's own model: connected, not the saved one,
+        // and arrived (a store that just connected still holds an empty model for a moment).
+        for connection in connections.values
+        where connection.store.isConnected && !connection.store.isSaved && connection.store.state != ModelState() {
+            AgentPins.shared.prune(machine: connection.id, agentPanes: Set(connection.agentRows.map(\.pane)))
+        }
         updateWidget(rows)
         modelChanged.send()
     }

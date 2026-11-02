@@ -12,10 +12,24 @@ struct AgentsSection: View {
     /// The quick reply and history sheets, presented by the list that holds the section (`agentSheets`).
     @Binding var replying: AgentRow?
     @Binding var history: AgentRow?
+    @ObservedObject private var pins = AgentPins.shared
 
     var body: some View {
         if !rows.isEmpty {
-            let parts = AgentRow.split(rows)
+            let pinned = pins.split(rows)
+            let parts = AgentRow.split(pinned.rest)
+            if !pinned.pinned.isEmpty {
+                Section {
+                    ForEach(pinned.pinned) { row in
+                        Group {
+                            if row.wantsAttention { attentionRow(row) } else { quietRow(row) }
+                        }
+                        .listRowBackground(Color.accentColor.opacity(0.09))
+                    }
+                } header: {
+                    SectionCount(title: "Pinned", count: pinned.pinned.count)
+                }
+            }
             if !parts.attention.isEmpty {
                 Section {
                     ForEach(parts.attention) { row in
@@ -28,10 +42,7 @@ struct AgentsSection: View {
             if !parts.quiet.isEmpty {
                 Section {
                     ForEach(parts.quiet) { row in
-                        AgentRowView(row: row, open: { open(row) }, openID: "quietAgent")
-                            .listRowInsets(Self.insets)
-                            .swipeActions(edge: .trailing) { muteButton(row) }
-                            .contextMenu { muteButton(row); historyButton(row) }
+                        quietRow(row)
                     }
                 } header: {
                     SectionCount(title: "Quiet", count: parts.quiet.count)
@@ -43,10 +54,18 @@ struct AgentsSection: View {
     /// Room around each row, so the list reads easily.
     static let insets = EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20)
 
+    private func quietRow(_ row: AgentRow) -> some View {
+        AgentRowView(row: row, pinned: pins.isPinned(row), open: { open(row) }, openID: "quietAgent")
+            .listRowInsets(Self.insets)
+            .swipeActions(edge: .trailing) { muteButton(row) }
+            .swipeActions(edge: .leading) { pinButton(row) }
+            .contextMenu { pinButton(row); muteButton(row); historyButton(row) }
+    }
+
     private func attentionRow(_ row: AgentRow) -> some View {
         let connection = connections.existing(row.machineID)
         return VStack(alignment: .leading, spacing: 8) {
-            AgentRowView(row: row, open: { open(row) }, openID: "needsYouAgent")
+            AgentRowView(row: row, pinned: pins.isPinned(row), open: { open(row) }, openID: "needsYouAgent")
             if let connection {
                 PermissionButtons(row: row, connection: connection)
             }
@@ -58,6 +77,7 @@ struct AgentsSection: View {
             muteButton(row)
         }
         .swipeActions(edge: .leading) {
+            pinButton(row)
             if row.acceptsReply, let connection {
                 if connection.canReply {
                     Button { replying = row } label: { Label("Reply", systemImage: "arrowshape.turn.up.left") }
@@ -70,6 +90,7 @@ struct AgentsSection: View {
         }
         .contextMenu {
             Button { resolve(row) } label: { Label("Resolve", systemImage: "checkmark") }
+            pinButton(row)
             muteButton(row)
             historyButton(row)
             if row.acceptsReply, let connection {
@@ -80,6 +101,15 @@ struct AgentsSection: View {
                 }
             }
         }
+    }
+
+    /// Pin keeps the agent in its own section at the top (on this phone only); Unpin puts it back.
+    private func pinButton(_ row: AgentRow) -> some View {
+        let pinned = pins.isPinned(row)
+        return Button { pins.toggle(row) } label: {
+            Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+        }
+        .tint(.orange)
     }
 
     /// What the agent did and asked, from the machine (`agent.history`).
@@ -122,6 +152,8 @@ struct AgentsSection: View {
 /// Quiet rows are dimmer, with one line of summary.
 struct AgentRowView: View {
     let row: AgentRow
+    /// Pinned on this phone (AgentPins): a pin in the caption.
+    var pinned = false
     /// Opens the agent's pane; nil shows the row on its own (the quick reply sheet's header).
     var open: (() -> Void)? = nil
     var openID: String? = nil
@@ -166,6 +198,9 @@ struct AgentRowView: View {
                 if row.info.state == .error {
                     Text("· Error").foregroundStyle(.red).fontWeight(.medium)
                 }
+                if pinned {
+                    Image(systemName: "pin.fill").imageScale(.small).foregroundStyle(Color.accentColor)
+                }
                 if row.isMuted {
                     Image(systemName: "bell.slash").imageScale(.small)
                 }
@@ -183,6 +218,7 @@ struct AgentRowView: View {
         var parts = ["\(row.workspace) › \(row.title)"]
         if let summary = row.summary { parts.append(summary) }
         parts.append("\(row.machineName) · \(row.info.shortKindName) · \(row.status)")
+        if pinned { parts.append("Pinned") }
         if row.isMuted { parts.append("Muted") }
         return parts.joined(separator: ", ")
     }

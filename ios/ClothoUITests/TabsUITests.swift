@@ -53,6 +53,16 @@ final class TabsUITests: XCTestCase {
         reveal(muted, in: app)
         XCTAssertTrue(muted.exists, "no muted row")
         for _ in 0..<8 where !asking.isHittable { app.swipeDown() }
+        // Two pinned agents: the permission ask, and a running one (Pin on the leading swipe and in the menu).
+        asking.press(forDuration: 1.2)
+        app.buttons["Pin"].tapWhenSettled()
+        let runningRow = app.buttons.matching(NSPredicate(format: "identifier == 'quietAgent' AND label CONTAINS 'Running'")).firstMatch
+        reveal(runningRow, in: app)
+        runningRow.swipeRight()
+        app.buttons["Pin"].tapWhenSettled()
+        for _ in 0..<10 where !app.staticTexts["Pinned"].exists { app.swipeDown() }
+        XCTAssertTrue(app.staticTexts["Pinned"].waitForExistence(timeout: 5), "no Pinned section")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'quietAgent'} AND label CONTAINS 'Pinned'")).count, 2)
         sleep(1)
         attach(app, "agents light")
 
