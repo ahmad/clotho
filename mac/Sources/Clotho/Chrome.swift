@@ -57,6 +57,11 @@ class ChromeItem: NSView, HoverRefreshing, NSDraggingSource {
     var onClose: (() -> Void)?
     var contextMenu: (() -> NSMenu?)?
     var isSelected = false { didSet { updateColors() } }
+    /// A highlight colour (a workspace's, WorkspaceHighlight.swift): a faint tint under the row. Selected,
+    /// the row keeps its colour, a little stronger, and shows the selection by its bar and bold title.
+    var highlight: NSColor? {
+        didSet { if highlight != oldValue { updateColors() } }
+    }
     /// A keyboard cursor ring (the sidebar has keyboard focus and this is its current row).
     var showsCursor = false {
         didSet {
@@ -312,8 +317,12 @@ class ChromeItem: NSView, HoverRefreshing, NSDraggingSource {
         // The accent while the window is key; grey (still visible) while it isn't.
         let active = window?.isKeyWindow ?? true
         let tint = active ? Theme.accent : Theme.dimText
-        let fill: NSColor = isSelected ? tint.withAlphaComponent(active ? Self.tintAlpha : 0.16)
-            : hovering ? hoverColor : .clear
+        let dark = effectiveAppearance.isDark
+        let highlighted = highlight.map {
+            $0.withAlphaComponent(WorkspaceHighlights.alpha(dark: dark, hovering: hovering) + (isSelected ? WorkspaceHighlights.selectedBoost : 0))
+        }
+        let fill: NSColor = highlighted ?? (isSelected ? tint.withAlphaComponent(active ? Self.tintAlpha : 0.16)
+            : hovering ? hoverColor : .clear)
         layer?.backgroundColor = fill.cgColor
         marker.isHidden = !isSelected
         marker.layer?.backgroundColor = tint.cgColor
@@ -1143,6 +1152,7 @@ final class SidebarView: NSView {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 guard let row = rows[rowKey]?.row else { continue }
                 row.isSelected = workspace.id == group.selected
+                row.highlight = WorkspaceHighlights.get(group.key, workspace.id)?.color
                 if row.isSelected { selectedItem = .workspace(group.key, workspace.id) }
             }
         }
@@ -1175,6 +1185,7 @@ final class SidebarView: NSView {
         row.onDoubleClick = { [weak self] in self?.beginRename(key, workspace.id) }
         row.onClose = { [weak self] in self?.onClose?(key, workspace.id) }
         row.contextMenu = { [weak self] in self?.workspaceMenu(key, workspace.id) }
+        row.highlight = WorkspaceHighlights.get(key, workspace.id)?.color
         rows[rowKey] = (row, name)
         row.isSelected = workspace.id == group.selected
         row.setBadge(group.badges[workspace.id])
@@ -1193,6 +1204,10 @@ final class SidebarView: NSView {
         let menu = NSMenu()
         menu.addItem(ClosureMenuItem(title: "New Tab") { [weak self] in self?.onNewTab?(machine, id) })
         menu.addItem(ClosureMenuItem(title: "Rename Workspace") { [weak self] in self?.beginRename(machine, id) })
+        menu.addItem(NSMenu.highlightItem(current: WorkspaceHighlights.get(machine, id)) { [weak self] color in
+            WorkspaceHighlights.set(color, machine, id)
+            self?.rows[Self.rowKey(machine, id)]?.row.highlight = color?.color
+        })
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Close Workspace…") { [weak self] in self?.onClose?(machine, id) })
         return menu

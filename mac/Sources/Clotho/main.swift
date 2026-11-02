@@ -555,6 +555,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NotificationCenter.default.addObserver(forName: Machine.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.sync() }
         }
+        NotificationCenter.default.addObserver(forName: WorkspaceHighlights.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sync() }
+        }
         container.addSubview(sidebar)
         sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: savedSidebarWidth)
         sidebarLeading = sidebar.leadingAnchor.constraint(equalTo: container.leadingAnchor,
@@ -879,6 +882,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
                 // "closetabs" closes every tab of the focused workspace without asking (an empty workspace);
                 // "panehover:on" / "panehover:off" as if the pointer came to the focused pane's corner or left.
+                // "newworkspace:name" makes a workspace on the focused machine; "highlight:name:green" (or
+                // ":none") sets that workspace's highlight, as the sidebar's menu does.
+                if step.hasPrefix("newworkspace:") {
+                    let name = String(step.dropFirst(13))
+                    return run { _ = try await $0.createWorkspace(name: name, spawn: self.spawnOptions()) }
+                }
+                if step.hasPrefix("highlight:") {
+                    let parts = step.dropFirst(10).split(separator: ":").map(String.init)
+                    guard parts.count == 2, let workspace = store.state.workspaces.first(where: { $0.name == parts[0] }) else {
+                        return log("TypeText: no workspace for \(step)")
+                    }
+                    return WorkspaceHighlights.set(WorkspaceHighlight(rawValue: parts[1]), focusedMachine, workspace.id)
+                }
                 if step == "closetabs", let workspace = store.focusedWorkspace {
                     let backend = backend
                     Task { for tab in workspace.tabs { try? await backend.closeTab(tab.id) } }

@@ -91,7 +91,7 @@ final class SidebarWorkspacesTests: XCTestCase {
         update()
         let docs = try XCTUnwrap(rows.first { $0.label.stringValue == "Docs" } as? WorkspaceRow)
         let menu = try XCTUnwrap(docs.contextMenu?())
-        XCTAssertEqual(menu.items.filter { !$0.isSeparatorItem }.map(\.title), ["New Tab", "Rename Workspace", "Close Workspace…"])
+        XCTAssertEqual(menu.items.filter { !$0.isSeparatorItem }.map(\.title), ["New Tab", "Rename Workspace", "Highlight", "Close Workspace…"])
         let close = try XCTUnwrap(menu.items.first { $0.title == "Close Workspace…" })
         _ = close.target?.perform(close.action, with: close)
         XCTAssertEqual(closed.map(\.1), [2])

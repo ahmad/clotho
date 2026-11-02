@@ -63,6 +63,7 @@ extension AppDelegate {
 
         settingsWindow?.refreshIfNeeded()
         followFocusedPaneInFileSidebar()
+        pruneWorkspaceHighlights()
         // An open command bar picks up the change once, after this pass.
         quickOpen?.setNeedsReload()
         let agents = agentEntries()

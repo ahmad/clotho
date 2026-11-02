@@ -912,6 +912,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
                                        showPath: shown.row == nil || shown.row?.section == .needsYou || shown.entry.item.kind == .machine) { [weak self] in
                 self?.pick(number)
             }
+            // A highlighted workspace keeps its tint here too, under the selection's.
+            if index != selected, case let .workspace(machine, id)? = node, let highlight = WorkspaceHighlights.get(machine, id) {
+                rowView.withAppearance {
+                    let alpha = WorkspaceHighlights.alpha(dark: rowView.effectiveAppearance.isDark, hovering: false)
+                    rowView.layer?.backgroundColor = highlight.color.withAlphaComponent(alpha).cgColor
+                }
+            }
             // Dimmed rows aren't targets while picking (machines stay expandable).
             if dimmed, case .workspace? = node { rowView.alphaValue = 0.4 } else if dimmed { rowView.alphaValue = 0.6 }
             list.addArrangedSubview(rowView)
