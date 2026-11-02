@@ -1,4 +1,4 @@
-# Status and handoff (2026-10-30, after Mac 1.0.16, clothod 0.1.29, iOS 202611011351)
+# Status and handoff (2026-10-30, after Mac 1.0.17, clothod 0.1.29, iOS 202611011351)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
@@ -32,7 +32,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
 - **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
   (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.16, build 202611011805 (4d595d0): the right file sidebar (⌥⌘B), following the focused pane; double-click opens a remote file in the default Mac app and saves sync back (fs.write with expect_mtime_ns; conflict sheet). Before: 1.0.15, build 202611010114 (ce2ddeb): plain-text notifications, Haiku summaries, Settings › Machines › "Summarize agent messages". Before: 1.0.14, build 202610302256 (8f201c2, clothod 0.1.28): panes follow focus (pane.focus), the pane × stays in the host's corner, word-prefix ⌘P commands. Before: 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on imac):
+- **The Mac app is public:** Clotho 1.0.17, build 202611021923 (7cffa61): workspace highlights from the sidebar's right-click menu (local to the Mac). Before: 1.0.16, build 202611011805 (4d595d0): the right file sidebar (⌥⌘B), following the focused pane; double-click opens a remote file in the default Mac app and saves sync back (fs.write with expect_mtime_ns; conflict sheet). Before: 1.0.15, build 202611010114 (ce2ddeb): plain-text notifications, Haiku summaries, Settings › Machines › "Summarize agent messages". Before: 1.0.14, build 202610302256 (8f201c2, clothod 0.1.28): panes follow focus (pane.focus), the pane × stays in the host's corner, word-prefix ⌘P commands. Before: 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on imac):
   ⌘P ">" commands, ⌘↩ open beside, Move Tab picker, title-row sidebar toggle, "New Tab (⌘T)" buttons,
   Agents panel switch, sidebar slides instead of squashing (crash fix). 1.0.12 ⌘P tree; 1.0.11 one
   Settings window (General, Machines); 1.0.10 Toggle Sidebar on macOS 26. 1.0.9 machine
