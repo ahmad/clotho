@@ -48,7 +48,12 @@ final class PaneActionsUITests: XCTestCase {
 
         actions.tap()
         // The open menu's item; the machine screen behind has a "New Tab" row too.
-        app.buttons.matching(identifier: "New Tab").allElementsBoundByIndex.last { $0.isHittable }?.tap()
+        // Settled first: since iOS 27 a tap on an item still animating in is lost (MenuTaps).
+        let newTab = app.buttons.matching(identifier: "New Tab")
+        _ = newTab.firstMatch.waitForExistence(timeout: 5)
+        sleep(1)
+        newTab.allElementsBoundByIndex.last { $0.isHittable }?.tapWhenSettled()
+        XCTAssertTrue(actions.waitForExistence(timeout: 10), "no pane after New Tab")
         sleep(2)
         attach(app, "new tab")
         actions.tap()
