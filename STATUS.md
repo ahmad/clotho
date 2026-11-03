@@ -1,11 +1,13 @@
-# Status and handoff (2026-10-30, after Mac 1.0.17, clothod 0.1.29, iOS 202611022024)
+# Status and handoff (2026-10-30, after Mac 1.0.17, clothod 0.1.30, iOS 202611022024)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The orchestrator keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.29** runs on devbox, imac and macbook, upgraded in place (holders 1799611, 5702, 9573 kept).
+- **clothod 0.1.30** runs on devbox, imac and macbook, upgraded in place (holders 1799611, 49964 (imac, since its reboot), 9573 kept).
+  0.1.30: every spawn (incl. restore after a reboot) gets TERM/COLORTERM/TERM_PROGRAM(_VERSION) and a UTF-8 LANG when
+  the daemon has none (pane_env); before, restored panes ran without them (black-and-white Claude).
   0.1.29: notification text rewritten by Claude Haiku through the machine's own claude login (`agent.summary`,
   `summary_pending`, push `sm`, setting `notification_rewrite`, `clothod summarize`); Markdown is never shown raw.
   0.1.28: `pane.focus`; the client that focused a pane last sets its size, input no longer does.
