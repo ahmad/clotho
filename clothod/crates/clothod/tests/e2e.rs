@@ -72,6 +72,12 @@ impl Env {
     }
 
     fn start_with(&mut self, bin: &str, env: &[(&str, &str)]) {
+        self.start_without(bin, env, &[]);
+    }
+
+    /// As `start_with`, with `remove` taken out of the daemon's environment (as launchd or
+    /// systemd start it at login, without a terminal's variables).
+    fn start_without(&mut self, bin: &str, env: &[(&str, &str)], remove: &[&str]) {
         let log = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.path().join("serve.log")).unwrap();
         // CLOTHOD_BIN lets cross-built test binaries run on another machine.
         let mut cmd = Command::new(bin);
@@ -84,6 +90,9 @@ impl Env {
         cmd.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude-config"));
         for (k, v) in env {
             cmd.env(k, v);
+        }
+        for k in remove {
+            cmd.env_remove(k);
         }
         let child = cmd
             .stdin(Stdio::null())
@@ -4248,6 +4257,8 @@ fn hooks_from_an_older_build_are_outdated_and_reinstall_replaces_them() {
 struct RestoreEnv {
     env: Env,
     vars: Vec<(String, String)>,
+    /// Taken out of the daemon's environment.
+    remove: Vec<&'static str>,
 }
 
 impl RestoreEnv {
@@ -4258,7 +4269,9 @@ impl RestoreEnv {
         let rec = env.dir.path().join("agents.rec");
         for name in ["claude", "codex"] {
             let f = stubs.join(name);
-            std::fs::write(&f, format!("#!/bin/sh\necho \"{name} $* in $PWD\" >> '{}'\n", rec.display())).unwrap();
+            // Each run also leaves its environment in env-<name>.txt.
+            let envf = env.dir.path().join(format!("env-{name}.txt"));
+            std::fs::write(&f, format!("#!/bin/sh\nenv | sort > '{}'\necho \"{name} $* in $PWD\" >> '{}'\n", envf.display(), rec.display())).unwrap();
             std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         }
         let path = format!("{}:{}", stubs.display(), std::env::var("PATH").unwrap_or_default());
@@ -4266,14 +4279,14 @@ impl RestoreEnv {
             ("CLOTHOD_LAYOUT_FILE".to_string(), env.dir.path().join("data/layout.json").display().to_string()),
             ("PATH".to_string(), path),
         ];
-        let mut r = RestoreEnv { env, vars };
+        let mut r = RestoreEnv { env, vars, remove: Vec::new() };
         r.start();
         r
     }
 
     fn start(&mut self) {
         let vars: Vec<(&str, &str)> = self.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        self.env.start_with(&test_bin(), &vars);
+        self.env.start_without(&test_bin(), &vars, &self.remove);
     }
 
     fn layout(&self) -> Option<Value> {
@@ -5473,4 +5486,67 @@ async fn test_instances_never_run_a_real_claude() {
     assert_eq!(r["sm"], MD_PLAIN);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!marker.exists(), "a claude ran");
+}
+
+/// The variables a terminal sets, and the pane's own.
+const TERMINAL_KEYS: [&str; 7] = ["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "CLOTHOD_SOCKET", "CLOTHO_PANE"];
+
+fn env_file(path: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+async fn pane_env_of(c: &Client, p: u64, file: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let _ = std::fs::remove_file(file);
+    c.input(p, format!("env | sort > '{0}.tmp' && mv '{0}.tmp' '{0}'\r", file.display()).as_bytes());
+    let deadline = Instant::now() + T;
+    while !file.exists() {
+        assert!(Instant::now() < deadline, "pane {p} wrote no env");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    env_file(file)
+}
+
+/// Panes brought back after a restart, and the agents resumed in them, get the same terminal
+/// variables as a new tab, also when the daemon itself was started without any (launchd and
+/// systemd at login): before 0.1.30 restored panes had no TERM, COLORTERM or TERM_PROGRAM.
+#[tokio::test]
+async fn restored_panes_get_the_same_variables_as_a_new_tab() {
+    let mut r = RestoreEnv::new();
+    r.remove = vec!["TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "LANG", "LC_ALL", "LC_CTYPE"];
+    r.reboot();
+    let c = r.env.client().await;
+    let d = r.env.dir.path().to_path_buf();
+    let shell = c.request("workspace.create", with(sh(), json!({"name": "w"}))).await.unwrap()["pane"].as_u64().unwrap();
+    let agent = c.request("pane.split", with(sh(), json!({"pane": shell}))).await.unwrap()["pane"].as_u64().unwrap();
+    let new_tab = pane_env_of(&c, shell, &d.join("env-new.txt")).await;
+    // Only these keys in messages: the rest of an environment can hold secrets.
+    let shown = |e: &std::collections::BTreeMap<String, String>| -> Vec<(String, Option<String>)> { TERMINAL_KEYS.iter().map(|k| (k.to_string(), e.get(*k).cloned())).collect() };
+    for (k, want) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "clotho"), ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"))] {
+        assert_eq!(new_tab.get(k).map(String::as_str), Some(want), "{k} in a new tab: {:?}", shown(&new_tab));
+    }
+    assert!(new_tab.get("LANG").is_some_and(|l| l.ends_with("UTF-8")), "a UTF-8 locale without one from the daemon: {:?}", shown(&new_tab));
+    r.agent(&c, agent, "claude", "env-sess-1").await;
+    r.wait_layout("saved with the session", |l| l.to_string().contains("env-sess-1")).await;
+    drop(c);
+
+    r.reboot();
+    let c = r.env.client().await;
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let layout = &s["workspaces"][0]["tabs"][0]["layout"];
+    let (n_shell, n_agent) = (layout["a"]["pane"].as_u64().unwrap(), layout["b"]["pane"].as_u64().unwrap());
+    let deadline = Instant::now() + T;
+    while !r.rec().contains("claude --resume=env-sess-1") {
+        assert!(Instant::now() < deadline, "not resumed: {}\n{}", r.rec(), r.env.log());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let restored = pane_env_of(&c, n_shell, &d.join("env-restored.txt")).await;
+    let resumed = env_file(&d.join("env-claude.txt"));
+    let pick = |e: &std::collections::BTreeMap<String, String>| -> Vec<(String, Option<String>)> {
+        // Per-pane ids differ; that they are there is what counts.
+        TERMINAL_KEYS.iter().map(|k| (k.to_string(), e.get(*k).map(|v| if *k == "CLOTHO_PANE" { "<id>".into() } else { v.clone() }))).collect()
+    };
+    assert_eq!(pick(&restored), pick(&new_tab), "a restored shell");
+    assert_eq!(pick(&resumed), pick(&new_tab), "the agent resumed in a restored pane");
+    assert_ne!(restored.get("CLOTHO_PANE"), resumed.get("CLOTHO_PANE"));
+    assert_eq!(resumed.get("CLOTHO_PANE"), Some(&n_agent.to_string()));
 }

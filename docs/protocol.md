@@ -514,8 +514,15 @@ keeps for this pane, which is what a reattaching or newly started client can get
 it, the pane follows the machine's setting (see [Settings](#settings)), also when that changes
 later; with it, the pane keeps its own value. Either way a pane keeps its value across daemon
 restarts. Children get `TERM=xterm-256color`, `COLORTERM=truecolor`,
-`TERM_PROGRAM=clotho`, `CLOTHO_PANE=<id>` and `CLOTHOD_SOCKET=<daemon socket>` (see
-[Agents](#agents)).
+`TERM_PROGRAM=clotho`, `TERM_PROGRAM_VERSION=<clothod version>`, `CLOTHO_PANE=<id>` and
+`CLOTHOD_SOCKET=<daemon socket>` (see [Agents](#agents)), and, when the daemon itself has no
+`LANG`, `LC_ALL` or `LC_CTYPE`, a UTF-8 `LANG` (macOS: the user's region, as Terminal sets it, else
+`en_US.UTF-8`; Linux: `C.UTF-8`). The spawn's `env` comes after these and wins. **Every pane gets
+them, however it starts:** a new tab or split from any client, and a pane brought back after a
+restart with its agent resumed ([Restore after restart](#restore-after-restart)), also when the
+daemon was started at login by launchd or systemd with a bare environment. Before 0.1.30 restored
+panes had none of the terminal variables, so programs in them (Claude Code) ran without color;
+`TERM_PROGRAM_VERSION` and the `LANG` default are new in 0.1.30.
 
 | method | params | result |
 |---|---|---|

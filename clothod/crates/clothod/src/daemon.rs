@@ -841,11 +841,9 @@ impl SpawnOpts {
             }
             _ => return Err(err("bad_request", "command must be an array")),
         };
-        let mut env = vec![
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("COLORTERM".into(), "truecolor".into()),
-            ("TERM_PROGRAM".into(), "clotho".into()),
-        ];
+        // The client's own extras; the terminal's variables are added for every spawn
+        // (`pane_env`).
+        let mut env = Vec::new();
         if let Some(Value::Object(m)) = p.get("env") {
             for (k, v) in m {
                 if let Some(v) = v.as_str() {
@@ -867,6 +865,49 @@ impl SpawnOpts {
             },
         })
     }
+}
+
+/// What every pane's process gets on top of the holder's environment, whichever way it was
+/// started (a client's new tab or split, a restore after a restart, an agent resumed there):
+/// what a terminal sets. The daemon may have been started by launchd or systemd at login with a
+/// bare environment, so nothing here may come from it alone. A spawn's own `env` goes after,
+/// and wins.
+fn pane_env(extra: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("COLORTERM".into(), "truecolor".into()),
+        ("TERM_PROGRAM".into(), "clotho".into()),
+        ("TERM_PROGRAM_VERSION".into(), env!("CARGO_PKG_VERSION").into()),
+    ];
+    // A locale, as Terminal and other terminals set one: the daemon's own if it has one, else
+    // a UTF-8 one (without it, programs fall back to ASCII).
+    let has = |k: &str| std::env::var(k).is_ok_and(|v| !v.is_empty());
+    if !["LANG", "LC_ALL", "LC_CTYPE"].iter().any(|k| has(k)) {
+        env.push(("LANG".into(), default_lang().to_string()));
+    }
+    env.extend(extra);
+    env
+}
+
+/// The UTF-8 locale for panes when the daemon has none: on macOS the user's region (as Terminal
+/// does), else en_US.UTF-8; on Linux C.UTF-8 (in glibc and musl).
+fn default_lang() -> &'static str {
+    static LANG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LANG.get_or_init(|| {
+        if cfg!(target_os = "macos") {
+            let region = std::process::Command::new("/usr/bin/defaults")
+                .args(["read", "-g", "AppleLocale"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().split('@').next().unwrap_or_default().to_string())
+                .map(|r| format!("{r}.UTF-8"))
+                .filter(|l| Path::new("/usr/share/locale").join(l).is_dir());
+            region.unwrap_or_else(|| "en_US.UTF-8".into())
+        } else {
+            "C.UTF-8".into()
+        }
+    })
 }
 
 fn param_u64(p: &Value, key: &str) -> std::result::Result<u64, RpcError> {
@@ -3244,7 +3285,7 @@ impl Daemon {
             id,
             command: opts.command,
             cwd: opts.cwd,
-            env: opts.env,
+            env: pane_env(opts.env),
             cols: opts.cols,
             rows: opts.rows,
         });
