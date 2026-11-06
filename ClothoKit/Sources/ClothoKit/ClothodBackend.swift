@@ -286,7 +286,7 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     private func reconnectLoop(failures startFailures: Int = 0) async {
         let policy = configuration.retry ?? RetryPolicy(limit: nil, firstDelay: 0.1, maxDelay: configuration.transport.maxReconnectDelay)
         var failures = startFailures
-        if failures > 0 { await waitBeforeRetry(after: failures, policy: policy, reason: lastFailure) }
+        if failures > 0 { _ = await waitBeforeRetry(after: failures, policy: policy, reason: lastFailure) }
         while !locked({ stopped }) {
             do {
                 try await connect()
