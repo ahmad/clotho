@@ -29,6 +29,8 @@ targets:
       path: ClothoWidget/Info.plist
       properties:
         CFBundleDisplayName: Clotho
+        # The Keychain group's prefix (PushKey.accessGroup).
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:

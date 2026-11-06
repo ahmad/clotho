@@ -10,7 +10,7 @@ final class ClothoTests: XCTestCase {
     }
 
     func testMachineRoundTrips() throws {
-        let machine = Machine(name: "devbox", host: "devbox", user: "ahmad", devDirs: true)
+        let machine = Machine(name: "devbox", host: "devbox", user: "user", devDirs: true)
         let data = try JSONEncoder.iso.encode([machine])
         let decoded = try JSONDecoder.iso.decode([Machine].self, from: data)
         XCTAssertEqual(decoded.first?.endpoint, machine.endpoint)

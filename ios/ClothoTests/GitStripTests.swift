@@ -7,15 +7,15 @@ import XCTest
 /// each pull request state for review.
 @MainActor
 final class GitStripTests: XCTestCase {
-    private func git(_ state: PaneGit.PullRequest.State?, url: String? = "https://github.com/ahmad/clotho/pull/42") -> PaneGit {
-        PaneGit(repo: "clotho", root: "/Users/ahmad/Projects/clotho-ios", remote: "ahmad/clotho", branch: "ios/git-strip",
+    private func git(_ state: PaneGit.PullRequest.State?, url: String? = "https://github.com/example/clotho/pull/42") -> PaneGit {
+        PaneGit(repo: "clotho", root: "/Users/user/Projects/clotho-ios", remote: "example/clotho", branch: "ios/git-strip",
                 head: "a1b2c3d", worktree: .init(name: "clotho-ios", path: "../clotho-ios"),
                 pr: .init(number: 42, state: state, url: url, title: "iPhone: git info under the pane"))
     }
 
     func testOnlyGitHubPullRequestsOpen() {
-        XCTAssertEqual(GitStrip.url(of: git(.open).pr!)?.absoluteString, "https://github.com/ahmad/clotho/pull/42")
-        XCTAssertNil(GitStrip.url(of: git(.open, url: "http://github.com/ahmad/clotho/pull/42").pr!))
+        XCTAssertEqual(GitStrip.url(of: git(.open).pr!)?.absoluteString, "https://github.com/example/clotho/pull/42")
+        XCTAssertNil(GitStrip.url(of: git(.open, url: "http://github.com/example/clotho/pull/42").pr!))
         XCTAssertNil(GitStrip.url(of: git(.open, url: "https://github.com.evil.example/x").pr!))
         XCTAssertNil(GitStrip.url(of: git(.open, url: "javascript:alert(1)").pr!))
         XCTAssertNil(GitStrip.url(of: git(.open, url: nil).pr!))

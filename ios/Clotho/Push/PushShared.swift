@@ -10,7 +10,17 @@ import UserNotifications
 /// The X25519 key machines encrypt alerts to. Made once, kept in the Keychain group the app shares with
 /// the extension, readable after first unlock (alerts arrive while the phone is locked), never synced.
 enum PushKey {
-    static let accessGroup = "TEAMID0000.nyc.amin.clotho.shared"
+    /// "<team>.nyc.amin.clotho.shared", the group in the entitlements. The team prefix comes from the bundle's
+    /// Info.plist (`AppIdentifierPrefix`, set from the build setting of that name), so no team ID is in the
+    /// source. Nil in a build without a team: the key then lives in the app's own group, as without the
+    /// push entitlements.
+    static let accessGroup: String? = sharedGroup(prefix: Bundle.main.object(forInfoDictionaryKey: "AppIdentifierPrefix") as? String)
+
+    /// The shared group for an app identifier prefix ("ABCDE12345."); nil for a missing, empty or unexpanded one.
+    static func sharedGroup(prefix: String?) -> String? {
+        guard let prefix, prefix.count > 1, prefix.hasSuffix("."), !prefix.contains("$(") else { return nil }
+        return prefix + "nyc.amin.clotho.shared"
+    }
     private static let service = "nyc.amin.clotho.push-key"
     private static let account = "x25519"
 

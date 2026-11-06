@@ -11,11 +11,16 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
+# Private values come from the environment, never the repo: CLOTHO_TEAM_ID (the signing team) and
+# CLOTHO_RELAY_URL (the push relay, read by the app from Info.plist's ClothoRelayURL). On the dev box they are
+# in ~/.config/clotho/local.env, and scripts/clotho-build passes them to the build Mac. xcodegen expands
+# ${CLOTHO_TEAM_ID} when it is set; otherwise Xcode reads it from the environment at build time. Don't define
+# CLOTHO_RELAY_URL as a build setting here: a target setting outranks the environment and would blank it.
 settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "0.1.0"
-    DEVELOPMENT_TEAM: TEAMID0000
+    DEVELOPMENT_TEAM: ${CLOTHO_TEAM_ID}
     CURRENT_PROJECT_VERSION: "1"
 packages:
   ClothoKit:
@@ -40,6 +45,13 @@ targets:
       - path: build-resources/dist
         type: folder
         buildPhase: resources
+    # Merged with the generated Info.plist (GENERATE_INFOPLIST_FILE). xcodegen writes the file; build-resources/
+    # is gitignored. AppIdentifierPrefix is the signing team's prefix, "<team>.".
+    info:
+      path: build-resources/Clotho-Info.plist
+      properties:
+        ClothoRelayURL: $(CLOTHO_RELAY_URL)
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
     preBuildScripts:
       - name: Pack clothod builds
         # CLOTHOD_DIST (from build.sh) bundles another dist, e.g. a dev build of unreleased clothod.

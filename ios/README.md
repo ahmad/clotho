@@ -10,13 +10,19 @@ resubscribes from the seq it reached and resumes in live or replay mode.
 
 Needs Xcode 26 or later and XcodeGen (`brew install xcodegen`; without Homebrew, the release zip unpacked in
 `~/Builds/tools/xcodegen`, which the scripts find). The Xcode project is generated from `project.yml`. The
-builds and tests run on imac (`CLOTHO_MAC=macbook@imac clotho-mac ios/build.sh test <simulator id>`, Xcode 27,
-iOS 27 simulators); macbook (Xcode 26) still works.
+builds and tests run on the build Mac (`scripts/clotho-build ios ios/build.sh test` from the repo root, Xcode 27,
+iOS 27 simulators); the laptop Mac (Xcode 26) still works.
 
 ```sh
 ./build.sh          # generate the project and build for the booted simulator
 ./build.sh test     # unit, integration and UI tests
 ```
+
+**Private settings.** The signing team, the push relay's URL and the APNs key ID are never in the repo. They
+come from the environment: `CLOTHO_TEAM_ID`, `CLOTHO_RELAY_URL` and `CLOTHO_APNS_KEY_ID`, kept on the dev box in
+`~/.config/clotho/local.env` and passed to the build Mac by `scripts/clotho-build`. `project.yml` takes the
+team from `CLOTHO_TEAM_ID`; the app reads the relay URL (Info.plist `ClothoRelayURL`) and the Keychain group's
+team prefix (`AppIdentifierPrefix`) from its Info.plist. A build without them works, with push alerts off.
 
 The app uses `../ClothoKit` (model, ModelStore, ClothodBackend, RemoteInstaller), SwiftTerm and
 swift-nio-ssh, and bundles `../clothod/dist` (manifest.json plus one clothod per platform) to install on
@@ -27,19 +33,22 @@ exact bytes into Caches on first use (`DistBundle.swift`).
 ## TestFlight
 
 ```sh
-./scripts/testflight.sh              # Release archive, team TEAMID0000 (Ahmad Amin), upload to App Store Connect
+./scripts/testflight.sh              # Release archive, team $CLOTHO_TEAM_ID, upload to App Store Connect
 ./scripts/testflight.sh --dry-run    # archive only
 ./scripts/testflight.sh --no-upload  # archive and export the signed .ipa, no upload
 ```
 
-Signing: the archive uses the existing "Apple Development: Ahmad Amin" identity, and the export Apple's
-cloud-managed "Apple Distribution: Ahmad Amin", through the App Store Connect API key (`-allowProvisioningUpdates`),
-so no Xcode account needs to be signed in. Over SSH the script unlocks imac's build keychain
-(`~/Library/Keychains/clotho-build.keychain-db`, password in `~/.config/clotho/build-keychain-pw`) when it
-exists, else the login keychain with `~/.keychain_pw` (macbook).
+It needs `CLOTHO_TEAM_ID` and an https `CLOTHO_RELAY_URL` in the environment (`scripts/testflight-remote` passes
+them) and refuses to archive without them; after archiving it checks that the app's relay URL and Keychain team
+prefix match them, and it fills the team into a copy of `scripts/ExportOptions.plist`.
 
-App Store Connect app: "Clotho: Remote Terminal" (bundle ID `nyc.amin.clotho`, SKU `clotho-ios`, app id
-1234567890). The internal group "Personal testing" has automatic distribution on, so each upload reaches
+Signing: the archive uses the team's Apple Development identity, and the export the cloud-managed Apple
+Distribution certificate, through the App Store Connect API key (`-allowProvisioningUpdates`),
+so no Xcode account needs to be signed in. Over SSH the script unlocks the build Mac's build keychain
+(`~/Library/Keychains/clotho-build.keychain-db`, password in `~/.config/clotho/build-keychain-pw`) when it
+exists, else the login keychain with `~/.keychain_pw` (the laptop Mac).
+
+App Store Connect app: "Clotho: Remote Terminal" (bundle ID `nyc.amin.clotho`, SKU `clotho-ios`). The internal group "Personal testing" has automatic distribution on, so each upload reaches
 its testers once Apple finishes processing. The app declares no non-exempt encryption
 (`ITSAppUsesNonExemptEncryption = NO`; SSH runs on Apple's CryptoKit).
 
@@ -83,19 +92,19 @@ nothing on the system; `scripts/ssh-test-server.sh stop` ends it. To aim the tes
 write its host and port to `/tmp/clotho-ios-sshtest/host` and `port`, and `user@host` to `ui-host`
 for the UI test.
 
-### The test key on devbox
+### The test key on the dev box
 
 The integration tests log in with `/tmp/clotho-ios-sshtest/client`. Its public key (comment
-`clotho-ios-dev-test`) was added to `ahmad@devbox:~/.ssh/authorized_keys` on 2026-10-26, with the
+`clotho-ios-dev-test`) was added to `user@devbox:~/.ssh/authorized_keys` on 2026-10-26, with the
 user's approval. To remove it:
 
 ```sh
-ssh devbox "sed -i '/clotho-ios-dev-test$/d' ~/.ssh/authorized_keys"
+ssh user@devbox "sed -i '/clotho-ios-dev-test$/d' ~/.ssh/authorized_keys"
 ```
 
-Over the tailnet, devbox uses Tailscale SSH, which accepts the "none" method and never checks client
+Over the tailnet, the dev box uses Tailscale SSH, which accepts the "none" method and never checks client
 keys. Key authentication is therefore exercised against the local test sshd, and the wrong-key test
-skips on devbox.
+skips on the dev box.
 
 ## Notes
 
@@ -121,12 +130,15 @@ skips on devbox.
 Agent alerts while the app is closed; the design is docs/push.md.
 
 - `relay/`: the Cloudflare Worker relay (plain JS). `cd relay && npm test` runs its tests; `node dev.js`
-  runs it locally, delivering to the booted simulator with `simctl push`.
+  runs it locally, delivering to the booted simulator with `simctl push`. Deploy with `cd relay && npm run deploy`
+  (`deploy.sh`), never a bare `wrangler deploy`: it passes the team and APNs key IDs from `CLOTHO_TEAM_ID` and
+  `CLOTHO_APNS_KEY_ID`, which aren't in `wrangler.toml`.
 - `ClothoNotify/`: the notification service extension that decrypts alerts. It and the push
   entitlements come from `push.yml`, included only with `PUSH=YES` (`build.sh` sets it), so device and
   TestFlight builds don't touch the developer account's identifiers until push is set up there.
-- The relay URL: `PushRegistrar.deployedRelay`, or `-PushRelay <url>`; Debug simulator builds default to
-  the dev relay. Each machine has an "Agent alerts" switch, and "Send test alert" on its screen.
+- The relay URL is built in from `CLOTHO_RELAY_URL` (Info.plist `ClothoRelayURL`,
+  `PushRegistrar.deployedRelay`); a build without it has push alerts off and logs so. `-PushRelay <url>`
+  overrides it, e.g. with the dev relay. Each machine has an "Agent alerts" switch, and "Send test alert" on its screen.
 - End to end, on request (needs the network and Apple): `touch /tmp/clotho-ios-push-e2e` runs
   `PushUITests.testRealSandboxPushIsDecrypted` (the app sends itself an alert through the deployed relay).
   For an alert from clothod itself: start the dev daemon with `CLOTHOD_TEST_PUSH_FAST=1`, create

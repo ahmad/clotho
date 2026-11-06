@@ -31,6 +31,8 @@ targets:
       path: ClothoNotify/Info.plist
       properties:
         CFBundleDisplayName: Clotho Alerts
+        # The Keychain group's prefix (PushKey.accessGroup).
+        AppIdentifierPrefix: $(AppIdentifierPrefix)
         # An extension's versions must match its app's.
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)

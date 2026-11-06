@@ -1,7 +1,7 @@
 # Push alerts: agent attention to the iPhone
 
-Status: **deployed** (2026-10-26). The relay runs at https://clotho-push.example.workers.dev
-(Cloudflare Worker `clotho-push`, APNs key KEYID00000, team-scoped, sandbox and production); a real
+Status: **deployed** (2026-10-26). The relay runs as the Cloudflare Worker `clotho-push` at
+`$CLOTHO_RELAY_URL`, with a team-scoped APNs key (sandbox and production); a real
 sandbox push to the simulator, decrypted by the extension, passes. clothod's side is implemented
 (ee398a7) and ships in the next dist build. The `.p8` lives only in `~/.config/clotho/` and in the
 Worker's secrets.
@@ -141,7 +141,7 @@ titles, agent messages or anything from a terminal.
 
 The handle is the credential: `/v1/push` accepts only a handle that unseals under a current relay
 key. There is no separate shared secret in clothod, so a machine needs nothing beyond what the
-phone gives it. Everything is over HTTPS (the tailnet in the devbox option, below).
+phone gives it. Everything is over HTTPS (the tailnet in the dev box option, below).
 
 Revocation: the user turns alerts off in the app (it unregisters everywhere it can reach) or
 deletes the app (the token dies and APNs answers 410). As a last resort, rotating the relay key
@@ -277,13 +277,13 @@ because the relay as first deployed rejects any key beyond the four.
 The relay is about 150 lines: two endpoints, AES-GCM, an ES256 JWT, one HTTP/2 POST. APNs itself
 is free.
 
-| | Cloudflare Worker | On devbox, over the tailnet | Small VPS |
+| | Cloudflare Worker | On the dev box, over the tailnet | Small VPS |
 |---|---|---|---|
 | Cost | $0 on the free plan (100,000 requests a day; this needs hundreds at most). $5 a month only for more | $0 | $4 to $6 a month (Hetzner, DigitalOcean, and similar) |
 | Reachable from | any machine with internet | only machines on the tailnet | any machine with internet |
-| Uptime | Cloudflare's | only while devbox is up; if devbox is down, no alerts from imac either | the VPS's |
-| Where the .p8 lives | a Worker secret on Cloudflare | devbox's disk | the VPS's disk |
-| Ops | none after `wrangler deploy` | a systemd service on devbox to keep running | OS updates, TLS (Caddy), monitoring |
+| Uptime | Cloudflare's | only while the dev box is up; if the dev box is down, no alerts from the other machines either | the VPS's |
+| Where the .p8 lives | a Worker secret on Cloudflare | the dev box's disk | the VPS's disk |
+| Ops | none after `npm run deploy` | a systemd service on the dev box to keep running | OS updates, TLS (Caddy), monitoring |
 | Catches | needs a Cloudflare account. `wrangler dev` can't reach APNs (local workerd has no HTTP/2), so testing runs against a deployed preview Worker | ties every machine's alerts to one box | the most upkeep for the least gain |
 
 **Variant: each clothod calls APNs directly.** That removes the relay, but every machine then
@@ -293,7 +293,7 @@ onto every dev box is the wrong trade. Not recommended.
 **Recommendation: the Cloudflare Worker.** It costs nothing, needs no upkeep, works from every
 machine whether or not it's on the tailnet, and with end-to-end encryption Cloudflare holds only the
 .p8 and sees only ciphertext. If the user would rather not involve a third party at all, run the
-same relay on devbox; the protocol and the app are identical, only the `relay` URL changes.
+same relay on the dev box; the protocol and the app are identical, only the `relay` URL changes.
 
 ## What the user needs to provide
 
@@ -303,11 +303,13 @@ same relay on devbox; the protocol and the app are identical, only the `relay` U
    Apple allows downloading it only once. Put it outside the repo, for example
    `~/.config/clotho/AuthKey_<KEYID>.p8`, and send only the path. It never gets committed;
    `.gitignore` already excludes `*.p8`.
-2. **The key ID**, 10 characters, shown next to the key. The team ID is already known: TEAMID0000.
-3. **The hosting choice**: Worker, devbox, or VPS.
+2. **The key ID**, 10 characters, shown next to the key. The team ID: YOUR_TEAM_ID (`$CLOTHO_TEAM_ID`).
+3. **The hosting choice**: Worker, the dev box, or VPS.
    - Worker: a Cloudflare account, and the user runs `wrangler login` once (it opens a browser).
-     Then I deploy to `clotho-push.<account>.workers.dev` and set the .p8 with `wrangler secret put`.
-   - devbox: OK to add a user systemd service there.
+     Then I deploy to `clotho-push.<account>.workers.dev` (that URL is `$CLOTHO_RELAY_URL`) and set the .p8
+     with `wrangler secret put`. Deploys run `cd ios/relay && npm run deploy` with `CLOTHO_TEAM_ID` and
+     `CLOTHO_APNS_KEY_ID` set; the IDs aren't in `wrangler.toml`.
+   - the dev box: OK to add a user systemd service there.
    - VPS: which provider, and that the user creates the box.
 4. **OK to change the App ID**: turn on Push Notifications for `nyc.amin.clotho`, register the
    extension's id `nyc.amin.clotho.notify`, and share a Keychain group between them. No App Group is

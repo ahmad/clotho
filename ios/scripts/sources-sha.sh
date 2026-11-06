@@ -1,7 +1,7 @@
 #!/bin/bash
 # Prints the SHA-256 of every source that goes into the app and its extensions: ios/Clotho, ios/ClothoNotify,
 # ios/ClothoWidget, ClothoKit/Sources, ios/project.yml, ios/push.yml, ios/widget.yml, ios/liveactivity.yml and
-# ClothoKit/Package.swift. The same on devbox (from a git
+# ClothoKit/Package.swift. The same on the dev box (from a git
 # checkout) and on the Mac (in the clotho-mac mirror), so testflight.sh can refuse to build anything else
 # (EXPECT_SOURCES_SHA). The extensions' Info.plists are left out: xcodegen writes them from push.yml and
 # widget.yml (hashed).

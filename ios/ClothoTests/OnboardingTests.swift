@@ -121,7 +121,7 @@ final class NavigationTests: XCTestCase {
         let entries = [entry(.tab, "cargo test", "devbox › clotho"), entry(.tab, "zsh", "devbox › clotho"),
                        entry(.workspace, "clotho", "devbox"), entry(.machine, "devbox")]
         XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "clotho").first?.entry.item.title, "clotho")
-        XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "bigzsh").first?.entry.item.title, "zsh", "the subtitle matches too")
+        XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "devzsh").first?.entry.item.title, "zsh", "the subtitle matches too")
         XCTAssertTrue(QuickOpenEntry.ranked(entries, query: "qqq").isEmpty)
         XCTAssertEqual(QuickOpenEntry.ranked(entries, query: "").map(\.entry.item.title), entries.map(\.item.title),
                        "an empty query keeps the given order")
@@ -134,13 +134,13 @@ final class NavigationTests: XCTestCase {
 
 final class MachineInputTests: XCTestCase {
     func testHostsAndUsersThatArentOneAreRefused() {
-        XCTAssertNil(Machine.problem(host: "devbox", user: "ahmad"))
+        XCTAssertNil(Machine.problem(host: "devbox", user: "user"))
         XCTAssertNil(Machine.problem(host: "fe80::1", user: "a.b-c_d"))
-        XCTAssertNotNil(Machine.problem(host: "-oProxyCommand=touch /tmp/x", user: "ahmad"))
-        XCTAssertNotNil(Machine.problem(host: "big boy", user: "ahmad"))
-        XCTAssertNotNil(Machine.problem(host: "devbox\u{07}", user: "ahmad"))
+        XCTAssertNotNil(Machine.problem(host: "-oProxyCommand=touch /tmp/x", user: "user"))
+        XCTAssertNotNil(Machine.problem(host: "dev box", user: "user"))
+        XCTAssertNotNil(Machine.problem(host: "devbox\u{07}", user: "user"))
         XCTAssertNotNil(Machine.problem(host: "devbox", user: "-l"))
-        XCTAssertNotNil(Machine.problem(host: "ahmad@devbox", user: "ahmad"))
+        XCTAssertNotNil(Machine.problem(host: "user@devbox", user: "user"))
     }
 }
 

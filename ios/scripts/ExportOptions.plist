@@ -6,8 +6,6 @@
     <string>app-store-connect</string>
     <key>destination</key>
     <string>upload</string>
-    <key>teamID</key>
-    <string>TEAMID0000</string>
     <key>signingStyle</key>
     <string>automatic</string>
     <key>uploadSymbols</key>

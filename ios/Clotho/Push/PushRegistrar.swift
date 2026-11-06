@@ -10,9 +10,20 @@ import UIKit
 final class PushRegistrar: ObservableObject {
     static let shared = PushRegistrar()
 
-    /// The relay's address: the Cloudflare Worker in ios/relay. `-PushRelay <url>` (a launch argument or
-    /// default) overrides it, for example with the local dev relay (relay/dev.js) at http://127.0.0.1:8787.
-    static let deployedRelay = URL(string: "https://clotho-push.example.workers.dev")
+    /// The relay's address: the Cloudflare Worker in ios/relay, built in from the CLOTHO_RELAY_URL build setting
+    /// (Info.plist `ClothoRelayURL`; scripts/clotho-build passes it from the dev box's private settings). Nil
+    /// when the build had none: push alerts are then off. `-PushRelay <url>` (a launch argument or default)
+    /// overrides it, for example with the local dev relay (relay/dev.js) at http://127.0.0.1:8787.
+    static let deployedRelay: URL? = builtInRelay(Bundle.main.object(forInfoDictionaryKey: "ClothoRelayURL") as? String)
+
+    /// The relay URL an Info.plist value names: nil when it is missing, empty, an unexpanded `$(...)`, or not an
+    /// http(s) URL with a host.
+    nonisolated static func builtInRelay(_ value: String?) -> URL? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty, !value.hasPrefix("$("),
+              let url = URL(string: value), let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http",
+              let host = url.host, !host.isEmpty else { return nil }
+        return url
+    }
 
     /// The handle the relay gave for this launch's token; nil until registered, or if there's no relay.
     @Published private(set) var handle: String?
@@ -41,7 +52,9 @@ final class PushRegistrar: ObservableObject {
     }
 
     func start() {
-        guard let relay else { return log("push: no relay configured") }
+        guard let relay else {
+            return log("push: no relay URL in this build (CLOTHO_RELAY_URL unset at build time) and no -PushRelay; push alerts are off")
+        }
         log("push: registering for remote notifications (relay \(relay.absoluteString))")
         UIApplication.shared.registerForRemoteNotifications()
     }

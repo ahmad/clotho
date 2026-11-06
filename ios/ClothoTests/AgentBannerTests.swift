@@ -5,7 +5,7 @@ import XCTest
 /// The local banner on an attention rise (AgentNotifier.banner), from agents decoded as the daemon sends them.
 @MainActor
 final class AgentBannerTests: XCTestCase {
-    private let machine = Machine(name: "devbox", host: "devbox", user: "ahmad")
+    private let machine = Machine(name: "devbox", host: "devbox", user: "user")
 
     private func agent(_ json: String) throws -> AgentInfo {
         try JSONDecoder().decode(AgentInfo.self, from: Data(json.utf8))

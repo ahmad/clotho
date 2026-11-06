@@ -5,6 +5,6 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "dev": "node dev.js",
-    "deploy": "npx wrangler@4 deploy"
+    "deploy": "./deploy.sh"
   }
 }

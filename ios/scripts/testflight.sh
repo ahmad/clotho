@@ -1,6 +1,6 @@
 #!/bin/bash
-# Archives Clotho (Release, team TEAMID0000) and uploads it to App Store Connect for TestFlight. Runs on the
-# Mac, in its own login session or over SSH (scripts/testflight-remote on devbox does the latter).
+# Archives Clotho (Release, team $CLOTHO_TEAM_ID) and uploads it to App Store Connect for TestFlight. Runs on the
+# Mac, in its own login session or over SSH (scripts/testflight-remote on the dev box does the latter).
 #
 # Usage: ios/scripts/testflight.sh [--dry-run | --no-upload]
 #   --dry-run    check, archive and stop: nothing is exported or uploaded.
@@ -8,11 +8,15 @@
 # Environment:
 #   ASC_KEY_ID, ASC_ISSUER_ID   the App Store Connect API key (required); the key itself is
 #                               ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8 on the Mac.
+#   CLOTHO_TEAM_ID              the Apple team that signs (required; private, never in the repo).
+#   CLOTHO_RELAY_URL            the push relay built into the app (required, https; private). Without it the app
+#                               would ship with push alerts off, so the script refuses.
 #   EXPECT_SOURCES_SHA          optional: refuse unless ios/scripts/sources-sha.sh prints exactly this.
 #   BUILD_NUMBER                optional: default the UTC time, YYYYMMDDHHMM.
 #
 # Before building, it refuses (exit 2) unless the bundled clothod dist is the release in clothod/RELEASED and
 # every binary's build id matches its manifest entry, and, given EXPECT_SOURCES_SHA, the sources match.
+# After archiving, it refuses (exit 1) unless the app's relay URL and Keychain team prefix match the environment.
 # Logs go to ~/Builds/testflight/Clotho-<build>/. "Uploaded Clotho build <n>" is printed only after the
 # export reported success; anything else exits non-zero.
 set -euo pipefail
@@ -30,7 +34,7 @@ IOS=$(cd "$(dirname "$0")/.." && pwd)
 ROOT=$(cd "$IOS/.." && pwd)
 cd "$IOS"
 DIST=$ROOT/clothod/dist
-# Where Homebrew has no xcodegen (imac), the release zip lives in ~/Builds/tools.
+# Where Homebrew has no xcodegen (the build Mac), the release zip lives in ~/Builds/tools.
 [ -x "$HOME/Builds/tools/xcodegen/bin/xcodegen" ] && PATH=$HOME/Builds/tools/xcodegen/bin:$PATH
 
 fail() { echo "testflight: $*" >&2; exit 2; }
@@ -41,6 +45,12 @@ fail() { echo "testflight: $*" >&2; exit 2; }
 [ -n "${ASC_ISSUER_ID:-}" ] || fail "ASC_ISSUER_ID is not set"
 KEY_PATH=$HOME/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
 [ -f "$KEY_PATH" ] || fail "no API key at ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8"
+[ -n "${CLOTHO_TEAM_ID:-}" ] || fail "CLOTHO_TEAM_ID is not set"
+printf '%s' "$CLOTHO_TEAM_ID" | grep -Eq '^[A-Z0-9]{10}$' || fail "CLOTHO_TEAM_ID isn't a team ID (10 letters and digits)"
+[ -n "${CLOTHO_RELAY_URL:-}" ] || fail "CLOTHO_RELAY_URL is not set (the app would ship with push alerts off)"
+case "$CLOTHO_RELAY_URL" in https://?*) ;; *) fail "CLOTHO_RELAY_URL isn't an https:// URL" ;; esac
+# xcodegen expands ${CLOTHO_TEAM_ID} (DEVELOPMENT_TEAM); xcodebuild reads CLOTHO_RELAY_URL as a build setting.
+export CLOTHO_TEAM_ID CLOTHO_RELAY_URL
 
 # clothod/RELEASED is one line, the released version (e.g. 0.1.15); anything else is refused, not guessed at.
 [ -f "$ROOT/clothod/RELEASED" ] || fail "no clothod/RELEASED"
@@ -72,9 +82,9 @@ echo "==> Clotho build $BUILD_NUMBER, clothod $RELEASED, sources $SOURCES (logs:
 
 # MARK: Signing over SSH
 
-# Over SSH keychains are locked. imac has a dedicated build keychain (its password in
-# ~/.config/clotho/build-keychain-pw, mode 600); macbook uses the login keychain, whose password the user keeps
-# in ~/.keychain_pw. Passwords are never echoed.
+# Over SSH keychains are locked. The build Mac has a dedicated build keychain (its password in
+# ~/.config/clotho/build-keychain-pw, mode 600); the laptop Mac uses the login keychain, whose password the user
+# keeps in ~/.keychain_pw. Passwords are never echoed.
 BUILD_KEYCHAIN=$HOME/Library/Keychains/clotho-build.keychain-db
 BUILD_KEYCHAIN_PW=$HOME/.config/clotho/build-keychain-pw
 SIGN_FLAGS=()
@@ -113,7 +123,8 @@ echo "==> archive"
 if ! xcodebuild -project Clotho.xcodeproj -scheme Clotho -configuration Release \
     -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
     -skipPackagePluginValidation -skipMacroValidation \
-    "${AUTH[@]}" ${SIGN_FLAGS[@]+"${SIGN_FLAGS[@]}"} CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive > "$OUT/archive.log" 2>&1; then
+    "${AUTH[@]}" ${SIGN_FLAGS[@]+"${SIGN_FLAGS[@]}"} DEVELOPMENT_TEAM="$CLOTHO_TEAM_ID" \
+    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive > "$OUT/archive.log" 2>&1; then
   tail -30 "$OUT/archive.log" >&2
   echo "testflight: archive failed (log: $OUT/archive.log)" >&2
   exit 1
@@ -121,6 +132,18 @@ fi
 grep -q '\*\* ARCHIVE SUCCEEDED \*\*' "$OUT/archive.log" || { echo "testflight: no ARCHIVE SUCCEEDED in the log" >&2; exit 1; }
 BUNDLED=$(jq -r .version "$ARCHIVE/Products/Applications/Clotho.app/dist/manifest.json" 2>/dev/null || echo "?")
 [ "$BUNDLED" = "$RELEASED" ] || { echo "testflight: the archive bundles clothod $BUNDLED, not $RELEASED" >&2; exit 1; }
+# The private values made it in: the relay URL, and the team prefix of the Keychain group the app and its
+# extensions share (a wrong one would strand every phone's push key). Compared, never printed.
+APP=$ARCHIVE/Products/Applications/Clotho.app
+plist() { plutil -extract "$2" raw -o - "$1/Info.plist" 2>/dev/null || true; }
+built_ok=1
+[ "$(plist "$APP" ClothoRelayURL)" = "$CLOTHO_RELAY_URL" ] || built_ok=0
+for bundle in "$APP" "$APP/PlugIns/ClothoNotify.appex" "$APP/PlugIns/ClothoWidget.appex"; do
+  [ "$(plist "$bundle" AppIdentifierPrefix)" = "$CLOTHO_TEAM_ID." ] || built_ok=0
+done
+entitlements=$(codesign -d --entitlements - --xml "$APP" 2>/dev/null || true)
+case "$entitlements" in *"$CLOTHO_TEAM_ID.nyc.amin.clotho.shared"*) ;; *) built_ok=0 ;; esac
+[ "$built_ok" = 1 ] || { echo "testflight: the archive's relay URL / team prefix doesn't match the environment" >&2; exit 1; }
 echo "==> archived build $BUILD_NUMBER with clothod $BUNDLED: $ARCHIVE"
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -130,13 +153,12 @@ fi
 
 # MARK: Export and upload
 
-EXPORT_OPTIONS=scripts/ExportOptions.plist
-if [ "$NO_UPLOAD" = 1 ]; then
-  # The same signing, but the .ipa stays in $OUT/export.
-  EXPORT_OPTIONS=$OUT/ExportOptions-no-upload.plist
-  cp scripts/ExportOptions.plist "$EXPORT_OPTIONS"
-  plutil -replace destination -string export "$EXPORT_OPTIONS"
-fi
+# The team isn't in the repo's copy: it's filled in here.
+EXPORT_OPTIONS=$OUT/ExportOptions.plist
+cp scripts/ExportOptions.plist "$EXPORT_OPTIONS"
+plutil -replace teamID -string "$CLOTHO_TEAM_ID" "$EXPORT_OPTIONS"
+# --no-upload: the same signing, but the .ipa stays in $OUT/export.
+if [ "$NO_UPLOAD" = 1 ]; then plutil -replace destination -string export "$EXPORT_OPTIONS"; fi
 export_once() {
   rm -rf "$OUT/export"
   xcodebuild -exportArchive -archivePath "$ARCHIVE" -exportOptionsPlist "$EXPORT_OPTIONS" \

@@ -8,7 +8,7 @@ const pkcs8 = Buffer.from(await crypto.subtle.exportKey("pkcs8", keyPair.private
 const ENV = {
   APNS_KEY: `-----BEGIN PRIVATE KEY-----\n${pkcs8.match(/.{1,64}/g).join("\n")}\n-----END PRIVATE KEY-----\n`,
   APNS_KEY_ID: "ABC123DEFG",
-  APNS_TEAM_ID: "TEAMID0000",
+  APNS_TEAM_ID: "TEAM123456",
   APNS_TOPIC: "nyc.amin.clotho",
   HANDLE_KEYS: JSON.stringify({ 1: Buffer.alloc(32, 7).toString("base64"), 2: Buffer.alloc(32, 9).toString("base64") }),
   HANDLE_KEY_ID: "2",
@@ -111,7 +111,7 @@ test("apnsDeliver sends a valid ES256 provider token and the APNs headers", asyn
   assert.equal(h["apns-expiration"], String(now / 1000 + 3600));
   const [header, claims, sig] = h.authorization.replace("bearer ", "").split(".");
   assert.deepEqual(JSON.parse(Buffer.from(header, "base64url")), { alg: "ES256", kid: "ABC123DEFG" });
-  assert.deepEqual(JSON.parse(Buffer.from(claims, "base64url")), { iss: "TEAMID0000", iat: now / 1000 });
+  assert.deepEqual(JSON.parse(Buffer.from(claims, "base64url")), { iss: "TEAM123456", iat: now / 1000 });
   const ok = await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, keyPair.publicKey,
     Buffer.from(sig, "base64url"), new TextEncoder().encode(`${header}.${claims}`));
   assert.ok(ok, "signature verifies with the key's public half");

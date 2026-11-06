@@ -92,11 +92,11 @@ final class AlertDetailTests: XCTestCase {
     /// The app's own banner for the same rise reads like the push and replaces it (same identifier and thread).
     @MainActor
     func testForegroundBannerMatchesThePush() throws {
-        let m = Machine(id: machine, name: "devbox", host: "devbox", user: "ahmad")
+        let m = Machine(id: machine, name: "devbox", host: "devbox", user: "user")
         let running = AgentInfo(kind: "claude", state: .running, source: "hook", attention: false)
         let done = AgentInfo(kind: "claude", state: .done, source: "hook", message: "All 214 tests pass.", since: 1000,
                              attention: true, prompt: "run the tests", turnStarted: 755)
-        let place = AgentNotifier.Place(workspace: "Platform", workspaceID: 3, tab: "cargo test", cwd: "/home/ahmad/api-server")
+        let place = AgentNotifier.Place(workspace: "Platform", workspaceID: 3, tab: "cargo test", cwd: "/home/user/api-server")
         let banner = try XCTUnwrap(AgentNotifier.banner(machine: m, pane: 7, place: place, before: running, after: done))
         let push = try deliver(record(["s": "done", "msg": "All 214 tests pass.", "w": "Platform", "wid": 3,
                                        "tb": "cargo test", "pj": "api-server", "q": "run the tests", "d": 245])).0
@@ -110,7 +110,7 @@ final class AlertDetailTests: XCTestCase {
     /// Parallel permission requests: the banner asks about the oldest, as the push for that wait does.
     @MainActor
     func testBannerAsksAboutTheOldestRequest() throws {
-        let m = Machine(id: machine, name: "devbox", host: "devbox", user: "ahmad")
+        let m = Machine(id: machine, name: "devbox", host: "devbox", user: "user")
         let running = AgentInfo(kind: "claude", state: .running, source: "hook", attention: false)
         let waiting = AgentInfo(kind: "claude", state: .waiting, source: "hook", message: "Claude needs your permission to use Bash",
                                 attention: true, tool: "Read", toolInput: "README.md",
@@ -163,7 +163,7 @@ final class AlertActionTests: XCTestCase {
     /// The app's own banner for a permission wait carries the oldest request, like the push.
     @MainActor
     func testBannerCarriesTheRequest() throws {
-        let m = Machine(name: "devbox", host: "devbox", user: "ahmad")
+        let m = Machine(name: "devbox", host: "devbox", user: "user")
         let running = AgentInfo(kind: "claude", state: .running, source: "hook", attention: false)
         let waiting = AgentInfo(kind: "claude", state: .waiting, source: "hook", message: "Claude needs your permission to use Bash",
                                 attention: true, requests: [PermissionRequest(id: "a1", tool: "Bash", summary: "npm test"),

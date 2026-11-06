@@ -1,12 +1,13 @@
 name = "clotho-push"
 main = "src/worker.js"
 compatibility_date = "2026-10-01"
-account_id = "00000000000000000000000000000000"
 workers_dev = true
 
+# Deploy with `npm run deploy` (deploy.sh), never a bare `wrangler deploy`: the account comes from the wrangler
+# login (or CLOUDFLARE_ACCOUNT_ID), and deploy.sh passes APNS_TEAM_ID and APNS_KEY_ID with `--var` from the
+# environment (CLOTHO_TEAM_ID, CLOTHO_APNS_KEY_ID), so no account, team or key ID is in this file. A deploy
+# without them would leave the Worker unable to sign for APNs.
 [vars]
-APNS_TEAM_ID = "TEAMID0000"
-APNS_KEY_ID = "KEYID00000"
 APNS_TOPIC = "nyc.amin.clotho"
 HANDLE_KEY_ID = "1"
 

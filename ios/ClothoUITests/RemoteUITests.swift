@@ -1,6 +1,6 @@
 import XCTest
 
-/// I3/I4 from the UI: add a machine (host from /tmp/clotho-ios-sshtest/ui-host, e.g. devbox), generate a key,
+/// I3/I4 from the UI: add a machine (host from /tmp/clotho-ios-sshtest/ui-host, e.g. user@devbox), generate a key,
 /// use the test install dirs, connect, and run a command in a remote pane. Skipped without that file.
 final class RemoteUITests: XCTestCase {
     func testAddMachineAndRunRemotePane() throws {
