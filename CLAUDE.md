@@ -19,6 +19,32 @@ paths it owns. When it needs something from another role (a protocol change, a C
 or changed something another role builds against, it says so in its final report and the main
 session passes it on.
 
+## How work flows (user decision, 2026-11-06)
+
+- **Agents.** The role agents (`clothod`, `mac`, `ios`) start their own subagents: `investigator`,
+  `planner`, `implementer` and `validator` (plus the built-in `Explore`). The merge gate uses
+  `code-reviewer`, `validator` and `ux-reviewer`. They are all in `.claude/agents/`.
+- **Branches.** Role agents always work in a git worktree on their own branch (`<role>/<slug>`). Start
+  them with `isolation: "worktree"`, or through `/change`. Nothing is committed to `main` directly
+  except the main session's own paths.
+- **Merge gate.** A branch merges only when all its checks PASS: `code-reviewer`, `validator` (the role's
+  full suite) and, for Mac and iOS, `ux-reviewer`. A check that didn't run counts as a block.
+- **Workflows** (`.claude/workflows/`, run as slash commands or by name):
+  - `/change ios <task>` (or `{"role": "ios", "task": "..."}`): the role agent builds the task in a worktree, then the gate
+    runs. If the gate blocks, the role agent fixes it, for up to 3 rounds. It returns whether the branch is
+    mergeable, the branch, and every review.
+  - `/gate mac <worktree path>`: the gate alone, for a branch made some other way.
+  - Without a workflow, the main session does the same by hand: an Agent call to the role with
+    `isolation: "worktree"`, then the three checks (the code review in parallel with the
+    validator, then the UX review).
+- **Merging.** The main session reads the report and the diff, rebases the branch onto `main` if
+  `main` moved (and reruns `validator` if the rebase brought in code), fast-forwards `main`, pushes,
+  removes the worktree and branch, and ships from the main clone (see Shipping).
+- **Across roles.** A protocol change goes first (clothod), then the clients against it. Pass each
+  report's "needs" on to the next role's task.
+- **One agent per role at a time.** A role's agents share its mirror on imac, and heavy runs go one
+  at a time (see imac under Machines).
+
 ## Rules (set by the user)
 
 - **The user's daemons.** Each machine (this one, devbox, imac) runs one clothod instance, and one

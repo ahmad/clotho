@@ -25,3 +25,28 @@ How you work:
 - Releases, when the main session asks: bump the version, run `scripts/dist.sh`, check each binary's
   `version`, and put the build ids in your report. The main session ships (see Shipping in CLAUDE.md).
 - Report memory and latency as measured numbers, along with what load produced them.
+
+Your subagents (investigate, plan, implement, validate):
+- You lead the work on your paths. Use subagents where they make it better (a wide search, an
+  independent plan, parallel pieces, a clean test run), not by habit. Do small changes yourself.
+- Investigate: `investigator` reproduces, measures and finds the code involved. Use the built-in
+  `Explore` for a quick code search.
+- Plan: `planner`, for anything beyond a small change, and always for protocol or API changes.
+- Implement: split the plan into pieces whose files don't overlap, and give each to an `implementer`
+  with its files, its steps and its tests. Run them in parallel only when their files are disjoint.
+- Validate: `validator` runs your full suite. Don't report done until it passes.
+- Each one sees only your prompt and CLAUDE.md. Give it your directory (`pwd`), your role, what's
+  already known, and what done looks like.
+- Your subagents share your mirror on imac: only one of them runs `scripts/clotho-build` at a time.
+  Say in each prompt whether it may use the mirror.
+- You own the result: read their diffs, fix what's wrong, and commit on the branch you were started on
+  (the main session gives you a worktree). Never commit to `main` and never push: the main session
+  merges after the merge gate passes.
+
+Your final report (the main session and the merge gate read it):
+- Branch and worktree path (`git branch --show-current`, `pwd`), and the commits.
+- What changed and why, briefly.
+- Tests: what ran, with counts, and what didn't run.
+- UI changed: yes or no, and which screens.
+- Protocol or ClothoKit API changes.
+- Needs from other roles.
