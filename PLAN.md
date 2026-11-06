@@ -572,22 +572,59 @@ The iPhone and iPad get the same model after the Mac ships.
 - Goal: users shouldn't have to install Tailscale separately.
 - The user's choices:
   - **Apps and clothod** both join the network themselves (phases 0–2);
-  - users join **their own Tailscale account** (free tier). We run no coordination server.
-- How: Tailscale's embeddable node (`tsnet`, via the C library `libtailscale`).
-  - Each app, and each clothod, is its own userspace node.
-  - There's no system VPN and no VPN entitlement.
+  - users join **their own Tailscale account** (free tier, which allows unlimited user devices). We run no coordination server.
+- Research: `reports/Built-in Tailscale research.md` (2026-11-06, claims checked against primary sources).
+- How: Tailscale's embeddable node (`tsnet`).
+  - Each app, and each clothod, is its own userspace node. There's no system VPN and no VPN entitlement.
   - Sign-in is a browser login link, once per device.
-  - Node state is kept in the Keychain on Apple devices, and in clothod's state dir on machines.
-- Phases:
-  - **0. Test build.** Build libtailscale for macOS arm64/x86_64, iOS arm64 and Linux x86_64/aarch64. Call it from Swift (mac, ios) and from Rust over FFI (clothod). Measure the size added, iOS background behaviour and memory. Prove one dial, app → machine, over the tailnet. Go/no-go after it.
-  - **1. The apps join.** The Mac and iPhone sign in inside Clotho and run today's SSH connection over the embedded node (they dial through tsnet, not the OS network). Machines still run Tailscale and sshd.
-  - **2. clothod joins.**
-    - `clothod login` prints the sign-in link, and clothod listens on its tailnet address.
-    - Clients connect without SSH. clothod checks the peer with WhoIs: by default, only devices of the same Tailscale user that clothod logged in as.
-    - The apps discover machines from the tailnet's peer list.
-    - SSH stays as an alternative.
+  - All nodes pin one `tailscale.com` version and are built with a pinned Go toolchain.
+
+### Decisions (user took the research's recommendations, 2026-11-06)
+
+1. **clothod: a Go sidecar, not FFI.** `clothod-net` is a separate pure-Go tsnet program.
+   - It accepts tailnet connections, checks the peer, starts clothod if needed, then relays to `clothod.sock` the way `clothod bridge` does.
+   - Why not FFI: clothod's one binary is also the holder, so a linked Go runtime would start in every clothod process. Go c-archives crash at startup in static musl builds (golang/go#13492, open), and tokio's signal handlers lack the SA_ONSTACK Go needs (tokio#3520).
+   - The node survives serve upgrades. The sidecar can be supervised because it isn't serve.
+2. **Apps: our own small Go shim over `tsnet`**, built as a static-library xcframework in a new ClothoKit target (`ClothoTailnet`). Not upstream libtailscale or TailscaleKit.
+   - It exports start, status, dial, interactive login, logout, WhoIs, a callback state store and log upload off.
+   - Upstream's C API lacks these; TailscaleKit has no SwiftPM package and needs iOS 18.1 / macOS 15.
+   - Only the app targets link it. The core ClothoKit target and the iOS extensions don't.
+3. **Node state:** iOS in the Keychain (through the shim's store callback). Mac in `~/Library/Application Support/Clotho/tailscale` (0700), since ad hoc signing makes Keychain access prompt. Machines in `<state_dir>/tailnet/` (0700).
+4. **Tests:** every automated test runs against a local test control server (`tstest/integration/testcontrol`), offline, in each role's `/tmp` dirs. Real-network device tests use a separate test tailnet: a second free Tailscale account the user creates when Phase 0 reaches them. Nothing test-related joins the user's own tailnet.
+5. **App nodes are not ephemeral** (ephemeral nodes vanish 30–60 min after going offline, forcing a new login). Only test and dev nodes are.
+6. **Key expiry:** nodes stay user-owned (tags would drop the user identity the peer check needs). Apps and `clothod status` show "Sign in again" when a key expires, and point to disabling expiry for clothod nodes in the admin console.
+7. **Names:** `clotho-<device>` for apps, `clothod-<host>` for machines, `-dev` for dev builds, so they never clash with a system Tailscale node.
+8. **Log upload to Tailscale is off** (build tag `ts_omit_logtail`, or `TS_NO_LOGS_NO_SUPPORT` set from our Go code). Confirm with a packet capture.
+9. **Routing next to a system Tailscale:** per machine. Machines picked from the in-app peer list use Clotho's node; existing machines keep today's path until changed.
+10. **Peer check (Phase 2):** WhoIs `UserProfile.ID` must equal the sidecar's own `Self.UserID` (never compare login names). Tagged and shared-in peers are refused. Apps check the server peer the same way before dialing.
+11. **Shipping the sidecar** and how it's bundled: decided after Phase 0's sizes (lean: in the Mac app, not the iOS app).
+12. **SSH-less machines:** the first install still uses SSH or a manual install; upgrade over the protocol is a later item with its own security review.
+
+### Phases
+
+- **0. Test build.** Prove one dial app → machine on the Mac and the iPhone, prove the sidecar, measure. No changes to serve.
+  - clothod: `clothod/net/` (sidecar with `login`, `status`, `serve`, a `dial` test mode) and `clothod/net/testctl/`. Static Linux x86_64/aarch64; darwin built and signed on the build Mac. Survives a serve restart; WhoIs accepts the same user and refuses a second user and a tagged node.
+  - mac: the shim and its build script in ClothoKit; a debug-only "Tailnet test" in the Mac app; ssh dials through a ProxyCommand helper wired to the existing dev `SSHProxyCommand` hook. Check that macOS ssh supports `ProxyUseFdpass` first.
+  - ios: link `ClothoTailnet` into the app target only; sign in with `ASWebAuthenticationSession`; a dial mode in `SSHSession.swift` (both `ClientBootstrap.connect` sites) using `withConnectedSocket`; a privacy manifest; a baseline IPA size first.
+  - **Physical iPhone, last:** lock for 30 s, 5 min and 30 min, then foreground. Recreate the node on foreground and never wait on `Close()` (tailscale/tailscale#21353: the node stops receiving ~30 s after lock). The simulator can't show this, so it runs at the end of Phase 0, on the test tailnet.
+  - Go/no-go bars (proposed by the research, taken by the user):
+    - Mac and iPhone dial a machine and an SSH pane works: must pass.
+    - iPhone after ≥5 min locked: usable within 10 s of foreground, UI never blocked.
+    - Notification action from a cold start on a locked phone: dial done with ≥8 s left of the 20 s budget.
+    - iOS thinned download grows ≤30 MB.
+    - Sidecar runs static on Linux x86_64 and aarch64 and survives a serve restart.
+    - No traffic to log.tailscale.com.
+    - Test runs leave no devices in any real tailnet.
+  - If only the iPhone fails, Phases 1–2 go ahead for the Mac and clothod, and the iPhone keeps the system-Tailscale path.
+- **1. The apps join.** The Mac and iPhone sign in inside Clotho and run today's SSH connection over the embedded node. Machines still run Tailscale and sshd. Machine records gain a `via` (system or tailnet); iOS keeps the machine id so host-key trust survives.
+- **2. clothod joins.**
+  - `clothod login` runs the sidecar's login and prints the sign-in link; the sidecar listens on its tailnet address only.
+  - Clients connect without SSH, after the peer check (decision 10).
+  - The apps discover machines from the tailnet's peer list and pin them by StableNodeID.
+  - SSH stays as an alternative, and for installs and upgrades until the protocol has them.
+  - docs/protocol.md gains the tailnet transport and `tailnet.*` methods; docs/security.md adds same-user tailnet devices as trusted and Tailscale's control plane as a trust anchor (Tailnet Lock recommended).
 - Known costs:
-  - about 20–30 MB per binary (to be measured in phase 0);
-  - one extra Tailscale device for each app install;
-  - The iPhone's node pauses while the app is suspended (pushes still arrive through the relay);
-  - a Go toolchain in the builds.
+  - size: about 19–25 MB per iOS slice and +11–17 MB for a Linux tsnet binary (third-party figures; Phase 0 measures ours);
+  - one extra Tailscale device for each app install and each machine (free on the Personal plan);
+  - the iPhone's node pauses while the app is suspended (pushes still arrive through the relay);
+  - a pinned Go toolchain on the dev box and the build Mac.
