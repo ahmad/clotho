@@ -24,7 +24,7 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl --target aarch64-unk
                                          # static Linux binaries; ring (TLS for push) has C code, so
                                          # cross builds use zig (brew install zig; cargo install cargo-zigbuild)
 cargo test                               # unit, snapshot round-trip and end-to-end tests
-scripts/test-all.sh                      # all of that on macOS, Linux (devbox) and remotes, plus cleanliness
+scripts/test-all.sh                      # all of that on macOS, Linux (the dev box) and remotes, plus cleanliness
 CLOTHOD_SOAK_SECS=3600 cargo test --release -p clothod --test soak -- --nocapture   # soak (Limits)
 ```
 

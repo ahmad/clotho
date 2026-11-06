@@ -2031,7 +2031,7 @@ async fn upgrade_switches_builds_despite_an_old_restarter() {
 }
 
 /// What the Mac app does when its connection drops: `<install dir>/current/clothod start`, about
-/// a second later. On macbook this restarted the old build in the middle of both the 0.1.6 and
+/// a second later. On the laptop Mac this restarted the old build in the middle of both the 0.1.6 and
 /// the 0.1.7 upgrade, which then needed a second attempt. An upgrade must win the first time.
 #[tokio::test]
 async fn upgrade_is_not_undone_by_a_client_restarting_current() {

@@ -7,10 +7,16 @@
 #   3. remote: the SSH suite against $REMOTE_HOSTS (a dev dist, not dist/)
 #   4. cleanliness: no test instance or /tmp/clt* dir left on any of those machines
 #
-# Runs on the build Mac (imac: `scripts/clotho-build clothod clothod/scripts/test-all.sh`).
-# The remote suite's other Mac is macbook, a laptop that sleeps: hosts in $OPTIONAL_HOSTS that
-# don't answer ssh are skipped (said so in the summary) instead of failing the run. Never list
-# the build Mac itself as a remote: it has no ssh to itself.
+# Runs on the build Mac (`scripts/clotho-build clothod clothod/scripts/test-all.sh`).
+# The hosts are private and come from the environment: $CLOTHO_DEV_HOST (the Linux dev box) and
+# $CLOTHO_FALLBACK_HOST (the laptop Mac). scripts/clotho-build passes them on from the dev box's
+# ~/.config/clotho/local.env; run elsewhere, this reads that file when it exists. The defaults:
+#   LINUX_HOST     = $CLOTHO_DEV_HOST
+#   REMOTE_HOSTS   = "$CLOTHO_DEV_HOST $CLOTHO_FALLBACK_HOST"
+#   OPTIONAL_HOSTS = $CLOTHO_FALLBACK_HOST
+# The laptop sleeps: hosts in $OPTIONAL_HOSTS that don't answer ssh are skipped (said so in the
+# summary) instead of failing the run. Never list the build Mac itself as a remote: it has no
+# ssh to itself.
 #
 # Tests only ever use ephemeral instances in /tmp/clt* dirs; they never touch the default
 # (the user's) instance.
@@ -18,9 +24,21 @@ set -u
 cd "$(dirname "$0")/.."
 . scripts/toolchain.sh
 
-LINUX_HOST=${LINUX_HOST:-ahmad@devbox}
-REMOTE_HOSTS=${REMOTE_HOSTS:-"ahmad@devbox ahmad@macbook"}
-OPTIONAL_HOSTS=${OPTIONAL_HOSTS:-"ahmad@macbook"}
+local_env=${CLOTHO_LOCAL_ENV:-$HOME/.config/clotho/local.env}
+if [ -z "${CLOTHO_DEV_HOST:-}" ] && [ -r "$local_env" ]; then
+    # shellcheck disable=SC1090
+    . "$local_env"
+fi
+need_host() {
+    echo "test-all: $1 is not set. Set it in $local_env on the dev box (scripts/clotho-build passes it on), or set $2." >&2
+    exit 2
+}
+[ -n "${LINUX_HOST:-}${CLOTHO_DEV_HOST:-}" ] || need_host CLOTHO_DEV_HOST LINUX_HOST
+[ -n "${REMOTE_HOSTS:-}${CLOTHO_DEV_HOST:-}" ] || need_host CLOTHO_DEV_HOST REMOTE_HOSTS
+[ -n "${REMOTE_HOSTS:-}${CLOTHO_FALLBACK_HOST:-}" ] || need_host CLOTHO_FALLBACK_HOST REMOTE_HOSTS
+LINUX_HOST=${LINUX_HOST:-$CLOTHO_DEV_HOST}
+REMOTE_HOSTS=${REMOTE_HOSTS:-"$CLOTHO_DEV_HOST $CLOTHO_FALLBACK_HOST"}
+OPTIONAL_HOSTS=${OPTIONAL_HOSTS:-${CLOTHO_FALLBACK_HOST:-}}
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=10"
 failed=""
 skipped=""

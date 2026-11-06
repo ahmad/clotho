@@ -368,7 +368,7 @@ mod tests {
         for bad in ["-oProxyCommand=touch /tmp/x", "", "a b", "host\n-oX", "-p22"] {
             assert!(super::check_host(bad).is_err(), "{bad:?}");
         }
-        for ok in ["devbox", "ahmad@devbox", "macbook@imac", "user@[::1]", "h.example.com"] {
+        for ok in ["devbox", "me@devbox", "macbook@imac", "user@[::1]", "h.example.com"] {
             assert!(super::check_host(ok).is_ok(), "{ok:?}");
         }
     }

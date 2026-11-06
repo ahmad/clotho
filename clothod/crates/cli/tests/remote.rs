@@ -1,6 +1,6 @@
 //! End-to-end tests against a real remote host over SSH (docs/remote.md).
 //!
-//! Set `CLOTHO_TEST_SSH_HOST` (e.g. `ahmad@devbox`) to run them; without it they are skipped.
+//! Set `CLOTHO_TEST_SSH_HOST` (e.g. `me@devbox`) to run them; without it they are skipped.
 //! They need `dist/` (scripts/dist.sh), and use their own runtime and install dirs on the host
 //! (`/tmp/clt-<tag>`), so they don't touch the host's real clothod.
 

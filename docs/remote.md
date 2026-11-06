@@ -39,11 +39,13 @@ Bundle the whole `dist/` directory.
 
 ### Build hosts
 
-Releases and `test-all.sh` run on imac (`macbook@imac`, always on), through
+Releases and `test-all.sh` run on the build Mac (always on, `$CLOTHO_BUILD_HOST`), through
 `scripts/clotho-build clothod <cmd>`, which mirrors the clone into `~/Builds/clotho-clothod`. That
 mirror's `clothod/dist` is the released builds; the other agents' mirrors link their
-`clothod/dist` to it.
-The toolchain lives in the `macbook` account only. Nothing is installed system-wide, and no
+`clothod/dist` to it. Host names and logins are private: they live in the dev box's
+`~/.config/clotho/local.env`, never in the repo, and `scripts/clotho-build` passes the
+`CLOTHO_*` values on to the command it runs.
+The toolchain lives in the build account only. Nothing is installed system-wide, and no
 dotfile was edited:
 
 - rustup in `~/.cargo` and `~/.rustup` (minimal profile, installed with `--no-modify-path`).
@@ -58,13 +60,15 @@ A non-interactive `zsh -lc` reads no profile there, so `dist.sh` and `test-all.s
 
 Signing: when `~/Library/Keychains/clotho-build.keychain-db` and
 `~/.config/clotho/build-keychain-pw` both exist, `dist.sh` unlocks that keychain and signs from it
-with `codesign --keychain`. Otherwise, as on macbook, it uses the login keychain, which the caller
-unlocks.
+with `codesign --keychain`. Otherwise, as on the laptop Mac, it uses the login keychain, which
+the caller unlocks.
 
-In `test-all.sh`, devbox is the Linux host, and the remote suite runs against `ahmad@devbox` and
-`ahmad@macbook`. macbook is a laptop: when it doesn't answer ssh, its remote run is skipped and
-the summary says so. Every other unreachable host is a failure. The build Mac never tests
-against itself.
+In `test-all.sh`, the dev box (`$CLOTHO_DEV_HOST`) is the Linux host, and the remote suite runs
+against the dev box and the laptop Mac (`$CLOTHO_FALLBACK_HOST`). `LINUX_HOST`, `REMOTE_HOSTS`
+and `OPTIONAL_HOSTS` override those; without either, the script stops and says which variable
+to set. The laptop sleeps: when it doesn't answer ssh, its remote run is skipped and the
+summary says so. Every other unreachable host is a failure. The build Mac never tests against
+itself.
 
 ## 1. Probe
 

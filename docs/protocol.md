@@ -241,7 +241,7 @@ the life of the object and never reused within an `instance`.
   ],
   "panes": [
     {"id": 3, "cols": 120, "rows": 40, "pid": 9811, "command": ["/bin/zsh", "-l"],
-     "title": "vim notes.md", "cwd": "/Users/ahmad/notes", "seq": 183230, "exited": null,
+     "title": "vim notes.md", "cwd": "/Users/me/notes", "seq": 183230, "exited": null,
      "scrollback_lines": 2000}
   ]
 }
@@ -357,7 +357,7 @@ is `null` outside one:
 ```json
 "git": {
   "repo": "clotho",
-  "root": "/Users/ahmad/Projects/clotho-fix",
+  "root": "/Users/me/Projects/clotho-fix",
   "remote": "ahmad/clotho",
   "branch": "fix-login",
   "head": "a1b2c3d",
@@ -1045,7 +1045,7 @@ the newest line up.
   is set: pass it as `before` to continue (only matches starting before it are returned), while
   `seq` hasn't changed. `next` is null when the search reached the oldest line. A search also
   stops after 200 ms with a `next`, since the pane's output waits while it runs. Measured: a
-  full scan of 50,000 scrollback rows at 120 columns takes 56 ms (release build, devbox), and a
+  full scan of 50,000 scrollback rows at 120 columns takes 56 ms (release build, the Linux x86_64 dev box), and a
   page of 100 matches near the bottom 0.6 ms.
 - It searches what the daemon keeps (`history` lines: the pane's `scrollback_lines`). Clients
   with deeper local history search the rest themselves. Feature flag: `pane.search`.

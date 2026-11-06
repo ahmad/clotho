@@ -83,8 +83,8 @@ sign=${CLOTHOD_SIGN_IDENTITY:-}
 keychain=""
 if [ -n "$sign" ]; then
     command -v codesign >/dev/null || { echo "dist: CLOTHOD_SIGN_IDENTITY needs codesign (a Mac)" >&2; exit 1; }
-    # A build Mac with a dedicated build keychain (imac) signs from it: unlocked here, since over
-    # SSH it is locked, and named to codesign so only it is searched. Without one (macbook), the
+    # A Mac with a dedicated build keychain (the build Mac) signs from it: unlocked here, since over
+    # SSH it is locked, and named to codesign so only it is searched. Without one (the laptop Mac), the
     # login keychain, unlocked by the caller.
     kc="$HOME/Library/Keychains/clotho-build.keychain-db"
     kcpw="$HOME/.config/clotho/build-keychain-pw"
@@ -113,7 +113,7 @@ mkdir -p "$out"
                 codesign --force --options runtime --timestamp --sign "$sign" ${keychain:+--keychain "$keychain"} "$out/$name/clothod" >&2
                 codesign --verify --strict --verbose=1 "$out/$name/clothod" >&2
                 # It must still start under the hardened runtime (x86_64 through Rosetta). A
-                # build Mac without Rosetta (imac) can't run the x86_64 one: said loudly, so it's
+                # build Mac without Rosetta can't run the x86_64 one: said loudly, so it's
                 # run on a Mac that can before the release goes out.
                 if [ "$name" = macos-x86_64 ] && [ "$(uname -m)" = arm64 ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
                     echo "dist: NOT RUN: $name version (no Rosetta here); run it on another Mac before shipping" >&2
