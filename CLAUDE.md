@@ -10,9 +10,11 @@ with native Mac and iOS clients. PLAN.md has the design and the decisions behind
 | `clothod/`, `docs/protocol.md`, `docs/remote.md` | clothod |
 | `mac/`, `ClothoKit/` (shared Swift package) | mac |
 | `ios/` (includes the push relay `ios/relay`), `docs/push.md` | ios |
-| `PLAN.md`, `CLAUDE.md`, `.claude/`, `scripts/`, root files | orchestrator |
+| `PLAN.md`, `CLAUDE.md`, `STATUS.md`, `.claude/`, `scripts/`, root files | main session |
 
-Four Claude Code sessions work here as peers. Start one with `scripts/agent <role>`. Peers find each
+The main session is the plain Claude Code session the user talks to at the repo root. It has no role
+file: it coordinates the three role sessions, verifies their work, pushes and ships. The role
+sessions (clothod, mac, ios) work as peers. Start one with `scripts/agent <role>`. Peers find each
 other with ListAgents and talk with SendMessage. Change only the paths you own. To change something
 another agent owns, message that agent; the iOS agent asks the mac agent for ClothoKit changes.
 
@@ -30,13 +32,13 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
 - **Git.** There is one repo, with remote `git@github.com:ahmad/clotho.git` (private).
   - Commit your own paths only. Never `git add -A` at the root.
   - Never commit secrets: `.p8` and `.p12` keys, provisioning profiles, `.env` files, tokens.
-  - Only the orchestrator pushes, after verifying each commit.
+  - Only the main session pushes, after verifying each commit.
   - End commit messages with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - **Terms.** It's Workspace, Tab, Pane in every UI and doc, never "Session". Renames happen inline the
   way Finder does it (double-click, or Return).
 - **Releases.** A clothod release bumps the version (`clothod/scripts/dist.sh` refuses to re-release
   one). The apps offer only newer versions and never downgrade.
-- **Shipping (user rule, 2026-10-28: "stop asking me to ship things and just do it").** The orchestrator
+- **Shipping (user rule, 2026-10-28: "stop asking me to ship things and just do it").** The main session
   ships without asking, once the work is verified: the full tests pass (test-all for clothod; the full
   iPhone suite and the iPad test for iOS; the swift tests for the Mac), and it has checked the result.
   Shipping covers clothod releases with in-place upgrades on all three machines, Mac app installs,
@@ -63,7 +65,7 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
   simulators without asking the user.
 - **imac** (macOS arm64, `macbook@imac`, always on): **the build host** (user, 2026-10-30). Run Mac and iOS
   builds, tests and dists there with `scripts/clotho-build <role> <command>` (role = clothod, mac, ios or
-  orchestrator). Each role has its own mirror on imac (~/Builds/clotho-clothod for clothod, which holds the
+  main). Each role has its own mirror on imac (~/Builds/clotho-clothod for clothod, which holds the
   released clothod/dist; clotho-mac, clotho-ios, clotho-orch, whose clothod/dist links to it), so agents never
   sync over each other's builds. Never sync into another role's mirror. Separate mirrors stop file clashes, not CPU
   contention: the iOS UI suite is timing-sensitive, so ask the other agents before a heavy run (test suites,
@@ -87,7 +89,7 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
     shipping (see Shipping).
 - iOS:
   - `ios/build.sh` builds for the simulator; `ios/build.sh test` runs the tests.
-  - `ios/scripts/testflight.sh` uploads to TestFlight. The orchestrator runs it over SSH without
+  - `ios/scripts/testflight.sh` uploads to TestFlight. The main session runs it over SSH without
     asking, once a build has passed the full iPhone suite and the iPad test and has been verified,
     then tells the user the build number. The API key ids live in devbox's
     `~/.config/clotho/asc.env`, never in the repo.

@@ -2,7 +2,7 @@
 # Runs a command on the build Mac (imac) in a mirror of this clone that belongs to one agent, so two
 # agents' syncs and builds never delete each other's files. Like clotho-mac, but one mirror per role.
 #
-# Usage: scripts/clotho-build <clothod|mac|ios|orchestrator> <command...>
+# Usage: scripts/clotho-build <clothod|mac|ios|main> <command...>
 #   e.g. scripts/clotho-build ios ios/build.sh test
 #        scripts/clotho-build mac 'cd mac && swift test --disable-keychain'
 #
@@ -10,7 +10,7 @@
 #   clothod       ~/Builds/clotho-clothod   (the canonical one: clothod/dist, the released builds, lives here)
 #   mac           ~/Builds/clotho-mac
 #   ios           ~/Builds/clotho-ios
-#   orchestrator  ~/Builds/clotho-orch
+#   main          ~/Builds/clotho-orch   (the main session's mirror)
 # In every mirror but clothod's, clothod/dist is a symlink to the canonical dist, so app builds bundle the
 # released clothod. The sync never touches clothod/dist (excluded), build outputs, or generated projects.
 # CLOTHO_MAC picks another host (default macbook@imac).
@@ -20,8 +20,8 @@ case $role in
   clothod) dest=Builds/clotho-clothod ;;
   mac) dest=Builds/clotho-mac ;;
   ios) dest=Builds/clotho-ios ;;
-  orchestrator) dest=Builds/clotho-orch ;;
-  *) echo "usage: scripts/clotho-build <clothod|mac|ios|orchestrator> <command...>" >&2; exit 64 ;;
+  main) dest=Builds/clotho-orch ;;
+  *) echo "usage: scripts/clotho-build <clothod|mac|ios|main> <command...>" >&2; exit 64 ;;
 esac
 shift
 host=${CLOTHO_MAC:-macbook@imac}

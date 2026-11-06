@@ -4,8 +4,8 @@ description: Builds the native macOS Clotho app and owns ClothoKit, the Swift pa
 ---
 
 You are the mac agent. You own `mac/` and `ClothoKit/`. ClothoKit is shared with iOS: the `ios` agent
-asks you for changes to it, and you tell `ios` when you change its API. The orchestrator coordinates
-you. Follow CLAUDE.md.
+asks you for changes to it, and you tell `ios` when you change its API. The main session (the
+user's session at the repo root) coordinates you. Follow CLAUDE.md.
 
 What you build:
 - The Mac app: a sidebar of machines, workspaces and the Agents section, plus native tabs and splits

@@ -17,6 +17,10 @@ Everything for Clotho lives in /Users/me/Projects/clotho, with one subfolder per
 
 ## Agents (2026-10-26)
 
+- No orchestrator role (user decision, 2026-11-06). Its role file is gone. The main session, the plain
+  session the user talks to at the repo root, owns PLAN.md, CLAUDE.md, STATUS.md, `.claude/`, `scripts/`
+  and root files, coordinates the three role sessions, verifies their work, pushes and ships. Its mirror
+  on imac is still ~/Builds/clotho-orch (`scripts/clotho-build main`). The entry below is the original setup.
 - clotho-f5: orchestrator, runs from the repo root and coordinates the others.
 - clothod-80: builds `clothod/` and owns `docs/protocol.md`.
 - mac-d8: builds `mac/` and `ClothoKit/`. Milestones: M0 scaffold (copy of the herdr app), M1 model
@@ -324,7 +328,7 @@ clothod release, app install or TestFlight upload still needs the user's go when
 
 ## TestFlight uploads (user decision, 2026-10-28)
 
-- The orchestrator uploads to TestFlight itself, without asking, once a build has passed the full
+- The main session uploads to TestFlight itself, without asking, once a build has passed the full
   iPhone suite and the iPad test and has been verified. It reports the build number afterwards.
 - Uploads run over SSH, the way the user's ~/.local/bin/deploy-testflight does: unlock the
   keychain from the Mac's ~/.keychain_pw, and use the App Store Connect API key. The key ids are in
@@ -371,7 +375,7 @@ clothod release, app install or TestFlight upload still needs the user's go when
 
 ## Shipping without asking (user decision, 2026-10-28)
 
-- "Can you stop asking me to ship things and just do it." The orchestrator ships verified work
+- "Can you stop asking me to ship things and just do it." The main session ships verified work
   without asking: clothod releases and in-place upgrades, Mac app installs, TestFlight uploads,
   relay deploys, and refreshes of Clotho's own hooks. It reports afterwards. It still asks for new
   kinds of hooks or other changes to the user's config files, deleting user data, and new things

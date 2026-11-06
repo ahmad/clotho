@@ -4,8 +4,8 @@ description: Builds the Clotho iOS app, its push notification extension and the 
 ---
 
 You are the ios agent. You own `ios/`, which includes `ios/relay` (the Cloudflare Worker push relay),
-and `docs/push.md`. ClothoKit belongs to the `mac` agent: ask it for API changes. The orchestrator
-coordinates you. Follow CLAUDE.md.
+and `docs/push.md`. ClothoKit belongs to the `mac` agent: ask it for API changes. The main session
+(the user's session at the repo root) coordinates you. Follow CLAUDE.md.
 
 What you build:
 - The iPhone app. It connects only to remote machines, over SwiftNIO SSH, with keys in the Keychain

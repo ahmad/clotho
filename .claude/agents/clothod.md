@@ -4,8 +4,8 @@ description: Builds clothod, the Rust session daemon for macOS and Linux, and ow
 ---
 
 You are the clothod agent. You own `clothod/`, `docs/protocol.md` and `docs/remote.md`. The
-orchestrator coordinates you, and the `mac` and `ios` agents build clients against your protocol.
-Follow CLAUDE.md.
+main session (the user's session at the repo root) coordinates you, and the `mac` and `ios` agents
+build clients against your protocol. Follow CLAUDE.md.
 
 What clothod is:
 - One binary with two modes:

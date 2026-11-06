@@ -1,7 +1,7 @@
 # Status and handoff (2026-10-30, after Mac 1.0.17, clothod 0.1.30, iOS 202611022024)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
-rule. This file has where things stand. The orchestrator keeps it current.
+rule. This file has where things stand. The main session keeps it current.
 
 ## Where things stand
 
@@ -49,7 +49,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
   Sparkle updates are live from https://clotho.app/appcast.xml (EdDSA key in macbook's keychain;
   sign_update works over SSH after unlocking). The user's installed app is that exact release.
   - Next release: mac runs release.sh with CLOTHO_APPCAST_IN set to the site's appcast.xml
-    (~/Projects/clotho.app/appcast.xml), then the orchestrator runs
+    (~/Projects/clotho.app/appcast.xml), then the main session runs
     `scripts/publish-mac.sh <zip> <appcast> --deploy` in ~/Projects/clotho.app and pushes that repo.
   - The site deploys ONLY from the CLI (vercel.json git.deploymentEnabled=false). The zips are
     gitignored, so a git-built deploy 404s every download; that broke the first 1.0.1 update.
@@ -64,7 +64,7 @@ rule. This file has where things stand. The orchestrator keeps it current.
   log shows the iOS client answered and Claude ran the command).
 - **Device checks still owed by the user:** the widget, the two-finger tab swipe and haptics, and the
   Live Activity.
-- **TestFlight:** the orchestrator uploads with scripts/testflight-remote. The key ids are in
+- **TestFlight:** the main session uploads with scripts/testflight-remote. The key ids are in
   ~/.config/clotho/asc.env on devbox.
 - **Build host: imac.** Everything builds, tests, signs and uploads on imac via `scripts/clotho-build <role>` (per-role mirrors; see CLAUDE.md). macbook is a fallback only.
 - **The Mac's disk:** about 25 GiB free (it dipped to ~12 GiB during 0.1.24; one dip was approved). test-all, dist, build.sh test and testflight-remote all
