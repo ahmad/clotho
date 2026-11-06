@@ -66,6 +66,9 @@ session passes it on.
   The app offers "Set Up Agent Status…" for that.
 - **Git.** There is one repo, with remote `git@github.com:ahmad/clotho.git` (private).
   - Commit your own paths only. Never `git add -A` at the root.
+  - Commit as `ahmad <info@ahmadamin.com>` (set in this repo's local git config; user, 2026-11-06).
+  - Before a push, scan what's going out with `~/.config/clotho/scrub-scan.py` and its private rules
+    (`~/.config/clotho/scrub-expr.txt`). The repo is public: a hit means don't push.
   - Never commit secrets: `.p8` and `.p12` keys, provisioning profiles, `.env` files, tokens.
   - Only the main session pushes, after verifying each commit.
   - End commit messages with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
