@@ -21,6 +21,12 @@ session passes it on.
 
 ## How work flows (user decision, 2026-11-06)
 
+- **The main session's default.** When the user asks for a change in `clothod/`, `docs/protocol.md`,
+  `docs/remote.md`, `mac/`, `ClothoKit/`, `ios/` or `docs/push.md`, don't edit those paths yourself.
+  Run `/change <role> <task>` for each role involved. This is the user's standing go to run the
+  `change` and `gate` workflows without asking. When you'd rather steer the work step by step, use the
+  by-hand path below instead. Questions, read-only investigations, and the main session's own paths
+  don't go through a role.
 - **Agents.** The role agents (`clothod`, `mac`, `ios`) start their own subagents: `investigator`,
   `planner`, `implementer` and `validator` (plus the built-in `Explore`). The merge gate uses
   `code-reviewer`, `validator` and `ux-reviewer`. They are all in `.claude/agents/`.
