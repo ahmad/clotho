@@ -689,6 +689,46 @@ func TestTestInstanceNeedsTestControl(t *testing.T) {
 	}
 }
 
+// An ephemeral node logs out when it exits, so dial and --ephemeral-node never run in the
+// machine's node dir, and neither does a test instance. HOME points at a scratch dir here, so a
+// failure touches only that.
+func TestEphemeralNodeNeverUsesMachineNode(t *testing.T) {
+	home := t.TempDir()
+	machine := filepath.Join(home, ".local", "state", "clothod")
+	if runtime.GOOS == "darwin" {
+		machine = filepath.Join(home, "Library", "Application Support", "clothod")
+	}
+	other := t.TempDir()
+	for _, tc := range []struct {
+		args []string
+		env  string
+		want string
+	}{
+		{[]string{"dial", "x:1"}, "", "--state-dir"},
+		{[]string{"dial", "x:1", "--timeout", "1s"}, "CLOTHOD_STATE_DIR=" + other, "--state-dir"},
+		{[]string{"dial", "x:1", "--state-dir", machine}, "", "machine's own node"},
+		{[]string{"status", "--ephemeral-node"}, "", "--state-dir"},
+		{[]string{"serve", "--port", "1", "--ephemeral-node", "--state-dir", machine + "/"}, "", "machine's own node"},
+		{[]string{"status", "--ephemeral", "--control-url", "http://127.0.0.1:9", "--state-dir", machine}, "", "machine's own node"},
+	} {
+		cmd := exec.Command(netBin, tc.args...)
+		cmd.Env = append(os.Environ(), "HOME="+home, "XDG_STATE_HOME=", "CLOTHOD_STATE_DIR=",
+			"CLOTHOD_EPHEMERAL=", "CLOTHOD_NET_CONTROL_URL=")
+		if tc.env != "" {
+			cmd.Env = append(cmd.Env, tc.env)
+		}
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), tc.want) {
+			t.Errorf("%v (%s): want a refusal naming %s, got %v: %s", tc.args, tc.env, tc.want, err, out)
+		}
+	}
+	for _, d := range []string{home, other} {
+		if entries, _ := os.ReadDir(d); len(entries) != 0 {
+			t.Errorf("a refused node left state in %s: %v", d, entries)
+		}
+	}
+}
+
 func rssKB(pid int) int {
 	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {

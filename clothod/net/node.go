@@ -40,6 +40,9 @@ type config struct {
 //   - A test instance (--ephemeral or $CLOTHOD_EPHEMERAL) only ever joins a test control server
 //     given with --control-url (or $CLOTHOD_NET_CONTROL_URL), never Tailscale's, and needs its
 //     own --state-dir, never the machine's.
+//   - An ephemeral node (--ephemeral-node, and dial always) needs its own --state-dir, never the
+//     machine's: a clean exit of an ephemeral node logs it out (tsnet's LocalBackend.Shutdown
+//     does), which would sign the machine's device out of the user's tailnet.
 func (c *commonFlags) config() (*config, error) {
 	cfg := &config{verbose: c.verbose}
 	envEph := os.Getenv("CLOTHOD_EPHEMERAL")
@@ -71,6 +74,9 @@ func (c *commonFlags) config() (*config, error) {
 			return nil, errors.New("a test instance (--ephemeral or CLOTHOD_EPHEMERAL) needs its own --state-dir")
 		}
 	}
+	if cfg.ephemeralNode && base == "" {
+		return nil, errors.New("an ephemeral node (dial, --ephemeral-node) logs out when it exits: give it its own --state-dir, never the machine's node")
+	}
 	if base == "" {
 		base = defaultStateDir()
 	}
@@ -79,6 +85,9 @@ func (c *commonFlags) config() (*config, error) {
 		return nil, err
 	}
 	cfg.stateDir = filepath.Join(abs, "tailnet")
+	if (test || cfg.ephemeralNode) && sameDir(cfg.stateDir, filepath.Join(platformStateDir(), "tailnet")) {
+		return nil, fmt.Errorf("%s is the machine's own node: a test instance or an ephemeral node (dial, --ephemeral-node) needs a --state-dir of its own", cfg.stateDir)
+	}
 	cfg.hostname = c.hostname
 	if cfg.hostname == "" {
 		cfg.hostname = defaultHostname(devBuild != "" || test)
@@ -107,6 +116,12 @@ func defaultStateDir() string {
 	if d := os.Getenv("CLOTHOD_STATE_DIR"); d != "" {
 		return d
 	}
+	return platformStateDir()
+}
+
+// platformStateDir is clothod's state dir without $CLOTHOD_STATE_DIR: where the machine's own
+// clothod, and so the machine's own node, keeps its state.
+func platformStateDir() string {
 	home, _ := os.UserHomeDir()
 	if runtime.GOOS == "darwin" {
 		return filepath.Join(home, "Library", "Application Support", "clothod")
@@ -115,6 +130,25 @@ func defaultStateDir() string {
 		return filepath.Join(d, "clothod")
 	}
 	return filepath.Join(home, ".local", "state", "clothod")
+}
+
+// sameDir: a and b name the same directory, through symlinks when both exist.
+func sameDir(a, b string) bool {
+	resolve := func(p string) string {
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	if resolve(a) == resolve(b) {
+		return true
+	}
+	fa, errA := os.Stat(a)
+	fb, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(fa, fb)
 }
 
 // defaultHostname is clothod-<host> (PLAN decision 7), from the first label of the OS hostname,

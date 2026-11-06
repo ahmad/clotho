@@ -48,9 +48,11 @@ commands:
             must be a device of this node's own Tailscale user (not tagged, not shared in), or
             the connection is closed before anything is read. Then clothod is started if needed
             (as 'clothod bridge' does) and bytes are relayed to its socket.
-  dial HOST:PORT
+  dial HOST:PORT --state-dir DIR
             (tests) join as an ephemeral node, connect to HOST:PORT over the tailnet and copy
             stdin and stdout to it. Exits 0 when stdin ends, 2 when the other side closes.
+            Needs its own --state-dir, never the machine's node: an ephemeral node logs out
+            when it exits.
   version   print this build's version and its tailscale.com version
 
 flags:
@@ -63,7 +65,8 @@ flags:
                       --control-url and --state-dir are given, so it never joins a real tailnet
                       or uses the machine's node; passed on to the clothod it starts
   --ephemeral-node    register an ephemeral node: control deletes it soon after it goes
-                      offline, and a clean exit logs it out (dial always does this)
+                      offline, and a clean exit logs it out (dial always does this). Needs
+                      its own --state-dir, never the machine's node
   -v                  log the node's internals to stderr
   serve: --port N (required), --clothod PATH (default: the clothod next to this binary, else
          $PATH), --runtime-dir DIR (clothod's; default clothod's own)
@@ -327,11 +330,11 @@ func runDial(args []string) error {
 	if _, _, err := net.SplitHostPort(target); err != nil {
 		return fmt.Errorf("dial needs HOST:PORT: %w", err)
 	}
+	c.ephNode = true // a test tool: never a lasting device, and so never the machine's node
 	cfg, err := c.config()
 	if err != nil {
 		return err
 	}
-	cfg.ephemeralNode = true // a test tool: never a lasting device
 	n, err := openNode(cfg, "dial")
 	if err != nil {
 		return err

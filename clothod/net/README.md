@@ -12,7 +12,7 @@ devices reach this machine's clothod without SSH. Nothing in clothod uses it yet
 clothod-net login                # prints auth_url=<URL>; open it, then state=Running, name=, ip=
 clothod-net status               # JSON: state, auth_url, name, IPs, user, key expiry, ...
 clothod-net serve --port N       # accept on the node's tailnet addresses, port N, only
-clothod-net dial HOST:PORT       # tests: join (ephemeral), pipe stdin/stdout to HOST:PORT
+clothod-net dial HOST:PORT --state-dir DIR   # tests: join (ephemeral), pipe stdio to HOST:PORT
 clothod-net version
 ```
 
@@ -43,6 +43,11 @@ clothod-net version
   and a clean exit logs it out, so the next start needs a new sign-in. `dial` always registers
   an ephemeral node. Test instances don't by default, because they only ever join testctl,
   which keeps nothing.
+- **An ephemeral node never uses the machine's node.** Because its exit logs it out, `dial` and
+  `--ephemeral-node` are refused without an explicit `--state-dir`, and refused when that is
+  clothod's own state dir (`~/Library/Application Support/clothod`, `~/.local/state/clothod`).
+  A test instance is refused there too. Otherwise a `dial` run while serve is stopped would take
+  the machine's signed-in node and sign it out of the user's tailnet.
 
 ## serve: the peer check and the relay
 
