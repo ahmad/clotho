@@ -1,0 +1,4 @@
+module CClothoTailnet {
+    header "clotho_tailnet.h"
+    export *
+}

@@ -1,0 +1,3 @@
+# ClothoKit/scripts/build-tailnet.sh output (the xcframework) and SwiftPM's.
+/build/
+/.build/
