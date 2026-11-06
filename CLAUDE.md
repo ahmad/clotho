@@ -13,10 +13,11 @@ with native Mac and iOS clients. PLAN.md has the design and the decisions behind
 | `PLAN.md`, `CLAUDE.md`, `STATUS.md`, `.claude/`, `scripts/`, root files | main session |
 
 The main session is the plain Claude Code session the user talks to at the repo root. It has no role
-file: it coordinates the three role sessions, verifies their work, pushes and ships. The role
-sessions (clothod, mac, ios) work as peers. Start one with `scripts/agent <role>`. Peers find each
-other with ListAgents and talk with SendMessage. Change only the paths you own. To change something
-another agent owns, message that agent; the iOS agent asks the mac agent for ClothoKit changes.
+file. It starts the role agents (clothod, mac, ios) as subagents when a task needs them, passes
+changes from one to another, verifies their work, pushes and ships. A role agent changes only the
+paths it owns. When it needs something from another role (a protocol change, a ClothoKit API change),
+or changed something another role builds against, it says so in its final report and the main
+session passes it on.
 
 ## Rules (set by the user)
 
@@ -68,8 +69,8 @@ another agent owns, message that agent; the iOS agent asks the mac agent for Clo
   main). Each role has its own mirror on imac (~/Builds/clotho-clothod for clothod, which holds the
   released clothod/dist; clotho-mac, clotho-ios, clotho-orch, whose clothod/dist links to it), so agents never
   sync over each other's builds. Never sync into another role's mirror. Separate mirrors stop file clashes, not CPU
-  contention: the iOS UI suite is timing-sensitive, so ask the other agents before a heavy run (test suites,
-  release builds) while one of them is mid-run, and wait for their "done". macbook is the fallback
+  contention: the iOS UI suite is timing-sensitive, so the main session runs heavy work (test suites,
+  release builds) one at a time and never starts two role agents that both run one. macbook is the fallback
   (`CLOTHO_MAC=ahmad@macbook clotho-mac <command>`).
   Signing uses imac's dedicated build keychain (~/Library/Keychains/clotho-build.keychain-db, password in
   ~/.config/clotho/build-keychain-pw; never print it). Unlock it in the same SSH session before codesign,

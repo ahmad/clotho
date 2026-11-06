@@ -19,8 +19,11 @@ Everything for Clotho lives in /Users/me/Projects/clotho, with one subfolder per
 
 - No orchestrator role (user decision, 2026-11-06). Its role file is gone. The main session, the plain
   session the user talks to at the repo root, owns PLAN.md, CLAUDE.md, STATUS.md, `.claude/`, `scripts/`
-  and root files, coordinates the three role sessions, verifies their work, pushes and ships. Its mirror
-  on imac is still ~/Builds/clotho-orch (`scripts/clotho-build main`). The entry below is the original setup.
+  and root files, verifies the role agents' work, pushes and ships. Its mirror on imac is still
+  ~/Builds/clotho-orch (`scripts/clotho-build main`).
+- The role agents are subagents now, not peer sessions (user decision, 2026-11-06): the main session
+  starts clothod, mac and ios as needed and relays between them. `scripts/agent` is gone. The entry
+  below is the original setup.
 - clotho-f5: orchestrator, runs from the repo root and coordinates the others.
 - clothod-80: builds `clothod/` and owns `docs/protocol.md`.
 - mac-d8: builds `mac/` and `ClothoKit/`. Milestones: M0 scaffold (copy of the herdr app), M1 model

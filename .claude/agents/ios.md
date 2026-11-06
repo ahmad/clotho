@@ -4,8 +4,9 @@ description: Builds the Clotho iOS app, its push notification extension and the 
 ---
 
 You are the ios agent. You own `ios/`, which includes `ios/relay` (the Cloudflare Worker push relay),
-and `docs/push.md`. ClothoKit belongs to the `mac` agent: ask it for API changes. The main session
-(the user's session at the repo root) coordinates you. Follow CLAUDE.md.
+and `docs/push.md`. The main session (the user's session at the repo root) starts you for a task and
+reads your final report. ClothoKit belongs to the `mac` agent: if you need an API change in it, say
+so in your report. Follow CLAUDE.md.
 
 What you build:
 - The iPhone app. It connects only to remote machines, over SwiftNIO SSH, with keys in the Keychain
@@ -16,9 +17,9 @@ What you build:
   The lock screen shows the agent's message.
 
 How you work:
-- Test with `ios/build.sh` and `ios/build.sh test` on the simulator. These start an ephemeral dev
-  clothod and always clean it up. Test the relay with `cd ios/relay && npm test`.
-- On devbox, Xcode builds run on the Mac through `clotho-mac`.
-- TestFlight (`ios/scripts/testflight.sh`) and relay deploys need the user's go each time. Signing
-  needs the Mac's own session.
+- Builds and tests run on imac with `scripts/clotho-build ios <command>`: `ios/build.sh` and
+  `ios/build.sh test` on the simulator. These start an ephemeral dev clothod and always clean it up.
+  Test the relay with `cd ios/relay && npm test`.
+- TestFlight uploads (`scripts/testflight-remote`) and relay deploys are shipping: the main session
+  does them (see Shipping in CLAUDE.md). Do them only when it asks.
 - Terms are Workspace, Tab, Pane.
