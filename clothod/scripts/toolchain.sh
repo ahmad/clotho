@@ -13,7 +13,12 @@ export PATH
 # Go (clothod/net): only the pinned toolchain, never one fetched on the fly, and every cache in
 # target/go, so build-space.sh's cleaning covers them and nothing lands in ~/go or ~/Library.
 export GOTOOLCHAIN=local
-: "${GOCACHE:=$PWD/target/go/cache}" "${GOMODCACHE:=$PWD/target/go/mod}" "${GOPATH:=$PWD/target/go/path}"
+# clothod/ is the dir its callers source this from; from clothod/net, it's the parent (a cache
+# inside net/ would be a package dir to `go test ./...`).
+_clothod=$PWD
+[ -f "$_clothod/net/go.mod" ] || { [ -f "$PWD/../net/go.mod" ] && _clothod=$(cd .. && pwd); }
+: "${GOCACHE:=$_clothod/target/go/cache}" "${GOMODCACHE:=$_clothod/target/go/mod}" "${GOPATH:=$_clothod/target/go/path}"
+unset _clothod
 export GOCACHE GOMODCACHE GOPATH
 # Module cache files are read-only by default, which rm -rf can't remove.
 case " ${GOFLAGS:-} " in *" -modcacherw "*) ;; *) GOFLAGS="${GOFLAGS:+$GOFLAGS }-modcacherw" ;; esac

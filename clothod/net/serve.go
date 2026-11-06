@@ -148,7 +148,7 @@ func peerName(who *apitype.WhoIsResponse) string {
 	return name
 }
 
-// allowPeer is the peer check (PLAN.md decision 10): a peer may in only if it is a device of
+// allowPeer is the peer check (PLAN.md decision 10): a peer gets in only if it is a device of
 // this node's own Tailscale user. Identity is the user ID control assigns, never a login name.
 // Tagged peers (no user identity) and peers shared in from another tailnet are refused, and so
 // is everyone while this node itself has no user (tagged, or not signed in).
