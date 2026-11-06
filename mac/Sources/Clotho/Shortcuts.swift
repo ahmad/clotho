@@ -156,7 +156,16 @@ extension AppDelegate {
     func buildMenu() {
         let main = Self.makeMainMenu()
         if let window = main.items.first(where: { $0.submenu?.title == "Window" })?.submenu { NSApp.windowsMenu = window }
-        if let help = main.items.first(where: { $0.submenu?.title == "Help" })?.submenu { NSApp.helpMenu = help }
+        if let help = main.items.first(where: { $0.submenu?.title == "Help" })?.submenu {
+            NSApp.helpMenu = help
+            #if CLOTHO_TAILNET
+            // The dev build's tailnet test (CLOTHO_TAILNET=1 ./build-app.sh --dev); never in the user's app.
+            if isDevBuild {
+                help.addItem(.separator())
+                help.addItem(withTitle: "Tailnet Test…", action: #selector(showTailnetTest(_:)), keyEquivalent: "")
+            }
+            #endif
+        }
         NSApp.mainMenu = main
     }
 

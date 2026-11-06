@@ -188,10 +188,16 @@ extension AppDelegate {
     /// noticed) can't hold the session, or the reconnect after it, hostage.
     nonisolated static let sshBridgeOptions: [String] = ["-o", "ControlMaster=no", "-o", "ControlPath=none"] + sshProxyOptions
 
-    nonisolated static let sshProxyOptions: [String] = {
-        guard isDevBuild, let command = UserDefaults.standard.string(forKey: "SSHProxyCommand"), !command.isEmpty else { return [] }
-        return ["-o", "ProxyCommand=\(command)"]
-    }()
+    nonisolated static let sshProxyOptions: [String] = proxyOptions(
+        command: UserDefaults.standard.string(forKey: "SSHProxyCommand"),
+        fdpass: UserDefaults.standard.bool(forKey: "SSHProxyUseFdpass"), dev: isDevBuild)
+
+    /// Dev builds only: ProxyCommand, plus ProxyUseFdpass when the command hands ssh a connected descriptor
+    /// instead of copying bytes (clotho-tailnet-proxy, the Tailnet Test window's "Route SSH through this node").
+    nonisolated static func proxyOptions(command: String?, fdpass: Bool, dev: Bool) -> [String] {
+        guard dev, let command, !command.isEmpty else { return [] }
+        return ["-o", "ProxyCommand=\(command)"] + (fdpass ? ["-o", "ProxyUseFdpass=yes"] : [])
+    }
 
     /// clothod's warnings (for example that workspaces won't survive logout), once per machine per run.
     func showRemoteWarning(_ line: String, for key: MachineKey) {

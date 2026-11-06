@@ -49,6 +49,17 @@ open -g -n "build/Clotho Dev.app" --args -LaunchInBackground YES
 
 `Clotho Dev.app` stays in `build/` and is never installed. It has its own bundle id (`app.clotho.desktop.dev`), preferences, log (`~/Library/Logs/Clotho Dev.log`) and daemon (`$TMPDIR/clotho-dev`), so testing never touches the installed app or its shells. Use it for every scripted or automated run. `-LaunchInBackground YES` keeps it from taking keyboard focus, so it can't catch keystrokes meant for another app.
 
+### Tailnet test (dev only)
+
+Phase 0 of PLAN.md's "Built-in Tailscale": the dev build can link Clotho's own tailnet node and show a **Tailnet Test** window (Help menu).
+
+```sh
+../ClothoKit/scripts/build-tailnet.sh          # once: the node's xcframework (a Mac with Xcode)
+CLOTHO_TAILNET=1 ./build-app.sh --dev
+```
+
+The window starts and stops the node, signs it in, lists its peers, dials `<peer>:<port>` and shows what the peer sends first (an SSH banner, say), and can route the dev build's SSH through the node (`clotho-tailnet-proxy` with `ProxyUseFdpass`, after a relaunch). Its settings are dev defaults: `TailnetDir` (default `~/Library/Application Support/Clotho/tailscale-dev`), `TailnetControlURL` (a loopback one, such as clothod's `testctl`, turns test mode on), `TailnetAutoStart` and `TailnetVerbose`. Automated runs always set `TailnetDir` to a `/tmp/cmac-*` dir and `TailnetControlURL` to a testctl. No other build links the node: `build-app.sh` refuses one that does. See `../ClothoKit/Tailnet/README.md`.
+
 ### Notarized builds
 
 `./build-app.sh` signs ad hoc, which is fine on this Mac. `./build-app.sh --release` signs with Developer ID (hardened runtime, secure timestamp, [`Resources/Clotho.entitlements`](Resources/Clotho.entitlements)), notarizes with `notarytool`, staples the ticket, then installs. [`scripts/notarize.sh`](scripts/notarize.sh) does the signing and notarizing, and refuses a bundled clothod that isn't Developer ID signed: clothod's build ids hash the whole file, so its dist signs it (`CLOTHOD_SIGN_IDENTITY`), not the app.

@@ -459,6 +459,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let firstRun = OnboardingController.isFirstRun()
         buildMenu()
         Self.registerBundledFonts()
+        #if CLOTHO_TAILNET
+        TailnetTestController.appLaunched()
+        #endif
 
         let frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
         window = FramelessWindow(

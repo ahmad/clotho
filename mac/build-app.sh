@@ -16,6 +16,11 @@
 # environment (scripts/keychain.sh) and is never written in the repo; without it they stop before
 # building. --dev and plain builds don't need it.
 #
+# CLOTHO_TAILNET=1 ./build-app.sh --dev also links Clotho's own tailnet node (../ClothoKit/Tailnet; build its
+# xcframework first with ../ClothoKit/scripts/build-tailnet.sh) and bundles clotho-tailnet-proxy, for the dev-only
+# Tailnet Test window (Help menu). Every other build unsets it and refuses an executable that has the node in it:
+# the user's app doesn't ship the tailnet yet (PLAN.md, "Built-in Tailscale", Phase 0).
+#
 # ./build-app.sh --check-dist builds nothing: it reports which clothod dist a plain build would bundle,
 # and which Developer ID identity --release and --package would sign with.
 #
@@ -74,13 +79,37 @@ else
   BUNDLE_ID="app.clotho.desktop"
 fi
 
+# The tailnet node: dev builds only, and only when asked for (see the top).
+TAILNET=false
+if $DEV && [[ "${CLOTHO_TAILNET:-}" == 1 ]]; then
+  TAILNET=true
+  if [[ ! -d ../ClothoKit/Tailnet/build/ClothoTailnet.xcframework ]]; then
+    echo "error: CLOTHO_TAILNET=1 needs the tailnet xcframework: run ClothoKit/scripts/build-tailnet.sh first" >&2
+    exit 1
+  fi
+else
+  unset CLOTHO_TAILNET
+fi
+
 # --disable-keychain: SwiftPM otherwise asks the keychain for github.com credentials when it fetches
 # Sparkle's binary, which fails over SSH, where the keychain is locked. Nothing it fetches needs any.
 swift build -c release --disable-keychain
+# A stale manifest evaluation or object must never put the node in an app without it.
+if ! $TAILNET && nm -U .build/release/Clotho 2>/dev/null | grep -q ' _ctn_start$'; then
+  echo "error: .build/release/Clotho links the tailnet node, which only CLOTHO_TAILNET=1 --dev builds may; rm -rf .build and build again" >&2
+  exit 1
+fi
 APP="build/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Clotho "$APP/Contents/MacOS/Clotho"
+if $TAILNET; then
+  # ssh's ProxyCommand for the node (ProxyUseFdpass): a separate small binary, so each ssh doesn't start Clotho
+  # (and its Go runtime). Signed ad hoc like the rest of the dev build, before the app is.
+  swift build -c release --disable-keychain --package-path ../ClothoKit/Tailnet --product clotho-tailnet-proxy
+  cp "$(swift build -c release --disable-keychain --package-path ../ClothoKit/Tailnet --show-bin-path)/clotho-tailnet-proxy" "$APP/Contents/MacOS/"
+  codesign --force --sign - "$APP/Contents/MacOS/clotho-tailnet-proxy"
+fi
 
 # clothod ships inside the app: every platform's build in Resources/clothod-dist (installed on remote
 # machines over SSH, see ../docs/remote.md), and this Mac's build next to the executable, where Clotho
