@@ -72,6 +72,39 @@ else
     fail "Linux cross build"
 fi
 
+# clothod-net (clothod/net, Go): the sidecar's unit and end-to-end tests, offline against an
+# in-process test control server, with ephemeral clothod instances in /tmp/clt*.
+step "macOS: clothod-net (go test)"
+if ! command -v go >/dev/null; then
+    fail "clothod-net tests: no go here (run scripts/install-go.sh)"
+elif [ ! -x target/debug/clothod ]; then
+    fail "clothod-net tests: no target/debug/clothod (cargo test failed to build it)"
+else
+    (cd net && CLOTHOD_BIN=$PWD/../target/debug/clothod go test -count=1 -v ./... 2>&1) > target/test-all-net-macos.log
+    rc=$?
+    grep -E "^(--- |ok|FAIL)" target/test-all-net-macos.log
+    { [ $rc = 0 ] && grep -q "^ok .*clothod/net[[:space:]]" target/test-all-net-macos.log; } || fail "clothod-net tests on macOS (target/test-all-net-macos.log)"
+fi
+
+step "Linux: clothod-net e2e on $LINUX_HOST"
+# The cross-built test binary and sidecar, with the debug clothod the Linux e2e step built.
+if [ -x "target/$T/debug/clothod" ] && command -v go >/dev/null &&
+    (cd net && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o ../target/net/linux-x86_64/net.test .) &&
+    scripts/build-net.sh linux-x86_64 > /dev/null; then
+    : > target/test-all-net-linux.log
+    if rdir=$($SSH "$LINUX_HOST" 'mktemp -d /tmp/clt-ci.XXXXXX') && [ -n "$rdir" ]; then
+        scp -q "target/$T/debug/clothod" target/net/linux-x86_64/net.test target/net/linux-x86_64/clothod-net "$LINUX_HOST:$rdir/" &&
+            $SSH "$LINUX_HOST" "cd $rdir && CLOTHOD_BIN=\$PWD/clothod CLOTHOD_NET_BIN=\$PWD/clothod-net ./net.test -test.count=1 -test.v 2>&1; echo EXIT=\$?" > target/test-all-net-linux.log
+        grep -E "^(--- |PASS|FAIL|EXIT)" target/test-all-net-linux.log
+        grep -q "^EXIT=0$" target/test-all-net-linux.log || fail "clothod-net e2e on $LINUX_HOST (target/test-all-net-linux.log)"
+        $SSH "$LINUX_HOST" "rm -rf $rdir"
+    else
+        fail "clothod-net e2e: can't reach $LINUX_HOST over ssh"
+    fi
+else
+    fail "clothod-net Linux build (no Linux clothod, no go, or the cross build failed)"
+fi
+
 step "dev dist for the remote suite"
 # The test builds above are done with: room for the dist's (on the Mac, at least).
 scripts/build-space.sh clean
@@ -102,13 +135,16 @@ step "cleanliness"
 checked=""
 # Ours: clothod processes serving /tmp/clt* dirs, the dirs themselves ("/tmp/": on macOS /tmp is
 # a symlink, which find does not follow without it), and login units of the
-# e2e tests (launchd labels / systemd runtime units named clt-test-*).
+# e2e tests (launchd labels / systemd runtime units named clt-test-*). Also clothod-net's: test
+# sidecars (a /tmp/clt* state dir, a test control URL, --ephemeral; a real one has none of
+# these), any testctl, and leftover Go test binaries (net.test).
 # A check that couldn't run is UNCHECKED, a failure: never read silence as clean.
+NET_LEFT='[c]lothod-net .*(/tmp/clt|--control-url|--ephemeral)|[t]estctl( |$)|/n[e]t[.]test( |$)'
 # The host build dist.sh leaves in target/release (kept by the cleaning), else the test build.
 ps_bin=target/release/clothod
 [ -x "$ps_bin" ] || ps_bin=target/debug/clothod
 if ps_out=$("$ps_bin" ps); then
-    left=$(echo "$ps_out" | grep "/tmp/clt" ; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test)
+    left=$(echo "$ps_out" | grep "/tmp/clt" ; ps -eo pid=,args= | grep -E "$NET_LEFT"; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test)
     [ -n "$left" ] && { echo "$left"; fail "leftovers on this Mac"; } || echo "this Mac: clean"
 else
     echo "this Mac: UNCHECKED"; fail "cleanliness unchecked on this Mac (clothod ps failed)"
@@ -119,7 +155,7 @@ for h in $LINUX_HOST $REMOTE_HOSTS; do
     case "$skipped" in *" $h skipped"*) echo "$h: skipped (unreachable)"; continue ;; esac
     checked="$checked $h"
     # The marker proves the remote commands ran; ssh failing leaves it out.
-    out=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test; ls /run/user/$(id -u)/systemd/user 2>/dev/null | grep clt-test; echo CLOTHO-CHECKED')
+    out=$($SSH "$h" 'ps -eo pid=,args= 2>/dev/null | grep "[c]lothod .*--runtime-dir /tmp/clt"; ps -eo pid=,args= 2>/dev/null | grep -E "'"$NET_LEFT"'"; find /tmp/ -maxdepth 1 -name "clt*" 2>/dev/null; launchctl list 2>/dev/null | grep clt-test; ls /run/user/$(id -u)/systemd/user 2>/dev/null | grep clt-test; echo CLOTHO-CHECKED')
     case "$out" in
     *CLOTHO-CHECKED*) ;;
     *) echo "$h: UNCHECKED"; fail "cleanliness unchecked on $h (ssh failed)"; continue ;;

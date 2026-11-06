@@ -54,9 +54,18 @@ dotfile was edited:
 - zig from ziglang.org, checked against the published sha256, in
   `~/.local/share/zig/<release>`, with `~/.local/share/zig/current` linked to it.
 - `cargo-zigbuild` in `~/.cargo/bin` (`cargo install --locked`).
+- Go, for `clothod-net` (the tailnet sidecar, `clothod/net`), from go.dev/dl, checked against
+  the sha256 pinned in `clothod/scripts/install-go.sh`, in `~/.local/share/go/<version>`, with
+  `~/.local/share/go/current` linked to it. `install-go.sh` installs the version
+  `clothod/net/go.mod` names (1.27.3, which tailscale.com v1.104.5 needs). It is on the dev
+  box and on the build Mac. Go's caches stay in `clothod/target/go` (`GOCACHE`, `GOMODCACHE`, `GOPATH`;
+  `GOTOOLCHAIN=local`, so Go never fetches another toolchain), so nothing goes into `~/go`
+  or `~/Library/Caches`, and `build-space.sh` cleans them on the Macs. It keeps only the module
+  downloads (about 200 MB).
 
-A non-interactive `zsh -lc` reads no profile there, so `dist.sh` and `test-all.sh` source
-`scripts/toolchain.sh`, which puts those dirs on `PATH`.
+A non-interactive `zsh -lc` reads no profile there, so `dist.sh`, `test-all.sh` and
+`build-net.sh` source `scripts/toolchain.sh`, which puts those dirs on `PATH` and sets Go's
+cache variables. `clothod/scripts/go <args>` runs `go` with those settings in `clothod/net`.
 
 Signing: when `~/Library/Keychains/clotho-build.keychain-db` and
 `~/.config/clotho/build-keychain-pw` both exist, `dist.sh` unlocks that keychain and signs from it

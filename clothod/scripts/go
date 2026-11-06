@@ -1,0 +1,8 @@
+#!/bin/sh
+# `go`, with scripts/toolchain.sh's settings (the pinned toolchain, caches in clothod/target/go),
+# run in clothod/net: e.g. `clothod/scripts/go test ./...` from anywhere.
+set -eu
+cd "$(dirname "$0")/.."
+. scripts/toolchain.sh
+cd net
+exec go "$@"
