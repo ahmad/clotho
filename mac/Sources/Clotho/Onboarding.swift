@@ -709,7 +709,7 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
 
     // MARK: Testing aid
 
-    /// OnboardingScript="target:macbook@imac|check|connect|next|back" drives the window, 3 s per step;
+    /// OnboardingScript="target:user@imac|check|connect|next|back" drives the window, 3 s per step;
     /// "shot:/tmp/x.png" saves an image of the window alone.
     func runScript(_ steps: [String]) {
         for (i, step) in steps.enumerated() {

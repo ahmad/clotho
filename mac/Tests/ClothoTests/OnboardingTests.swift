@@ -4,7 +4,7 @@ import XCTest
 
 final class SSHDiagnosisTests: XCTestCase {
     func testAuthWithAndWithoutKeys() {
-        let denied = "macbook@imac: Permission denied (publickey,password,keyboard-interactive)."
+        let denied = "user@imac: Permission denied (publickey,password,keyboard-interactive)."
         XCTAssertEqual(SSHDiagnosis.classify(denied, hasKeys: true), .authRejected)
         XCTAssertEqual(SSHDiagnosis.classify(denied, hasKeys: false), .noKey)
     }
@@ -22,9 +22,9 @@ final class SSHDiagnosisTests: XCTestCase {
 
     func testNetwork() {
         XCTAssertEqual(SSHDiagnosis.classify("ssh: Could not resolve hostname nowhere: nodename nor servname provided, or not known", hasKeys: true), .unknownHost)
-        XCTAssertEqual(SSHDiagnosis.classify("ssh: connect to host 10.0.0.9 port 22: Connection refused", hasKeys: true), .refused)
-        XCTAssertEqual(SSHDiagnosis.classify("ssh: connect to host 10.0.0.9 port 22: Operation timed out", hasKeys: true), .timedOut)
-        XCTAssertEqual(SSHDiagnosis.classify("ssh: connect to host 10.0.0.9 port 22: No route to host", hasKeys: true), .timedOut)
+        XCTAssertEqual(SSHDiagnosis.classify("ssh: connect to host 192.0.2.9 port 22: Connection refused", hasKeys: true), .refused)
+        XCTAssertEqual(SSHDiagnosis.classify("ssh: connect to host 192.0.2.9 port 22: Operation timed out", hasKeys: true), .timedOut)
+        XCTAssertEqual(SSHDiagnosis.classify("ssh: connect to host 192.0.2.9 port 22: No route to host", hasKeys: true), .timedOut)
     }
 
     func testOtherKeepsLastLine() {

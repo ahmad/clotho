@@ -102,7 +102,7 @@ final class FileBrowserTests: XCTestCase {
     }
 
     func testVerbs() {
-        let imac = Machine(id: "m", label: "imac", target: "macbook@imac"), big = Machine(id: "b", label: "devbox", target: "ahmad@devbox")
+        let imac = Machine(id: "m", label: "imac", target: "user@imac"), big = Machine(id: "b", label: "devbox", target: "user@devbox")
         XCTAssertEqual(Transfer.verb(from: .local, to: imac), "Upload")
         XCTAssertEqual(Transfer.verb(from: imac, to: .local, ing: true), "Downloading")
         XCTAssertEqual(Transfer.verb(from: big, to: imac, ing: true), "Copying", "remote to remote")
@@ -122,7 +122,7 @@ final class FileBrowserTests: XCTestCase {
         try payload.write(to: from.appendingPathComponent("big.bin"))
         try Data("hi".utf8).write(to: from.appendingPathComponent("dir/note.txt"))
 
-        let big = Machine(id: "b", label: "devbox", target: "ahmad@devbox"), imac = Machine(id: "m", label: "imac", target: "macbook@imac")
+        let big = Machine(id: "b", label: "devbox", target: "user@devbox"), imac = Machine(id: "m", label: "imac", target: "user@imac")
         let manager = TransferManager()
         var asked: [String] = []
         manager.files = { machine in
@@ -150,7 +150,7 @@ final class FileBrowserTests: XCTestCase {
     }
 
     func testRemoteToRemoteCopyCancels() async throws {
-        let big = Machine(id: "b", label: "devbox", target: "ahmad@devbox"), imac = Machine(id: "m", label: "imac", target: "macbook@imac")
+        let big = Machine(id: "b", label: "devbox", target: "user@devbox"), imac = Machine(id: "m", label: "imac", target: "user@imac")
         let manager = TransferManager()
         manager.files = { _ in LocalFileBackend() }
         let finished = expectation(description: "ended")
@@ -188,13 +188,13 @@ final class MachineSwitchTests: XCTestCase {
     }
 
     func testOffIsSavedAndKeptThroughEdits() throws {
-        let imac = Machine.add(label: "imac", target: "macbook@imac"), big = Machine.add(label: "devbox", target: "ahmad@devbox")
+        let imac = Machine.add(label: "imac", target: "user@imac"), big = Machine.add(label: "devbox", target: "user@devbox")
         XCTAssertTrue(imac.isEnabled)
         Machine.setEnabled(try XCTUnwrap(imac.id), false)
         XCTAssertEqual(Machine.all().map(\.label), [Machine.local.label, "imac", "devbox"], "still listed in Manage Machines")
         XCTAssertEqual(Machine.all()[1].isEnabled, false)
         XCTAssertEqual(Machine.enabled().map(\.label), [Machine.local.label, "devbox"])
-        let edited = Machine.update(try XCTUnwrap(imac.id), label: "iMac", target: "macbook@imac.tail")
+        let edited = Machine.update(try XCTUnwrap(imac.id), label: "iMac", target: "user@imac.tail")
         XCTAssertFalse(edited.isEnabled, "editing doesn't switch it on")
         XCTAssertFalse(Machine.all()[1].isEnabled)
         Machine.move(try XCTUnwrap(imac.id), to: 1)
@@ -229,12 +229,12 @@ final class MachineSwitchTests: XCTestCase {
         }
         let source = root.appendingPathComponent("big.bin")
         try Data(count: 256 << 20).write(to: source)
-        let toMini = expectation(description: "to imac ended"), toLocal = expectation(description: "to this Mac ended")
+        let toIMac = expectation(description: "to imac ended"), toLocal = expectation(description: "to this Mac ended")
         var miniResult: Bool?, localResult: Bool?
         let copy = manager.start(title: "Copying", sources: [Location(machine: big, path: source.path)],
                                  to: Location(machine: imac, path: root.appendingPathComponent("a").path)) { ok in
             miniResult = ok
-            toMini.fulfill()
+            toIMac.fulfill()
         }
         let other = manager.start(title: "Downloading", sources: [Location(machine: big, path: source.path)],
                                   to: Location(machine: .local, path: root.appendingPathComponent("b").path)) { ok in
@@ -243,7 +243,7 @@ final class MachineSwitchTests: XCTestCase {
         }
         // What AppDelegate.setMachineEnabled does before it disconnects.
         manager.cancelAll(touching: imac)
-        await fulfillment(of: [toMini], timeout: 20)
+        await fulfillment(of: [toIMac], timeout: 20)
         XCTAssertEqual(miniResult, false)
         XCTAssertEqual(copy.detail, "Cancelled")
         await fulfillment(of: [toLocal], timeout: 60)

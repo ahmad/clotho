@@ -4,7 +4,7 @@ import Foundation
 /// platform supplies for remote setup: an ssh process on macOS, an exec channel over SwiftNIO SSH on iOS.
 /// Exit status 255 means ssh itself failed (can't connect or authenticate), as with OpenSSH.
 public protocol RemoteCommandRunner: Sendable {
-    /// For messages, such as "ahmad@devbox".
+    /// For messages, such as "user@devbox".
     var target: String { get }
     func run(_ command: String, input: Data?) throws -> RemoteCommandResult
 }

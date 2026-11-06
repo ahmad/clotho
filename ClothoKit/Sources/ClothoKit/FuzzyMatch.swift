@@ -113,7 +113,7 @@ public enum QuickOpen {
             if let match = FuzzyMatch.match(trimmed, in: item.title) {
                 scored.append((Result(item: item, score: match.score, titleIndices: match.indices), order))
             } else if !item.subtitle.isEmpty, let match = FuzzyMatch.match(trimmed, in: item.subtitle + " " + item.title) {
-                // "bb api" finds devbox's api workspace; highlight what landed in the title.
+                // "dev api" finds devbox's api workspace; highlight what landed in the title.
                 let offset = item.subtitle.count + 1
                 let inTitle = match.indices.filter { $0 >= offset }.map { $0 - offset }
                 scored.append((Result(item: item, score: match.score - subtitlePenalty, titleIndices: inTitle), order))

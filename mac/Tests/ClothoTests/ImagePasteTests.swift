@@ -37,7 +37,7 @@ final class ImagePasteDecisionTests: XCTestCase {
     func testNames() {
         let date = Date(timeIntervalSince1970: 1_793_200_000) // 2026-10-28 15:06:40 UTC
         XCTAssertEqual(ImagePaste.imageName(date, id: "a1b2c3"), "20261028-150640-a1b2c3.png")
-        XCTAssertEqual(ImagePaste.remoteFolder(home: "/home/ahmad"), "/home/ahmad/.cache/clotho/paste")
+        XCTAssertEqual(ImagePaste.remoteFolder(home: "/home/user"), "/home/user/.cache/clotho/paste")
         XCTAssertEqual(ImagePaste.remoteFolder(home: "/"), "/.cache/clotho/paste")
         let id = ImagePaste.newID()
         XCTAssertEqual(id.count, 6)

@@ -775,7 +775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if step.hasPrefix("click:") { return postTestClick(String(step.dropFirst(6))) }
                 if step.hasPrefix("rclick:") { return postTestClick(String(step.dropFirst(7)), right: true) }
                 if step.hasPrefix("menu:") { return runPaneMenuItem(String(step.dropFirst(5))) }
-                // "quick:bb api" opens quick open with that query and logs the results; "quick:" + "open" picks the top one.
+                // "quick:dev api" opens quick open with that query and logs the results; "quick:" + "open" picks the top one.
                 if step.hasPrefix("quick:") {
                     let query = String(step.dropFirst(6))
                     // "quick:close" dismisses it, so the next "quick:" lists the model as it is then.

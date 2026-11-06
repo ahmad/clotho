@@ -55,28 +55,29 @@ open -g -n "build/Clotho Dev.app" --args -LaunchInBackground YES
 
 One-time setup, at the Mac itself (the login keychain is locked over SSH):
 
-1. Xcode › Settings › Accounts › the Apple ID in team TEAMID0000 › Manage Certificates… › + › **Developer ID Application**. Only the team's Account Holder can create one.
+1. Xcode › Settings › Accounts › the Apple ID in your team (`YOUR_TEAM_ID`) › Manage Certificates… › + › **Developer ID Application**. Only the team's Account Holder can create one.
 2. Check it: `security find-identity -v -p codesigning | grep "Developer ID Application"`
 3. Make an app-specific password at [account.apple.com](https://account.apple.com) › Sign-In and Security › App-Specific Passwords, then store it for notarytool (it asks for the password):
-   `xcrun notarytool store-credentials clotho-notary --apple-id "YOUR_APPLE_ID_EMAIL" --team-id TEAMID0000`
+   `xcrun notarytool store-credentials clotho-notary --apple-id "YOUR_APPLE_ID_EMAIL" --team-id YOUR_TEAM_ID`
 4. Check it: `xcrun notarytool history --keychain-profile clotho-notary`
+5. Give the scripts the team ID: `export CLOTHO_TEAM_ID=YOUR_TEAM_ID`, or put `CLOTHO_TEAM_ID=YOUR_TEAM_ID` in `~/.config/clotho/local.env` (outside the repo). `--release`, `--package`, `scripts/notarize.sh` and `scripts/release.sh` sign with that team's Developer ID and stop with an error when it isn't set; `--dev`, plain builds and the tests don't need it.
 
 Each release, at the Mac:
 
 ```sh
-CLOTHOD_SIGN_IDENTITY="Developer ID Application: YOUR NAME (TEAMID0000)" clothod/scripts/dist.sh
+CLOTHOD_SIGN_IDENTITY="Developer ID Application: YOUR NAME ($CLOTHO_TEAM_ID)" clothod/scripts/dist.sh
 mac/build-app.sh --release
 ```
 
-`CLOTHO_SIGN_IDENTITY` and `CLOTHO_NOTARY_PROFILE` override the identity and the profile name (`clotho-notary`).
+`CLOTHO_SIGN_IDENTITY` and `CLOTHO_NOTARY_PROFILE` override the identity and the profile name (`clotho-notary`). `./build-app.sh --check-dist` builds nothing: it reports the clothod dist a plain build would bundle, and the Developer ID identity `--release` and `--package` would sign with.
 
 ### Releases and in-app updates
 
 Clotho updates itself with [Sparkle 2](https://sparkle-project.org): **Clotho › Check for Updates…**, plus a daily automatic check (Settings › Updates turns it off). It reads the appcast at `https://clotho.app/appcast.xml` and installs an update only if its zip is signed with Clotho's EdDSA key. The public key is in [`Resources/SparklePublicKey`](Resources) and goes into Info.plist as `SUPublicEDKey`. The private key exists only in the release Mac's login keychain, never in the repo. A build without `Resources/SparklePublicKey` has updates turned off, and Clotho Dev never updates. The appcast is live, so every non-dev build gets the feed (`UPDATES_LIVE=true` in `build-app.sh`). Setting it to false limits the feed to `--release` and `--package` builds.
 
-The key pair is made: [`Resources/SparklePublicKey`](Resources) holds the public half. The private key is in macbook's login keychain and in imac's build keychain.
+The key pair is made: [`Resources/SparklePublicKey`](Resources) holds the public half. The private key is in the laptop Mac's login keychain and in the build Mac's build keychain.
 
-**Where releases are built.** imac (`macbook@imac`, always on) is the release build host: run `CLOTHO_MAC=macbook@imac clotho-mac mac/scripts/release.sh …` from devbox. It has a keychain only for building, `~/Library/Keychains/clotho-build.keychain-db`, with the Developer ID identity, the `clotho-notary` notarytool profile (App Store Connect API key) and the Sparkle key. Its password is in `~/.config/clotho/build-keychain-pw`. [`scripts/keychain.sh`](scripts/keychain.sh), which `build-app.sh`, `notarize.sh` and `release.sh` share, picks that keychain when the password file exists, unlocks it (an unlock lasts only for one SSH session), and passes it to `codesign`, `security find-identity` and `notarytool`. `sign_update` and `generate_keys` find the key through the keychain search list. On imac, `build-app.sh` never installs: plain and `--release` builds are refused, and `--package` and `--dev` work. macbook is the fallback: with no build keychain, the scripts use the login keychain and unlock it from `~/.keychain_pw`. `CLOTHO_RELEASE_OUT` writes a release somewhere other than `build/release`, for a dry run.
+**Where releases are built.** The build Mac (always on) is the release build host: run `scripts/clotho-build mac mac/scripts/release.sh …` from the dev box, which passes `CLOTHO_TEAM_ID` on from `~/.config/clotho/local.env`. It has a keychain only for building, `~/Library/Keychains/clotho-build.keychain-db`, with the Developer ID identity, the `clotho-notary` notarytool profile (App Store Connect API key) and the Sparkle key. Its password is in `~/.config/clotho/build-keychain-pw`. [`scripts/keychain.sh`](scripts/keychain.sh), which `build-app.sh`, `notarize.sh` and `release.sh` share, picks that keychain when the password file exists, unlocks it (an unlock lasts only for one SSH session), and passes it to `codesign`, `security find-identity` and `notarytool`. `sign_update` and `generate_keys` find the key through the keychain search list. On the build Mac, `build-app.sh` never installs: plain and `--release` builds are refused, and `--package` and `--dev` work. Another Mac (the laptop Mac) is the fallback: with no build keychain, the scripts use the login keychain and unlock it from `~/.keychain_pw`. `CLOTHO_RELEASE_OUT` writes a release somewhere other than `build/release`, for a dry run.
 
 How the key pair was made (one time, at the Mac):
 

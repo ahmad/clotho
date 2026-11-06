@@ -99,7 +99,7 @@ enum CommandBar {
 
     /// How well `query` matches a row's title, best first: 0 the title starts with it ("api" for "api" or
     /// "api-tests"), 1 a word in it does ("deploy api"), 2 its letters are in the title in order ("a-p-i"),
-    /// 3 only with the subtitle's help ("bb api" for devbox's api). Case doesn't matter.
+    /// 3 only with the subtitle's help ("dev api" for devbox's api). Case doesn't matter.
     static func band(title: String, query: String, inTitle: Bool) -> Int {
         let text = Array(title.lowercased())
         let needle = Array(query.lowercased())

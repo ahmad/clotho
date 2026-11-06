@@ -6,7 +6,7 @@
 #   scripts/release.sh [notes.html]
 #
 # sign_update reads the private key from the keychain scripts/keychain.sh picks and unlocks: the build
-# keychain on the release build host (imac), else the login keychain (macbook, from ~/.keychain_pw). The key
+# keychain on the release build host (the build Mac), else the login keychain (from ~/.keychain_pw). The key
 # never goes anywhere else (README, "Releases"). Output, in build/release/ ($CLOTHO_RELEASE_OUT for a dry
 # run elsewhere):
 #   Clotho-<version>-<build>.zip   upload to $CLOTHO_DOWNLOADS (default https://clotho.app/downloads/)
@@ -14,7 +14,8 @@
 #
 # The appcast starts from the published one ($CLOTHO_APPCAST_IN, a file or URL, default the live feed),
 # so older entries stay. VERSION sets the version; CLOTHO_VERSION and CLOTHO_BUILD override it and the
-# build number (build-app.sh).
+# build number (build-app.sh). CLOTHO_TEAM_ID, the Apple team whose Developer ID signs the app, comes
+# from the environment (scripts/keychain.sh); without it the release stops before building.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,6 +25,7 @@ NOTES=${1:-}
 OUT=${CLOTHO_RELEASE_OUT:-build/release}
 die() { print -u2 "release: $*"; exit 1; }
 source scripts/keychain.sh
+clotho_team_id >/dev/null || die "no Apple team to sign for (see above)"
 clotho_unlock_keychain || die "the signing keychain isn't usable"
 
 [[ -s Resources/SparklePublicKey ]] || die "no Resources/SparklePublicKey. Make the key pair first (README, \"Releases\")."
@@ -31,11 +33,11 @@ clotho_unlock_keychain || die "the signing keychain isn't usable"
 TOOLS=$(scripts/sparkle-tools.sh)
 
 # Signs a file with Clotho's EdDSA key; prints sign_update's enclosure attributes. On the build host the
-# Sparkle tools can't use the build keychain (they search the keychain list, and stop at imac's login
+# Sparkle tools can't use the build keychain (they search the keychain list, and stop at the build Mac's login
 # keychain, locked over SSH), so the key goes from the build keychain straight into sign_update through a
 # pipe: never to disk, the screen or a command line. Elsewhere sign_update finds it in the login keychain.
 sparkle_sign() {
-  if $CLOTHO_BUILD_HOST; then
+  if $CLOTHO_ON_BUILD_HOST; then
     security find-generic-password -s https://sparkle-project.org -a ed25519 -w "$CLOTHO_KEYCHAIN" \
       | "$TOOLS/sign_update" --ed-key-file - "$1"
   else
@@ -52,7 +54,7 @@ verify_signature() {
 }
 
 # The key must be the one the app trusts, or every update would be refused. Checked before the build.
-if $CLOTHO_BUILD_HOST; then
+if $CLOTHO_ON_BUILD_HOST; then
   PROBE=$(mktemp)
   print "clotho release key check" > "$PROBE"
   PROBE_SIGNATURE=$(sparkle_sign "$PROBE") || { rm -f "$PROBE"; die "couldn't sign with the Sparkle key in $CLOTHO_KEYCHAIN"; }

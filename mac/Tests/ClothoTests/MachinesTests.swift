@@ -23,13 +23,13 @@ final class MachineListTests: XCTestCase {
     func testAddEditRemove() throws {
         XCTAssertEqual(Machine.all().count, 1, "only this Mac")
         XCTAssertTrue(Machine.all()[0].isLocal)
-        let imac = Machine.add(label: "imac", target: "macbook@imac")
-        let big = Machine.add(label: "", target: "ahmad@devbox")
-        XCTAssertEqual(Array(names.dropFirst()), ["imac", "ahmad@devbox"], "a blank name falls back to the target")
+        let imac = Machine.add(label: "imac", target: "user@imac")
+        let big = Machine.add(label: "", target: "user@devbox")
+        XCTAssertEqual(Array(names.dropFirst()), ["imac", "user@devbox"], "a blank name falls back to the target")
 
-        let edited = Machine.update(try XCTUnwrap(big.id), label: "devbox", target: "ahmad@devbox.tail")
+        let edited = Machine.update(try XCTUnwrap(big.id), label: "devbox", target: "user@devbox.tail")
         XCTAssertEqual(edited.id, big.id, "editing keeps the id, so its settings and connection key stay")
-        XCTAssertEqual(Machine.all().last?.target, "ahmad@devbox.tail")
+        XCTAssertEqual(Machine.all().last?.target, "user@devbox.tail")
         XCTAssertEqual(Machine.all().last?.label, "devbox")
 
         Machine.remove(try XCTUnwrap(imac.id))

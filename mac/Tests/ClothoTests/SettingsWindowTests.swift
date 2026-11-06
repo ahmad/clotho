@@ -70,8 +70,8 @@ final class SettingsWindowTests: XCTestCase {
     }
 
     func testMachinesListsThisMacFirstWithSwitchesAndStatus() throws {
-        let imac = Machine.add(label: "imac", target: "macbook@imac")
-        _ = Machine.add(label: "devbox", target: "ahmad@devbox")
+        let imac = Machine.add(label: "imac", target: "user@imac")
+        _ = Machine.add(label: "devbox", target: "user@devbox")
         Machine.setEnabled(try XCTUnwrap(imac.id), false)
         app.showMachineManager(nil)
         let machines = try XCTUnwrap(app.settingsWindow?.machines)

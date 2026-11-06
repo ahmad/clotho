@@ -5,24 +5,24 @@
 #
 # Needs, on this Mac (see mac/README.md, "Notarized builds"), in the keychain scripts/keychain.sh picks
 # (the build keychain on the release build host, else the login keychain), which it unlocks:
-#   - a "Developer ID Application: … (TEAMID0000)" identity
+#   - a "Developer ID Application: … (TEAM)" identity, where TEAM is $CLOTHO_TEAM_ID (scripts/keychain.sh)
 #   - notarytool credentials stored as the keychain profile below (xcrun notarytool store-credentials)
 #   - a clothod dist whose macOS builds are already Developer ID signed. clothod's build ids hash the
 #     whole file, so the bundled clothod is never re-signed here: that would break the ids in its
 #     manifest and make installed daemons look like a different build.
 #
-# Environment: CLOTHO_SIGN_IDENTITY (default: the team's Developer ID Application identity),
-# CLOTHO_NOTARY_PROFILE (default: clotho-notary).
+# Environment: CLOTHO_TEAM_ID (required: the Apple team ID; never in the repo), CLOTHO_SIGN_IDENTITY
+# (default: the team's Developer ID Application identity), CLOTHO_NOTARY_PROFILE (default: clotho-notary).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TEAM=TEAMID0000
 PROFILE=${CLOTHO_NOTARY_PROFILE:-clotho-notary}
 APP=${1:-build/Clotho.app}
 ENTITLEMENTS=Resources/Clotho.entitlements
 
 die() { print -u2 "notarize: $*"; exit 1; }
 source scripts/keychain.sh
+TEAM=$(clotho_team_id) || die "no Apple team to sign for (see above)"
 clotho_unlock_keychain || die "the signing keychain isn't usable"
 
 [[ -d "$APP" ]] || die "no app at $APP (build it first)"
@@ -30,7 +30,7 @@ clotho_unlock_keychain || die "the signing keychain isn't usable"
 if [[ -n "${CLOTHO_SIGN_IDENTITY:-}" ]]; then
   IDENTITY=$CLOTHO_SIGN_IDENTITY
 else
-  IDENTITY=$(security find-identity -v -p codesigning "$CLOTHO_KEYCHAIN" | sed -n "s/.*\"\(Developer ID Application: .*($TEAM)\)\".*/\1/p" | head -1)
+  IDENTITY=$(clotho_developer_id)
   [[ -n "$IDENTITY" ]] || die "no \"Developer ID Application: … ($TEAM)\" identity in $CLOTHO_KEYCHAIN. Create one in Xcode › Settings › Accounts › Manage Certificates, or set CLOTHO_SIGN_IDENTITY."
 fi
 print "notarize: signing with $IDENTITY (keychain ${CLOTHO_KEYCHAIN:t})"
@@ -68,9 +68,9 @@ ZIP=$(mktemp -d)/Clotho.zip
 ditto -c -k --keepParent "$APP" "$ZIP"
 print "notarize: submitting (profile $PROFILE)…"
 # The build host's profile is in its build keychain. Elsewhere notarytool finds the profile itself (on
-# macbook it isn't in login.keychain-db, so naming that keychain would hide it).
+# the fallback Mac it isn't in login.keychain-db, so naming that keychain would hide it).
 NOTARY=(--keychain-profile "$PROFILE")
-$CLOTHO_BUILD_HOST && NOTARY+=(--keychain "$CLOTHO_KEYCHAIN")
+$CLOTHO_ON_BUILD_HOST && NOTARY+=(--keychain "$CLOTHO_KEYCHAIN")
 OUT=$(xcrun notarytool submit "$ZIP" "${NOTARY[@]}" --wait --output-format plist) \
   || die "notarytool submit failed. Check the profile with: xcrun notarytool history ${NOTARY[*]}"
 ID=$(print -r -- "$OUT" | plutil -extract id raw -o - -)

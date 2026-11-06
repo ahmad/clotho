@@ -12,9 +12,16 @@
 # ./build-app.sh --package builds build/Clotho.app the way --release does (or signed ad hoc, when there's
 # no Developer ID yet) but doesn't install it: scripts/release.sh turns it into a Sparkle update.
 #
-# On the release build host (imac: the Mac with Clotho's build keychain, see scripts/keychain.sh) it only
-# builds: plain and --release, which install into ~/Applications, are refused there. --package and --dev
-# work anywhere.
+# --release and --package sign with the Developer ID of the Apple team CLOTHO_TEAM_ID, which comes from the
+# environment (scripts/keychain.sh) and is never written in the repo; without it they stop before
+# building. --dev and plain builds don't need it.
+#
+# ./build-app.sh --check-dist builds nothing: it reports which clothod dist a plain build would bundle,
+# and which Developer ID identity --release and --package would sign with.
+#
+# On the release build host (the build Mac: the one with Clotho's build keychain, see scripts/keychain.sh)
+# it only builds: plain and --release, which install into ~/Applications, are refused there. --package and
+# --dev work anywhere.
 #
 # The version is VERSION (CFBundleShortVersionString); the build number, which Sparkle compares, is the
 # UTC time (CFBundleVersion, YYYYMMDDHHMM). CLOTHO_VERSION and CLOTHO_BUILD override them.
@@ -24,17 +31,37 @@ cd "$(dirname "$0")"
 DEV=false
 RELEASE=false
 PACKAGE=false
+CHECK=false
 case "${1:-}" in
   --dev) DEV=true ;;
   --release) RELEASE=true ;;
   --package) PACKAGE=true ;;
-  --check-dist) exec scripts/clothod-dist.sh --check ;;
+  --check-dist) CHECK=true ;;
   "") ;;
   *) echo "usage: $0 [--dev | --release | --package | --check-dist]" >&2; exit 2 ;;
 esac
 source scripts/keychain.sh
-if $CLOTHO_BUILD_HOST && ! $DEV && ! $PACKAGE; then
+if $CHECK; then
+  scripts/clothod-dist.sh --check
+  # The signing identity, reported only: a plain build doesn't need one.
+  if TEAM=$(clotho_team_id) && clotho_unlock_keychain; then
+    IDENTITY=$(clotho_developer_id)
+    if [[ -n "$IDENTITY" ]]; then
+      echo "build-app: --release and --package would sign with \"$IDENTITY\" (keychain ${CLOTHO_KEYCHAIN:t})" >&2
+    else
+      echo "build-app: no Developer ID Application identity for team $TEAM in $CLOTHO_KEYCHAIN: --package would sign ad hoc, and --release would stop" >&2
+    fi
+  else
+    echo "build-app: --release and --package can't sign on this Mac yet (see above)" >&2
+  fi
+  exit 0
+fi
+if $CLOTHO_ON_BUILD_HOST && ! $DEV && ! $PACKAGE; then
   echo "error: this Mac is the release build host (it has $CLOTHO_KEYCHAIN), and Clotho is never installed here. Use --package (scripts/release.sh) or --dev." >&2
+  exit 2
+fi
+if ($RELEASE || $PACKAGE) && ! clotho_team_id >/dev/null; then
+  echo "error: --release and --package sign with the Developer ID of CLOTHO_TEAM_ID's team (see above)" >&2
   exit 2
 fi
 VERSION=${CLOTHO_VERSION:-$(cat VERSION)}
@@ -156,9 +183,9 @@ if $RELEASE; then
   scripts/notarize.sh "$APP"
 fi
 if $PACKAGE; then
-  # Developer ID and notarized when the certificate exists; ad hoc otherwise.
+  # Developer ID and notarized when the team's certificate exists; ad hoc otherwise.
   clotho_unlock_keychain || exit 1
-  if security find-identity -v -p codesigning "$CLOTHO_KEYCHAIN" 2>/dev/null | grep -q "Developer ID Application: .*(TEAMID0000)"; then
+  if [[ -n "$(clotho_developer_id)" ]]; then
     scripts/notarize.sh "$APP"
   else
     echo "warning: no Developer ID identity, so $APP is signed ad hoc and not notarized" >&2

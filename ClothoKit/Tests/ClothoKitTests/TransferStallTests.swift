@@ -95,9 +95,9 @@ final class StopOnce: @unchecked Sendable {
 
 final class SSHTargetTests: XCTestCase {
     func testRefusesOptionsAndOddCharacters() {
-        XCTAssertNil(SSHTarget.problem("macbook@imac"))
+        XCTAssertNil(SSHTarget.problem("user@imac"))
         XCTAssertNil(SSHTarget.problem("imac"))
-        XCTAssertNil(SSHTarget.problem("me@10.0.0.2"))
+        XCTAssertNil(SSHTarget.problem("me@192.0.2.2"))
         XCTAssertNotNil(SSHTarget.problem("-oProxyCommand=touch /tmp/pwned"))
         XCTAssertNotNil(SSHTarget.problem("-p22"))
         XCTAssertNotNil(SSHTarget.problem("me@host extra"))

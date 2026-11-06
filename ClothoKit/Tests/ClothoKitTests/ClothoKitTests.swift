@@ -18,7 +18,7 @@ final class ModelTests: XCTestCase {
       ],
       "panes": [
         {"id": 3, "cols": 120, "rows": 40, "pid": 9811, "command": ["/bin/zsh", "-l"],
-         "title": "vim notes.md", "cwd": "/Users/ahmad/notes", "seq": 183230, "exited": null, "future": 1},
+         "title": "vim notes.md", "cwd": "/Users/user/notes", "seq": 183230, "exited": null, "future": 1},
         {"id": 4, "cols": 80, "rows": 24, "title": null, "cwd": null, "seq": 0, "exited": {"signal": 9}}
       ]
     }
@@ -323,7 +323,7 @@ final class DisplayTitleTests: XCTestCase {
         XCTAssertEqual(Pane.displayTitle("✳notes", cwd: nil), "✳notes")
         XCTAssertEqual(Pane.displayTitle("#1 build", cwd: nil), "#1 build")
         XCTAssertEqual(Pane.displayTitle("(main) repo", cwd: nil), "(main) repo")
-        XCTAssertEqual(Pane.displayTitle("ahmad@mac: ~", cwd: nil), "ahmad@mac: ~")
+        XCTAssertEqual(Pane.displayTitle("user@mac: ~", cwd: nil), "user@mac: ~")
         XCTAssertNil(Pane.displayTitle("✳ ", cwd: nil))
         XCTAssertNil(Pane.displayTitle(nil, cwd: "/x"))
     }
@@ -431,7 +431,7 @@ final class AgentNoticeTests: XCTestCase {
     func testFinished() {
         let info = AgentInfo(kind: "claude", state: .done, message: "All 42 tests pass. I also fixed the flaky retry test.",
                              since: 1240, attention: true, turnStarted: 1000)
-        let notice = AgentNotice(info: info, machine: "devbox", workspace: "Platform", cwd: "/home/ahmad/api-server/")
+        let notice = AgentNotice(info: info, machine: "devbox", workspace: "Platform", cwd: "/home/user/api-server/")
         XCTAssertEqual(notice.title, "Platform · Claude finished")
         XCTAssertEqual(notice.subtitle, "devbox · api-server · 4m")
         XCTAssertEqual(notice.body, "All 42 tests pass. I also fixed the flaky retry test.")
