@@ -1,13 +1,13 @@
 # Clotho session engine plan
 
-Source: herdr-46 session (repo /Users/me/Projects/herdr), 2026-10-26.
+Source: herdr-46 session (the herdr repo), 2026-10-26.
 Tasktrail: "Plan a native session engine for Clotho" (task_dc0f4f70-cd71-4ff1-b0a2-c205a3ef0fc7).
 
 Goals: mobile, native UI, remote machines.
 
 ## Repository layout (user decision, 2026-10-26)
 
-Everything for Clotho lives in /Users/me/Projects/clotho, with one subfolder per sub-project:
+Everything for Clotho lives in one repo, with one subfolder per sub-project:
 
 - `clothod/`: Rust daemon (holder, logic, protocol crate, test client)
 - `ClothoKit/`: shared Swift package (protocol client, model store, terminal view)
@@ -185,8 +185,8 @@ is verified; this is a standing go for this round.
   - The same settings as the Mac.
   - A fix for the host-key hang.
   - A TestFlight build at the end, which the user uploads at the Mac.
-- The Mac reaches the build Mac under clotho-mac through a `Host` entry in the Mac's ~/.ssh/config
-  (`IdentityFile ~/.ssh/id_ed25519_clotho`). The original config is backed up as
+- The Mac reaches the build Mac under clotho-mac through a `Host` entry in the Mac's ~/.ssh/config (with its own IdentityFile).
+  The original config is backed up as
   config.bak-2026-10-27.
 
 ## Agents panel: attention first, resolve to collapse (user decision, 2026-10-27)
