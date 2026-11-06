@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -63,8 +64,8 @@ func (c *commonFlags) config() (*config, error) {
 	}
 	base := c.stateDir
 	if test {
-		if cfg.controlURL == "" {
-			return nil, errors.New("a test instance (--ephemeral or CLOTHOD_EPHEMERAL) never joins a real tailnet: give it a test control server with --control-url")
+		if !isLoopbackURL(cfg.controlURL) {
+			return nil, fmt.Errorf("a test instance (--ephemeral or CLOTHOD_EPHEMERAL) never joins a real tailnet: give it a test control server on this machine with --control-url (got %q)", cfg.controlURL)
 		}
 		if base == "" {
 			return nil, errors.New("a test instance (--ephemeral or CLOTHOD_EPHEMERAL) needs its own --state-dir")
@@ -83,6 +84,20 @@ func (c *commonFlags) config() (*config, error) {
 		cfg.hostname = defaultHostname(devBuild != "" || test)
 	}
 	return cfg, nil
+}
+
+// isLoopbackURL: an http(s) URL whose host is a loopback address or localhost.
+func isLoopbackURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	h := u.Hostname()
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // defaultStateDir is clothod's state dir (proto/src/platform: state_dir): $CLOTHOD_STATE_DIR,

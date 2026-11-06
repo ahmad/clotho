@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -670,6 +671,8 @@ func TestTestInstanceNeedsTestControl(t *testing.T) {
 		{[]string{"status", "--state-dir", dir}, "CLOTHOD_EPHEMERAL=60", "--control-url"},
 		{[]string{"login", "--ephemeral", "--control-url", "http://127.0.0.1:9"}, "", "--state-dir"},
 		{[]string{"dial", "x:1", "--ephemeral"}, "", "--control-url"},
+		{[]string{"serve", "--port", "1", "--state-dir", dir, "--control-url", "https://controlplane.tailscale.com"}, "CLOTHOD_EPHEMERAL=exit", "on this machine"},
+		{[]string{"status", "--ephemeral", "--state-dir", dir}, "CLOTHOD_NET_CONTROL_URL=http://192.0.2.1:80", "on this machine"},
 	} {
 		cmd := exec.Command(netBin, tc.args...)
 		cmd.Env = append(os.Environ(), "CLOTHOD_EPHEMERAL=", "CLOTHOD_NET_CONTROL_URL=")
@@ -713,8 +716,7 @@ func TestMeasure(t *testing.T) {
 
 	s := in.tsnetNode(t, "dialer-m")
 	target := net.JoinHostPort(st.IPs[0], strconv.Itoa(port))
-	start := time.Now()
-	var worst time.Duration
+	var took []time.Duration
 	for i := 0; i < 100; i++ {
 		t0 := time.Now()
 		c := dialFrom(t, s, target)
@@ -722,12 +724,13 @@ func TestMeasure(t *testing.T) {
 			t.Fatalf("dial %d: %v", i, err)
 		}
 		c.Close()
-		if d := time.Since(t0); d > worst {
-			worst = d
-		}
+		took = append(took, time.Since(t0))
 	}
-	el := time.Since(start)
-	t.Logf("MEASURE 100 dials+hello: %v total, %v mean, %v worst", el, el/100, worst)
+	// The first includes the dialer finding A, and A starting clothod.
+	rest := slices.Clone(took[1:])
+	slices.Sort(rest)
+	t.Logf("MEASURE 100 dials, each connect + hello + close: first %v; the other 99: median %v, p95 %v, max %v",
+		took[0].Round(time.Millisecond), rest[49].Round(100*time.Microsecond), rest[93].Round(100*time.Microsecond), rest[98].Round(100*time.Microsecond))
 	time.Sleep(2 * time.Second)
 	t.Logf("MEASURE RSS after 100 dials: %d KiB", rssKB(a.cmd.Process.Pid))
 }

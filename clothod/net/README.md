@@ -29,9 +29,16 @@ clothod-net version
   calls `envknob.SetNoLogsNoSupport()` before anything starts.
 - **Test instances never reach Tailscale.** With `--ephemeral[=SECS|exit]`, or with
   `$CLOTHOD_EPHEMERAL` set as clothod's tests set it, clothod-net refuses to start unless it has
-  `--control-url` (or `$CLOTHOD_NET_CONTROL_URL`) and its own `--state-dir`. It passes
-  `--ephemeral` on to the clothod it starts. Without a control URL a node uses
-  `https://controlplane.tailscale.com`; `$TS_CONTROL_URL` is ignored.
+  a control URL on this machine (`--control-url` or `$CLOTHOD_NET_CONTROL_URL`, host loopback
+  or `localhost`) and its own `--state-dir`. It passes `--ephemeral` on to the clothod it starts.
+  A test node also turns off the port mapper, so it makes no NAT-PMP, PCP or UPnP requests to
+  the LAN's router. It doesn't bind its UDP socket to the default interface either; Tailscale's
+  own tests do the same, and on Linux the binding drops STUN to 127.0.0.1. Without a control
+  URL a real node uses `https://controlplane.tailscale.com`; `$TS_CONTROL_URL` is ignored.
+- **Files stay in the node's dir.** `TS_LOGS_DIR` is set to it, because without that the
+  backend creates tailscaled's default dir, `~/.local/share/tailscale`. The node reports
+  `IPNVersion` `<tailscale.com version>-clothod-net`, and the build stamps it so that it never
+  carries this repo's commit.
 - `--ephemeral-node` registers an ephemeral node. Control deletes it soon after it goes offline,
   and a clean exit logs it out, so the next start needs a new sign-in. `dial` always registers
   an ephemeral node. Test instances don't by default, because they only ever join testctl,
