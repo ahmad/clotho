@@ -124,6 +124,11 @@ anything else that gets pushed. Here the machines go by role:
   - `mac/build-app.sh --dev` builds `Clotho Dev.app` without installing it.
   - `mac/build-app.sh` installs to `~/Applications` and replaces the user's app. Run it when
     shipping (see Shipping).
+  - The mac role's full suite: `cd mac && swift test`, `ClothoKit/scripts/test.sh`, and the tailnet
+    suite `scripts/clotho-build mac ClothoKit/Tailnet/scripts/test.sh` (offline, against clothod's
+    testctl; it builds the tailnet xcframework with `ClothoKit/scripts/build-tailnet.sh` if missing).
+  - `CLOTHO_TAILNET=1 mac/build-app.sh --dev` builds a dev app with the tailnet node and its Tailnet
+    Test window. Every other build refuses the node (`mac/scripts/check-no-tailnet.sh`).
 - iOS:
   - `ios/build.sh` builds for the simulator; `ios/build.sh test` runs the tests.
   - `ios/scripts/testflight.sh` uploads to TestFlight. The main session runs it over SSH without
