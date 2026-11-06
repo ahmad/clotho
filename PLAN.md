@@ -551,3 +551,28 @@ The iPhone and iPad get the same model after the Mac ships.
   - if the remote file changed since it was opened, the app asks first: Overwrite, Save a Copy Beside, or Discard.
 - A local-machine file opens in place.
 - A copy with unsynced edits is never deleted.
+
+## Built-in Tailscale (user, 2026-11-06)
+
+- Goal: users shouldn't have to install Tailscale separately.
+- The user's choices:
+  - **Apps and clothod** both join the network themselves (phases 0–2);
+  - users join **their own Tailscale account** (free tier). We run no coordination server.
+- How: Tailscale's embeddable node (`tsnet`, via the C library `libtailscale`).
+  - Each app, and each clothod, is its own userspace node.
+  - There's no system VPN and no VPN entitlement.
+  - Sign-in is a browser login link, once per device.
+  - Node state is kept in the Keychain on Apple devices, and in clothod's state dir on machines.
+- Phases:
+  - **0. Test build.** Build libtailscale for macOS arm64/x86_64, iOS arm64 and Linux x86_64/aarch64. Call it from Swift (mac, ios) and from Rust over FFI (clothod). Measure the size added, iOS background behaviour and memory. Prove one dial, app → machine, over the tailnet. Go/no-go after it.
+  - **1. The apps join.** The Mac and iPhone sign in inside Clotho and run today's SSH connection over the embedded node (they dial through tsnet, not the OS network). Machines still run Tailscale and sshd.
+  - **2. clothod joins.**
+    - `clothod login` prints the sign-in link, and clothod listens on its tailnet address.
+    - Clients connect without SSH. clothod checks the peer with WhoIs: by default, only devices of the same Tailscale user that clothod logged in as.
+    - The apps discover machines from the tailnet's peer list.
+    - SSH stays as an alternative.
+- Known costs:
+  - about 20–30 MB per binary (to be measured in phase 0);
+  - one extra Tailscale device for each app install;
+  - the iPhone's node pauses while the app is suspended (pushes still arrive through the relay);
+  - a Go toolchain in the builds.
