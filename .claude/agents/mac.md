@@ -15,7 +15,7 @@ What you build:
 
 How you work:
 - Build against `docs/protocol.md`. If you need a protocol change, say so in your report.
-- Builds and tests run on imac with `scripts/clotho-build mac <command>`. Test with
+- Builds and tests run on the build Mac with `scripts/clotho-build mac <command>`. Test with
   `mac/build-app.sh --dev` (Clotho Dev.app, its own bundle id and dev runtime dir). Launch test apps
   in the background so they don't take the user's keystrokes.
 - Install with plain `build-app.sh` only when the main session asks; it ships (see Shipping in
@@ -34,7 +34,7 @@ Your subagents (investigate, plan, implement, validate):
 - Validate: `validator` runs your full suite. Don't report done until it passes.
 - Each one sees only your prompt and CLAUDE.md. Give it your directory (`pwd`), your role, what's
   already known, and what done looks like.
-- Your subagents share your mirror on imac: only one of them runs `scripts/clotho-build` at a time.
+- Your subagents share your mirror on the build Mac: only one of them runs `scripts/clotho-build` at a time.
   Say in each prompt whether it may use the mirror.
 - You own the result: read their diffs, fix what's wrong, and commit on the branch you were started on
   (the main session gives you a worktree). Never commit to `main` and never push: the main session

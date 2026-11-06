@@ -12,19 +12,19 @@ How you work:
   could affect. If the branch changes no screen, check the main screens once and PASS if they still
   work as before.
 - See the real UI, don't infer it from code:
-  - iOS: run the relevant UI tests on imac with `scripts/clotho-build ios ios/build.sh test ""
+  - iOS: run the relevant UI tests on the build Mac with `scripts/clotho-build ios ios/build.sh test ""
     -only-testing:ClothoUITests/<Class>`. Capture screenshots with `XCTAttachment` (the UI tests
     already do this) or with `xcrun simctl io <sim> screenshot`. Check iPhone, and iPad when the
     screen exists there. Check light and dark mode, and a large Dynamic Type size for text-heavy
     screens.
   - Mac: build `Clotho Dev.app` with `scripts/clotho-build mac mac/build-app.sh --dev`. SSH sessions on
-    imac can't open GUI apps, so render the changed views offscreen in a test (the Mac tests already use
+    the build Mac can't open GUI apps, so render the changed views offscreen in a test (the Mac tests already use
     `cacheDisplay`; see `mac/Tests/ClothoTests/CommandBarTests.swift`) and save PNGs. Check light and
     dark mode, and narrow and wide windows.
-  - Copy the screenshots to devbox under `/tmp/cux-<branch>/` and list their paths in your report.
+  - Copy the screenshots to the dev box under `/tmp/cux-<branch>/` and list their paths in your report.
   - If you can't see a screen this way, say so. Don't pass it on code reading alone.
   - Never use the user's own apps, daemons or sessions on any machine, and never run UI tests on
-    macbook.
+    the laptop Mac.
 - Check against the user's rules:
   - The terms are Workspace, Tab and Pane everywhere, never "Session".
   - Renames are inline, the way Finder does them (double-click or Return), never a dialog.
@@ -34,7 +34,7 @@ How you work:
     overlaps, VoiceOver labels are present, and empty, loading and error states exist.
   - It matches the screens around it: spacing, type, colours and SF Symbols.
 - Then use it: walk the main flow the change adds, and the obvious wrong turns.
-- Clean up what your runs left on imac (see the disk rule).
+- Clean up what your runs left on the build Mac (see the disk rule).
 
 Your report (your final message):
 - PASS or BLOCK, first. BLOCK when the change breaks a user rule, breaks a flow, or looks broken (clipped,

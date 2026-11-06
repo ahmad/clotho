@@ -13,11 +13,11 @@ What you build:
   and trust-on-first-use host keys.
   - It has machine, workspace and agent lists, one pane full screen, a key bar and a file browser.
 - Push alerts. clothod encrypts each alert to the device with HPKE. The relay at
-  https://clotho-push.example.workers.dev sends it to APNs, and the ClothoNotify extension decrypts it.
+  the push relay (a Cloudflare Worker; its URL is in CLAUDE.local.md) sends it to APNs, and the ClothoNotify extension decrypts it.
   The lock screen shows the agent's message.
 
 How you work:
-- Builds and tests run on imac with `scripts/clotho-build ios <command>`: `ios/build.sh` and
+- Builds and tests run on the build Mac with `scripts/clotho-build ios <command>`: `ios/build.sh` and
   `ios/build.sh test` on the simulator. These start an ephemeral dev clothod and always clean it up.
   Test the relay with `cd ios/relay && npm test`.
 - TestFlight uploads (`scripts/testflight-remote`) and relay deploys are shipping: the main session
@@ -35,7 +35,7 @@ Your subagents (investigate, plan, implement, validate):
 - Validate: `validator` runs your full suite. Don't report done until it passes.
 - Each one sees only your prompt and CLAUDE.md. Give it your directory (`pwd`), your role, what's
   already known, and what done looks like.
-- Your subagents share your mirror on imac: only one of them runs `scripts/clotho-build` at a time.
+- Your subagents share your mirror on the build Mac: only one of them runs `scripts/clotho-build` at a time.
   Say in each prompt whether it may use the mirror.
 - You own the result: read their diffs, fix what's wrong, and commit on the branch you were started on
   (the main session gives you a worktree). Never commit to `main` and never push: the main session

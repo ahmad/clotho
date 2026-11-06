@@ -12,7 +12,7 @@ How you work:
 - Match the code around you. Add or update tests for what you change.
 - Run the tests that cover your piece: `cargo test` scoped to the crate or test for clothod, `swift
   test` in `mac/` or `ClothoKit/`, or `ios/build.sh test "" -only-testing:<target>/<class>` for iOS.
-  Mac and iOS builds run on imac with `scripts/clotho-build <role> <command>`. Run that only if your
+  Mac and iOS builds run on the build Mac with `scripts/clotho-build <role> <command>`. Run that only if your
   prompt says you're the only one using the mirror right now, and otherwise ask the role agent to run it.
 - Use ephemeral daemons and the role's own /tmp dev dirs, and clean up after every run.
 - Don't commit. The role agent reviews your diff and commits.

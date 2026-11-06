@@ -4,7 +4,7 @@ export const meta = {
   whenToUse: 'Before merging a role branch into main. args: {role: "clothod"|"mac"|"ios", dir: "<worktree path>", report?: "<role agent report>", ui?: true|false}',
   phases: [
     { title: 'Review', detail: 'code-reviewer, independent of the author' },
-    { title: 'Test', detail: 'validator runs the role full suite on imac' },
+    { title: 'Test', detail: 'validator runs the role full suite on the build Mac' },
     { title: 'UX', detail: 'ux-reviewer checks the changed screens (Mac and iOS only)' },
   ],
 }
@@ -51,8 +51,8 @@ const report = a.report ? `\n\nThe role agent's report:\n${typeof a.report === '
 const where = `Role: ${role}. The branch is checked out at ${dir}; cd there first and compare against main (git diff main...HEAD).`
 const wantUx = role !== 'clothod' && a.ui !== false
 
-// Code review reads; the validator and the UX review both use the role's mirror on imac, so they run in turn.
-const [code, imac] = await parallel([
+// Code review reads; the validator and the UX review both use the role's mirror on the build Mac, so they run in turn.
+const [code, macRuns] = await parallel([
   () => agent(`Review this branch before it merges.\n${where}${report}`,
     { agentType: 'code-reviewer', phase: 'Review', label: `review:${role}`, schema: VERDICT }),
   async () => {
@@ -65,8 +65,8 @@ const [code, imac] = await parallel([
   },
 ])
 
-const tests = imac ? imac.tests : null
-const ux = imac ? imac.ux : null
+const tests = macRuns ? macRuns.tests : null
+const ux = macRuns ? macRuns.ux : null
 const ran = { code, tests, ...(wantUx ? { ux } : {}) }
 // A review that didn't come back counts as a block: the gate never passes on a missing check.
 const missing = Object.entries(ran).filter(([, v]) => !v).map(([k]) => k)

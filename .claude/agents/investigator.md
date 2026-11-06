@@ -11,7 +11,7 @@ How you work:
 - Start from what the prompt already ruled out. Find the code involved and read it, not just the
   matching lines.
 - Reproduce bugs when you can. Use ephemeral daemons and the role's own dev dirs (clothod `/tmp/clt*`,
-  mac `/tmp/cmac-*`, ios `/tmp/cki-*`). Run Mac and iOS builds on imac with
+  mac `/tmp/cmac-*`, ios `/tmp/cki-*`). Run Mac and iOS builds on the build Mac with
   `scripts/clotho-build <role> <command>`, and clean up after every run.
 - Measure instead of guessing: timings, memory, log lines, exit codes.
 

@@ -1,19 +1,22 @@
 #!/bin/bash
-# Runs a command on the build Mac (imac) in a mirror of this clone that belongs to one agent, so two
-# agents' syncs and builds never delete each other's files. Like clotho-mac, but one mirror per role.
+# Runs a command on the build Mac in a mirror of this clone that belongs to one agent, so two agents' syncs
+# and builds never delete each other's files.
 #
 # Usage: scripts/clotho-build <clothod|mac|ios|main> <command...>
 #   e.g. scripts/clotho-build ios ios/build.sh test
 #        scripts/clotho-build mac 'cd mac && swift test --disable-keychain'
 #
 # Mirrors on the build Mac:
-#   clothod       ~/Builds/clotho-clothod   (the canonical one: clothod/dist, the released builds, lives here)
+#   clothod       ~/Builds/clotho-clothod  (the canonical one: clothod/dist, the released builds, lives here)
 #   mac           ~/Builds/clotho-mac
 #   ios           ~/Builds/clotho-ios
-#   main          ~/Builds/clotho-orch   (the main session's mirror)
+#   main          ~/Builds/clotho-orch     (the main session's mirror)
 # In every mirror but clothod's, clothod/dist is a symlink to the canonical dist, so app builds bundle the
 # released clothod. The sync never touches clothod/dist (excluded), build outputs, or generated projects.
-# CLOTHO_MAC picks another host (default macbook@imac).
+#
+# Hosts and account IDs are private: they come from ~/.config/clotho/local.env (never in the repo), which sets
+# CLOTHO_BUILD_HOST and the CLOTHO_* values below. Those values are passed on to the command on the build Mac.
+# CLOTHO_MAC overrides the host for one run (e.g. CLOTHO_MAC="$CLOTHO_FALLBACK_HOST").
 set -euo pipefail
 role=${1:-}
 case $role in
@@ -24,7 +27,11 @@ case $role in
   *) echo "usage: scripts/clotho-build <clothod|mac|ios|main> <command...>" >&2; exit 64 ;;
 esac
 shift
-host=${CLOTHO_MAC:-macbook@imac}
+local_env=${CLOTHO_LOCAL_ENV:-$HOME/.config/clotho/local.env}
+# shellcheck disable=SC1090
+[ -r "$local_env" ] && . "$local_env"
+host=${CLOTHO_MAC:-${CLOTHO_BUILD_HOST:-}}
+[ -n "$host" ] || { echo "clotho-build: set CLOTHO_BUILD_HOST in $local_env (or CLOTHO_MAC)" >&2; exit 2; }
 canon=Builds/clotho-clothod
 
 ssh "$host" "set -e; mkdir -p $dest/ios/build-resources/dist $dest/clothod
@@ -33,7 +40,13 @@ rsync -a --delete \
   --exclude .git/ --exclude target/ --exclude build/ --exclude .build/ --exclude node_modules/ \
   --exclude .wrangler/ --exclude /clothod/dist --exclude ios/build-resources/ \
   --exclude '*.xcodeproj/' --exclude DerivedData/ \
+  --exclude /.claude/worktrees/ --exclude /CLAUDE.local.md \
   "$(cd "$(dirname "$0")/.." && pwd)/" "$host:$dest/"
 [ $# -eq 0 ] && exit 0
+# Pass the private settings on, without writing them to disk on the build Mac.
+exports=
+for v in CLOTHO_BUILD_HOST CLOTHO_FALLBACK_HOST CLOTHO_DEV_HOST CLOTHO_TEAM_ID CLOTHO_APNS_KEY_ID CLOTHO_RELAY_URL; do
+  [ -n "${!v:-}" ] && exports+="export $v=$(printf %q "${!v}"); "
+done
 tty=; [ -t 0 ] && tty=-t
-exec ssh $tty "$host" "cd $dest && exec zsh -lc $(printf %q "$*")"
+exec ssh $tty "$host" "cd $dest && exec zsh -lc $(printf %q "$exports$*")"

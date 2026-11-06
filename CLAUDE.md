@@ -48,12 +48,12 @@ session passes it on.
   removes the worktree and branch, and ships from the main clone (see Shipping).
 - **Across roles.** A protocol change goes first (clothod), then the clients against it. Pass each
   report's "needs" on to the next role's task.
-- **One agent per role at a time.** A role's agents share its mirror on imac, and heavy runs go one
-  at a time (see imac under Machines).
+- **One agent per role at a time.** A role's agents share its mirror on the build Mac, and heavy runs go one
+  at a time (see the build Mac under Machines).
 
 ## Rules (set by the user)
 
-- **The user's daemons.** Each machine (this one, devbox, imac) runs one clothod instance, and one
+- **The user's daemons.** Each of the three machines runs one clothod instance, and one
   version of it. Never stop or restart the user's default instance. Upgrading it in place is part of
   shipping (see Shipping): the upgrade swaps the holder in place, so shells survive.
 - **Tests and dev daemons.** These are temporary. Use `--ephemeral` and each role's own dev dirs: clothod
@@ -83,32 +83,31 @@ session passes it on.
 
 ## Machines
 
-- **devbox** (Linux x86_64, `ahmad@devbox`): the main dev machine. The clone is at `~/Projects/clotho`.
-- **This Mac** (Tailscale name `macbook`, `ahmad@macbook`): has Xcode. From devbox,
-  `clotho-mac <command>` syncs the clone to `~/Builds/clotho-clothod` on the Mac and runs the command
-  there, e.g. `clotho-mac ios/build.sh` or `clotho-mac mac/build-app.sh --dev`. Over SSH the login
-  keychain is locked, but TestFlight uploads still work: they unlock it from the Mac's ~/.keychain_pw and
-  use the App Store Connect API key in ~/.appstoreconnect/private_keys/. The Mac app is
-  signed ad hoc, so `mac/build-app.sh` installs fine over SSH.
-- **Disk space on the Mac is limited (user rule).** Keep `~/Builds` small. After every run on the Mac, remove
-  what the run left that isn't needed: cargo cross-target and debug dirs in the mirror's `clothod/target`
-  (keep `dist-dev`), Xcode's `Index.noindex`, old archives, and scratch dirs. `~/Builds/testflight` keeps
-  only the latest uploaded archive. Never delete `clothod/dist` (the released builds). Keep at least 20 GiB
-  free; check with `df -h /System/Volumes/Data` before big builds. Don't touch `~/Library` caches or
-  simulators without asking the user.
-- **imac** (macOS arm64, `macbook@imac`, always on): **the build host** (user, 2026-10-30). Run Mac and iOS
-  builds, tests and dists there with `scripts/clotho-build <role> <command>` (role = clothod, mac, ios or
-  main). Each role has its own mirror on imac (~/Builds/clotho-clothod for clothod, which holds the
-  released clothod/dist; clotho-mac, clotho-ios, clotho-orch, whose clothod/dist links to it), so agents never
-  sync over each other's builds. Never sync into another role's mirror. Separate mirrors stop file clashes, not CPU
-  contention: the iOS UI suite is timing-sensitive, so the main session runs heavy work (test suites,
-  release builds) one at a time and never starts two role agents that both run one. macbook is the fallback
-  (`CLOTHO_MAC=ahmad@macbook clotho-mac <command>`).
-  Signing uses imac's dedicated build keychain (~/Library/Keychains/clotho-build.keychain-db, password in
-  ~/.config/clotho/build-keychain-pw; never print it). Unlock it in the same SSH session before codesign,
-  notarytool (profile `clotho-notary`, ASC API key) or Sparkle signing. The Sparkle key is read from it
-  into `sign_update --ed-key-file -` only, never to disk. imac also runs the user's own clothod and
-  Claude sessions: never touch them. The user is often at macbook: no UI test runs there.
+The repo is public. Hostnames, logins, account IDs and key paths live only in the gitignored
+`CLAUDE.local.md` (Claude Code loads it, worktrees under `.claude/worktrees/` included) and in
+`~/.config/clotho/local.env` (scripts read it). Never write them into the repo, a commit message, or
+anything else that gets pushed. Here the machines go by role:
+
+- **The dev box** (Linux x86_64): the main dev machine, where these sessions run, with the clone at
+  `~/Projects/clotho`.
+- **The laptop Mac**: the user's own Mac, often in use: no UI test runs there. It's the fallback build
+  host.
+- **The build Mac** (macOS arm64, always on; user, 2026-10-30): runs every Mac and iOS build, test and dist,
+  through `scripts/clotho-build <role> <command>` (role = clothod, mac, ios or main). That syncs the clone to
+  the role's own mirror under `~/Builds` and passes the `CLOTHO_*` settings along. clothod's mirror holds the
+  released `clothod/dist`, and the other mirrors link to it. Never sync into another role's mirror.
+  Separate mirrors stop file clashes, not CPU contention: the iOS UI suite is timing-sensitive, so the main
+  session runs heavy work (test suites, release builds) one at a time and never starts two role agents that
+  both run one. Signing uses the build Mac's dedicated build keychain: unlock it in the same SSH session
+  before codesign, notarytool or Sparkle signing, never print its password, and read the Sparkle key from it
+  only into `sign_update --ed-key-file -`, never to disk. The build Mac also runs the user's own clothod and
+  Claude sessions: never touch them.
+- **Disk space on the Macs is limited (user rule).** Keep `~/Builds` small. After every run, remove what the
+  run left that isn't needed: cargo cross-target and debug dirs in the mirror's `clothod/target` (keep
+  `dist-dev`), Xcode's `Index.noindex`, old archives, and scratch dirs. `~/Builds/testflight` keeps only the
+  latest uploaded archive. Never delete `clothod/dist` (the released builds). Keep at least 20 GiB free;
+  check with `df -h /System/Volumes/Data` before big builds. Don't touch `~/Library` caches or simulators
+  without asking the user.
 
 ## Build and test
 
@@ -124,12 +123,12 @@ session passes it on.
   - `ios/build.sh` builds for the simulator; `ios/build.sh test` runs the tests.
   - `ios/scripts/testflight.sh` uploads to TestFlight. The main session runs it over SSH without
     asking, once a build has passed the full iPhone suite and the iPad test and has been verified,
-    then tells the user the build number. The API key ids live in devbox's
+    then tells the user the build number. The API key ids live in the dev box's
     `~/.config/clotho/asc.env`, never in the repo.
 - Relay: `cd ios/relay && npm test`. Deploy with `npx wrangler deploy` when shipping (see Shipping).
 
 ## Keys (never in the repo)
 
-- The APNs key is `~/.config/clotho/AuthKey_KEYID00000.p8`. The push relay holds it as a Worker secret.
-- The Cloudflare login is wrangler's own config.
-- The Apple team is TEAMID0000. Signing uses the Mac's Xcode account.
+- The APNs key, the App Store Connect API key, the Apple team ID and the relay URL: see `CLAUDE.local.md`.
+  Scripts get the IDs from `~/.config/clotho/local.env` and `asc.env`.
+- The push relay holds the APNs key as a Worker secret. The Cloudflare login is wrangler's own config.

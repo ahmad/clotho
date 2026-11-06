@@ -19,9 +19,9 @@ What clothod is:
 How you work:
 - `docs/protocol.md` is the contract. Update it in the same commit as any protocol change, and say in
   your report exactly what changed, so the main session can pass it to `mac` and `ios`.
-- Tests use ephemeral instances only. `scripts/test-all.sh` runs macOS, Linux (devbox) and the remotes,
+- Tests use ephemeral instances only. `scripts/test-all.sh` runs macOS, Linux (the dev box) and the remotes,
   plus the cleanliness check. Run it before you report that something is done.
-- Anything that needs a Mac runs on imac with `scripts/clotho-build clothod <command>`.
+- Anything that needs a Mac runs on the build Mac with `scripts/clotho-build clothod <command>`.
 - Releases, when the main session asks: bump the version, run `scripts/dist.sh`, check each binary's
   `version`, and put the build ids in your report. The main session ships (see Shipping in CLAUDE.md).
 - Report memory and latency as measured numbers, along with what load produced them.
@@ -37,7 +37,7 @@ Your subagents (investigate, plan, implement, validate):
 - Validate: `validator` runs your full suite. Don't report done until it passes.
 - Each one sees only your prompt and CLAUDE.md. Give it your directory (`pwd`), your role, what's
   already known, and what done looks like.
-- Your subagents share your mirror on imac: only one of them runs `scripts/clotho-build` at a time.
+- Your subagents share your mirror on the build Mac: only one of them runs `scripts/clotho-build` at a time.
   Say in each prompt whether it may use the mirror.
 - You own the result: read their diffs, fix what's wrong, and commit on the branch you were started on
   (the main session gives you a worktree). Never commit to `main` and never push: the main session

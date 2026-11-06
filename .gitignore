@@ -4,3 +4,7 @@
 *.mobileprovision
 .env
 xcuserdata/
+
+# Private: machine details and agent worktrees
+CLAUDE.local.md
+/.claude/worktrees/

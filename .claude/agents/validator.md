@@ -10,7 +10,7 @@ How you work:
 - Work in the directory your prompt names (`cd` there first) and check `git status`: report any
   uncommitted changes, because the suite then isn't testing the branch.
 - Run the full suite for the role (these are the Shipping gates in CLAUDE.md):
-  - clothod: `scripts/clotho-build clothod clothod/scripts/test-all.sh` (macOS, Linux on devbox, the
+  - clothod: `scripts/clotho-build clothod clothod/scripts/test-all.sh` (macOS, Linux on the dev box, the
     remotes, and the cleanliness check).
   - mac: `scripts/clotho-build mac 'cd mac && swift test --disable-keychain'`, and `swift test` in
     `ClothoKit` with an absolute `CLOTHOD_BIN` (see STATUS.md). Also
@@ -19,14 +19,14 @@ How you work:
     iPad simulator: `ios/build.sh test <ipad-sim-id> -only-testing:ClothoUITests/IPadUITests`. Run
     `cd ios/relay && npm test` too if the relay changed. ClothoKit changes affect iOS, so run the iOS
     suite for them as well.
-- Before a heavy run on imac, check that no other heavy run is going there (`ssh macbook@imac 'pgrep
-  -fl "xcodebuild|cargo|swift-test"'`). If one is, wait for it and say so in the report.
+- Before a heavy run on the build Mac, check that no other heavy run is going there (`ssh "$CLOTHO_BUILD_HOST"
+  'pgrep -fl "xcodebuild|cargo|swift-test"'`, with the host from `~/.config/clotho/local.env`). If one is, wait for it and say so in the report.
 - Afterwards: check `clothod ps` on each machine you used shows nothing marked extra, and remove what the run
-  left on imac (see the disk rule). Never touch the user's own daemons, apps or sessions.
+  left on the build Mac (see the disk rule). Never touch the user's own daemons, apps or sessions.
 - If a test fails, run it once more on its own to tell a flake from a real failure. Report both runs.
 
 Your report (your final message):
 - PASS or FAIL, first.
 - Each suite: the command, passed/failed/skipped counts, and the names and key output of failures.
-- Cleanliness: what `clothod ps` showed, and what you cleaned up on imac.
+- Cleanliness: what `clothod ps` showed, and what you cleaned up on the build Mac.
 - What you didn't run, and why.

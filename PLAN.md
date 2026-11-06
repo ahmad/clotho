@@ -17,9 +17,13 @@ Everything for Clotho lives in /Users/me/Projects/clotho, with one subfolder per
 
 ## Agents (2026-10-26)
 
+- The repo is public (user decision, 2026-11-06). Hostnames, logins, account IDs, key paths and the relay URL
+  live only in the gitignored CLAUDE.local.md and ~/.config/clotho/local.env; docs say "the dev box", "the
+  laptop Mac" and "the build Mac", and test data uses devbox, macbook and imac. Git history was rewritten the
+  same way. The build Mac's clothod mirror is now ~/Builds/clotho-clothod.
 - No orchestrator role (user decision, 2026-11-06). Its role file is gone. The main session, the plain
   session the user talks to at the repo root, owns PLAN.md, CLAUDE.md, STATUS.md, `.claude/`, `scripts/`
-  and root files, verifies the role agents' work, pushes and ships. Its mirror on imac is still
+  and root files, verifies the role agents' work, pushes and ships. Its mirror on the build Mac is still
   ~/Builds/clotho-orch (`scripts/clotho-build main`).
 - The role agents are subagents now, not peer sessions (user decision, 2026-11-06): the main session
   starts clothod, mac and ios as needed and relays between them. `scripts/agent` is gone.
@@ -146,8 +150,8 @@ owns the PTY fds shapes spawn, resize, reconnect and the output buffer.
 - Copying inside Claude Code and Codex must reach the device clipboard. Panes may set the clipboard
   through OSC 52, which clothod forwards to attached clients. Panes may never read it.
 - Modifier-drag (Option/Shift) forces a local selection while a pane has mouse reporting on.
-- The user approved releasing it everywhere: clothod 0.1.6, upgraded in place on macbook, devbox and
-  imac, the Mac app installed, and an iOS TestFlight build with the same support. This is together
+- The user approved releasing it everywhere: clothod 0.1.6, upgraded in place on the laptop Mac, the dev box and
+  the build Mac, the Mac app installed, and an iOS TestFlight build with the same support. This is together
   with the Shift+Return, rename-flicker and Cmd-arrow/Cmd-Delete fixes.
 
 ## Image paste into remote agents (user decision, 2026-10-27)
@@ -173,7 +177,7 @@ is verified; this is a standing go for this round.
 - mac:
   - A Settings window (notification mutes, scrollback, start at login).
   - Collapsible machine groups, wider agent rows, and cleanup of orphaned upload parts.
-  - Transfer tests against imac, a large tree and a slow link.
+  - Transfer tests against the build Mac, a large tree and a slow link.
   - A Developer ID and notarized release path (the user creates the cert and the notary profile).
 - ios:
   - Parity: image paste and photo upload into remote agents, a newline key, the hardware-keyboard
@@ -181,7 +185,7 @@ is verified; this is a standing go for this round.
   - The same settings as the Mac.
   - A fix for the host-key hang.
   - A TestFlight build at the end, which the user uploads at the Mac.
-- The Mac reaches imac under clotho-mac through a `Host imac` entry in the Mac's ~/.ssh/config
+- The Mac reaches the build Mac under clotho-mac through a `Host` entry in the Mac's ~/.ssh/config
   (`IdentityFile ~/.ssh/id_ed25519_clotho`). The original config is backed up as
   config.bak-2026-10-27.
 
@@ -199,8 +203,8 @@ is verified; this is a standing go for this round.
 
 ## clothod 0.1.8 (user decision, 2026-10-27)
 
-- The user asked to "ship 0.1.8 whenever you can": release it and upgrade in place on macbook, devbox
-  and imac, then reinstall the Mac app with 0.1.8 bundled. It carries the upgrade-race fix (68497ac):
+- The user asked to "ship 0.1.8 whenever you can": release it and upgrade in place on the laptop Mac, the dev box
+  and the build Mac, then reinstall the Mac app with 0.1.8 bundled. It carries the upgrade-race fix (68497ac):
   `upgrade` moves `current` first and holds `upgrade.lock`, so a client's restart can't revive the old
   build.
 - Agent hooks (Claude Code and Codex) were installed on all three machines at the user's request
@@ -212,13 +216,13 @@ is verified; this is a standing go for this round.
   directly to clothod ("I like option 3. Panes. use that everywhere"). The user also told clothod
   "upload to testflight when the icon is in". The upload runs from the Mac's own session, so the
   user runs testflight.sh.
-- imac has Start at login installed; the user turned it on from Settings (confirmed 2026-10-27).
+- The build Mac has Start at login installed; the user turned it on from Settings (confirmed 2026-10-27).
 - Machine group headers put the chevron on the left of the name, the same as the Agents "Quiet"
   header (user feedback).
 
 ## clothod 0.1.9 (user decision, 2026-10-27)
 
-- The user said "ship it" for 0.1.9: release it, upgrade in place on macbook, devbox and imac, reinstall
+- The user said "ship it" for 0.1.9: release it, upgrade in place on the laptop Mac, the dev box and the build Mac, reinstall
   the Mac app with 0.1.9 bundled, and prepare a TestFlight build, which the user uploads at the Mac.
 - New attention rule (user request): an agent leaves the top list only when it works again
   (running or starting from a hook, or Claude's title spinner) or when the user resolves it
@@ -236,8 +240,8 @@ is verified; this is a standing go for this round.
 
 - The user said "ship when everything is completed". When Mute (daemon, Mac and iOS) and the Mac
   batch (pinned agent time, app-wide zoom, thicker tabs, Create Workspace buttons, Manage
-  Machines) are done and verified, release 0.1.10 and upgrade in place on macbook, devbox and
-  imac. Then reinstall the Mac app with 0.1.10, and prepare a TestFlight build, which the user
+  Machines) are done and verified, release 0.1.10 and upgrade in place on the laptop Mac, the dev box and
+  the build Mac. Then reinstall the Mac app with 0.1.10, and prepare a TestFlight build, which the user
   uploads at the Mac.
 - Sidebar (user request): a subtle outline "Create Workspace" button at the bottom of each machine's
   workspace list replaces the header "+". A "Manage Machines…" footer pinned to the bottom of the
@@ -271,9 +275,9 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - Workspace rows: the status dot sits right after the name, like the machine dot. The tab count is
   pinned to the trailing edge. The close button shows only on hover, in the count's place.
 - The user asked the mac agent to install the app. It bundles clothod 0.1.11.
-- The user chose to upgrade devbox, macbook and imac to 0.1.11 in place once the iOS tests passed,
+- The user chose to upgrade the dev box, the laptop Mac and the build Mac to 0.1.11 in place once the iOS tests passed,
   then refresh the hooks. TestFlight is still the user's to run.
-- The installed app bundled macbook's dev dist of 0.1.11, and the user's "Update clothod" put that
+- The installed app bundled the laptop Mac's dev dist of 0.1.11, and the user's "Update clothod" put that
   build on all three machines. It predates 0488b00 (the push record cap, the report caps, and hooks
   status `outdated`). The user chose to ship 0.1.12 from HEAD: upgrade in place, reinstall the app
   with the released dist, refresh the hooks, then TestFlight. The user's install of the app should
@@ -325,9 +329,9 @@ clothod release, app install or TestFlight upload still needs the user's go when
 ## clothod 0.1.13 (user decision, 2026-10-28)
 
 - Ship once the iOS suite passes. The batch:
-  - in-place upgrades on devbox, macbook and imac
-  - the Mac app install
-  - the TestFlight command, for the user to run
+  - in-place upgrades on the dev box, the laptop Mac and the build Mac
+  - The Mac app install
+  - The TestFlight command, for the user to run
 - 0.1.13 contains the push fixes (quiet, nested agents, idle reminders, compaction), the
   notification detail, and Allow/Deny (agent.decide).
 - Install the two new Claude hooks (PostToolUse, and PermissionRequest with timeout 3600) on each
@@ -339,7 +343,7 @@ clothod release, app install or TestFlight upload still needs the user's go when
   iPhone suite and the iPad test and has been verified. It reports the build number afterwards.
 - Uploads run over SSH, the way the user's ~/.local/bin/deploy-testflight does: unlock the
   keychain from the Mac's ~/.keychain_pw, and use the App Store Connect API key. The key ids are in
-  devbox's ~/.config/clotho/asc.env, outside the repo.
+  the dev box's ~/.config/clotho/asc.env, outside the repo.
 
 ## clothod 0.1.14 (user decision, 2026-10-28)
 
@@ -378,7 +382,7 @@ clothod release, app install or TestFlight upload still needs the user's go when
   install and uninstall edit only clotho's part), the Mac app's matching fix (67f583f), and a
   TestFlight build bundling 0.1.17 after the full iPhone suite and the iPad test. In-place upgrades
   on all three machines.
-- Updating macbook's outdated chained Codex hook still needs the user's OK.
+- Updating the laptop Mac's outdated chained Codex hook still needs the user's OK.
 
 ## Shipping without asking (user decision, 2026-10-28)
 
@@ -388,9 +392,9 @@ clothod release, app install or TestFlight upload still needs the user's go when
   kinds of hooks or other changes to the user's config files, deleting user data, and new things
   in the Apple or Cloudflare accounts. CLAUDE.md has the rule.
 
-## macbook's Codex hook (user decision, 2026-10-28)
+## The laptop Mac's Codex hook (user decision, 2026-10-28)
 
-- The user approved updating macbook's outdated chained Codex hook: `clothod hooks install codex`
+- The user approved updating the laptop Mac's outdated chained Codex hook: `clothod hooks install codex`
   edits only clotho's command inside Computer Use's notify (`--previous-notify`) in
   ~/.codex/config.toml, with a backup first. Nothing else in that file changes.
 
@@ -410,7 +414,7 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - New users download the Mac app from clotho.app/downloads (the user wrote "clothoc.app", read as a
   typo: clothoc.app doesn't resolve, and clotho.app is the live Vercel site). The Sparkle feed is
   clotho.app/appcast.xml, as release.sh and the app already expect.
-- Signing is ready on macbook: the Developer ID certificate (expires 2027-02-01, G1 CA), the
+- Signing is ready on the laptop Mac: the Developer ID certificate (expires 2027-02-01, G1 CA), the
   `clotho-notary` profile, and the Sparkle key pair (public key in mac/Resources/SparklePublicKey).
 - The first public release follows the sidebar work: a notarized build, the zip in /downloads, the
   appcast, and a Download button on the landing page.
@@ -470,12 +474,12 @@ clothod release, app install or TestFlight upload still needs the user's go when
 
 - Bug: on macOS, a daemon started over SSH stays in that SSH session's bootstrap namespace, which
   dies when the SSH connection closes. Its shells then can't reach DNS, user lookup, TLS trust or the
-  keychain. imac's holder after the 14:28 reboot hit this, and so does macbook's SSH-upgraded serve
+  keychain. The build Mac's holder after the 14:28 reboot hit this, and so does the laptop Mac's SSH-upgraded serve
   (gh_auth).
 - Fix: clothod starts serve and holder on macOS through launchd in the user's durable domain. The user
-  approved restarting imac's daemon once that fix is in. Its shells end, and restore brings back the
-  layout and agent conversations. macbook's serve is not restarted for now.
-- Disk (2026-10-29): the user allowed one dip below the 20 GiB floor on macbook, for the 0.1.24 test
+  approved restarting the build Mac's daemon once that fix is in. Its shells end, and restore brings back the
+  layout and agent conversations. The laptop Mac's serve is not restarted for now.
+- Disk (2026-10-29): the user allowed one dip below the 20 GiB floor on the laptop Mac, for the 0.1.24 test
   and release builds only (abort under 8 GiB). Most of the space went to swap from the user's own
   dev server and browser, not to our builds.
 
@@ -499,15 +503,15 @@ clothod release, app install or TestFlight upload still needs the user's go when
 - Manage Machines has an on/off switch per machine. Off disconnects the app and stops reconnecting, and hides the machine from the sidebar, Agents and ⌘P. Its clothod and shells keep running. The local Mac can't be turned off.
 - File manager: sort by any column, copy between any two machines (remote→remote streams through the Mac), and a per-machine filter field.
 
-## Build host: imac (user, 2026-10-30)
+## Build host: the build Mac (user, 2026-10-30)
 
-- imac (macbook@imac, always on, Xcode) becomes the build host for clothod dists, Mac releases, iOS builds and tests, and TestFlight; macbook stays as a fallback. `CLOTHO_MAC=macbook@imac clotho-mac …`.
-- Keys were copied from macbook (user's choice), not re-created: the Developer ID identity only (not the third-party Apple Development identity on macbook) and the Sparkle key, into a dedicated build keychain on imac (~/Library/Keychains/clotho-build.keychain-db, password in ~/.config/clotho/build-keychain-pw, 600). The ASC API key is in ~/.appstoreconnect/private_keys; notarization on imac uses the API key (`clotho-notary` in the build keychain), so the app-specific password stays on macbook.
-- The Sparkle key moved via a private temp folder on macbook erased right after (user-approved exception to "never export it to disk").
-- iOS signing on imac must not create new certificates, devices or profiles in the Apple account without the user's OK.
-- The user runs `sudo pmset autorestart 1` on imac once, so it comes back after a power cut.
-- SSH from imac (user-approved): imac's key is in ahmad@macbook's authorized_keys; devbox admits it through Tailscale SSH. imac's known_hosts pins devbox (fingerprint checked against macbook's trusted entry) and macbook. imac→itself is not set up. test-all's remote suite uses devbox and macbook, and skips macbook with a clear note when it's asleep.
-- 2026-10-30 follow-ups (user): copy macbook's "Apple Development: Ahmad Amin (CERTID0000)" to imac's build keychain too (archives the iPhone app; nothing new in the Apple account); the user installs Rosetta on imac so Intel builds are test-run there. On imac, sign_update reads the Sparkle key from the build keychain through a pipe (`--ed-key-file -`), never to disk, and each release's signature is checked against the public key. The Rust toolchain is pinned (rust-toolchain.toml, 1.99.1).
+- The build Mac (always on, Xcode) becomes the build host for clothod dists, Mac releases, iOS builds and tests, and TestFlight; the laptop Mac stays as a fallback. `scripts/clotho-build`.
+- Keys were copied from the laptop Mac (user's choice), not re-created: the Developer ID identity only (not the third-party Apple Development identity on the laptop Mac) and the Sparkle key, into a dedicated build keychain on the build Mac (~/Library/Keychains/clotho-build.keychain-db, password in ~/.config/clotho/build-keychain-pw, 600). The ASC API key is in ~/.appstoreconnect/private_keys; notarization on the build Mac uses the API key (`clotho-notary` in the build keychain), so the app-specific password stays on the laptop Mac.
+- The Sparkle key moved via a private temp folder on the laptop Mac erased right after (user-approved exception to "never export it to disk").
+- iOS signing on the build Mac must not create new certificates, devices or profiles in the Apple account without the user's OK.
+- The user runs `sudo pmset autorestart 1` on the build Mac once, so it comes back after a power cut.
+- SSH from the build Mac (user-approved): the build Mac's key is in the laptop Mac's authorized_keys; the dev box admits it through Tailscale SSH. The build Mac's known_hosts pins the dev box (fingerprint checked against the laptop Mac's trusted entry) and the laptop Mac. The build Mac→itself is not set up. test-all's remote suite uses the dev box and the laptop Mac, and skips the laptop Mac with a clear note when it's asleep.
+- 2026-10-30 follow-ups (user): copy the laptop Mac's "Apple Development: Ahmad Amin (<cert id>)" to the build Mac's build keychain too (archives the iPhone app; nothing new in the Apple account); the user installs Rosetta on the build Mac so Intel builds are test-run there. On the build Mac, sign_update reads the Sparkle key from the build keychain through a pipe (`--ed-key-file -`), never to disk, and each release's signature is checked against the public key. The Rust toolchain is pinned (rust-toolchain.toml, 1.99.1).
 
 ## Settings (user, 2026-10-30; Mac 1.0.11)
 
@@ -557,7 +561,7 @@ The iPhone and iPad get the same model after the Mac ships.
 - A file sidebar on the right of the Mac app. An icon at the far right of the title row toggles it, and it shows even when the sidebar is closed.
 - It follows the focused pane's machine and cwd. A "Follow pane" button returns to it after you browse elsewhere.
 - Double-clicking a remote file opens it in the default Mac app, and saves sync back (the user's choice):
-  - the file is downloaded to an app cache copy, which is watched;
+  - The file is downloaded to an app cache copy, which is watched;
   - each save is uploaded through a temp file plus a rename;
   - if the remote file changed since it was opened, the app asks first: Overwrite, Save a Copy Beside, or Discard.
 - A local-machine file opens in place.
@@ -585,5 +589,5 @@ The iPhone and iPad get the same model after the Mac ships.
 - Known costs:
   - about 20–30 MB per binary (to be measured in phase 0);
   - one extra Tailscale device for each app install;
-  - the iPhone's node pauses while the app is suspended (pushes still arrive through the relay);
+  - The iPhone's node pauses while the app is suspended (pushes still arrive through the relay);
   - a Go toolchain in the builds.

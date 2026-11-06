@@ -237,7 +237,7 @@ tab, pinch changes columns once, key bar keys reach the pane), unit (font size b
   archive that includes it).
 - Data: a small summary, `AgentsSummary {updated, agents: [{machine, machineName, pane, workspace, kind,
   state, since}]}`, with no terminal text and no agent messages. The app and the notification extension
-  write it to the Keychain access group they already share (`TEAMID0000.nyc.amin.clotho.shared`,
+  write it to the Keychain access group they already share (`$(AppIdentifierPrefix)nyc.amin.clotho.shared`,
   `AfterFirstUnlock`); the widget reads it. That needs no App Group, so no new capability. An App Group
   would be the more usual path, at the cost of a new capability on all three App IDs.
 - Freshness: the app writes the summary whenever its agent rows change, and reloads the widget timelines.

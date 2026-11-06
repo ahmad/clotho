@@ -5,7 +5,7 @@ rule. This file has where things stand. The main session keeps it current.
 
 ## Where things stand
 
-- **clothod 0.1.30** runs on devbox, imac and macbook, upgraded in place (holders 1799611, 49964 (imac, since its reboot), 9573 kept).
+- **clothod 0.1.30** runs on the dev box, the build Mac and the laptop Mac, upgraded in place (holders 1799611, 49964 (the build Mac, since its reboot), 9573 kept).
   0.1.30: every spawn (incl. restore after a reboot) gets TERM/COLORTERM/TERM_PROGRAM(_VERSION) and a UTF-8 LANG when
   the daemon has none (pane_env); before, restored panes ran without them (black-and-white Claude).
   0.1.29: notification text rewritten by Claude Haiku through the machine's own claude login (`agent.summary`,
@@ -13,13 +13,13 @@ rule. This file has where things stand. The main session keeps it current.
   0.1.28: `pane.focus`; the client that focused a pane last sets its size, input no longer does.
   0.1.27: client safety (shutdown --forget only deletes the target's own layout; ps shows the real runtime
   dir or "?"; stop/shutdown/status wait at most 15 s). 0.1.26: pane.move and tab.join (⌘↩ open beside). First
-  releases built on imac. 0.1.25: agents survive a
+  releases built on the build Mac. 0.1.25: agents survive a
   reboot (agent kept 10 s after it leaves a live shell), detected Claude sessions from
-  ~/.claude/sessions/<pid>.json, and `continued` restores when unambiguous. Proven on imac's unplanned
+  ~/.claude/sessions/<pid>.json, and `continued` restores when unambiguous. Proven on the build Mac's unplanned
   reboot 2026-10-30 09:18: 4 panes, 3 Claude sessions resumed. 0.1.24: on macOS, serve and
   holder always start in the login session's launchd namespace (Aqua), never an SSH session's; a
-  daemon left in a dead SSH namespace lost DNS, opendirectoryd, trustd and the keychain (imac's shells
-  broke this way; imac was restarted with the user's OK and now runs holder 2418 / serve 2417, Aqua).
+  daemon left in a dead SSH namespace lost DNS, opendirectoryd, trustd and the keychain (the build Mac's shells
+  broke this way; the build Mac was restarted with the user's OK and now runs holder 2418 / serve 2417, Aqua).
   `clothod ps` shows `launchd: <ns>`; hello carries namespace. 0.1.23: per-pane git info (branch,
   worktree, PR via the machine's own gh). 0.1.22: workspace.move and
   tab.move, and agent sessions kept in the holder meta. 0.1.21: restore after restart (layout.json in
@@ -31,10 +31,10 @@ rule. This file has where things stand. The main session keeps it current.
   - 0.1.15: clothod.log names who closed or answered what.
   - 0.1.16: Live Activity updates (push.activity).
   - 0.1.17: a chained Codex notify reads "installed (chained)".
-- **Hooks:** 8 Claude entries on all three machines. Codex is installed on devbox, and installed
-  (chained) inside Computer Use's notifier on imac and macbook. macbook's was updated with the
+- **Hooks:** 8 Claude entries on all three machines. Codex is installed on the dev box, and installed
+  (chained) inside Computer Use's notifier on the build Mac and the laptop Mac. The laptop Mac's was updated with the
   user's OK; its backup is ~/.codex/config.toml.clotho-backup-1793217804.
-- **The Mac app is public:** Clotho 1.0.17, build 202611021923 (7cffa61): workspace highlights from the sidebar's right-click menu (local to the Mac). Before: 1.0.16, build 202611011805 (4d595d0): the right file sidebar (⌥⌘B), following the focused pane; double-click opens a remote file in the default Mac app and saves sync back (fs.write with expect_mtime_ns; conflict sheet). Before: 1.0.15, build 202611010114 (ce2ddeb): plain-text notifications, Haiku summaries, Settings › Machines › "Summarize agent messages". Before: 1.0.14, build 202610302256 (8f201c2, clothod 0.1.28): panes follow focus (pane.focus), the pane × stays in the host's corner, word-prefix ⌘P commands. Before: 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on imac):
+- **The Mac app is public:** Clotho 1.0.17, build 202611021923 (7cffa61): workspace highlights from the sidebar's right-click menu (local to the Mac). Before: 1.0.16, build 202611011805 (4d595d0): the right file sidebar (⌥⌘B), following the focused pane; double-click opens a remote file in the default Mac app and saves sync back (fs.write with expect_mtime_ns; conflict sheet). Before: 1.0.15, build 202611010114 (ce2ddeb): plain-text notifications, Haiku summaries, Settings › Machines › "Summarize agent messages". Before: 1.0.14, build 202610302256 (8f201c2, clothod 0.1.28): panes follow focus (pane.focus), the pane × stays in the host's corner, word-prefix ⌘P commands. Before: 1.0.13, build 202610301926 (a8e6c02, clothod 0.1.27, built on the build Mac):
   ⌘P ">" commands, ⌘↩ open beside, Move Tab picker, title-row sidebar toggle, "New Tab (⌘T)" buttons,
   Agents panel switch, sidebar slides instead of squashing (crash fix). 1.0.12 ⌘P tree; 1.0.11 one
   Settings window (General, Machines); 1.0.10 Toggle Sidebar on macOS 26. 1.0.9 machine
@@ -46,7 +46,7 @@ rule. This file has where things stand. The main session keeps it current.
   build 202610291513 (at ee15de6). The user updated 1.0.0 → 1.0.1 through Sparkle (first real update, OK).
   Both are Developer ID signed,
   notarized and stapled, at https://clotho.app/downloads (Clotho.zip redirects to the newest zip).
-  Sparkle updates are live from https://clotho.app/appcast.xml (EdDSA key in macbook's keychain;
+  Sparkle updates are live from https://clotho.app/appcast.xml (EdDSA key in the laptop Mac's keychain;
   sign_update works over SSH after unlocking). The user's installed app is that exact release.
   - Next release: mac runs release.sh with CLOTHO_APPCAST_IN set to the site's appcast.xml
     (~/Projects/clotho.app/appcast.xml), then the main session runs
@@ -54,7 +54,7 @@ rule. This file has where things stand. The main session keeps it current.
   - The site deploys ONLY from the CLI (vercel.json git.deploymentEnabled=false). The zips are
     gitignored, so a git-built deploy 404s every download; that broke the first 1.0.1 update.
   - UPDATES_LIVE=true (93b3da6): every non-dev build checks the feed.
-- **iOS:** TestFlight build 202611022024 (744f36c: pinned agents at the top of the Agents tab, tinted with a pin glyph; local to the phone). Before: 202611011351 (36af5b3: agent rows without status dot, status word or bell; the age in the caption; red Error kept). Before: 202611011257 (66368db: agent rows with the status dot on the caption line, a Mute bell, larger type and more room). Before: 202611010600 (11fb536: three tabs, Agents / Machines / Settings; the Agents tab as an inbox with status dots and compact rows; iPad keeps the sidebar). Before: 202611010139 (870b0f8: summaries and plain text in alerts, banners, Live Activity; onboarding as window content). Before: 202610302317 (8f201c2: a pane takes the phone's size on focus, not on typing; clothod 0.1.28). Before: 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on imac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
+- **iOS:** TestFlight build 202611022024 (744f36c: pinned agents at the top of the Agents tab, tinted with a pin glyph; local to the phone). Before: 202611011351 (36af5b3: agent rows without status dot, status word or bell; the age in the caption; red Error kept). Before: 202611011257 (66368db: agent rows with the status dot on the caption line, a Mute bell, larger type and more room). Before: 202611010600 (11fb536: three tabs, Agents / Machines / Settings; the Agents tab as an inbox with status dots and compact rows; iPad keeps the sidebar). Before: 202611010139 (870b0f8: summaries and plain text in alerts, banners, Live Activity; onboarding as window content). Before: 202610302317 (8f201c2: a pane takes the phone's size on focus, not on typing; clothod 0.1.28). Before: 202610301954 (⌘P tree and ">" commands in Quick Open; clothod 0.1.27; built on the build Mac). Before: 202610301844 (tree), 202610301224 (Reconnect, git strip, restored note). Before: 202610291753 (client.colors, with 0.1.20). Earlier: 202610282014, with 0.1.17. It has the whole redesign: saved state, the
   one-screen Home, three-step onboarding, Allow/Deny/Reply on cards and notifications, the terminal
   gestures, the "Needs you" widget, and the Live Activity. Full suite: 90 passed, 8 skipped, 0
   failed; iPad passed.
@@ -65,17 +65,17 @@ rule. This file has where things stand. The main session keeps it current.
 - **Device checks still owed by the user:** the widget, the two-finger tab swipe and haptics, and the
   Live Activity.
 - **TestFlight:** the main session uploads with scripts/testflight-remote. The key ids are in
-  ~/.config/clotho/asc.env on devbox.
-- **Build host: imac.** Everything builds, tests, signs and uploads on imac via `scripts/clotho-build <role>` (per-role mirrors; see CLAUDE.md). macbook is a fallback only.
+  ~/.config/clotho/asc.env on the dev box.
+- **Build host: the build Mac.** Everything builds, tests, signs and uploads on the build Mac via `scripts/clotho-build <role>` (per-role mirrors; see CLAUDE.md). The laptop Mac is a fallback only.
 - **The Mac's disk:** about 25 GiB free (it dipped to ~12 GiB during 0.1.24; one dip was approved). test-all, dist, build.sh test and testflight-remote all
   clean up after themselves.
 
 ## Waiting on the user
 
 - **Optional:**
-  - Developer ID: done 2026-10-28. "Developer ID Application: Ahmad Amin (TEAMID0000)" is on macbook,
+  - Developer ID: done 2026-10-28. "Developer ID Application: Ahmad Amin (<team id>)" is on the laptop Mac,
     issued under the G1 CA, so it expires 2027-02-01; make a G2 one before then. The notary profile
-    `clotho-notary` (app-specific password, Apple ID apple-id@example.com) is in macbook's login keychain
+    `clotho-notary` (app-specific password, Apple ID the user's Apple ID) is in the laptop Mac's login keychain
     and validated. Nothing has been notarized yet.
   - Back up the Sparkle private key (`generate_keys -x`) to a password manager.
 - **Website leftovers:** remove orchestrator-test@example.com from Upstash; optionally set
@@ -101,7 +101,7 @@ rule. This file has where things stand. The main session keeps it current.
   - collapsible machine groups
   - wider or wrapping agent rows
   - a cleanup helper for orphaned upload part files
-- Transfers were checked end to end against devbox only, not against imac, a large tree or a slow link.
+- Transfers were checked end to end against the dev box only, not against the build Mac, a large tree or a slow link.
 
 ### ios
 - `SSHIntegrationTests.testChangedHostKeyIsRefused` once hung until the 180 s limit in a full run. It
@@ -115,11 +115,11 @@ rule. This file has where things stand. The main session keeps it current.
   Never use the Mac app's `-ApplyDaemonUpdates` against real machines.
 - **Test daemons.** Use `--ephemeral` and a non-default `--runtime-dir`. Shut them down, delete their
   dirs, and check that `clothod ps` shows nothing extra.
-- **Builds from a fresh clone.** `clothod/dist` is gitignored. The Mac mirror devbox uses
+- **Builds from a fresh clone.** `clothod/dist` is gitignored. The Mac mirror the dev box uses
   (`~/Builds/clotho-clothod`) already holds the 0.1.5 dist. After a new release, run `dist.sh` on a Mac
   or copy the new dist into that mirror. Mac `--dev` builds otherwise make a dev dist in
   `clothod/target/dist-dev`.
-- **From devbox.** `clotho-mac <cmd>` runs Xcode builds on this Mac. Signing, archives, TestFlight and
+- **From the dev box.** `clotho-mac <cmd>` runs Xcode builds on this Mac. Signing, archives, TestFlight and
   installing the app need the Mac's own session, because the keychain is locked over SSH.
 
 ### clothod
@@ -128,7 +128,7 @@ rule. This file has where things stand. The main session keeps it current.
   without re-running the hour soak.
 - **Vendored alacritty_terminal.** It's in `vendor/` (see VENDORED.md), patched with
   `MAX_CACHE_SIZE` 100. Re-apply that patch on any alacritty upgrade.
-- **Linux builds.** These need zig and cargo-zigbuild, because ring has C code. devbox has Rust but not
+- **Linux builds.** These need zig and cargo-zigbuild, because ring has C code. The dev box has Rust but not
   yet zig or cargo-zigbuild.
 - **Exit-mode ephemeral instances.** They count only clients whose hello name doesn't start with
   `clothod-`. Internal probes must use a `clothod-*` name.
@@ -165,7 +165,7 @@ rule. This file has where things stand. The main session keeps it current.
 ### ios
 - **Test runs.** `./build.sh test` starts an ephemeral `/tmp/cki-ios` clothod and a test sshd on
   127.0.0.1:2222, and cleans up on exit. Never run two at once.
-- **devbox dirs.** The SSH tests use `~/.local/share/clotho-ios-dev` on devbox. Never touch
+- **The dev box dirs.** The SSH tests use `~/.local/share/clotho-ios-dev` on the dev box. Never touch
   `~/.local/share/clothod`.
 - **Push testing.** `simctl push` skips notification service extensions. Test decryption with
   PushTests (which include a vector sealed by Rust), or the gated PushUITests
@@ -173,4 +173,4 @@ rule. This file has where things stand. The main session keeps it current.
 - **UI.** Keep actions in menus and swipe actions. Split large SwiftUI bodies, because type-checking
   times out on them. Put accessibility identifiers on the NavigationLink.
 - **The push setup** in the developer account: extension `nyc.amin.clotho.notify`, Keychain group
-  `TEAMID0000.nyc.amin.clotho.shared`. Deploy the relay with `npm run deploy`, only when asked.
+  `$(AppIdentifierPrefix)nyc.amin.clotho.shared`. Deploy the relay with `npm run deploy`, only when asked.
