@@ -23,6 +23,9 @@ How you work:
   'pgrep -fl "xcodebuild|cargo|swift-test"'`, with the host from `~/.config/clotho/local.env`). If one is, wait for it and say so in the report.
 - Afterwards: check `clothod ps` on each machine you used shows nothing marked extra, and remove what the run
   left on the build Mac (see the disk rule). Never touch the user's own daemons, apps or sessions.
+- Write logs and scratch files outside `/tmp/clt*`, `/tmp/cmac-*` and `/tmp/cki-*` (for example
+  `/tmp/validate-<role>-*.log`), and delete them when you're done. The cleanliness check treats anything
+  under those names as a leftover.
 - If a test fails, run it once more on its own to tell a flake from a real failure. Report both runs.
 
 Your report (your final message):
