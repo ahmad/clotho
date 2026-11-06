@@ -95,9 +95,9 @@ fi
 # Sparkle's binary, which fails over SSH, where the keychain is locked. Nothing it fetches needs any.
 swift build -c release --disable-keychain
 # A stale manifest evaluation or object must never put the node in an app without it.
-if ! $TAILNET && nm -U .build/release/Clotho 2>/dev/null | grep -q ' _ctn_start$'; then
-  echo "error: .build/release/Clotho links the tailnet node, which only CLOTHO_TAILNET=1 --dev builds may; rm -rf .build and build again" >&2
-  exit 1
+# scripts/check-no-tailnet.sh also fails when it can't read the executable.
+if ! $TAILNET; then
+  scripts/check-no-tailnet.sh .build/release/Clotho
 fi
 APP="build/$NAME.app"
 rm -rf "$APP"

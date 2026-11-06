@@ -58,7 +58,7 @@ Phase 0 of PLAN.md's "Built-in Tailscale": the dev build can link Clotho's own t
 CLOTHO_TAILNET=1 ./build-app.sh --dev
 ```
 
-The window starts and stops the node, signs it in, lists its peers, dials `<peer>:<port>` and shows what the peer sends first (an SSH banner, say), and can route the dev build's SSH through the node (`clotho-tailnet-proxy` with `ProxyUseFdpass`, after a relaunch). Its settings are dev defaults: `TailnetDir` (default `~/Library/Application Support/Clotho/tailscale-dev`), `TailnetControlURL` (a loopback one, such as clothod's `testctl`, turns test mode on), `TailnetAutoStart` and `TailnetVerbose`. Automated runs always set `TailnetDir` to a `/tmp/cmac-*` dir and `TailnetControlURL` to a testctl. No other build links the node: `build-app.sh` refuses one that does. See `../ClothoKit/Tailnet/README.md`.
+The window starts and stops the node, signs it in, lists its peers, dials `<peer>:<port>` and shows what the peer sends first (an SSH banner, say), and can route the dev build's SSH through the node (`clotho-tailnet-proxy` with `ProxyUseFdpass`, after a relaunch). Its settings are dev defaults: `TailnetDir` (default `~/Library/Application Support/Clotho/tailscale-dev`), `TailnetControlURL` (a loopback one, such as clothod's `testctl`, turns test mode on), `TailnetAutoStart` and `TailnetVerbose`. Automated runs always set `TailnetDir` to a `/tmp/cmac-*` dir and `TailnetControlURL` to a testctl. No other build links the node: `build-app.sh` refuses one that does ([`scripts/check-no-tailnet.sh`](scripts/check-no-tailnet.sh), tested by `scripts/test-check-no-tailnet.sh` on a Mac). See `../ClothoKit/Tailnet/README.md`.
 
 ### Notarized builds
 

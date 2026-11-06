@@ -46,7 +46,8 @@ final class TailnetTestController: NSObject, NSWindowDelegate {
     private var refreshTimer: Timer?
 
     private var window: NSWindow?
-    private let stateLabel = NSTextField(labelWithString: "")
+    // Wraps, as dialResult does: "Connected as <MagicDNS name> <address>" and errors are often wider than the window.
+    private let stateLabel = NSTextField(wrappingLabelWithString: "")
     private let controlLabel = NSTextField(labelWithString: "")
     private let dirLabel = NSTextField(labelWithString: "")
     private lazy var startButton = NSButton(title: "Start", target: self, action: #selector(toggleNode))
@@ -56,7 +57,7 @@ final class TailnetTestController: NSObject, NSWindowDelegate {
     private let hostField = NSTextField(string: "")
     private let portField = NSTextField(string: "22")
     private lazy var dialButton = NSButton(title: "Dial", target: self, action: #selector(dial))
-    private let dialResult = NSTextField(labelWithString: "")
+    private let dialResult = NSTextField(wrappingLabelWithString: "")
     private lazy var routeSSH = NSButton(checkboxWithTitle: "Route SSH through this node", target: self, action: #selector(toggleRoute))
     private let routeNote = NSTextField(wrappingLabelWithString: "")
 
@@ -277,7 +278,12 @@ final class TailnetTestController: NSObject, NSWindowDelegate {
             label.textColor = .secondaryLabelColor
         }
         dirLabel.lineBreakMode = .byTruncatingMiddle
-        dialResult.lineBreakMode = .byTruncatingTail
+        controlLabel.lineBreakMode = .byTruncatingMiddle
+        // One-line labels truncate rather than widen the window (which holds its size at priority 500).
+        for label in [controlLabel, dirLabel] {
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        stateLabel.isSelectable = true
         dialResult.isSelectable = true
         peersLabel.isSelectable = true
         stateLabel.font = .systemFont(ofSize: NSFont.systemFontSize + 1, weight: .medium)
@@ -309,12 +315,18 @@ final class TailnetTestController: NSObject, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: content.topAnchor),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor),
+            stateLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            controlLabel.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -40),
             peersLabel.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             routeNote.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
             dirLabel.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -40),
-            dialResult.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -40),
+            dialResult.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
         ])
+        // The window never gets narrower than its widest fixed row plus the margins (the labels wrap or truncate).
+        let minWidth = [buttons, dialRow, routeSSH].map(\.fittingSize.width).max()! + 40
+        content.widthAnchor.constraint(greaterThanOrEqualToConstant: minWidth).isActive = true
         window.contentView = content
+        window.contentMinSize = NSSize(width: minWidth, height: 0)
         window.center()
         self.window = window
     }
