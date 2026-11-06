@@ -127,7 +127,8 @@ anything else that gets pushed. Here the machines go by role:
     asking, once a build has passed the full iPhone suite and the iPad test and has been verified,
     then tells the user the build number. The API key ids live in the dev box's
     `~/.config/clotho/asc.env`, never in the repo.
-- Relay: `cd ios/relay && npm test`. Deploy with `npx wrangler deploy` when shipping (see Shipping).
+- Relay: `cd ios/relay && npm test`. Deploy with `cd ios/relay && npm run deploy` when shipping (see Shipping), never a bare
+  `wrangler deploy`: the deploy script passes the team and key IDs from `local.env`.
 
 ## Keys (never in the repo)
 

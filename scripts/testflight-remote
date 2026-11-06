@@ -15,7 +15,7 @@ local_env=${CLOTHO_LOCAL_ENV:-$HOME/.config/clotho/local.env}
 # shellcheck disable=SC1090
 [ -r "$local_env" ] && . "$local_env"
 export CLOTHO_MAC=${CLOTHO_MAC:-${CLOTHO_BUILD_HOST:?set CLOTHO_BUILD_HOST in $local_env}}
-: "${CLOTHO_TEAM_ID:?set CLOTHO_TEAM_ID in $local_env}"
+: "${CLOTHO_TEAM_ID:?set CLOTHO_TEAM_ID in $local_env}" "${CLOTHO_RELAY_URL:?set CLOTHO_RELAY_URL in $local_env}"
 cd "$(dirname "$0")/.."
 
 case "${1:-}" in "" | --dry-run | --no-upload) ;; *) echo "usage: scripts/testflight-remote [--dry-run | --no-upload]" >&2; exit 64 ;; esac
@@ -40,5 +40,5 @@ echo "==> $(git log --oneline -1 HEAD) | sources $sha | clothod $(cat clothod/RE
 
 scripts/clotho-build ios true
 # Keep only the newest archive in ~/Builds/testflight on the build Mac.
-ssh "$CLOTHO_MAC" "cd ~/Builds/clotho-ios && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") CLOTHO_TEAM_ID=$(printf %q "$CLOTHO_TEAM_ID") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
+ssh "$CLOTHO_MAC" "cd ~/Builds/clotho-ios && ASC_KEY_ID=$(printf %q "$ASC_KEY_ID") ASC_ISSUER_ID=$(printf %q "$ASC_ISSUER_ID") CLOTHO_TEAM_ID=$(printf %q "$CLOTHO_TEAM_ID") CLOTHO_RELAY_URL=$(printf %q "$CLOTHO_RELAY_URL") EXPECT_SOURCES_SHA=$sha zsh -lc $(printf %q "ios/scripts/testflight.sh ${1:-}")"
 ssh "$CLOTHO_MAC" 'cd ~/Builds/testflight 2>/dev/null && ls -dt Clotho-* | tail -n +2 | xargs rm -rf; rm -rf ~/Builds/clotho-ios/ios/build/Index.noindex; df -h /System/Volumes/Data | tail -1'

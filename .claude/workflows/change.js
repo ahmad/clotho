@@ -94,10 +94,15 @@ if (!plan || !plan.pieces || !plan.pieces.length) throw new Error(`the ${role} p
 log(`${role}: ${plan.pieces.length} piece(s): ${plan.pieces.map(p => p.title).join('; ')}`)
 
 phase('Implement')
+// An isolated worktree that ends unchanged is removed when its agent returns, so the setup agent creates a
+// plain git worktree instead: it persists for the implementers and the integrate step.
 const setup = await agent(
-  `You are in a fresh git worktree for this task. If HEAD is detached, create a branch named ${role}/<short-slug>. ` +
-  `Don't change any files yet. Return the branch name and the absolute worktree path (pwd).\n\nTask:\n${task}`,
-  { agentType: role, isolation: 'worktree', phase: 'Implement', label: `worktree:${role}`, schema: SETUP })
+  `Create the worktree for this task, and change no files. From the main clone (cd "$(git rev-parse ` +
+  `--show-toplevel)" first, and if that is itself a worktree under .claude/worktrees, use the clone that contains ` +
+  `it), pick a short slug and run: git worktree add -b ${role}/<slug> .claude/worktrees/${role}-<slug> main. ` +
+  `If the branch or directory exists, pick another slug. Return the branch name and the worktree's absolute ` +
+  `path.\n\nTask:\n${task}`,
+  { agentType: role, phase: 'Implement', label: `worktree:${role}`, schema: SETUP })
 if (!setup) throw new Error(`the ${role} agent did not set up a worktree`)
 const dir = setup.dir
 
