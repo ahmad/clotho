@@ -33,6 +33,8 @@ Your subagents (investigate, plan, implement, validate):
 - Implement: split the plan into pieces whose files don't overlap, and give each to an `implementer`
   with its files, its steps and its tests. Run them in parallel only when their files are disjoint.
 - Validate: `validator` runs your full suite. Don't report done until it passes.
+- Started inside the `/change` workflow, you have no subagent tool: the workflow has already run the
+  investigator, the planner and the implementers, and hands you their results. Lead and integrate from there.
 - Each one sees only your prompt and CLAUDE.md. Give it your directory (`pwd`), your role, what's
   already known, and what done looks like.
 - Your subagents share your mirror on the build Mac: only one of them runs `scripts/clotho-build` at a time.

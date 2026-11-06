@@ -36,8 +36,10 @@ session passes it on.
 - **Merge gate.** A branch merges only when all its checks PASS: `code-reviewer`, `validator` (the role's
   full suite) and, for Mac and iOS, `ux-reviewer`. A check that didn't run counts as a block.
 - **Workflows** (`.claude/workflows/`, run as slash commands or by name):
-  - `/change ios <task>` (or `{"role": "ios", "task": "..."}`): the role agent builds the task in a worktree, then the gate
-    runs. If the gate blocks, the role agent fixes it, for up to 3 rounds. It returns whether the branch is
+  - `/change ios <task>` (or `{"role": "ios", "task": "..."}`): investigator, then planner, then the role agent opens a
+    worktree, implementers build the plan's pieces (in parallel when their files don't overlap), and the role agent
+    integrates and commits. Then the gate runs. If it blocks, the role agent fixes it, for up to 3 rounds. (Workflow
+    agents can't start subagents, so the workflow runs those steps itself.) It returns whether the branch is
     mergeable, the branch, and every review.
   - `/gate mac <worktree path>`: the gate alone, for a branch made some other way.
   - Without a workflow, the main session does the same by hand: an Agent call to the role with
