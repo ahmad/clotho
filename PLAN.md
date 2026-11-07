@@ -591,7 +591,8 @@ The iPhone and iPad get the same model after the Mac ships.
    - Only the app targets link it. The core ClothoKit target and the iOS extensions don't.
 3. **Node state:** iOS in the Keychain (through the shim's store callback). Mac in `~/Library/Application Support/Clotho/tailscale` (0700), since ad hoc signing makes Keychain access prompt. Machines in `<state_dir>/tailnet/` (0700).
 4. **Tests:** every automated test runs against a local test control server (`tstest/integration/testcontrol`), offline, in each role's `/tmp` dirs. Real-network device tests use a separate test tailnet: a second free Tailscale account the user creates when Phase 0 reaches them. Nothing test-related joins the user's own tailnet.
-5. **App nodes are not ephemeral** (ephemeral nodes vanish 30–60 min after going offline, forcing a new login). Only test and dev nodes are.
+5. **App nodes are not ephemeral** (ephemeral nodes vanish 30–60 min after going offline, forcing a new login). Automated test nodes are.
+   The iOS debug node isn't either (user, 2026-11-07): tsnet signs an ephemeral node out when it closes, so recreating it on foreground would need a new sign-in. After the iPhone test, remove it from the test tailnet's device list by hand.
 6. **Key expiry:** nodes stay user-owned (tags would drop the user identity the peer check needs). Apps and `clothod status` show "Sign in again" when a key expires, and point to disabling expiry for clothod nodes in the admin console.
 7. **Names:** `clotho-<device>` for apps, `clothod-<host>` for machines, `-dev` for dev builds, so they never clash with a system Tailscale node.
 8. **Log upload to Tailscale is off** (build tag `ts_omit_logtail`, or `TS_NO_LOGS_NO_SUPPORT` set from our Go code). Confirm with a packet capture.
@@ -599,6 +600,8 @@ The iPhone and iPad get the same model after the Mac ships.
 10. **Peer check (Phase 2):** WhoIs `UserProfile.ID` must equal the sidecar's own `Self.UserID` (never compare login names). Tagged and shared-in peers are refused. Apps check the server peer the same way before dialing.
 11. **Shipping the sidecar** and how it's bundled: decided after Phase 0's sizes (lean: in the Mac app, not the iOS app).
 12. **SSH-less machines:** the first install still uses SSH or a manual install; upgrade over the protocol is a later item with its own security review.
+13. **Privacy manifest (user, 2026-11-07):** the released iOS app and its extensions get a PrivacyInfo.xcprivacy for the required-reason APIs they already use (file timestamps, disk space, UserDefaults), shipped with the next TestFlight build. Tailnet builds keep their own, which adds the Go runtime's.
+14. **Before any App Store or TestFlight build includes the node (user, 2026-11-07):** the mac role drops Go's runtime/pprof from the shim (try `ts_omit_debug`), whose `proc_regionfilename` and `mach_vm_region` imports App Store review may question.
 
 ### Phases
 
