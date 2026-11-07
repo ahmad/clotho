@@ -52,6 +52,58 @@ App Store Connect app: "Clotho: Remote Terminal" (bundle ID `nyc.amin.clotho`, S
 its testers once Apple finishes processing. The app declares no non-exempt encryption
 (`ITSAppUsesNonExemptEncryption = NO`; SSH runs on Apple's CryptoKit).
 
+## Tailnet test (CLOTHO_TAILNET builds)
+
+Phase 0 of PLAN.md's "Built-in Tailscale": Clotho's own tailnet node (`../ClothoKit/Tailnet`), in debug builds
+made with `CLOTHO_TAILNET=1` only. Default builds and TestFlight never link it: `build.sh` and `testflight.sh`
+run `scripts/check-no-tailnet.sh` on the app and both extensions, and the extensions never link it at all.
+
+```sh
+ClothoKit/scripts/build-tailnet.sh --slices "ios-arm64 iossim-arm64"   # once per mirror, from the repo root
+CLOTHO_TAILNET=1 ./build.sh                                             # fails with a clear message without it
+CLOTHO_TAILNET=1 ./build.sh test "" -only-testing:ClothoTests/TailnetNodeAppTests \
+  -only-testing:ClothoTests/TailnetKeychainStoreTests -only-testing:ClothoTests/SSHDialTests \
+  -only-testing:ClothoUITests/TailnetUITests
+./scripts/tailnet-size.sh   # Release sizes with and without the node, linker warnings, required-reason imports
+```
+
+**The screen** (Settings > Developer > Tailnet Test, or `-TailnetTest YES` at launch): Start/Stop, sign-in in
+an ephemeral `ASWebAuthenticationSession` sheet that closes itself once the node runs, the peers, Dial (shows
+the first line the peer sends) and SSH Handshake (the host key's fingerprint), "Route SSH through this node"
+(every machine's SSH then goes over the tailnet: `SSHSession.socketDialer`, an fd handed to NIO with
+`withConnectedSocket`), and the foreground check. The node starts on a background queue, never the main thread.
+
+**State** is in the Keychain (`TailnetKeychainStore`, after first unlock, this device only), one item per tsnet
+state key, in service `nyc.amin.clotho.tailnet-dev` (debug), `-test` (any loopback control server, and the
+tests) or `nyc.amin.clotho.tailnet` (release, unused yet). `-CleanState` wipes dev and test. The node dir
+(Application Support/Clotho/tailnet-dev) holds only tsnet's other files. Nodes aren't ephemeral, even in
+debug builds: an ephemeral node's clean shutdown logs it out, and recreating it would need a new sign-in.
+
+**Launch arguments** (UserDefaults): `-TailnetControlURL` (empty: Tailscale's; a loopback one is test mode,
+which stays on until a relaunch), `-TailnetDir`, `-TailnetHostname` (default `clotho-<model>-dev`),
+`-TailnetAutoStart YES` (logs launch to Running and to the first probe dial), `-TailnetProbe host:port`,
+`-TailnetForceRecreate YES` (every foreground; the screen's toggle is one-time), `-TailnetVerbose YES`.
+
+**Foreground.** On background the node is left alone. On every foreground the app checks it (Running, and a
+status call answering within 2 s) and dials the probe target within 3 s. If either fails it stops the node
+without waiting (tailscale#21353) and starts a new one on the same Keychain store, revoking the old node's
+write access first, then records how long until Running and until the probe dials (the Foreground list,
+and one `tailnet: foreground` log line).
+
+**Tests**, all offline. `build.sh test` with `CLOTHO_TAILNET=1` also runs `scripts/tailnet-test-net.sh start`.
+That starts two clothod `testctl` control servers (one signs nodes in, one with `--require-auth`) and a
+`tailnet-testpeer` that forwards its tailnet port 22 to the throwaway sshd on 127.0.0.1:2222, all in
+/tmp/cki-tailnet, which `cleanup-dev.sh` stops and removes. Nothing joins a real tailnet or talks to
+Tailscale. `TailnetNodeAppTests` covers Running with the state in the Keychain, a restart without a new login,
+a dial, SSH with a full login over the node, the foreground recreate and the healthy case, and a refused start
+that never blocks the main thread. `TailnetUITests` covers the sign-in sheet and a forced recreate across a trip
+to the background. `TailnetKeychainStoreTests` and `SSHDialTests` need no node and run in every build.
+
+**On a physical iPhone** (not done yet; it needs the user's separate test tailnet): build with `CLOTHO_TAILNET=1`
+signed for the device. Launch with `-TailnetAutoStart YES -TailnetProbe <machine>:22`, sign in, then lock the
+phone for 30 s, 5 min and 30 min, unlocking each time. Read the Foreground timings: usable within 10 s of
+foreground, and the UI never blocked.
+
 ## Layout
 
 - `Clotho/Machines`: the machine list (JSON in Application Support; plain Codable records with stable

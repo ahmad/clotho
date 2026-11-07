@@ -46,6 +46,15 @@ struct SettingsView: View {
                 Button { navigator.guide = .firstRun } label: { Label("Welcome Guide", systemImage: "questionmark.circle") }
             }
             aboutSection
+            #if CLOTHO_TAILNET
+            Section("Developer") {
+                NavigationLink {
+                    TailnetTestView()
+                } label: {
+                    Label("Tailnet Test", systemImage: "network")
+                }
+            }
+            #endif
         }
         .navigationTitle("Settings")
         .onChange(of: appearance) { AppearanceChoice.applyToAllWindows() }

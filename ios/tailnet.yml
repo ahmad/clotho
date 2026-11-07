@@ -1,0 +1,35 @@
+# Clotho's own tailnet node (PLAN.md, "Built-in Tailscale", Phase 0): the ClothoTailnet package (a Go runtime of
+# about 20 MB) and the debug-only Tailnet Test screen. Included only with TAILNET=YES, which build.sh passes for
+# CLOTHO_TAILNET=1 after checking that ../ClothoKit/Tailnet/build/ClothoTailnet.xcframework exists (build it in
+# this mirror with ClothoKit/scripts/build-tailnet.sh --slices "ios-arm64 iossim-arm64"). testflight.sh never
+# includes it and refuses an archive that links the node.
+#
+# ClothoTailnet links into the Clotho app target only. Never into ClothoNotify or ClothoWidget (the extensions
+# stay Go-free), and never into ClothoTests or ClothoUITests: the tests run inside the app (TEST_HOST), and a
+# second copy of the static Go archive in the test bundle would be a second Go runtime in one process. The
+# tests reach the node only through the app's own Swift types (TailnetController).
+packages:
+  Tailnet:
+    path: ../ClothoKit/Tailnet
+targets:
+  Clotho:
+    dependencies:
+      - package: Tailnet
+        product: ClothoTailnet
+    # The node's required-reason APIs (Go's runtime: stat family, mach_absolute_time); see the file.
+    sources:
+      - path: Tailnet/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    settings:
+      base:
+        # A flag, not SWIFT_ACTIVE_COMPILATION_CONDITIONS: liveactivity.yml sets that one for these targets, and
+        # one include's value would replace the other's.
+        OTHER_SWIFT_FLAGS: $(inherited) -DCLOTHO_TAILNET
+  ClothoTests:
+    settings:
+      base:
+        OTHER_SWIFT_FLAGS: $(inherited) -DCLOTHO_TAILNET
+  ClothoUITests:
+    settings:
+      base:
+        OTHER_SWIFT_FLAGS: $(inherited) -DCLOTHO_TAILNET

@@ -6,9 +6,13 @@ include:
     enable: ${WIDGET}
   - path: liveactivity.yml
     enable: ${LIVE_ACTIVITY}
+  # The tailnet node (tailnet.yml): CLOTHO_TAILNET=1 ./build.sh only, never TestFlight.
+  - path: tailnet.yml
+    enable: ${TAILNET}
 options:
   bundleIdPrefix: nyc.amin
   deploymentTarget:
+    # Keep equal to ClothoKit/Tailnet/Package.swift's .iOS(.v17) and build-tailnet.sh's iOS 17.0 slices.
     iOS: "17.0"
   createIntermediateGroups: true
 # Private values come from the environment, never the repo: CLOTHO_TEAM_ID (the signing team) and

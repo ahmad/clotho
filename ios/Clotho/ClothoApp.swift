@@ -15,17 +15,21 @@ struct ClothoApp: App {
         AgentNotifier.shared.setUp()
         TransferCenter.shared.removeOldDownloads()
         TransferCenter.shared.onDownloaded = { ShareSheet.present($0.localItems) }
+        #if CLOTHO_TAILNET
+        MainActor.assumeIsolated { TailnetController.launched() }
+        #endif
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environmentObject(machines)
-                .environmentObject(connections)
+            root
                 // Follows the system unless the user picked Light or Dark (the Machines toolbar).
                 .onAppear { AppearanceChoice.applyToAllWindows() }
         }
         .onChange(of: scenePhase) { _, phase in
+            #if CLOTHO_TAILNET
+            TailnetController.shared.sceneChanged(phase)
+            #endif
             // iOS suspends a backgrounded app, so close connections deliberately and resume them on return:
             // each pane resubscribes with the seq it reached and picks up in live or replay mode.
             switch phase {
@@ -36,6 +40,21 @@ struct ClothoApp: App {
             default: break
             }
         }
+    }
+}
+
+extension ClothoApp {
+    @ViewBuilder private var root: some View {
+        #if CLOTHO_TAILNET
+        // -TailnetTest YES: the debug Tailnet Test screen alone (UI tests, quick device runs).
+        if TailnetController.opensAtLaunch {
+            NavigationStack { TailnetTestView() }
+        } else {
+            RootView().environmentObject(machines).environmentObject(connections)
+        }
+        #else
+        RootView().environmentObject(machines).environmentObject(connections)
+        #endif
     }
 }
 

@@ -30,6 +30,13 @@ enum Onboarding {
         UserDefaults.standard.removeObject(forKey: "TrustedHostKeys")
         UserDefaults.standard.removeObject(forKey: doneKey)
         MainActor.assumeIsolated { SavedState.shared.deleteAll() }
+        // The debug and test tailnet nodes (never the release one's state).
+        TailnetKeychainStore.deleteAll(.dev)
+        TailnetKeychainStore.deleteAll(.test)
+        try? FileManager.default.removeItem(at: TailnetKeychainStore.debugNodeDir)
+        for key in ["TailnetControlURL", "TailnetProbe", "TailnetForceRecreate", "TailnetTimings"] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
         #endif
     }
 }

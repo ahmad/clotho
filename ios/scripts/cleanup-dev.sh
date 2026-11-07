@@ -3,7 +3,8 @@
 # machine. Run after any test session, pass or fail (build.sh test runs it). Touches only the iOS test
 # instances:
 #   Mac: the "Local Mac (dev)" daemon (/tmp/cki-ios, binary /tmp/cki-ios-bin), the dev install dirs the
-#        SSH tests use against the local test sshd, and that sshd
+#        SSH tests use against the local test sshd, that sshd, and the offline test tailnet
+#        (scripts/tailnet-test-net.sh: testctl and the test peer in /tmp/cki-tailnet)
 #   remote machines named in /tmp/clotho-ios-sshtest/{host,ui-host}: the dev install dirs only
 set -u
 T=/tmp/clotho-ios-sshtest
@@ -38,6 +39,8 @@ all
 SH
 
 echo "== Mac"
+# The test peer forwards to the sshd: it goes first.
+[ "$(uname)" = Darwin ] && "$(dirname "$0")/tailnet-test-net.sh" stop
 [ -f $T/sshd.pid ] && "$(dirname "$0")/ssh-test-server.sh" stop
 print -r -- "$CLEANUP" | CKI=1 sh -s
 

@@ -70,8 +70,51 @@ final class SSHSession: @unchecked Sendable {
                     try channel.pipeline.syncOperations.addHandlers([ssh, ErrorHandler(errors: errors)])
                 }
             }
-        let channel = try bootstrap.connect(host: machine.host, port: machine.port).wait()
+        let channel = try open(bootstrap, host: machine.host, port: machine.port, timeout: 10, dialer: socketDialer)
         return SSHSession(target: "\(machine.user)@\(machine.host)", channel: channel, errors: errors)
+    }
+
+    // MARK: Dialing
+
+    /// Returns a connected stream socket to host:port, which NIO adopts (and then owns), within `timeout`.
+    typealias SocketDialer = @Sendable (_ host: String, _ port: Int, _ timeout: TimeInterval) throws -> Int32
+
+    private static let dialerLock = NSLock()
+    nonisolated(unsafe) private static var _socketDialer: SocketDialer?
+
+    /// Phase 0 of the built-in tailnet (PLAN.md): when set, SSH reaches every machine through this instead of
+    /// TCP, both the session and the host-key probe. Only the CLOTHO_TAILNET debug screen sets it ("Route SSH
+    /// through this node"). Phase 1 replaces this process-wide switch with a per-machine route.
+    static var socketDialer: SocketDialer? {
+        get { dialerLock.withLock { _socketDialer } }
+        set { dialerLock.withLock { _socketDialer = newValue } }
+    }
+
+    /// The connection both connect sites use: TCP, or the dialer's socket handed to NIO.
+    ///
+    /// Who closes the dialer's descriptor (read in NIOPosix 2.104, Bootstrap.swift and BaseSocket.swift): once
+    /// `withConnectedSocket` has made its SocketChannel, NIO owns the descriptor and closes it on every path,
+    /// including a failed channel option or initializer (close0). Before that, `SocketChannel(socket:)` can throw
+    /// in two places and closes nothing: its SO_NOSIGPIPE setsockopt (it then forgets the descriptor) and
+    /// fcntl(O_NONBLOCK) (it then trips BaseSocket's "leak of open BaseSocket" assert). So both are done here
+    /// first, and a descriptor that fails them is closed here, before NIO ever sees it; after that NIO's own
+    /// calls are no-ops that can't fail, and nothing here closes the descriptor again.
+    private static func open(_ bootstrap: ClientBootstrap, host: String, port: Int, timeout: TimeInterval,
+                             dialer: SocketDialer?) throws -> Channel {
+        guard let dialer else {
+            return try bootstrap.connect(host: host, port: port).wait()
+        }
+        // connectTimeout doesn't apply to an adopted socket: the dialer's own timeout bounds the dial.
+        let fd = try dialer(host, port, timeout)
+        var on: Int32 = 1
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0,
+              setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            let reason = String(cString: strerror(errno))
+            Darwin.close(fd)
+            throw BackendError(code: "internal", message: "the dialed socket for \(host):\(port) is unusable: \(reason)")
+        }
+        return try bootstrap.withConnectedSocket(fd).wait()
     }
 
     func close() {
@@ -80,7 +123,9 @@ final class SSHSession: @unchecked Sendable {
 
     /// The host key `host` presents, read in the key exchange without trusting it or logging in, so the user
     /// can compare its fingerprint before the first connection.
-    static func presentedHostKey(host: String, port: Int, timeout: TimeAmount = .seconds(10)) throws -> String {
+    /// `dialer`: how to reach the machine (`socketDialer`, the Phase 0 tailnet route, by default; nil is TCP).
+    static func presentedHostKey(host: String, port: Int, timeout: TimeAmount = .seconds(10),
+                                 dialer: SocketDialer? = socketDialer) throws -> String {
         let loop = group.next()
         let captured = loop.makePromise(of: String.self)
         let errors = ErrorRecorder()
@@ -96,7 +141,7 @@ final class SSHSession: @unchecked Sendable {
             }
         let channel: Channel
         do {
-            channel = try bootstrap.connect(host: host, port: port).wait()
+            channel = try open(bootstrap, host: host, port: port, timeout: Double(timeout.nanoseconds) / 1e9, dialer: dialer)
         } catch {
             // NIO traps on a promise that's never completed.
             captured.fail(error)

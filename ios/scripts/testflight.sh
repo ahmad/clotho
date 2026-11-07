@@ -16,7 +16,8 @@
 #
 # Before building, it refuses (exit 2) unless the bundled clothod dist is the release in clothod/RELEASED and
 # every binary's build id matches its manifest entry, and, given EXPECT_SOURCES_SHA, the sources match.
-# After archiving, it refuses (exit 1) unless the app's relay URL and Keychain team prefix match the environment.
+# After archiving, it refuses (exit 1) unless the app's relay URL and Keychain team prefix match the environment,
+# and unless neither the app nor its extensions link the tailnet node (only CLOTHO_TAILNET=1 ./build.sh may).
 # Logs go to ~/Builds/testflight/Clotho-<build>/. "Uploaded Clotho build <n>" is printed only after the
 # export reported success; anything else exits non-zero.
 set -euo pipefail
@@ -115,7 +116,9 @@ mkdir -p build-resources/dist
 unset CLOTHOD_DIST
 # The widget is in (user decision 2026-10-28, PLAN.md): its App ID, nyc.amin.clotho.widget, is approved.
 # Live Activities are on (user decision 2026-10-28, PLAN.md): the relay serves /v1/activity, clothod 0.1.16 sends.
-PUSH=YES WIDGET=YES LIVE_ACTIVITY=YES xcodegen generate -q
+# The tailnet node (tailnet.yml) is Phase 0, debug builds only: never in an upload.
+unset CLOTHO_TAILNET
+PUSH=YES WIDGET=YES LIVE_ACTIVITY=YES TAILNET=NO xcodegen generate -q
 # Packed before xcodebuild plans its resource copy (see build.sh), so the archive has the current release.
 python3 scripts/pack-dist.py "$DIST" build-resources/dist
 ARCHIVE=$OUT/Clotho.xcarchive
@@ -144,6 +147,8 @@ done
 entitlements=$(codesign -d --entitlements - --xml "$APP" 2>/dev/null || true)
 case "$entitlements" in *"$CLOTHO_TEAM_ID.nyc.amin.clotho.shared"*) ;; *) built_ok=0 ;; esac
 [ "$built_ok" = 1 ] || { echo "testflight: the archive's relay URL / team prefix doesn't match the environment" >&2; exit 1; }
+"$IOS/scripts/check-no-tailnet.sh" "$APP/Clotho" "$APP/PlugIns/ClothoNotify.appex/ClothoNotify" \
+  "$APP/PlugIns/ClothoWidget.appex/ClothoWidget" || { echo "testflight: the archive links the tailnet node" >&2; exit 1; }
 echo "==> archived build $BUILD_NUMBER with clothod $BUNDLED: $ARCHIVE"
 
 if [ "$DRY_RUN" = 1 ]; then
