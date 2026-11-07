@@ -10,6 +10,7 @@
 # Privacy manifests (scripts/check-privacy.py): the committed ones are linted before xcodegen runs, and every build
 # checks that the app and both extensions carry their own PrivacyInfo.xcprivacy declaring every required-reason
 # API their executables import.
+# Exits with xcodebuild's status (non-zero on a build error or a failed test), or 1 from a failed check.
 cd "$(dirname "$0")"
 # Where Homebrew has no xcodegen (the build Mac), the release zip lives in ~/Builds/tools.
 # The signing team and the push relay URL come from the environment (CLOTHO_TEAM_ID, CLOTHO_RELAY_URL; see
@@ -51,11 +52,13 @@ if [ "$action" = test ]; then
   # The peer forwards its tailnet port 22 to that sshd.
   if [ $tailnet = YES ]; then scripts/tailnet-test-net.sh start || exit 1; fi
 fi
+# rc is xcodebuild's own status, not the last grep's (a grep that matches nothing exits 1, so no pipefail). It is
+# read right after the pipeline: zsh resets pipestatus after every command.
 xcodebuild -project Clotho.xcodeproj -scheme Clotho -destination "platform=iOS Simulator,id=$sim" \
   -derivedDataPath build -skipPackagePluginValidation -skipMacroValidation \
   $([ "$action" = test ] && echo -test-timeouts-enabled YES -default-test-execution-time-allowance 180) "${@:3}" "$action" 2>&1 \
   | grep -E "error:|warning: .*/ios/Clotho|ld: warning|\*\* |Test Case.*(passed|failed|skipped)|Executed" | grep -v SPMCustomBuildCommand
-rc=$?
+rc=${pipestatus[1]}
 # Only CLOTHO_TAILNET=1 builds may link the node, and the extensions never do. Debug builds keep the code in
 # <name>.debug.dylib next to a stub executable, so both are checked.
 app=build/Build/Products/Debug-iphonesimulator/Clotho.app
