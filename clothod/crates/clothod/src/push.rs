@@ -868,17 +868,24 @@ fn body(reg: &Reg, pane: u64, alert: &Alert) -> Option<Value> {
 mod tests {
     use super::*;
 
-    // The vector shared with the iOS side (ClothoTests/PushTests).
+    // The vector shared with the iOS side (ClothoTests/PushTests). CT_IOS was sealed by iOS
+    // (CryptoKit) for Rust to open; CT, CT_PADDED, CT_FULL and CT_PERMISSION were sealed by
+    // clothod (resealed in 3be7df2) for iOS to open with SK.
     const SK: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
     const PK: &str = "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=";
     const LABEL: &str = "00000000-0000-0000-0000-00000000C10D devbox";
+    /// PLAIN (unpadded) sealed to PK by clothod.
     const CT: &str = "7Nr1oOMC39SZcf90z0zGpw6evTVseUzsnkRUWv1Dz3GDqh2klG2lrOSWha+TcMj78vQjWJdV5OHK4XEpXTo5ri24K2/R/Ca6H+6hEMjL19aYfHwIY26pxFi+O4BQYdc7e/Gao2nYt8ZONGK9BnLADuzmSh3FhkrBoNIrE3zlefKhzUbE700B8hKzUGL5eorQ/vAEcJvPX29y1YNtaB5qjuIN25vsqRM25H9l54TJa58geXZqxyDDSWpPyyQcLB0=";
+    /// PLAIN sealed to PK by iOS (CryptoKit), AAD = the collapse id; the same string as PushTests.vectorCiphertext.
+    /// Rust can't reseal it: if INFO or the suite changes, iOS must seal it again.
+    const CT_IOS: &str = "LaMPSZpg7wDeSa1yKp1q9SqiEIXggADLO+ezBn4U+ASwiLzAzxIW/mFiE3NZD9atex8F8qBz71MO52bkXdUDQicnz4HhbuiIsGs9wtoKFYzhZC3un764DD+Oia6eDSVNLpEq+dZ7MGzfC3zaIkHKhDDBk2Ut7/UdoR2JL8pThT1ZBuB3CSHZZ8AGF8gUdjpYzFZaVM6rrDRS25e7dlGvSQi/Y+vaakVJyA8yhPKEfksd9AZIwTNsu+huFFT2jzU=";
     /// PLAIN as clothod sends it since 0.1.11: padded to 1024 bytes.
     const PADDED: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Allow cargo test --release?","t":1761512345.5,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        "}"#;
     /// PADDED sealed to PK (by clothod), for iOS to open with SK.
     const CT_PADDED: &str = "1os6Zx8iJ3Bc8mFS6jX808zzJa+FCOcYMMsicsVk+l7MeFf9SFSQ+BugL0LbWMK8BPSPbUwxMaEMx9vv+tk/keKCDSJzL2N9uzXaKV4wZBhWtWKeyA/VopbuU8AkiuIQBglHHl/3wUBzpkGSKRtnj1m21gToALLQrv0eY3p/dvnM3KxZIVQDk0ygbwbOU5DgU6nlc65g7W7fZ+swgcUVcKIsiKz8sZ5hau6FuIsWdAVZoA6BeXEa3MiDg6War2NkKsV6YXiy2GLbqLujaESWGiMh/vdwqE9mTQkZJmMqZ1hcT6FAqEKFm/I9OUkheONXTxvU+JpjNoqzQjRYmYuf7o+cUfb0y/n6pqNGapTX3Wo2tJZGrcZnHiA6Plh2LoOdOvtDYONZ2o8msQBLW3kbAKmXQhVrBPwmoCFmuACZ6L5l5hmrXhC6T9ryB3tF/7LFwGoHOA9OjNP9jxKXPpeOfVi0t8vYIXRPgK+U7WjOD/fmA7e9sw7f3aqfY8I6wbjyZzepxvG+Ihx4SP0UsaQmwUhcdv08FGn4X3hzwbzg8RU/SZpvD3MdeTG/6Vu2AgUwiwbGwlYZTejB8Lgbg39+VPbGgaRfQehTjST92xir5jHU6yEreM2kQMu+XyY4ZHNj8zq6idApk7l4hI5p4kgIj+4CSi//78VgAmCW7Cxd/NPHr43m07niXZyW2fuIUDgt9iPvSc4gSqhV4m3gme2VRzSgUC3KXDKiHmiOM+DAvBGe8subWB9vLioLM8zsuo3h/peIbHJ+Co8g0A48a2lb11GQXMp/qFNUZsHqGYiF8+Xry/AK/vy9Gy0/OkmmJO8yG3JU9wprvlE+4GMYxXO1RIPdP2Imka+Z1vIGDG+866pyLAKQNQIVubhladTr7mx8B95SzsqDP4DnHW9KGtXvZqYIrT5uqdUoQxW/u7D5DjRua3NSSaMyL4GgpqWtpBkxqiXiWCh4omqClpGgA435tQYcGZTSzDX8T6HqkAMRaUzIggy7leRMUtayWKNOFM8xD6GQk5SVU0edtsfkm/+q04T0nz0Qv3X0gTbrAMKbsvbJGJ0O/IbNgfZfSTmUfyypK5xD8vNjVbUtQUbfR9bnJKK/4h++ylYZG45+EM+Q2HCTqd/CkUd6PluHJmVi0mozOcE3VhMKO6ukB02YNLMYFeu+nAmPQnkjajXkUypD2Ez5iq0BMLA4OD9WQMbLsijHVOfqpkx/lhKz/xvg40YziXbr5OomxNGN7F7YmToZa1ki0M/2ywwTIuYH63TDXW4kl8VEJjDQAGQtVHvoA7mYK5VM8/pyGVyoRWV34wLCqKgXo9aNivxiaOnpzYkD4xmxzZY5vrVT9RfkEyEzR5oh+I81/T+jxmJ7ZbBtGP6QwJkifSYAzrpU3dsZ/W8k9L5JwM8Hz6tgARWg7jNxLUGuLA==";
     /// A done record with every detail (`full()`), padded to 1024 bytes.
     const FULL: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"done","msg":"All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.","t":1761512345.5,"q":"fix the flaky push test on macOS","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"d":254,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         "}"#;
+    /// FULL sealed to PK (by clothod), for iOS to open with SK: a record with every detail.
     const CT_FULL: &str = "9opST3exXumrNqA5EzaDfCCQ9hFt7c7zvTyHThUFERC6Kn83TrqqibBRtQNa8KRf099Jr7nhaROwZffD9uF+qo6UJCfwZhRDvO+QuviILs0sXV4Pji5/+eAOaY00QI815TXpoRArqH9p65gJLiyU8O6Eytrcv9ePw9Cowfe9q1yF7JH04hkOIKq28Io+/2gpqRCP8RQWgvZ3I5wUXcuSTZqWCcW4iytVi7DywhrtnCythnT0l0+FR3760cnU9HdWgdIoqMurYiy9uDitrHsQaUrgOydHHTWV85qNrtp8oXkO0JmNCusqFMVad1LUZo600b8bPVprDdVlSiKx5rbfT30a7Gq7OJo67ZIas0kLOBas8j1PrmiqLMS8G1GKcB+9SyvIXXEGCGCK6OO4gptSgKAw5ZOhibTRLRZDGVzC/9EPRpz65k/JWhny9M2Ig1qpS77gu6QKcfW+AlT/PXaI3zL1k/pPnfCvSQL9KAGasKxRxWzEDpal7dhS3ieSbBL1FiDjxS8/Q8dYAMJa3Hg2r5C33GlISrXUiWqJzvah0+bxxUjGJMh0OxDRklZ6REPvsKkVqIcefWYRGRcz6T4763gsTqKU59fzZoXp5tTbzDbYM6nc6+YYdp1MPcsYqTu+HgmGW7R4Nbs6mNVSAsgMfDYydOmxFqVegPIZRDfjNoRxtgr0Y6LfBWEF3yOYbnqnFniimqyu4NzbkWqWOKw1d3HCT0sSPr9cP+TjNaCPXiPToFBHlDPhsvxUL1NioavtIl7P3V7xPxCE7eDlcwFmoHtmvHrhpA93TD60Q/TSFHu9rl6rhIIkR+fBw4pujQTtGd0/laDNZy/CLGznF9RNCaUKjN5FBanTsgf6F20J11d9EC+7G5AtOxQvop2OewGHr3+op+8v3XPMWyjhXmoQQvwA28nvajzAb4oNGd6BlreiTnu3pL2tawxRfUcej55eEty+gp++VeNeRsMDkmSfLSujmV1WffdHUtpPnYqO7w7iUC9MKs0ehUgwL5Q9bEE5YbgJkMj4KUqe3WfkLY5TWlp08cgp/im8PuZq1LRQqeOnCbTCC8WhlWBfSu468Y676YwSwDTm0xfAXoh3S4smP23Xbe4rUDInYOhqDh5pouO87OMpsuqdV8Y4NI/XUQecqZGO57Vph73tu8cnMna3Ksc3YjrO6zzb9q8enECHJkk0Mc4PGm/42ls/spaGUM9hAK4g8WgBNv6jAkZjhE8/TaHKBk9v7mjidjyC6CXZUn7ADexHvXs0Vef4DtnYLc9W5jWMXEGyKemOY0L8F2EABANJ9ObX485dYLxV7Dq5frE+MPAJR0nEZtmYH1I8Gae5bCL13DBpowzsLjvC0H6hMmRczdaX6IzjI1nX4Jc/qojn7crBf7K2KgSUJjBf3ZKqqsHK0AM/l2cmQ+VFtmBrEQ==";
     const PLAIN: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Allow cargo test --release?","t":1761512345.5}"#;
 
@@ -889,13 +896,17 @@ mod tests {
     #[test]
     fn matches_the_ios_vector() {
         assert_eq!(collapse_id(LABEL, 7), "2d85134107d287e04043e26b56beefb2");
-        // Ours is PLAIN padded; CT, PLAIN unpadded (the form iOS once sent), still opens.
+        // Ours is PLAIN padded. CT is PLAIN unpadded, sealed by clothod; CT_IOS is PLAIN
+        // unpadded, sealed by iOS.
         let ours = String::from_utf8(plaintext(LABEL, 7, &alert())).unwrap();
         assert_eq!(ours, PADDED);
         assert_eq!(ours.len(), PAD_TO);
         assert_eq!(open(SK, CT_PADDED, collapse_id(LABEL, 7).as_bytes()).unwrap(), PADDED.as_bytes(), "the padded vector for iOS");
-        let opened = open(SK, CT, collapse_id(LABEL, 7).as_bytes()).expect("opens the unpadded ciphertext");
+        let opened = open(SK, CT, collapse_id(LABEL, 7).as_bytes()).expect("opens the Rust-sealed unpadded ciphertext");
         assert_eq!(String::from_utf8(opened).unwrap(), PLAIN);
+        let opened = open(SK, CT_IOS, collapse_id(LABEL, 7).as_bytes()).expect("opens the iOS-sealed (CryptoKit) ciphertext");
+        assert_eq!(opened, PLAIN.as_bytes(), "the iOS-sealed vector opens to PLAIN byte for byte");
+        assert!(open(SK, CT_IOS, b"another pane").is_none(), "aad binds the collapse id on the iOS-sealed vector too");
         let ours = seal(PK, PLAIN.as_bytes(), collapse_id(LABEL, 7).as_bytes()).unwrap();
         assert_eq!(open(SK, &ours, collapse_id(LABEL, 7).as_bytes()).unwrap(), PLAIN.as_bytes());
         assert!(open(SK, &ours, b"another pane").is_none(), "aad binds the collapse id");
@@ -989,7 +1000,6 @@ mod tests {
         }
     }
 
-    /// FULL sealed to PK (by clothod), for iOS to open with SK: a record with every detail.
     /// A permission wait with its request id (`rq`), for iOS's Allow/Deny actions.
     fn permission() -> Alert {
         Alert {
@@ -1007,6 +1017,7 @@ mod tests {
     /// The permission vector iOS pins: its notification gets the Allow/Deny category and the
     /// request id from `rq`.
     const PERMISSION: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"waiting","msg":"Claude needs your permission to use Bash","t":1761512345.5,"q":"run the phone test","cmd":"date > /tmp/clotho-phone-test.txt","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"tool":"Bash","rq":"87b99bd3910be450","pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                "}"#;
+    /// PERMISSION sealed to PK by clothod, for iOS to open with SK.
     const CT_PERMISSION: &str = "GO2U6qxLoSfGq56/pQlDPdcXC6pJtnjUBjnruelxeHZxNvOlIk4/0MmiOYevavq8+s2cs7dzeqV9hgTbCYdTX8kgf6TGyhpbHlerT7vzQA3IIDPlh5d3LXSwRYarSZ6UOtL2SGDU+HvMj2k72XpbaHu27shLXVi7mKb8DzC2V3wuEFm8jWKIQLI30k48olIzv46a34pAeOkxBeS3yThDIb6v4s+jlCSw2o9dNBmOmT40O/oU0VS7RPevdnWf39QjHn8HUWzltUCigV4sgN4/V02I1VDqiGNEOfSw3jOZNsv8UUuF+AZwYuxGfWOLex91CTs21kwIHNfEaPcESRLSecqgK4z+NZQuuYB7YL/5q3l0pyui+aF1Z1KzQssEPZopLLgCquQAHvYzEBfUqg2GTRz2qUTc28Z5jimEswO3AGTHz+Nmcx7mnjw7aLqZpUqjXAUYJk9Wsu2m6h6FIQj2sid2XVAtrB7gEK8PDjyWYhi5nIg9z+Kmfv158SOpwJHbRbLPRvSRQ563xKtZ6FULUIpuIBt9b9Deg38L0e/nM81x9RN3aCp4xaMNNKSrFLZ7xlmzomjrUrT0PHiRxoE6rx4h0C6uKJNnfYKvKlxmAUfIWXUuPzdlsPnM9jfh9bxxLhbu9YH1SmIfTD/53gegGSAaankmEiO9cIfB9FXTlEaAviMB6A2zQOQeZn1aZpadviRPgJeIJ/Abv22FhuWtCB4MF/c/Z/d01vOQGLvHqGYIkAqrBJ67UB/KuFde/owadwwZVYNmoMk8P9nt4gbU8Lf/J3g5wYVO2bEv8XregYBMHiVVgAXTb5dfMew/Rh0SFOBsrQwOBdK/lGUfse3DJPrYs95bd+qg2g/TxGjxowK1+tAc+elLeVC/XzW7GHxIfbQA4Hd/VTsbHgOhszt/X/Eq7Gm4+x5FEprXuEkFVSeODNv3CqObv5OChyK2+uLmH73HfbY4s/0C92sZ6UH1VRMpESvNvFkfgkyXR17FpuRa6k25fXrfNPxIWXsmyCGB9L4Q3Hi8vUEkkZd/o+5KjUmg+7qfcNpivTeNWbjVVb4+akgXOwvQ01/qCku4qMXLBbo4pfLlbmscPr9nYVFj4Pvw5W357d163SYTEusThclJtz0tk5nv/qqJQCcXJ8VxU5+pW1/n63L/eC7JUWoRc9b34jfMypWk4W2rL8Fg7mk1/yshIEBKjzZDyxO6HU6AbX9ixrXYGUJjDHVJKPZ95MOssxIbMa7X7B3GRe/wmzUW8GF+WeBTGPdDkCCmt6ugzAci7osqf5M+skfWo9iWbreTQWYSHiJdwKZN3qqORyxzvumONgopxQ8YZH2sINLorneaUrPCplLr9txQ9S23lmYGP74Yocny+AkhWe1X/ylgOBsU0YkW+nLf3h91SVvhduaVBdQaI0iIE4n9K04owQ==";
 
     #[test]
