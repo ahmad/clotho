@@ -135,6 +135,11 @@ let report = await agent(
 if (!report) throw new Error(`the ${role} agent did not return a report`)
 report = { ...report, dir, branch: setup.branch }
 log(`${role}: ${report.branch} at ${report.dir}, ${report.commits.length} commit(s)`)
+// Nothing committed (e.g. the fix was already on main): there is nothing for the gate to test or to merge.
+if (!report.commits.length) {
+  log(`${role}: no commits, so no gate and nothing to merge. Remove the worktree and branch.`)
+  return { mergeable: false, nothing_to_merge: true, role, branch: report.branch, dir: report.dir, plan, report, gate: null }
+}
 
 let gate = null
 for (let round = 1; round <= maxRounds; round++) {
