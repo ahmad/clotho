@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The ClothoWidget extension's privacy manifest (Xcode copies it from the ClothoWidget folder source in widget.yml). Its
+  required-reason APIs come only from ClothoKit code that is statically linked in and never called here
+  (checked with `nm -u` by ios/scripts/check-privacy.py):
+  - FileTimestamp C617.1: the stat family, from LocalFileBackend and RemoteEdits.
+  - DiskSpace 85F4.1: statfs, from LocalFileBackend.statfs.
+  There is no UserDefaults use, and NSPrivacyCollectedDataTypes is empty for the same reason as the app's
+  (ios/Clotho/PrivacyInfo.xcprivacy).
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>85F4.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

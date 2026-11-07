@@ -44,6 +44,7 @@ targets:
     platform: iOS
     sources:
       - Clotho
+      # Includes Clotho/PrivacyInfo.xcprivacy as a resource; tailnet.yml replaces it in tailnet builds.
       # The clothod builds the app installs on machines, deflated by the pre-build script (an iOS app may
       # not contain other platforms' executables).
       - path: build-resources/dist

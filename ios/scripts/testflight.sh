@@ -15,9 +15,12 @@
 #   BUILD_NUMBER                optional: default the UTC time, YYYYMMDDHHMM.
 #
 # Before building, it refuses (exit 2) unless the bundled clothod dist is the release in clothod/RELEASED and
-# every binary's build id matches its manifest entry, and, given EXPECT_SOURCES_SHA, the sources match.
+# every binary's build id matches its manifest entry, the committed privacy manifests pass
+# scripts/check-privacy.py sources, and, given EXPECT_SOURCES_SHA, the sources match.
 # After archiving, it refuses (exit 1) unless the app's relay URL and Keychain team prefix match the environment,
-# and unless neither the app nor its extensions link the tailnet node (only CLOTHO_TAILNET=1 ./build.sh may).
+# unless neither the app nor its extensions link the tailnet node (only CLOTHO_TAILNET=1 ./build.sh may), and
+# unless the app and each extension carry a privacy manifest declaring every required-reason API they import
+# (scripts/check-privacy.py bundle). --dry-run runs these checks too.
 # Logs go to ~/Builds/testflight/Clotho-<build>/. "Uploaded Clotho build <n>" is printed only after the
 # export reported success; anything else exits non-zero.
 set -euo pipefail
@@ -71,6 +74,7 @@ for platform in $(jq -r '.builds | keys[]' "$DIST/manifest.json"); do
   [ "$got" = "$want" ] || { echo "testflight: $platform binary is $got, the manifest says $want" >&2; ok=0; }
 done
 [ "$ok" = 1 ] || fail "the clothod dist doesn't match its manifest"
+python3 -I "$IOS/scripts/check-privacy.py" sources "$IOS" || fail "the privacy manifests in ios/ don't pass check-privacy.py"
 SOURCES=$("$IOS/scripts/sources-sha.sh" "$ROOT")
 if [ -n "${EXPECT_SOURCES_SHA:-}" ] && [ "$SOURCES" != "$EXPECT_SOURCES_SHA" ]; then
   fail "sources are $SOURCES, expected $EXPECT_SOURCES_SHA"
@@ -149,6 +153,8 @@ case "$entitlements" in *"$CLOTHO_TEAM_ID.nyc.amin.clotho.shared"*) ;; *) built_
 [ "$built_ok" = 1 ] || { echo "testflight: the archive's relay URL / team prefix doesn't match the environment" >&2; exit 1; }
 "$IOS/scripts/check-no-tailnet.sh" "$APP/Clotho" "$APP/PlugIns/ClothoNotify.appex/ClothoNotify" \
   "$APP/PlugIns/ClothoWidget.appex/ClothoWidget" || { echo "testflight: the archive links the tailnet node" >&2; exit 1; }
+python3 -I "$IOS/scripts/check-privacy.py" bundle "$APP" "$APP/PlugIns/ClothoNotify.appex" "$APP/PlugIns/ClothoWidget.appex" \
+  || { echo "testflight: the archive's privacy manifests don't cover what it imports" >&2; exit 1; }
 echo "==> archived build $BUILD_NUMBER with clothod $BUNDLED: $ARCHIVE"
 
 if [ "$DRY_RUN" = 1 ]; then

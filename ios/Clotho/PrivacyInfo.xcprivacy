@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The app's privacy manifest (every build: Xcode copies it from the Clotho folder source in project.yml). In
+  CLOTHO_TAILNET=1 builds, ios/tailnet.yml replaces it in the built app with ios/Tailnet/PrivacyInfo.xcprivacy,
+  which must declare everything this file does. Required-reason APIs the linked binary uses (checked with `nm -u`
+  by ios/scripts/check-privacy.py):
+  - FileTimestamp C617.1: modification dates of files in the app's own container: SavedState.swift:154 (trimming
+    saved screens), Transfers.swift:83 (clearing old Caches/Downloads), the temporary copies of picked photos,
+    and the fstat calls in NIOPosix and SwiftTerm.
+  - FileTimestamp 3B52.1: files the user picks to upload with .fileImporter (FileBrowser.swift:189-190 and 298,
+    Transfers.swift:116). FileTransfer reads their modification dates and sends them, with the file, to the
+    user's own machine, which is why this is not DDA9.1.
+  - DiskSpace 85F4.1: statfs, from ClothoKit's LocalFileBackend.statfs, which is linked in but never called on iOS.
+  - UserDefaults CA92.1: the app's own settings (UserDefaults.standard and @AppStorage). There is no App Group,
+    so not 1C8F.1.
+  NSPrivacyCollectedDataTypes is empty ("Data Not Collected"): the only request to a server of ours is the push
+  relay's POST /v1/register {token, env}, and the relay seals the token and returns it, storing and logging
+  nothing. Everything else goes over SSH to the user's own machines.
+  Measured imports (Release, iOS arm64): stat fstat lstat statfs.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+				<string>3B52.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>85F4.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

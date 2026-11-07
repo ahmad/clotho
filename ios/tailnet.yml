@@ -16,10 +16,17 @@ targets:
     dependencies:
       - package: Tailnet
         product: ClothoTailnet
-    # The node's required-reason APIs (Go's runtime: stat family, mach_absolute_time); see the file.
-    sources:
-      - path: Tailnet/PrivacyInfo.xcprivacy
-        buildPhase: resources
+    # The node's required-reason APIs (Go's runtime: stat family, mach_absolute_time): Tailnet/PrivacyInfo.xcprivacy
+    # replaces the app's base manifest (Clotho/PrivacyInfo.xcprivacy) in the built app, after a check that it
+    # declares everything the base one does. It is copied over the base file rather than added as a second
+    # resource: two PrivacyInfo.xcprivacy resources in one target fail the build ("Multiple commands produce"), and
+    # so would declaring the product file as this script's output, since Copy Bundle Resources writes it too. So the
+    # phase has no outputs and runs every build. It runs after Copy Bundle Resources and before code signing, and it
+    # can write into the app because the Clotho target sets ENABLE_USER_SCRIPT_SANDBOXING NO.
+    postBuildScripts:
+      - name: Tailnet privacy manifest
+        script: python3 -I "$SRCROOT/scripts/check-privacy.py" superset "$SRCROOT/Clotho/PrivacyInfo.xcprivacy" "$SRCROOT/Tailnet/PrivacyInfo.xcprivacy" && cp "$SRCROOT/Tailnet/PrivacyInfo.xcprivacy" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/PrivacyInfo.xcprivacy"
+        basedOnDependencyAnalysis: false
     settings:
       base:
         # A flag, not SWIFT_ACTIVE_COMPILATION_CONDITIONS: liveactivity.yml sets that one for these targets, and

@@ -7,6 +7,9 @@
 # needs ../ClothoKit/Tailnet/build/ClothoTailnet.xcframework (ClothoKit/scripts/build-tailnet.sh). With `test` it
 # also starts the offline test tailnet (scripts/tailnet-test-net.sh). Every other build checks that the app
 # doesn't link the node (scripts/check-no-tailnet.sh).
+# Privacy manifests (scripts/check-privacy.py): the committed ones are linted before xcodegen runs, and every build
+# checks that the app and both extensions carry their own PrivacyInfo.xcprivacy declaring every required-reason
+# API their executables import.
 cd "$(dirname "$0")"
 # Where Homebrew has no xcodegen (the build Mac), the release zip lives in ~/Builds/tools.
 # The signing team and the push relay URL come from the environment (CLOTHO_TEAM_ID, CLOTHO_RELAY_URL; see
@@ -32,6 +35,7 @@ if [ "${CLOTHO_TAILNET:-}" = 1 ]; then
   tailnet=YES
 fi
 unset CLOTHO_TAILNET
+python3 -I scripts/check-privacy.py sources || exit 1
 PUSH=YES WIDGET=YES LIVE_ACTIVITY=YES TAILNET=$tailnet xcodegen generate --quiet
 # Pack before xcodebuild, not only in its pre-build phase: Xcode plans the resource copy before that phase
 # runs, so the first build after a new clothod release would otherwise bundle the previous one.
@@ -62,5 +66,8 @@ if [ -f $app/Clotho ]; then
   existing=()
   for b in $bins; do [ -f $b ] && existing+=($b); done
   if [ ${#existing} -gt 0 ]; then scripts/check-no-tailnet.sh $existing || exit 1; fi
+  # Each bundle's own manifest covers what its executable imports. The extensions are named, so a missing one fails.
+  python3 -I scripts/check-privacy.py bundle $app $app/PlugIns/ClothoNotify.appex $app/PlugIns/ClothoWidget.appex \
+    || exit 1
 fi
 exit $rc

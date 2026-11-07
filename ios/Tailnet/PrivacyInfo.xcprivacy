@@ -1,14 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The app's privacy manifest in CLOTHO_TAILNET=1 builds only (ios/tailnet.yml), for the required-reason APIs that
-  the linked binary uses (checked with `nm -u` by ios/scripts/tailnet-size.sh):
-  - FileTimestamp C617.1: Go's runtime and tsnet stat files in the node's dir (fstat, fstatat, stat, lstat); the app
-    itself reads modification dates of its own files (SavedState, Transfers).
+  The app's privacy manifest in CLOTHO_TAILNET=1 builds only. ios/tailnet.yml copies it over the app's base
+  manifest (ios/Clotho/PrivacyInfo.xcprivacy) in the built app, after checking that this file is a superset of
+  that one, so the build fails if they drift apart. It is the base manifest plus the node's own entries:
+  - FileTimestamp C617.1: as in the base manifest, and Go's runtime and tsnet stat files in the node's dir (fstat,
+    fstatat, stat, lstat).
+  - FileTimestamp 3B52.1: as in the base manifest (files the user picks to upload).
   - SystemBootTime 35F9.1: Go's monotonic clock (mach_absolute_time), for elapsed time only.
-  - DiskSpace 85F4.1: statfs, which the base app already imports (ClothoKit's LocalFileBackend.statfs, the free
-    space the file browser shows).
-  - UserDefaults CA92.1: the app's own settings.
+  - DiskSpace 85F4.1: as in the base manifest: statfs, from ClothoKit's LocalFileBackend.statfs, linked in but
+    never called on iOS (iOS never shows local free space).
+  - UserDefaults CA92.1: as in the base manifest (the app's own settings).
   Measured imports (Release, iOS arm64): base app stat fstat lstat statfs; with the node also fstatat,
   mach_absolute_time, sysctl, sysctlbyname, proc_regionfilename, mach_vm_region (the last two from Go's
   runtime/pprof, not required-reason APIs but worth removing before any upload: see the ios report).
@@ -29,6 +31,7 @@
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array>
 				<string>C617.1</string>
+				<string>3B52.1</string>
 			</array>
 		</dict>
 		<dict>
