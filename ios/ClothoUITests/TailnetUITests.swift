@@ -62,8 +62,30 @@ final class TailnetUITests: XCTestCase {
         XCTAssertTrue(start.waitForExistence(timeout: 10))
         XCTAssertTrue(start.isHittable)
         XCTAssertFalse(app.staticTexts["tailnet.error"].exists, app.staticTexts["tailnet.error"].label)
+        // Signed in: no Sign In row left next to Sign Out.
+        XCTAssertTrue(waitForGone(signIn, timeout: 5), "Sign In is still there while Running")
+
+        // Sign Out, then sign in again: the first sign-in left nothing behind.
+        let signOut = app.buttons["tailnet.signOut"]
+        reveal(signOut, in: app)
+        XCTAssertTrue(signOut.waitForExistence(timeout: 5))
+        signOut.tap()
+        XCTAssertTrue(waitForState(app, "Needs sign-in", timeout: 30), app.descendants(matching: .any)["tailnet.state"].label)
+        reveal(signIn, in: app)
+        XCTAssertTrue(signIn.waitForExistence(timeout: 5))
+        XCTAssertTrue(signIn.isEnabled, "Sign In is disabled after Sign Out")
+        signIn.tap()
+        XCTAssertTrue(waitForState(app, "Running", timeout: 30), app.descendants(matching: .any)["tailnet.state"].label)
+        XCTAssertTrue(waitForGone(signIn, timeout: 5), "Sign In is still there after the second sign-in")
+        XCTAssertTrue(start.waitForExistence(timeout: 10))
+        XCTAssertTrue(start.isHittable)
         start.tap()
         XCTAssertTrue(waitForState(app, "Stopped", timeout: 10))
+    }
+
+    private func waitForGone(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: element)
+        return XCTWaiter().wait(for: [gone], timeout: timeout) == .completed
     }
 
     /// Autostart, a dial to the test peer, then a trip to the background with the node forced dead: on return it's

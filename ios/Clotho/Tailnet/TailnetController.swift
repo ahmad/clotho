@@ -79,10 +79,14 @@ struct ForegroundTiming: Codable, Identifiable, Equatable, Sendable {
     /// Seconds from foreground to a working dial of the probe target.
     var dialAfter: Double?
     var error: String?
+    /// Not checked: the node's state then. It wasn't Running when the app went to the background (it was signing
+    /// in, say), so recreating it would only cancel that. Optional so timings saved before it still decode.
+    var skipped: String?
 
     var id: Date { at }
 
     var summary: String {
+        if let skipped { return "not checked (\(skipped))" }
         var parts = [healthy ? "healthy" : (forced ? "forced dead" : "dead")]
         if recreated { parts.append("recreated" + (oldClosed == true ? " (old closed)" : "")) }
         if let runningAfter, recreated { parts.append(String(format: "running in %.2f s", runningAfter)) }
@@ -149,6 +153,10 @@ final class TailnetController: ObservableObject {
     private var generation = 0
     private var startedAt: Date?
     private var backgroundedAt: Date?
+    /// The node was Running when the app went to the background.
+    private var backgroundedRunning = false
+    /// Counts sign-ins, so only the latest one clears `signingIn`.
+    private var signInGeneration = 0
     /// Test mode was on for a node in this process: its switches stay on until a relaunch.
     private(set) var testModeUsed = false
     private let signIn = TailnetSignIn()
@@ -238,7 +246,9 @@ final class TailnetController: ObservableObject {
     func stop() {
         guard let node else { return }
         generation += 1
+        signInGeneration += 1
         signIn.cancel()
+        signingIn = false
         node.stop()
         self.node = nil
         current.value = nil
@@ -306,7 +316,9 @@ final class TailnetController: ObservableObject {
         if !needsLogin { loginURL = nil }
         log("tailnet: state \(name)")
         if state == .running {
+            signInGeneration += 1
             signIn.finished()
+            signingIn = false
             if startToRunning == nil, let startedAt {
                 startToRunning = Date().timeIntervalSince(startedAt)
                 log("tailnet: Running after \(Int(startToRunning! * 1000)) ms")
@@ -352,16 +364,21 @@ final class TailnetController: ObservableObject {
     func startSignIn() {
         guard let node else { return }
         lastError = nil
+        signInGeneration += 1
+        let gen = signInGeneration
         Task {
             do {
                 var url: URL?
                 if case .needsLogin(let known?) = node.state { url = known } else { url = try await node.login() }
-                guard let url else { return }
+                // Stopped, Running or another sign-in while the login URL was on its way.
+                guard let url, gen == signInGeneration, self.node === node, node.state != .running else { return }
                 signingIn = true
                 let outcome = await signIn.present(url)
+                guard gen == signInGeneration else { return }
                 signingIn = false
                 if outcome == .cancelledByUser { lastError = "Sign-in cancelled" }
             } catch {
+                guard gen == signInGeneration else { return }
                 signingIn = false
                 lastError = error.localizedDescription
             }
@@ -435,7 +452,10 @@ final class TailnetController: ObservableObject {
         switch phase {
         case .background:
             // The node stays: iOS suspends it with the app, and the foreground check finds out what's left.
-            if node != nil { backgroundedAt = Date() }
+            if let node {
+                backgroundedAt = Date()
+                backgroundedRunning = node.state == .running
+            }
         case .active:
             guard backgroundedAt != nil else { return }
             Task { await didBecomeActive() }
@@ -453,12 +473,25 @@ final class TailnetController: ObservableObject {
     /// The foreground check: is the node healthy (Running, and a status call answers in 2 s), and does the probe
     /// target dial in 3 s? If not, recreate it on the same store (no new sign-in) without waiting for the old one,
     /// and time until it runs and the probe dials. Nothing here blocks the main thread.
+    ///
+    /// Only a node that was Running when the app went to the background (or is now) is checked, forced or not. One
+    /// that was signing in or waiting for approval (NeedsLogin, NeedsMachineAuth, Starting) is left alone: the user
+    /// may have gone to another app to finish the login, and a recreate would close the sign-in sheet and ask for
+    /// a new login. That foreground is recorded as not checked.
     @discardableResult
     func didBecomeActive() async -> ForegroundTiming? {
+        let wasRunning = backgroundedRunning
+        backgroundedRunning = false
         guard let node else { backgroundedAt = nil; return nil }
         let t0 = Date()
         let background = backgroundedAt.map { t0.timeIntervalSince($0) }
         backgroundedAt = nil
+        guard wasRunning || node.state == .running else {
+            var timing = ForegroundTiming(at: t0, backgroundSeconds: background, healthy: false, forced: false, recreated: false)
+            timing.skipped = stateText
+            record(timing, background: background)
+            return timing
+        }
         let forced = forceUnhealthyOnForeground
         if forced && !forceIsLaunchArgument { forceUnhealthyOnForeground = false }
         var healthy = false
@@ -502,6 +535,11 @@ final class TailnetController: ObservableObject {
             timing.oldClosed = old?.waitForClose(timeout: 0)
             purgeRetired()
         }
+        record(timing, background: background)
+        return timing
+    }
+
+    private func record(_ timing: ForegroundTiming, background: Double?) {
         let backgroundText = background.map { String(format: "+%.0fs", $0) } ?? "+?"
         log("tailnet: foreground \(backgroundText): \(timing.summary)")
         timings.insert(timing, at: 0)
@@ -509,7 +547,6 @@ final class TailnetController: ObservableObject {
         if fixedService == nil, let data = try? JSONEncoder().encode(timings) {
             UserDefaults.standard.set(data, forKey: "TailnetTimings")
         }
-        return timing
     }
 
     func clearTimings() {

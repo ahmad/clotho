@@ -1,6 +1,7 @@
 #if CLOTHO_TAILNET
 @testable import Clotho
 import CryptoKit
+import SwiftUI
 import XCTest
 
 /// The app's tailnet node (TailnetController) in the simulator, offline: clothod's testctl and a test peer that
@@ -210,6 +211,31 @@ final class TailnetNodeAppTests: XCTestCase {
         XCTAssertNil(timing.error)
         XCTAssertLessThan(try XCTUnwrap(timing.dialAfter), 3)
         XCTAssertEqual(tailnet.retiredCount, 0)
+    }
+
+    /// A foreground while the node is signing in (the user went to another app for a 2FA code or a magic link)
+    /// leaves the node alone, even with the dead switch on: no recreate, so the same login URL and the same node.
+    func testForegroundLeavesSigningInNode() async throws {
+        let tailnet = controller("signing-in", control: net.auth)
+        tailnet.start()
+        let loginURL = await tailnet.waitForLoginURL(timeout: 30)
+        let url = try XCTUnwrap(loginURL, "no login URL: \(tailnet.stateText)")
+        for _ in 0..<20 where tailnet.loginURL == nil { try await Task.sleep(nanoseconds: 100_000_000) }
+        XCTAssertEqual(tailnet.loginURL, url)
+        tailnet.forceUnhealthyOnForeground = true
+        tailnet.sceneChanged(.background)
+        let maybeTiming = await tailnet.didBecomeActive()
+        let timing = try XCTUnwrap(maybeTiming)
+        print("tailnet test: foreground while signing in: \(timing.summary)")
+        XCTAssertFalse(timing.recreated)
+        XCTAssertEqual(timing.skipped, "Needs sign-in")
+        XCTAssertTrue(tailnet.forceUnhealthyOnForeground, "the dead switch was used up on a node it didn't check")
+        XCTAssertEqual(tailnet.retiredCount, 0)
+        XCTAssertTrue(tailnet.hasNode)
+        XCTAssertTrue(tailnet.needsLogin)
+        XCTAssertEqual(tailnet.loginURL, url)
+        let again = await tailnet.waitForLoginURL(timeout: 1)
+        XCTAssertEqual(again, url, "the login URL changed")
     }
 
     /// A start the shim refuses (test mode with a control server that isn't on this machine) fails on a background

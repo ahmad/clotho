@@ -65,6 +65,7 @@ struct TailnetTestView: View {
             }
             if tailnet.isRunning {
                 Button("Sign Out", role: .destructive) { tailnet.signOut() }
+                    .accessibilityIdentifier("tailnet.signOut")
             }
             if let seconds = tailnet.startToRunning {
                 LabeledContent("Start to Running", value: String(format: "%.2f s", seconds))
@@ -198,7 +199,7 @@ struct TailnetTestView: View {
         } header: {
             Text("Foreground")
         } footer: {
-            Text("On every return to the foreground the node is checked (Running, and a status call within 2 s) and the probe target dialed; a dead node is recreated from its Keychain state, without signing in again.")
+            Text("On every return to the foreground a Running node is checked (a status call within 2 s) and the probe target dialed; a dead node is recreated from its Keychain state, without signing in again. A node that is still signing in is left alone.")
         }
     }
 }

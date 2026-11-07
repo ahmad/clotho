@@ -11,43 +11,54 @@ import UIKit
 final class TailnetSignIn: NSObject, ASWebAuthenticationPresentationContextProviding {
     enum Outcome { case finished, cancelledByUser, failed }
 
-    private var session: ASWebAuthenticationSession?
-    private var closedByUs = false
+    /// The open sheet and the caller waiting on it. Whoever closes it first (the sheet's handler, `finished`, or a
+    /// new `present`) takes it and resumes the caller, once: after a programmatic cancel the handler may never run.
+    private struct Open {
+        var id: Int
+        var session: ASWebAuthenticationSession
+        var continuation: CheckedContinuation<Outcome, Never>
+    }
+    private var open: Open?
+    private var lastID = 0
 
     /// Shows `url` and returns when the sheet closes: `finished` when the node ran (or Stop), `cancelledByUser`
     /// when the user closed it first.
     func present(_ url: URL) async -> Outcome {
-        cancel()
-        closedByUs = false
+        finished()
+        lastID += 1
+        let id = lastID
         return await withCheckedContinuation { continuation in
             let session = ASWebAuthenticationSession(url: url, callbackURLScheme: nil) { [weak self] _, error in
                 MainActor.assumeIsolated {
-                    let byUs = self?.closedByUs ?? true
-                    self?.session = nil
-                    if byUs {
-                        continuation.resume(returning: .finished)
-                    } else if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
-                        continuation.resume(returning: .cancelledByUser)
+                    let outcome: Outcome
+                    if let error = error as? ASWebAuthenticationSessionError, error.code == .canceledLogin {
+                        outcome = .cancelledByUser
                     } else {
-                        continuation.resume(returning: error == nil ? .finished : .failed)
+                        outcome = error == nil ? .finished : .failed
                     }
+                    self?.resolve(id, outcome)
                 }
             }
             session.prefersEphemeralWebBrowserSession = true
             session.presentationContextProvider = self
-            self.session = session
-            if !session.start() {
-                self.session = nil
-                continuation.resume(returning: .failed)
-            }
+            self.open = Open(id: id, session: session, continuation: continuation)
+            if !session.start() { self.resolve(id, .failed) }
         }
     }
 
-    /// The node runs: close the sheet.
+    /// Resumes the caller of presentation `id`, if it's still the open one.
+    private func resolve(_ id: Int, _ outcome: Outcome) {
+        guard let open, open.id == id else { return }
+        self.open = nil
+        open.continuation.resume(returning: outcome)
+    }
+
+    /// The node runs: close the sheet, and the caller gets `finished` now.
     func finished() {
-        guard let session else { return }
-        closedByUs = true
-        session.cancel()
+        guard let open else { return }
+        self.open = nil
+        open.session.cancel()
+        open.continuation.resume(returning: .finished)
     }
 
     func cancel() { finished() }
