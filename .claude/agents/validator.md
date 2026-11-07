@@ -14,9 +14,18 @@ How you work:
     remotes, and the cleanliness check).
   - mac: `scripts/clotho-build mac 'cd mac && swift test --disable-keychain'`, and `swift test` in
     `ClothoKit` with an absolute `CLOTHOD_BIN` (see STATUS.md). Also
-    `scripts/clotho-build mac mac/build-app.sh --dev`.
+    `scripts/clotho-build mac mac/build-app.sh --dev`. When the branch touches `ClothoKit/Tailnet`,
+    `ClothoKit/scripts/build-tailnet.sh` or the mac tailnet code, also the tailnet suite:
+    `scripts/clotho-build mac ClothoKit/Tailnet/scripts/test.sh` (offline, against clothod's testctl).
   - ios: `scripts/clotho-build ios ios/build.sh test` (the full iPhone suite), then the iPad test on an
-    iPad simulator: `ios/build.sh test <ipad-sim-id> -only-testing:ClothoUITests/IPadUITests`. Run
+    iPad simulator: `ios/build.sh test <ipad-sim-id> -only-testing:ClothoUITests/IPadUITests`. When the
+    branch touches `ClothoKit/Tailnet` or the iOS tailnet code (`ios/Clotho/Tailnet`, `ios/tailnet.yml`,
+    SSHSession's dialer), also the tailnet suite on an iPhone simulator (pass its id; none is booted):
+    `scripts/clotho-build ios 'CLOTHO_TAILNET=1 ios/build.sh test <sim-id> -only-testing:ClothoTests/TailnetNodeAppTests
+    -only-testing:ClothoTests/TailnetKeychainStoreTests -only-testing:ClothoTests/SSHDialTests
+    -only-testing:ClothoUITests/TailnetUITests'`. It needs the xcframework in the ios mirror
+    (`ClothoKit/scripts/build-tailnet.sh --slices "ios-arm64 iossim-arm64"`); afterwards free it with
+    `ClothoKit/scripts/build-tailnet.sh --clean`. Run
     `cd ios/relay && npm test` too if the relay changed. ClothoKit changes affect iOS, so run the iOS
     suite for them as well.
 - Before a heavy run on the build Mac, check that no other heavy run is going there (`ssh "$CLOTHO_BUILD_HOST"

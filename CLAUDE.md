@@ -131,6 +131,10 @@ anything else that gets pushed. Here the machines go by role:
     Test window. Every other build refuses the node (`mac/scripts/check-no-tailnet.sh`).
 - iOS:
   - `ios/build.sh` builds for the simulator; `ios/build.sh test` runs the tests.
+  - `CLOTHO_TAILNET=1 ios/build.sh [build|test]` adds the tailnet node and its debug Tailnet Test screen
+    (it needs `ClothoKit/scripts/build-tailnet.sh` run in the ios mirror first). Default and TestFlight
+    builds refuse the node (`ios/scripts/check-no-tailnet.sh`). The tailnet suite is in
+    `.claude/agents/validator.md`.
   - `ios/scripts/testflight.sh` uploads to TestFlight. The main session runs it over SSH without
     asking, once a build has passed the full iPhone suite and the iPad test and has been verified,
     then tells the user the build number. The API key ids live in the dev box's
