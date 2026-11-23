@@ -67,7 +67,9 @@ fn try_report(args: &[String]) -> Result<()> {
                 // The thread is the session `codex resume <id>` takes (Codex 0.164's payload
                 // carries it as "thread-id").
                 session = v["thread-id"].as_str().filter(|s| safe_session(s)).map(String::from);
-                message = v["last-assistant-message"].as_str().map(|m| one_line(m, RESULT_MAX));
+                let reply = v["last-assistant-message"].as_str();
+                message = reply.map(|m| one_line(m, RESULT_MAX));
+                extra.extend(reply.and_then(reply_tail).map(|t| ("tail", t)));
                 // The user's messages in this turn, oldest first: the last one is what they asked.
                 let asked = v["input-messages"].as_array().and_then(|m| m.last()).and_then(Value::as_str).map(user_prompt);
                 extra.extend(asked.map(|q| ("prompt", q)));
@@ -193,6 +195,9 @@ fn claude_hook_state(v: &Value) -> Option<&'static str> {
 const RESULT_MAX: usize = 300;
 const PROMPT_MAX: usize = 120;
 const TOOL_INPUT_MAX: usize = 160;
+/// Longest end of a reply sent (agent.report's `tail`), in chars: where a long reply asks its
+/// question or says what's left, which the first RESULT_MAX chars miss.
+const TAIL_MAX: usize = 600;
 
 /// `text` on one line: whitespace runs (newlines too) become one space; at most `max` chars.
 fn one_line(text: &str, max: usize) -> String {
@@ -207,6 +212,18 @@ fn one_line(text: &str, max: usize) -> String {
         }
     }
     out.chars().take(max).collect()
+}
+
+/// The end of a reply longer than RESULT_MAX: its last TAIL_MAX chars, on one line. None for a
+/// shorter reply, whose message is already the whole of it.
+fn reply_tail(text: &str) -> Option<String> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars = line.chars().count();
+    if chars <= RESULT_MAX {
+        return None;
+    }
+    let start = line.char_indices().nth(chars.saturating_sub(TAIL_MAX)).map_or(0, |(i, _)| i);
+    Some(line[start..].to_string())
 }
 
 /// The first line of a prompt the user typed, or "" for one the agent's app injected (another
@@ -252,7 +269,12 @@ fn claude_hook_context(v: &Value) -> (Option<String>, Vec<(&'static str, String)
         // Only a permission prompt is about the tool in use: any other wait (a question)
         // clears it, so the phone never offers to allow a tool the question isn't about.
         "Notification" if !is_permission(v) => (None, vec![("tool", String::new())]),
-        "Stop" => (v["last_assistant_message"].as_str().map(|m| one_line(m, RESULT_MAX)).filter(|m| !m.is_empty()), vec![("retire", "all".into())]),
+        "Stop" => {
+            let reply = v["last_assistant_message"].as_str();
+            let mut e = vec![("retire", "all".into())];
+            e.extend(reply.and_then(reply_tail).map(|t| ("tail", t)));
+            (reply.map(|m| one_line(m, RESULT_MAX)).filter(|m| !m.is_empty()), e)
+        }
         _ => (None, vec![]),
     }
 }
@@ -723,6 +745,28 @@ mod tests {
         assert_eq!(m.as_deref(), Some("Done. - one - two"));
         let long = format!(r#"{{"hook_event_name":"Stop","last_assistant_message":"{}"}}"#, "word ".repeat(200));
         assert_eq!(ctx(&long).0.unwrap().chars().count(), RESULT_MAX);
+        // A reply longer than that also sends its end (where the question usually is), on one
+        // line, at most TAIL_MAX chars; the message is still the start.
+        let tail_of = |e: &[(&'static str, String)]| e.iter().find(|(k, _)| *k == "tail").map(|(_, t)| t.clone());
+        let asks = json!({"hook_event_name": "Stop", "last_assistant_message": format!("Started.\n{}\n\nShould I push\nthe branch?", "word ".repeat(200))});
+        let (m, e) = claude_hook_context(&asks);
+        assert!(m.unwrap().starts_with("Started. word"));
+        assert_eq!(e[0], ("retire", "all".to_string()));
+        let tail = tail_of(&e).unwrap();
+        assert!(tail.ends_with("word Should I push the branch?"), "{tail}");
+        assert_eq!(tail.chars().count(), TAIL_MAX);
+        // Between RESULT_MAX and TAIL_MAX the tail is the whole reply; at RESULT_MAX or under
+        // there is none (whitespace doesn't count: the reply is measured collapsed).
+        assert_eq!(reply_tail(&"a".repeat(RESULT_MAX + 1)).unwrap().chars().count(), RESULT_MAX + 1);
+        assert_eq!(reply_tail(&"a".repeat(RESULT_MAX)), None);
+        assert_eq!(reply_tail(&format!("{}\n\n   {}", "a".repeat(100), " \n".repeat(400))), None);
+        assert_eq!(tail_of(&ctx(r#"{"hook_event_name":"Stop","last_assistant_message":"Done.\n\n- one\n- two"}"#).1), None);
+        assert_eq!(tail_of(&ctx(r#"{"hook_event_name":"Stop"}"#).1), None);
+        // Multi-byte text is cut between chars, never inside one.
+        let wide = reply_tail(&format!("{}né?", "é".repeat(1000))).unwrap();
+        assert_eq!(wide.chars().count(), TAIL_MAX);
+        assert!(wide.starts_with('é') && wide.ends_with("éné?"));
+        assert_eq!(reply_tail(&"日本 ".repeat(400)).unwrap().chars().count(), TAIL_MAX);
         // A permission prompt keeps the turn's tool; any other wait clears it.
         assert!(ctx(r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt"}"#).1.is_empty());
         assert!(ctx(r#"{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}"#).1.is_empty());

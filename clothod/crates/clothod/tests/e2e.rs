@@ -88,6 +88,9 @@ impl Env {
         cmd.env("CLOTHOD_CONFIG", self.dir.path().join("config.toml"));
         // Never the user's ~/.claude (detection reads Claude Code's session records there).
         cmd.env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude-config"));
+        // No settle window and no hold at the Mac unless a test asks for them: a finished turn
+        // raises attention and pushes at once, as the tests written before those rules expect.
+        cmd.env("CLOTHOD_TEST_SETTLE_MS", "0").env("CLOTHOD_TEST_AT_MAC_MS", "0");
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -5549,4 +5552,672 @@ async fn restored_panes_get_the_same_variables_as_a_new_tab() {
     assert_eq!(pick(&resumed), pick(&new_tab), "the agent resumed in a restored pane");
     assert_ne!(restored.get("CLOTHO_PANE"), resumed.get("CLOTHO_PANE"));
     assert_eq!(resumed.get("CLOTHO_PANE"), Some(&n_agent.to_string()));
+}
+
+// MARK: Fewer, clearer alerts (settle, label, hold at the Mac)
+
+/// A daemon with fast pushes and `vars` (the settle window, the hold at the Mac) started in `env`.
+fn start_alerts(env: &mut Env, vars: &[(&str, &str)]) {
+    let mut all = vec![("CLOTHOD_TEST_PUSH_FAST", "1")];
+    all.extend_from_slice(vars);
+    env.start_with(&test_bin(), &all);
+}
+
+fn alerts_env(vars: &[(&str, &str)]) -> Env {
+    let mut env = Env::empty();
+    start_alerts(&mut env, vars);
+    env
+}
+
+/// A summarizer that answers like the real one: the label on the first line, then the text.
+fn labelling(env: &Env, name: &str, label: &str, text: &str) -> String {
+    fake_summarizer(env, name, &format!("echo {label}; echo '{text}'"))
+}
+
+/// What a `claude` without a login prints, and how it exits.
+const NOT_LOGGED_IN: &str = "echo 'Not logged in · Please run /login'; exit 1";
+
+/// A connection that says hello as `name` (an app's name and version).
+async fn client_named(env: &Env, name: &str) -> Client {
+    let c = env.client().await;
+    c.request("hello", json!({"protocol": clotho_proto::PROTOCOL, "client": name})).await.unwrap();
+    c
+}
+
+/// The next `agent` event `cond` accepts, if one comes within `within`.
+async fn next_agent_event(c: &mut Client, within: Duration, cond: impl Fn(&Value) -> bool) -> Option<Value> {
+    let deadline = Instant::now() + within;
+    loop {
+        match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), c.recv()).await {
+            Ok(Some(Frame::Json(v))) if v["event"] == "agent" && cond(&v["data"]) => return Some(v["data"].clone()),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("disconnected"),
+            Err(_) => return None,
+        }
+    }
+}
+
+/// serve.log's push decisions of one kind (`sent`, `held`, `dropped`).
+fn push_log(env: &Env, decision: &str) -> Vec<String> {
+    let want = format!("push {decision}");
+    env.log().lines().filter(|l| l.contains(&want)).map(String::from).collect()
+}
+
+/// Waits until serve.log has `n` push decisions of that kind.
+async fn wait_push_log(env: &Env, decision: &str, n: usize) -> Vec<String> {
+    let deadline = Instant::now() + T;
+    loop {
+        let lines = push_log(env, decision);
+        if lines.len() >= n {
+            return lines;
+        }
+        assert!(Instant::now() < deadline, "serve.log has {} `push {decision}` lines, not {n}:\n{}", lines.len(), env.log());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The log names decisions, never what an agent or the user said.
+fn assert_log_has_none_of(env: &Env, texts: &[&str]) {
+    let log = env.log();
+    for t in texts {
+        assert!(!log.contains(t), "serve.log carries {t:?}:\n{log}");
+    }
+}
+
+fn flags(a: &Value) -> (Option<&str>, Option<bool>, Option<bool>) {
+    (a["state"].as_str(), a["attention"].as_bool(), a["settling"].as_bool())
+}
+
+#[tokio::test]
+async fn hello_lists_alerts() {
+    let env = Env::new();
+    let c = env.client().await;
+    assert!(c.hello["features"].as_array().unwrap().contains(&json!("alerts")), "{}", c.hello);
+}
+
+/// A finished turn raises attention (and pushes) only after the settle window, once.
+#[tokio::test]
+async fn a_finished_turn_waits_the_settle_window() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[("CLOTHOD_TEST_SETTLE_MS", "800")]);
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    let t = Instant::now();
+    report(&c, p, "done", "SETTLE-REPLY-1101 is in.").await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!(flags(&a), (Some("done"), Some(false), Some(true)), "done, settling, not raised: {a}");
+    let e = next_agent_event(&mut c, T, |e| e["pane"] == p && e["agent"]["state"] == "done").await.expect("the turn's end");
+    assert_eq!(e["from"], "running", "{e}");
+    assert_eq!(flags(&e["agent"]), (Some("done"), Some(false), Some(true)), "{e}");
+    relay.none_for(Duration::from_millis(500));
+
+    // The window ends: the rise is an `agent` event with no change of state, and one push.
+    let e = next_agent_event(&mut c, T, |e| e["pane"] == p).await.expect("the rise");
+    assert!(t.elapsed() >= Duration::from_millis(800), "raised early: {:?}", t.elapsed());
+    assert_eq!(e["from"], "done", "{e}");
+    assert_eq!(flags(&e["agent"]), (Some("done"), Some(true), Some(false)), "{e}");
+    assert!(e["agent"]["needs_user"].is_boolean(), "never null once raised: {e}");
+    let (at, body) = relay.next();
+    assert!(at - t >= Duration::from_millis(800), "pushed early: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "done");
+    relay.none_for(Duration::from_millis(1200));
+    assert!(next_agent_event(&mut c, Duration::from_millis(100), |e| e["pane"] == p).await.is_none(), "one rise");
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(true), Some(false)));
+    wait_push_log(&env, "sent", 1).await;
+    assert_log_has_none_of(&env, &["SETTLE-REPLY-1101"]);
+}
+
+/// An agent that stops and goes on within the window (a hook that resumes it, a background
+/// task) never raises attention and never pushes; the log says why.
+#[tokio::test]
+async fn a_stop_resume_cycle_sends_nothing() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[("CLOTHOD_TEST_SETTLE_MS", "800")]);
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    for i in 0..3 {
+        report(&c, p, "done", &format!("CYCLE-REPLY-7731 round {i}.")).await;
+        let a = pane_agent(&c, p).await;
+        assert_eq!(flags(&a), (Some("done"), Some(false), Some(true)), "round {i}: {a}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        report(&c, p, "running", "").await;
+        let a = pane_agent(&c, p).await;
+        assert_eq!(flags(&a), (Some("running"), Some(false), Some(false)), "round {i}: {a}");
+    }
+    // Longer than a window after the last `done`: nothing was held back, nothing comes.
+    relay.none_for(Duration::from_millis(1500));
+    let raised: Vec<Value> = agent_events(&mut c).into_iter().filter(|e| e["agent"]["attention"] == true).collect();
+    assert!(raised.is_empty(), "{raised:?}");
+    let dropped = wait_push_log(&env, "dropped", 1).await;
+    assert!(dropped.iter().all(|l| l.contains("reason=settled away")), "{dropped:?}");
+    assert!(push_log(&env, "sent").is_empty() && push_log(&env, "held").is_empty(), "{}", env.log());
+    assert_log_has_none_of(&env, &["CYCLE-REPLY-7731"]);
+}
+
+/// The window is for finished turns only: an ask and an error raise and push at once.
+#[tokio::test]
+async fn waiting_and_error_still_notify_at_once() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[("CLOTHOD_TEST_SETTLE_MS", "5000")]);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    for state in ["waiting", "error"] {
+        let p = new_pane(&c, sh()).await;
+        report(&c, p, "running", "").await;
+        let t = Instant::now();
+        report(&c, p, state, "It needs a look.").await;
+        let a = pane_agent(&c, p).await;
+        assert_eq!(flags(&a), (Some(state), Some(true), Some(false)), "{a}");
+        assert_eq!(a["needs_user"], true, "{a}");
+        let (at, body) = relay.next();
+        assert!(at - t < Duration::from_millis(2500), "{state} waited: {:?}", at - t);
+        let r = opened(&body);
+        assert_eq!((r["s"].as_str(), r["nu"].as_bool()), (Some(state), Some(true)), "{r}");
+        assert!(body.get("silent").is_none(), "{body}");
+    }
+    // A `done` in the same daemon does wait.
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", "Finished.").await;
+    relay.none_for(Duration::from_millis(1000));
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(false), Some(true)));
+}
+
+/// The user saw it (ack) or doesn't want to hear of it (mute) before the window ended.
+#[tokio::test]
+async fn ack_or_mute_during_the_window_cancels_it() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[("CLOTHOD_TEST_SETTLE_MS", "800")]);
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let (acked, muted) = (new_pane(&c, sh()).await, new_pane(&c, sh()).await);
+    for p in [acked, muted] {
+        report(&c, p, "running", "").await;
+        report(&c, p, "done", "Finished.").await;
+        assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(false), Some(true)));
+    }
+    c.request("agent.ack", json!({"pane": acked})).await.unwrap();
+    assert_eq!(flags(&pane_agent(&c, acked).await), (Some("done"), Some(false), Some(false)), "ack ends the window");
+    c.request("agent.mute", json!({"pane": muted, "muted": true})).await.unwrap();
+    relay.none_for(Duration::from_millis(1500));
+    for p in [acked, muted] {
+        assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(false), Some(false)), "pane {p} after the window");
+    }
+    let raised: Vec<Value> = agent_events(&mut c).into_iter().filter(|e| e["agent"]["attention"] == true).collect();
+    assert!(raised.is_empty(), "{raised:?}");
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+}
+
+/// An upgrade (a restart of the logic process) in the window loses no alert: the timer is
+/// set again from what was saved.
+#[tokio::test]
+async fn a_restart_during_the_window_still_notifies() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_SETTLE_MS", "4000")];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    // A stand-in agent with a process of its own in the pane: that is what a restart keeps.
+    let b = test_bin();
+    let t = Instant::now();
+    c.input(p, format!(r#"sh -c '"{b}" report running --agent claude --session r1; "{b}" report done --agent claude --message Finished.; sleep 60'"#).as_bytes());
+    c.input(p, b"\r");
+    let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    assert_eq!(flags(&a), (Some("done"), Some(false), Some(true)), "{a}");
+    // Killed, not stopped: what survives is what the daemon last stored in the holder, which it
+    // does once a second.
+    relay.none_for(Duration::from_millis(1500));
+    drop(c);
+    env.kill();
+    start_alerts(&mut env, &vars);
+    let c = env.client().await;
+    let a = wait_agent(&c, p, "the rise after the restart", |a| a["attention"] == true).await;
+    assert_eq!(flags(&a), (Some("done"), Some(true), Some(false)), "{a}");
+    let (at, body) = relay.next();
+    assert_eq!(opened(&body)["s"], "done");
+    // Not at once when the daemon came back: after the rest of the window.
+    assert!(at - t >= Duration::from_millis(3500), "pushed early: {:?}", at - t);
+    relay.none_for(Duration::from_millis(1200));
+}
+
+/// The window ended while the daemon was down: the rise comes as soon as it is back.
+#[tokio::test]
+async fn a_window_that_ended_during_a_restart_notifies_at_once() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_SETTLE_MS", "2000")];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let b = test_bin();
+    c.input(p, format!(r#"sh -c '"{b}" report running --agent claude --session r2; "{b}" report done --agent claude --message Finished.; sleep 60'"#).as_bytes());
+    c.input(p, b"\r");
+    wait_agent(&c, p, "done", |a| a["state"] == "done" && a["settling"] == true).await;
+    relay.none_for(Duration::from_millis(1300));
+    drop(c);
+    env.kill();
+    relay.none_for(Duration::from_millis(1200));
+    let t = Instant::now();
+    start_alerts(&mut env, &vars);
+    let (at, body) = relay.next();
+    assert!(at - t < Duration::from_millis(1500), "a whole new window: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "done");
+    let c = env.client().await;
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(true), Some(false)));
+    relay.none_for(Duration::from_millis(1200));
+}
+
+/// The user was at the pane when the turn ended: still quiet when the window ends, even with
+/// presence itself over by then.
+#[tokio::test]
+async fn a_turn_that_ends_at_the_pane_stays_quiet_after_settling() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[("CLOTHOD_TEST_SETTLE_MS", "1200"), ("CLOTHOD_TEST_PRESENCE_MS", "500")]);
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    c.request("pane.subscribe", json!({"pane": p})).await.unwrap();
+    report(&c, p, "running", "").await;
+    c.request("pane.input", json!({"pane": p, "data": "\x1b[I"})).await.unwrap();
+    report(&c, p, "done", "Finished.").await;
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(false), Some(true)));
+    let e = next_agent_event(&mut c, T, |e| e["pane"] == p && e["agent"]["attention"] == true).await.expect("the rise");
+    assert_eq!((e["from"].as_str(), e["agent"]["quiet"].as_bool()), (Some("done"), Some(true)), "raised for the app to show, quietly: {e}");
+    relay.none_for(Duration::from_millis(1200));
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+}
+
+/// The model's label: a turn that ends by asking the user is "needs you", with its sound.
+#[tokio::test]
+async fn a_question_ending_turn_is_labelled_needs_you() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[], |e| labelling(e, "asks", "NEEDS_USER", "Which database should it use?"));
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    // Nothing in the words themselves reads as a question: the label is the model's.
+    report(&c, p, "done", "LABEL-REPLY-4402 compared **both** databases.").await;
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["s"].as_str(), r["nu"].as_bool()), (Some("done"), Some(true)), "{r}");
+    assert_eq!(r["sm"], "Which database should it use?", "the label is not part of the text: {r}");
+    assert!(body.get("silent").is_none(), "needs you makes a sound: {body}");
+    let a = wait_agent(&c, p, "the label", |a| a["summary_pending"] == false).await;
+    assert_eq!((a["needs_user"].as_bool(), a["summary"].as_str()), (Some(true), Some("Which database should it use?")), "{a}");
+    assert_eq!(runs(&env, "asks"), 1, "one call for the text and the label");
+    assert_log_has_none_of(&env, &["LABEL-REPLY-4402", "Which database"]);
+}
+
+/// A plain finished turn is "done", and arrives silently.
+#[tokio::test]
+async fn a_plain_turn_is_done_and_silent() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[], |e| labelling(e, "plain", "DONE", "The build is fixed."));
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", MD).await;
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["s"].as_str(), r["nu"].as_bool(), r["sm"].as_str()), (Some("done"), Some(false), Some("The build is fixed.")), "{r}");
+    assert_eq!(body["silent"], true, "{body}");
+    let a = wait_agent(&c, p, "the label", |a| a["summary_pending"] == false).await;
+    assert_eq!((a["needs_user"].as_bool(), a["summary"].as_str()), (Some(false), Some("The build is fixed.")), "{a}");
+
+    // The model's answer is the label, also where the words alone would read as a question.
+    let q = new_pane(&c, sh()).await;
+    report(&c, q, "running", "").await;
+    c.request("agent.report", json!({"pane": q, "state": "done", "kind": "claude", "message": "Moved the config.", "tail": "It asks itself: what else could break?"})).await.unwrap();
+    let body = relay.next().1;
+    assert_eq!((opened(&body)["nu"].as_bool(), body["silent"].as_bool()), (Some(false), Some(true)), "{body}");
+    assert_eq!(wait_agent(&c, q, "the label", |a| a["summary_pending"] == false).await["needs_user"], false);
+    // An ask in the same daemon is never silent.
+    report(&c, q, "running", "").await;
+    report(&c, q, "waiting", "May it run the tests?").await;
+    let body = relay.next().1;
+    assert_eq!(opened(&body)["nu"], true);
+    assert!(body.get("silent").is_none(), "{body}");
+}
+
+/// No working helper (here: not logged in): the label comes from how the reply ends.
+#[tokio::test]
+async fn without_the_helper_the_heuristic_labels() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[], |e| fake_summarizer(e, "broken", NOT_LOGGED_IN));
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let long = format!("{}?", "word ".repeat(60).trim_end());
+    assert_eq!(long.chars().count(), 300);
+    let turns: [(Value, bool); 3] = [
+        (json!({"message": "Refactored the parser.", "tail": "The tests pass. Should I also update the docs?"}), true),
+        (json!({"message": "Refactored the parser.", "tail": "All 12 tests pass and the branch is pushed."}), false),
+        // As long as a message gets (it was cut there) and no tail: its end isn't the reply's.
+        (json!({"message": long}), false),
+    ];
+    for (turn, needs) in turns {
+        let p = new_pane(&c, sh()).await;
+        report(&c, p, "running", "").await;
+        c.request("agent.report", with(json!({"pane": p, "state": "done", "kind": "claude"}), turn.clone())).await.unwrap();
+        let body = relay.next().1;
+        let r = opened(&body);
+        assert_eq!(r["nu"].as_bool(), Some(needs), "{turn}: {r}");
+        assert_eq!(body.get("silent").and_then(Value::as_bool), if needs { None } else { Some(true) }, "{turn}: {body}");
+        let a = wait_agent(&c, p, "the rewrite to give up", |a| a["summary_pending"] == false).await;
+        assert_eq!(a["needs_user"].as_bool(), Some(needs), "{turn}: {a}");
+    }
+    assert_log_has_none_of(&env, &["Refactored the parser", "update the docs", "branch is pushed", "word word"]);
+}
+
+/// A helper that fails while the turn settles isn't run again at the rise: the push goes at
+/// the end of the window, with the heuristic's label.
+#[tokio::test]
+async fn a_failed_helper_runs_once_per_finished_turn() {
+    let relay = FakeRelay::start();
+    let mut env = Env::empty();
+    let fake = fake_summarizer(&env, "broken", NOT_LOGGED_IN);
+    start_alerts(&mut env, &[("CLOTHOD_SUMMARIZER", fake.as_str()), ("CLOTHOD_TEST_SETTLE_MS", "800")]);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", "All merged. Should I tag the release?").await;
+    let body = relay.next().1;
+    assert_eq!(opened(&body)["nu"], true, "{body}");
+    assert!(body.get("silent").is_none(), "{body}");
+    let a = wait_agent(&c, p, "the rise", |a| a["attention"] == true).await;
+    assert_eq!((a["summary_pending"].as_bool(), a["needs_user"].as_bool()), (Some(false), Some(true)), "{a}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(runs(&env, "broken"), 1, "run when the turn ended, not again at the rise");
+}
+
+/// Whether the rewrite works on this machine is in the settings, read-only, and a run of
+/// failures is logged once.
+#[tokio::test]
+async fn rewrite_health_is_in_settings() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[], |e| {
+        let ok = e.dir.path().join("logged-in");
+        fake_summarizer(e, "flaky", &format!("if [ -e '{}' ]; then echo DONE; echo 'Fine now.'; else {NOT_LOGGED_IN}; fi", ok.display()))
+    });
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let health = |s: &Value| s["notification_rewrite_health"].clone();
+    let h = health(&c.request("settings.get", json!({})).await.unwrap());
+    assert_eq!(h, json!({"state": "unknown", "reason": null, "at": null}), "none has run yet");
+
+    async fn turn(c: &Client, relay: &FakeRelay, message: &str) -> Value {
+        let p = new_pane(c, sh()).await;
+        report(c, p, "running", "").await;
+        report(c, p, "done", message).await;
+        relay.next();
+        wait_agent(c, p, "the rewrite to end", |a| a["summary_pending"] == false).await
+    }
+    turn(&c, &relay, "HEALTH-REPLY-6001 one.").await;
+    turn(&c, &relay, "HEALTH-REPLY-6002 two.").await;
+    assert_eq!(runs(&env, "flaky"), 2);
+    let h = health(&c.request("settings.get", json!({})).await.unwrap());
+    assert_eq!(h["state"], "failing", "{h}");
+    let reason = h["reason"].as_str().unwrap_or_else(|| panic!("a reason: {h}"));
+    assert!(reason.to_lowercase().contains("not logged in") && !reason.contains('\n') && reason.chars().count() <= 80, "{reason:?}");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    assert!((now - h["at"].as_f64().unwrap()).abs() < 30.0, "{h}");
+    let failures = env.log().lines().filter(|l| l.contains("notification rewrite")).count();
+    assert_eq!(failures, 1, "two failures, one line:\n{}", env.log());
+
+    // Read-only: like any key settings.set doesn't know.
+    let e = c.request("settings.set", json!({"notification_rewrite_health": {"state": "ok"}})).await.unwrap_err();
+    assert!(e.to_string().contains("bad_request"), "{e}");
+    assert_eq!(health(&c.request("settings.get", json!({})).await.unwrap())["state"], "failing");
+
+    // It works again.
+    std::fs::write(env.dir.path().join("logged-in"), "").unwrap();
+    let a = turn(&c, &relay, "HEALTH-REPLY-6003 three.").await;
+    assert_eq!(a["summary"], "Fine now.", "{a}");
+    let h = health(&c.request("settings.get", json!({})).await.unwrap());
+    assert_eq!((h["state"].as_str(), h["reason"].is_null(), h["at"].is_number()), (Some("ok"), true, true), "{h}");
+    // Switched off.
+    let s = c.request("settings.set", json!({"notification_rewrite": false})).await.unwrap();
+    assert_eq!(health(&s)["state"], "off", "{s}");
+    assert_log_has_none_of(&env, &["HEALTH-REPLY", "Fine now"]);
+}
+
+const AT_MAC: (&str, &str) = ("CLOTHOD_TEST_AT_MAC_MS", "1500");
+
+/// A pane the Mac app shows, and the user typing in it there.
+async fn mac_pane(mac: &Client) -> u64 {
+    let a = new_pane(mac, sh()).await;
+    mac.request("pane.subscribe", json!({"pane": a})).await.unwrap();
+    a
+}
+
+async fn type_in(c: &Client, pane: u64) {
+    c.request("pane.input", json!({"pane": pane, "data": " "})).await.unwrap();
+}
+
+/// A helper slower than the window doesn't delay the rise: the heuristic labels it, and the
+/// model's label and text arrive after, together.
+#[tokio::test]
+async fn a_slow_helper_does_not_delay_a_settled_rise() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[("CLOTHOD_TEST_SETTLE_MS", "500"), ("CLOTHOD_SUMMARY_WAIT_MS", "300")], |e| fake_summarizer(e, "slow", "sleep 3; echo NEEDS_USER; echo 'It wants a decision.'"));
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    let t = Instant::now();
+    report(&c, p, "done", "Compared both databases.").await;
+    let e = next_agent_event(&mut c, T, |e| e["pane"] == p && e["agent"]["attention"] == true).await.expect("the rise");
+    assert!(t.elapsed() < Duration::from_millis(2500), "the rise waited for the helper: {:?}", t.elapsed());
+    assert_eq!((e["agent"]["needs_user"].as_bool(), e["agent"]["summary_pending"].as_bool()), (Some(false), Some(true)), "the heuristic's label meanwhile: {e}");
+    let (at, body) = relay.next();
+    assert!(at - t < Duration::from_millis(2500), "the push waited for the helper: {:?}", at - t);
+    assert_eq!((opened(&body)["nu"].as_bool(), body["silent"].as_bool()), (Some(false), Some(true)), "{body}");
+    let a = wait_agent(&c, p, "the model's label", |a| a["summary_pending"] == false).await;
+    assert_eq!((a["needs_user"].as_bool(), a["summary"].as_str()), (Some(true), Some("It wants a decision.")), "{a}");
+    relay.none_for(Duration::from_millis(500));
+}
+
+/// The user is at the Mac, in another pane: the Mac shows the alert at once and the phone gets
+/// it only when the hold ends with nobody having looked.
+#[tokio::test]
+async fn pushes_for_other_panes_hold_while_the_user_is_at_the_mac() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mut mac = client_named(&env, "clotho-mac/test").await;
+    mac.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    report(&c, b, "running", "").await;
+    let t = Instant::now();
+    type_in(&mac, a).await;
+    report(&c, b, "waiting", "HOLD-ASK-2207 may it deploy?").await;
+    let e = next_agent_event(&mut mac, Duration::from_secs(2), |e| e["pane"] == b && e["agent"]["attention"] == true).await.expect("the Mac hears at once");
+    assert_eq!((e["agent"]["state"].as_str(), e["agent"]["quiet"].as_bool()), (Some("waiting"), Some(false)), "{e}");
+    relay.none_for(Duration::from_millis(1000));
+    assert_eq!(push_log(&env, "held").len(), 1, "{}", env.log());
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+
+    let (at, body) = relay.next();
+    assert!(at - t >= Duration::from_millis(1500), "sent early: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "waiting");
+    relay.none_for(Duration::from_millis(1200));
+    assert_eq!(wait_push_log(&env, "sent", 1).await.len(), 1, "{}", env.log());
+    assert!(push_log(&env, "dropped").is_empty(), "{}", env.log());
+    assert_log_has_none_of(&env, &["HOLD-ASK-2207", "may it deploy"]);
+}
+
+/// A held push goes away when someone looks at that pane (focus, typing), acknowledges it, or
+/// the agent works again.
+#[tokio::test]
+async fn a_held_push_is_dropped_when_seen_or_cleared() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let b = new_pane(&c, sh()).await;
+        mac.request("pane.subscribe", json!({"pane": b})).await.unwrap();
+        report(&c, b, "running", "").await;
+        held.push(b);
+    }
+    let (focused, typed, acked, resumed) = (held[0], held[1], held[2], held[3]);
+    type_in(&mac, a).await;
+    for b in &held {
+        report(&c, *b, "waiting", "DROP-ASK-3306 may it deploy?").await;
+        assert_eq!(pane_agent(&c, *b).await["attention"], true);
+    }
+    wait_push_log(&env, "held", 4).await;
+    relay.none_for(Duration::from_millis(300));
+
+    mac.request("pane.focus", json!({"pane": focused})).await.unwrap();
+    type_in(&mac, typed).await;
+    c.request("agent.ack", json!({"pane": acked})).await.unwrap();
+    report(&c, resumed, "running", "").await;
+    // Past the hold: none of the four went out.
+    relay.none_for(Duration::from_millis(2500));
+    let dropped = wait_push_log(&env, "dropped", 4).await;
+    assert_eq!(dropped.len(), 4, "{dropped:?}");
+    assert!(dropped.iter().all(|l| l.contains("reason=")), "each says why: {dropped:?}");
+    for b in &held {
+        assert_eq!(dropped.iter().filter(|l| l.contains(&format!("pane={b} "))).count(), 1, "pane {b}: {dropped:?}");
+    }
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+    // Looking is not resolving: attention stays for the ones only seen.
+    assert_eq!(pane_agent(&c, focused).await["attention"], true);
+    assert_eq!(pane_agent(&c, typed).await["attention"], true);
+    assert_log_has_none_of(&env, &["DROP-ASK-3306", "may it deploy"]);
+}
+
+/// A Mac app whose user is in another machine's panes says so with `client.active`.
+#[tokio::test]
+async fn client_active_marks_the_mac_present() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/0.1.31").await;
+    register(&c, "phone", &relay.url).await;
+    let b = new_pane(&c, sh()).await;
+    report(&c, b, "running", "").await;
+    let t = Instant::now();
+    assert_eq!(mac.request("client.active", json!({})).await.unwrap(), json!({}));
+    report(&c, b, "waiting", "May it deploy?").await;
+    relay.none_for(Duration::from_millis(1000));
+    assert_eq!(push_log(&env, "held").len(), 1, "{}", env.log());
+    let (at, body) = relay.next();
+    assert!(at - t >= Duration::from_millis(1500), "sent early: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "waiting");
+}
+
+/// Only the Mac app holds pushes: the phone itself, the CLI and test clients don't.
+#[tokio::test]
+async fn a_phone_or_cli_client_does_not_hold() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    for name in ["clotho-ios/0.1", "test", "clotho-cli/0.1.31"] {
+        let other = client_named(&env, name).await;
+        let a = mac_pane(&other).await;
+        let b = new_pane(&c, sh()).await;
+        report(&c, b, "running", "").await;
+        type_in(&other, a).await;
+        // Whatever it answers them, it marks nobody present.
+        let _ = other.request("client.active", json!({})).await;
+        let t = Instant::now();
+        report(&c, b, "waiting", "May it deploy?").await;
+        let (at, body) = relay.next();
+        assert!(at - t < Duration::from_millis(1000), "{name} held it: {:?}", at - t);
+        assert_eq!(opened(&body)["p"], b, "{name}");
+    }
+    assert!(push_log(&env, "held").is_empty(), "{}", env.log());
+}
+
+/// At the pane itself nothing changed: an ask pushes at once (the user may have just stepped
+/// away), a finished turn is quiet.
+#[tokio::test]
+async fn the_same_pane_rule_is_unchanged() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let b = mac_pane(&mac).await;
+    report(&c, b, "running", "").await;
+    type_in(&mac, b).await;
+    let t = Instant::now();
+    report(&c, b, "waiting", "May it deploy?").await;
+    let (at, body) = relay.next();
+    assert!(at - t < Duration::from_millis(1000), "held: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "waiting");
+    assert!(push_log(&env, "held").is_empty(), "{}", env.log());
+
+    report(&c, b, "running", "").await;
+    type_in(&mac, b).await;
+    report(&c, b, "done", "Finished.").await;
+    let a = pane_agent(&c, b).await;
+    assert_eq!((a["attention"].as_bool(), a["quiet"].as_bool()), (Some(true), Some(true)), "{a}");
+    relay.none_for(Duration::from_millis(2000));
+}
+
+/// Every decision is in serve.log (sent, held, dropped and why), and none of the words: not the
+/// agent's message or its end, the rewrite, the user's prompt, or a command.
+#[tokio::test]
+async fn the_log_never_carries_text() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[("CLOTHOD_TEST_SETTLE_MS", "400"), ("CLOTHOD_TEST_AT_MAC_MS", "800")], |e| labelling(e, "words", "NEEDS_USER", "SUMMARY-TEXT-5512 wants an answer."));
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    let turn = |state: &str, message: &str| {
+        c.request(
+            "agent.report",
+            json!({"pane": b, "state": state, "kind": "claude", "message": message, "tail": "TAIL-TEXT-6604 shall it go on?", "tool": "Bash", "tool_input": "COMMAND-TEXT-2203 --force"}),
+        )
+    };
+    c.request("agent.report", json!({"pane": b, "state": "running", "kind": "claude", "prompt": "PROMPT-TEXT-4410 fix it"})).await.unwrap();
+
+    // Held at the Mac, then sent.
+    type_in(&mac, a).await;
+    turn("waiting", "MESSAGE-TEXT-8891 may it run this?").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["s"], "waiting");
+    wait_push_log(&env, "held", 1).await;
+    wait_push_log(&env, "sent", 1).await;
+    // Settled away.
+    report(&c, b, "running", "").await;
+    turn("done", "MESSAGE-TEXT-8892 half way.").await.unwrap();
+    report(&c, b, "running", "").await;
+    wait_push_log(&env, "dropped", 1).await;
+    // Settled, labelled, sent.
+    turn("done", "MESSAGE-TEXT-8893 all of it.").await.unwrap();
+    let r = opened(&relay.next().1);
+    assert_eq!((r["s"].as_str(), r["nu"].as_bool()), (Some("done"), Some(true)), "{r}");
+    assert!(r["sm"].as_str().unwrap().starts_with("SUMMARY-TEXT-5512"), "{r}");
+    wait_push_log(&env, "sent", 2).await;
+    // A failed delivery is a decision too.
+    relay.queue(&[500, 500, 500, 500]);
+    report(&c, b, "running", "").await;
+    turn("error", "MESSAGE-TEXT-8894 it broke.").await.unwrap();
+    relay.next();
+    wait_agent(&c, b, "the rewrite", |a| a["summary_pending"] == false).await;
+
+    assert_log_has_none_of(&env, &["MESSAGE-TEXT", "TAIL-TEXT", "SUMMARY-TEXT", "PROMPT-TEXT", "COMMAND-TEXT", "shall it go on", "wants an answer", "fix it", "--force"]);
 }

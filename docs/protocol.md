@@ -96,7 +96,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
                   "restore", "move", "git", "pane.move", "pane.focus",
-                  "summary"],
+                  "summary", "alerts"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -134,7 +134,11 @@ The first request on a connection must be `hello`. Any other request gets `hands
   client that focused a pane last sets its size, not the one that typed last, see
   [Resize](#resize); since 0.1.28), `summary` (agents' `summary` and `summary_pending`, the
   `notification_rewrite` setting and push records' `sm`, see
-  [Notification text](#notification-text); since 0.1.29).
+  [Notification text](#notification-text); since 0.1.29), `alerts` (fewer, clearer alerts:
+  agents' `needs_user` and `settling`, the settle window before a finished turn raises
+  `attention`, `agent.report`'s `tail`, the `client.active` request, the
+  `notification_rewrite_health` setting, and push records' `nu` with `/v1/push`'s `silent`, see
+  [Fewer, clearer alerts](#fewer-clearer-alerts); since 0.1.31).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -555,6 +559,7 @@ panes had none of the terminal variables, so programs in them (Claude Code) ran 
 | `pane.dismiss_restored` | `pane` | `{}`: clears the pane's `restored` for every client (a `pane` event). Idempotent; `not_found` for an unknown pane. See [Restore after restart](#restore-after-restart) |
 | `pane.search` | `pane`, `query`; optional `regex`, `case_sensitive` (both default false), `limit` (1–1000, default 100), `before` (`{line, col}`) | matches in the scrollback and screen, newest first; see [Searching scrollback](#searching-scrollback) |
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
+| `client.active` | – | `{}`: a Mac app says the user is at it right now (since 0.1.31, feature `alerts`); see [Fewer, clearer alerts](#fewer-clearer-alerts) |
 | `settings.get` | – | the settings object; see [Settings](#settings) |
 | `settings.set` | any settings to change, e.g. `scrollback_lines`, `notification_rewrite` | the settings object, plus `applied_panes`; see [Settings](#settings) |
 | `service.status` | – | the service object; see [Start at login](#start-at-login) |
@@ -581,8 +586,8 @@ frame.
 
 | `agent.decide` | `pane`, `request` (an id from the agent's `requests`), `decision` (`"allow"` or `"deny"`), `message?` (for deny: told to the agent, at most 300 chars) | `{}`. Answers that request only, once: `stale` if it was already answered, retired (answered in the terminal, the turn ended, its hook went away) or never existed. See [Permission requests](#permission-requests) |
 | `agent.permission` | `pane`, `pid`, `tool`, `tool_input?`, `key`, `kind?`, `session?` | Sent by `clothod report --claude-permission` (Claude Code's PermissionRequest hook), not by apps. The reply waits until a client decides: `{"decision": "allow"\|"deny", "message"?}`, or `{"retired": true}` |
-| `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both) | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
-| `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it) |
+| `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both), `tail?` (the end of the agent's last reply, at most 600 chars; since 0.1.31, feature `alerts`) | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
+| `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it). During a settle window (`settling`) it cancels the pending rise instead |
 | `agent.history` | `pane`; optional `limit` (1–200, default 200), `since` (unix seconds: entries after it), `session` | `{"pane", "entries": [..], "max": 200}`, oldest first; see [Agent history](#agent-history) |
 | `agent.mute` | `pane`, `muted` (bool) | `{"agent": <agent>}`: mutes or unmutes the pane's agent; see [Agents](#agents). `not_found` if the pane has no agent |
 
@@ -599,7 +604,7 @@ File access (`fs.*`) is described in [Files](#files).
 | `pane.resized` | `{"pane", "cols", "rows", "seq"}` | the pane's PTY size changed; see [Resize](#resize) |
 | `pane.resync` | `{"pane"}` | the client fell behind on this pane, and a SNAPSHOT follows; see [Output](#output) |
 | `pane.clipboard` | `{"pane", "target", "text"}` | the pane's application copied text with OSC 52; see [Clipboard](#clipboard-osc-52) |
-| `settings` | the settings object | a client changed a setting (`settings.set`); see [Settings](#settings) |
+| `settings` | the settings object | a client changed a setting (`settings.set`), or `notification_rewrite_health` changed; see [Settings](#settings) |
 | `service` | the service object | a client installed or removed the login unit; see [Start at login](#start-at-login) |
 
 `state`, `pane`, `bell`, `agent`, `settings` and `service` go only to connections that called `events.subscribe`. `pane.resized`,
@@ -624,6 +629,7 @@ them per machine, like "Start at login".
 ← {"id": 7, "result": {
      "scrollback_lines": 2000,
      "notification_rewrite": true,
+     "notification_rewrite_health": {"state": "ok", "reason": null, "at": 1763900000.5},
      "limits": {"scrollback_lines": {"min": 0, "max": 50000, "default": 2000}},
      "config": "/home/me/.config/clothod/config.toml"}}
 
@@ -650,6 +656,35 @@ them per machine, like "Start at login".
   model runs. Clients show it per machine (a switch such as "Rewrite notification text with
   Claude Haiku"), reading it from `settings.get` and the `settings` event; a daemon without the
   `summary` feature doesn't have it, so the switch is hidden there.
+- **`notification_rewrite_health`** (since 0.1.31, feature `alerts`): whether the rewrite works
+  on this machine, as `{"state", "reason", "at"}`. It is in the result of `settings.get` and
+  `settings.set` and in the `settings` event. **Read-only:** `settings.set` rejects it like any
+  key it doesn't know (`bad_request`).
+
+  | `state` | meaning |
+  |---|---|
+  | `"ok"` | the last rewrite that ran worked |
+  | `"failing"` | the last rewrite that ran failed; `reason` says why |
+  | `"unknown"` | the rewrite is on, but none has run since the daemon started |
+  | `"off"` | `notification_rewrite` is false |
+  | `"unavailable"` | there is no `claude` on this machine to run it |
+
+  `off` and `unavailable` are checked first, in that order. A rewrite answered from the cache
+  doesn't count as a run.
+  - `reason`: for `failing`, one line of at most about 130 characters, else `null`. It is the
+    helper's exit code and the first line it printed (`"exit 1: Not logged in · Please run
+    /login"`), a fixed phrase when `claude` printed an error as its answer (`"claude said: not
+    logged in"`, `api error`, `credit balance`, `invalid api key`, `rate limit`), or the time
+    limit (`"no answer within 30s"`). An answer that may be notification text is never put there.
+  - `at`: when that run ended, in unix seconds (a float), for `ok` and `failing`; `null` for the
+    other states.
+  - When a rewrite changes it, every connection that called `events.subscribe` gets a `settings`
+    event with the new object, so a client's settings view stays current. The daemon also writes a line to `clothod.log`
+    when it starts failing (once per reason) and when it works again.
+  - Clients show it under the rewrite switch: nothing extra for `ok`, `unknown` and `off`; "Not
+    working: " and the `reason` for `failing` (for example "Not working: Not logged in"); and
+    that Claude Code wasn't found for `unavailable`. While it fails, notifications still arrive,
+    with the agent's own words cleaned of Markdown.
 - `settings.set` takes only the keys it changes. It checks all of them first, so a bad value
   (`bad_request`: unknown key, wrong type, out of range) changes nothing. Then it writes the
   config file atomically, keeping its comments and other keys, and applies the change. A config
@@ -733,7 +768,8 @@ and otherwise:
 
 ```json
 {"kind": "claude", "state": "waiting", "source": "hook", "message": "Claude needs your permission to use Bash",
- "since": 1761512345.123, "attention": true, "muted": false, "session": "3f1c..."}
+ "since": 1761512345.123, "attention": true, "needs_user": true, "settling": false, "muted": false,
+ "session": "3f1c..."}
 ```
 
 | field | |
@@ -747,9 +783,11 @@ and otherwise:
 | `requests` | permission requests the agent is waiting on, oldest first: `[{"id", "tool", "summary"}]` (`"Bash"`, `"npm test"` or `null`). A client can answer one with `agent.decide` (Allow/Deny from the phone or the app). Empty when none. See [Permission requests](#permission-requests). Feature flag: `agent.decide` |
 | `turn_started` | unix seconds (float) when the current turn started (its prompt, or work resuming after the turn ended), or `null`. For `done` and `error`, `since - turn_started` is how long the turn took |
 | `since` | when `state` last changed, in **unix seconds as a float** |
-| `attention` | the agent needs the user. **Raised** only by exact signals: a hook-reported transition into `waiting`, `done` or `error` (including a hook report that takes over from detection in the same state, e.g. detection guessed `waiting` and then the hook reports `waiting`; that also sends an `agent` event whose `from` equals the state), or a terminal bell (BEL) from a detected agent. **Cleared** only when the agent works again (a transition into `running` or `starting` reported by a hook, or shown by Claude Code's title spinner), by `agent.ack` (the user resolved it), or when the agent goes away. Input never clears it: opening a pane makes a client send focus and mouse reports, and looking is not resolving. A typed reply clears it through the agent going back to work. Detection's guesses from output alone (busy read as `running`, quiet as `waiting`) neither raise nor clear it, since an app's redraw after a resize would read as work. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions**, unless `quiet` is true. Pushes (`push`) follow the same rises, except quiet ones |
-| `quiet` | the last rise of `attention` was quiet: the agent's turn ended (`done`) while the user was at the pane, meaning a client that shows the pane (subscribed) sent it input within the last 60 s. The user sees that turn end, so `attention` is raised (badge it, show it in the pane) but the daemon sends no push, and **clients must not post a notification for it** either. Decided when `attention` rises and kept until the next rise (through `agent.ack`), so it is in the `agent` and `pane` events of that rise. Always false for a rise into `waiting` or `error`: those notify even when the user just typed, since they may have stepped away and the agent is stuck until they answer. Absent (older daemons) means false |
-| `muted` | the user muted this agent (`agent.mute`). While muted, nothing raises its `attention` (hook `waiting`/`done`/`error`, BEL), so it never notifies or pushes; its `state` still updates as usual. Muting clears `attention`. It lasts for this agent: through restarts and upgrades of the daemon while the agent's process lives, and until `agent.mute` with `muted: false`. It is gone when the agent goes away (session end, exit), and a new agent in the pane starts unmuted. Owned by the daemon, like `attention`: muting on one device mutes it everywhere. Absent (older daemons) means false. Feature flag: `agent.mute` |
+| `attention` | the agent needs the user, or has finished and the user should know. **Raised** only by exact signals: a hook-reported transition into `waiting` or `error`, at once; a hook-reported `done`, after the settle window (about 30 s; see `settling`), and not at all if the agent works again first; or a terminal bell (BEL) from a detected agent. A hook report that takes over from detection in the same state counts as a transition (detection guessed `waiting` and then the hook reports `waiting`; a `done` taken over this way settles like any other). **Every rise arrives as an `agent` event.** A rise in the same state (a takeover, or the end of the settle window, when `state` has been `done` all along) is an `agent` event whose `from` equals the state. Before 0.1.31 (no `alerts` feature) a hook `done` raised it at once. **Cleared** only when the agent works again (a transition into `running` or `starting` reported by a hook, or shown by Claude Code's title spinner), by `agent.ack` (the user resolved it), or when the agent goes away. Input never clears it: opening a pane makes a client send focus and mouse reports, and looking is not resolving. A typed reply clears it through the agent going back to work. Detection's guesses from output alone (busy read as `running`, quiet as `waiting`) neither raise nor clear it, since an app's redraw after a resize would read as work. Owned by the daemon: acknowledging on one device clears it everywhere. **Clients should notify and badge on `attention` becoming true, not on state transitions**, unless `quiet` is true. Pushes (`push`) follow the same rises, except quiet ones |
+| `needs_user` | whether the user has to do something (`true`) or the agent only finished (`false`); `null` when not known: while the agent works, and possibly while a finished turn is still `settling`. Always `true` for `waiting` and `error`. For `done` it is decided from how the reply ends: a question to the user or a blocked turn is `true`, a plain finished turn `false`. The small model that writes `summary` decides it in the same call; until it answers, and when it can't, a text heuristic does. **Never `null` while `attention` is true on a hook-reported agent.** It may change together with `summary` while `summary_pending` is true (a `pane` event brings both) and is final after. Clients word the notification by it ("Needs you" or "Done") and play no sound for `false`; see [Fewer, clearer alerts](#fewer-clearer-alerts). Absent (older daemons) means not known: word the notification by `state`, with its sound, as before. Feature flag: `alerts` |
+| `settling` | a hook reported `done` and the settle window is running: `attention` has not risen for this turn yet. It turns false when the window ends (and `attention` rises, unless the agent is muted), when the agent works again or goes away, or on `agent.ack`. Clients show the agent as `done` meanwhile, without a badge or notification. Absent (older daemons) means false. Feature flag: `alerts` |
+| `quiet` | the last rise of `attention` was quiet: the agent's turn ended (`done`) while the user was at the pane, meaning a client that shows the pane (subscribed) sent it input within the last 60 s. For a rise after the settle window, that is decided when the window ends, and it is quiet if the user was at the pane when `done` was reported **or** is at the rise (otherwise a prompt typed 40 s before the turn ended would stop counting). The user sees that turn end, so `attention` is raised (badge it, show it in the pane) but the daemon sends no push, and **clients must not post a notification for it** either. Kept until the next rise (through `agent.ack`), so it is in the `agent` and `pane` events of that rise. Always false for a rise into `waiting` or `error`: those notify even when the user just typed, since they may have stepped away and the agent is stuck until they answer. Absent (older daemons) means false |
+| `muted` | the user muted this agent (`agent.mute`). While muted, nothing raises its `attention` (hook `waiting`/`done`/`error`, BEL, the end of a settle window), so it never notifies or pushes; its `state` still updates as usual. Muting clears `attention`. It lasts for this agent: through restarts and upgrades of the daemon while the agent's process lives, and until `agent.mute` with `muted: false`. It is gone when the agent goes away (session end, exit), and a new agent in the pane starts unmuted. Owned by the daemon, like `attention`: muting on one device mutes it everywhere. Absent (older daemons) means false. Feature flag: `agent.mute` |
 | `session` | the agent's own session id, if it reports one |
 | `summary` | what a notification about this agent should say: `message` as one or two plain sentences (at most 200 chars, no Markdown, one line), or `null` when there is no `message`. A small model's rewrite once it's ready, before that (and when there is none) `message` cleaned of Markdown. **Clients show `summary` in notifications and the Agents list, and fall back to `message` (cleaned of Markdown themselves) when it is absent** (older daemons). See [Notification text](#notification-text). Feature flag: `summary` |
 | `summary_pending` | a rewrite of this rise's text is under way, so `summary` may still change (a `pane` event brings it). Absent (older daemons) means false |
@@ -757,7 +795,9 @@ and otherwise:
 Changes reach clients in two ways. Every change to the field comes as a `pane` event, because
 the pane object changed. State transitions (including an agent appearing or going away) also
 come as an `agent` event, `{"pane", "agent", "from"}`, with the full new object (or `null`) and
-the previous state (or `null`), so clients can notify without diffing.
+the previous state (or `null`), so clients can notify without diffing. A rise of `attention` with
+no change of state (the end of the settle window, a hook taking over from detection) is an `agent`
+event too, with `from` equal to the state.
 
 **Clearing:** the field goes back to `null` when the agent reports that its session ended, when
 the agent's process exits (it's watched by pid), or when the pane closes.
@@ -767,38 +807,150 @@ the agent's process exits (it's watched by pid), or when the pane closes.
 Since 0.1.29 (feature `summary`). Agents write Markdown and long replies; a lock screen wants one
 or two plain sentences. So when an agent's `attention` rises and the rise isn't quiet, the daemon
 has a small model rewrite the agent's words, and every client and phone shows the same text
-(PLAN.md, "Notification text").
+(PLAN.md, "Notification text"). Since 0.1.31 (feature `alerts`) the same call also says whether
+the user is needed (`needs_user`), and for a hook-reported `done` it starts when `done` is
+reported, so the answer is usually there when the settle window ends
+([Fewer, clearer alerts](#fewer-clearer-alerts)).
 
 - **Who writes it:** Claude Haiku, run through the machine's own `claude` login
   (`claude -p --model haiku`), no API key. It gets the agent kind, the state (finished, error,
-  a question, or a permission ask), `message`, `prompt`, and for a wait the tool and its input,
-  and answers with at most about 160 characters of plain text. A permission ask says plainly
+  a question, or a permission ask), `message`, `prompt`, for a wait the tool and its input, and
+  (since 0.1.31) the end of the reply (`agent.report`'s `tail`, its last 600 characters), and
+  answers with at most about 160 characters of plain text. A permission ask says plainly
   what the agent wants to do. **Clients still show the exact tool and command** (`tool`/
   `tool_input`, `requests`) next to it, so what Allow approves is never only the model's words.
+- **One call, summary and label** (since 0.1.31, feature `alerts`): for a finished turn (`done`)
+  the same call also decides `needs_user`. The model is asked to start its answer with a line
+  that is exactly `NEEDS_USER` (the reply ends by asking the user something, waits on their
+  decision, or says it is blocked) or `DONE`, and to put the notification text on the next line:
+  ```
+  NEEDS_USER
+  Tests pass. Should I push the branch?
+  ```
+  The daemon reads the first non-empty line, in any case and with `*` or `` ` `` around it
+  ignored. If it is one of the two words, that is the label and the rest is the text. If not,
+  the whole answer is the text and the label comes from the heuristic. `waiting` and `error`
+  ask for no label: they always need the user.
+- **The heuristic** decides `needs_user` for `done` until the model answers, and for good when
+  it doesn't (the rewrite is off, fails, or gives no label). It looks only at the end of the
+  reply: `tail`, else `message` when that is under 300 characters (a longer one was cut, so its
+  end isn't known, and the answer is false). It is true when that text, with trailing spaces,
+  quote marks and Markdown marks dropped, ends with `?`, or when its last 200 characters hold one
+  of these as whole words, in any case: "let me know", "should I", "do you want", "would you
+  like", "which option", "please confirm", "waiting for your", "need your", "I need you to",
+  "blocked", "can't proceed", "cannot proceed", "unable to proceed". Otherwise false. It leans
+  towards false: a wrong "Done" is silent but still shown, a wrong "Needs you" is noise.
 - **Where it goes:** the agent's `summary`, and the push record's `sm` (docs/push.md). `message`
   and the record's `msg` stay exactly as the agent said them.
 - **Timing:** a push waits up to about 6 s for the rewrite. Without it by then it goes with the
   cleaned original in `sm`, and the rewrite still reaches the model if it finishes (within 30 s):
   `summary` changes in a `pane` event and `summary_pending` turns false. A client notifying on the
   rise can wait for that event while `summary_pending` is true (up to about 6 s, like the push),
-  or notify at once with the current `summary`.
+  or notify at once with the current `summary`. `needs_user` may change in that same `pane` event,
+  from the heuristic's answer to the model's, and is final once `summary_pending` is false. For a
+  hook-reported `done` the call starts when `done` is reported, not at the rise, so after the
+  settle window both are normally final already.
 - **Failures:** no `claude`, not logged in, out of quota, a timeout, an empty answer: `summary`
-  stays the cleaned original. Nothing is ever held back or dropped for it.
+  stays the cleaned original and `needs_user` the heuristic's. Nothing is ever held back or
+  dropped for it. The `notification_rewrite_health` setting says whether it works and why not
+  (see [Settings](#settings)).
 - **Cost:** at most two rewrites run at once. The same input is rewritten once (cached).
 - **Cleaning** (also applied to the model's answer): no `**`, `_`, `` ` `` or `~~` marks, no
   code fences, headings, quote marks or rules, link and image syntax replaced by their text,
   list items as `• item`, whitespace collapsed to single spaces.
-- **Safety:** the helper runs in a fresh empty private directory with
-  `--setting-sources project,local` (the user's own settings, hooks, plugins and MCP servers are
-  not loaded), `--tools ""`, `--strict-mcp-config`, `--no-session-persistence` (nothing in the
-  user's Claude history) and a clean environment (no `CLOTHO_*` pane variables, no API keys).
-  It isn't in any pane, so agent detection never sees it. An ephemeral (test) instance never runs
-  the real `claude`, only a program named by `$CLOTHOD_SUMMARIZER` (tests point it at a fake);
-  set on a normal instance, that variable replaces `claude` too.
+- **Safety:** the helper runs in a fresh empty private directory with `--safe-mode
+  --setting-sources user` (since 0.1.31), `--tools ""`, `--strict-mcp-config`,
+  `--no-session-persistence` (nothing in the user's Claude history) and a clean environment (no
+  `CLOTHO_*` pane variables, no API keys or `ANTHROPIC_*` from the daemon's own environment).
+  - Why the user settings: a machine's Claude login can live in the `env` block of the user
+    settings (`~/.claude/settings.json`), not only in the credentials file or keychain. Before
+    0.1.31 the helper ran with `--setting-sources project,local`, which skipped that file, so on
+    such a machine every rewrite failed with "Not logged in".
+  - Why safe mode: it keeps what the user settings would otherwise bring in turned off. Hooks,
+    plugins, MCP servers, skills and CLAUDE.md don't load, so the user's hooks never see the
+    helper's traffic; the login works as usual.
+  - A Claude Code too old to know `--safe-mode` refuses it ("unknown option"). The daemon then
+    runs that rewrite again with the earlier arguments (`--setting-sources project,local`, no
+    `--safe-mode`) and uses those until it restarts. Hooks, plugins and MCP servers stay off that
+    way too, but a login from the settings' `env` block isn't found: the health then says so.
+  - It isn't in any pane, so agent detection never sees it. An ephemeral (test) instance never runs
+    the real `claude`, only a program named by `$CLOTHOD_SUMMARIZER` (tests point it at a fake);
+    set on a normal instance, that variable replaces `claude` too.
 - **Off switch:** the `notification_rewrite` setting (see [Settings](#settings)). Off, `summary`
-  is the cleaned original and nothing runs.
-- **By hand:** `echo '{"state": "done", "message": "..."}' | clothod summarize` prints the cleaned
-  text and the rewrite (or why there is none) as this machine's daemon would make them.
+  is the cleaned original, `needs_user` is the heuristic's, and nothing runs.
+- **By hand:** `echo '{"state": "done", "message": "...", "tail": "..."}' | clothod summarize`
+  prints the cleaned text and the rewrite (or why there is none) as this machine's daemon would
+  make them, with the model's label (`needs_user`) and the heuristic's (`needs_user_guess`).
+
+### Fewer, clearer alerts
+
+Since 0.1.31 (feature `alerts`; PLAN.md, "Fewer, clearer alerts"). The daemon decides when an
+agent is worth an alert and what kind, so every client and the phone agree. Everything here is
+additive: a client that knows nothing of it keeps working and simply gets fewer rises.
+
+The rules:
+
+- **Settle.** A hook-reported `done` (also a hook taking over from detection in `done`) doesn't
+  raise `attention` at once when it wasn't raised already. The agent shows `state: "done"`,
+  `settling: true`, and a timer runs (30 s).
+  - The agent works again in the window (`running` or `starting`): the timer is cancelled and
+    `attention` never rises for that turn.
+  - `agent.ack` in the window cancels it too. A muted agent never raises.
+  - A second `done` report in the window keeps the same timer.
+  - Otherwise `attention` rises when the window ends: a `pane` event and an `agent` event whose
+    `from` is `"done"`, with `settling` false and `quiet` decided then (see `quiet`).
+  - `waiting` and `error` never settle. They raise at once, also during a window.
+  - The window survives a daemon restart or upgrade: it is re-armed from the saved `settling` and
+    `since`, and raises at once if it is already past.
+- **Label.** `needs_user` says whether the user has to act: always for `waiting` and `error`; for
+  `done`, when the reply ends by asking the user something or says it is blocked. To judge that
+  on a long reply, hooks send its end as `agent.report`'s `tail`: the last 600 characters, on one
+  line, of a reply longer than the 300 that `message` keeps. The `clothod report` binary adds it
+  from the payload the installed hooks already pass, so hooks need no reinstall. `tail` is only
+  input for the label and the summary: it is not in the agent object.
+- **At the Mac.** While the user is at the Mac app, the daemon holds pushes to the phone for
+  other panes for up to 2 minutes, from the rise. This applies to every state, `waiting` and
+  `error` included; the Mac app shows the alert itself. A held push is dropped when the pane's
+  `attention` clears (the agent works again, `agent.ack`, the agent goes away) or when any client
+  focuses that pane (`pane.focus`) or types in it. Otherwise it is sent when the 2 minutes end,
+  with the latest text and label. A quiet rise (the user at that pane) is never held or sent.
+  The daemon knows the user is at the Mac from input in its own panes, by a client whose hello
+  `client` starts with `clotho-mac`. For the other machines the Mac app says so with
+  **`client.active`**: no params, result `{}`. It means "the user is at this app now" and counts
+  for 2 minutes, while that connection stays open. A Mac app sends it to each connected machine
+  whose panes the user isn't typing in, while the user is using the app (again at least every
+  2 minutes; once a minute is enough), and not when it is idle or in the background. It changes no state and sends no event. From a client
+  that isn't a Mac app it is answered `{}` and ignored.
+
+- **Push.** The push record gets `nu` (the agent's `needs_user` as a bool, left out when not
+  known), inside the ciphertext. The `/v1/push` body gets `"silent": true`, in the clear, only
+  for state `done` with `needs_user` false, so the relay can leave the sound out; it is never
+  sent as false. docs/push.md has the record and the relay's side.
+- **Decision log.** Every push decision is one line in `clothod.log`:
+  `push <sent|held|dropped> pane=<id> agent=<kind> state=<state>
+  label=<needs-you|done|unknown> [silent] [devices=<n>] [reason=<why>]`. The reasons for
+  `dropped` are `quiet` (the user was at the pane), `seen at the Mac`, `attention cleared`
+  (while held), `settled away` (the agent worked again within the settle window), `muted`, and
+  `rate limited`. `sent` and `held` are logged only when a phone is registered. The log never
+  carries a message, summary, prompt, tool input, or a Workspace, Tab or machine name.
+- **Test timings**, like `CLOTHOD_TEST_PRESENCE_MS`: `CLOTHOD_TEST_SETTLE_MS` (default 30000;
+  0 means no settle, the behaviour before 0.1.31) and `CLOTHOD_TEST_AT_MAC_MS` (default 120000,
+  both the "within 2 minutes" and the hold; 0 turns the hold off). Client test suites that wait
+  for the rise after a `done` report set the first on their dev daemons.
+
+What a client does:
+
+- **Notify on the `attention` rise, as before** (the `agent` event, unless `quiet`). Nothing new
+  to wait for: the settle window has already passed when the rise arrives. Don't notify on
+  `state` becoming `done`, and don't badge an agent that is `settling`.
+- **Word it by `needs_user`:** "Needs you" for true, "Done" for false, with `summary` as the
+  text. A permission ask keeps its exact tool and command, as before.
+- **Play no sound for a plain Done** (`needs_user` false). Needs you keeps its sound.
+- `needs_user` and `summary` may change once while `summary_pending` is true. A client that
+  waits for the summary (up to about 6 s) gets the final label with it; one that notified at
+  once may replace the notification in place.
+- Against a daemon without `alerts`, `needs_user` and `settling` are absent: notify by `state`
+  as before.
 
 **Hooks and detection:**
 

@@ -90,6 +90,9 @@ pub(crate) struct Client {
     control_max: usize,
     /// The `client` string from `hello` and the connecting process, for the log.
     name: Mutex<String>,
+    /// A Mac app (its hello `client` starts with `clotho-mac`): the user being at it holds
+    /// pushes for other panes (`at_mac_hold`).
+    mac: AtomicBool,
     peer_pid: Option<u32>,
     /// The client's terminal colors (`hello.colors`, `client.colors`) and when it set them (the
     /// daemon's `colors_seq`): applications in the panes it uses query these.
@@ -199,8 +202,23 @@ struct Agent {
     /// A small model's rewrite of `message` for notifications (crate::summary), for this state
     /// and message; `summary` falls back to the message cleaned of Markdown.
     rewrite: Option<String>,
-    /// A rewrite is under way: `summary` may still change.
+    /// A rewrite is under way: `summary` (and `needs_user`) may still change.
     rewrite_pending: bool,
+    /// A rewrite was started for this state, message and time: a later rise doesn't run the
+    /// helper again (a failed one would fail again, and delay the push).
+    rewrite_tried: bool,
+    /// Whether the user has something to do: true when it waits or failed; for a finished turn,
+    /// the rewrite's label, else a guess from the text (`summary::needs_user_guess`). None
+    /// while it works, and for a finished turn that hasn't settled yet.
+    needs_user: Option<bool>,
+    /// A hook reported `done` and `attention` waits for `settle()` to pass: the agent working
+    /// again within that time means the turn wasn't over, and nothing is raised.
+    settling: bool,
+    /// The end of the agent's last reply (`agent.report` `tail`), for the rewrite and the
+    /// `needs_user` guess. Not sent to clients or stored.
+    tail: Option<String>,
+    /// The user was at the pane when the turn ended: the rise after the settle is quiet.
+    present_at_done: bool,
 }
 
 /// A tool call the agent asks permission for, answerable from a client (`agent.decide`) while
@@ -274,24 +292,7 @@ fn parse_palette(v: &Value) -> std::result::Result<clotho_vt::Palette, String> {
     })
 }
 
-/// A line in clothod.log, with the time (UTC): what closed panes and answered requests, which
-/// clients don't log anywhere else.
-fn log(msg: impl std::fmt::Display) {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let (secs, ms) = (t.as_secs() as i64, t.subsec_millis());
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = secs.div_euclid(86400) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    let sod = secs.rem_euclid(86400);
-    eprintln!("clothod: {y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{ms:03}Z {msg}", sod / 3600, sod / 60 % 60, sod % 60);
-}
+use crate::log::line as log;
 
 /// Whether input is the user's typing, not a terminal report (focus in/out, mouse).
 fn typed(data: &[u8]) -> bool {
@@ -369,6 +370,11 @@ impl Agent {
             requests: Vec::new(),
             rewrite: None,
             rewrite_pending: false,
+            rewrite_tried: false,
+            needs_user: v.get("needs_user").and_then(Value::as_bool),
+            settling: flag("settling"),
+            tail: None,
+            present_at_done: false,
         })
     }
 
@@ -390,6 +396,8 @@ impl Agent {
             "session": self.session,
             "summary": self.summary(),
             "summary_pending": self.rewrite_pending,
+            "needs_user": self.needs_user,
+            "settling": self.settling,
         })
     }
 
@@ -410,6 +418,7 @@ impl Agent {
             tool: req.map(|r| r.tool.clone()).or(self.tool.clone()).filter(|_| waiting),
             tool_input: req.map(|r| r.summary.clone()).unwrap_or(self.tool_input.clone()).filter(|_| waiting),
             permission: req.is_some(),
+            tail: self.tail.clone(),
         }
     }
 
@@ -487,7 +496,12 @@ struct Pane {
     git_cwd: Option<String>,
     git_loc: Option<crate::git::Location>,
     git: Option<Value>,
+    /// The rewrite under way for the agent (`rewrite_pending`), started when it began to
+    /// settle, with the agent's `since`: the rise hands it to the push, which waits for it.
+    rewrite_rx: Option<(f64, RewriteRx)>,
 }
+
+type RewriteRx = tokio::sync::watch::Receiver<Option<crate::summary::Rewrite>>;
 
 /// A client that sent input to a pane it shows within this long means the user is at that pane:
 /// a turn that ends then raises attention there, but sends no push to the phone.
@@ -496,6 +510,25 @@ const PRESENCE: Duration = Duration::from_secs(60);
 fn presence() -> Duration {
     std::env::var("CLOTHOD_TEST_PRESENCE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(PRESENCE)
 }
+
+/// A hook's `done` raises attention only after this long without the agent working again: turns
+/// that go on by themselves (a background task ending, a queued prompt) don't alert. 0: at once.
+const SETTLE: Duration = Duration::from_secs(30);
+
+fn settle() -> Duration {
+    std::env::var("CLOTHOD_TEST_SETTLE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(SETTLE)
+}
+
+/// The user used a Mac app (typed in another pane, or it said `client.active`) within this long:
+/// they are at the Mac, and a push to the phone is held that long (`at_mac_hold`). 0: never.
+const AT_MAC: Duration = Duration::from_secs(120);
+
+fn at_mac() -> Duration {
+    std::env::var("CLOTHOD_TEST_AT_MAC_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(AT_MAC)
+}
+
+/// Longest `tail` kept from an `agent.report` (chars, its end).
+const AGENT_TAIL_MAX: usize = 600;
 
 /// A request id no one can guess from another (the socket is the user's alone; this keeps a
 /// stale id from ever naming a newer request).
@@ -613,6 +646,7 @@ impl Pane {
             git_cwd: None,
             git_loc: None,
             git: None,
+            rewrite_rx: None,
         }
     }
 
@@ -683,6 +717,9 @@ pub struct Daemon {
     summary: Arc<crate::summary::Summarizer>,
     /// This daemon, for tasks that come back to it later.
     me: std::sync::OnceLock<std::sync::Weak<Daemon>>,
+    /// When a Mac app's user was last seen at it: typing in a pane (which one), or the app
+    /// saying so (`client.active`, no pane), and which client.
+    desktop_seen: Mutex<Option<(Instant, Option<u64>, u64)>>,
 }
 
 /// Work trees panes are in, and pull request lookups, shared by every pane on them.
@@ -1085,6 +1122,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         gh_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         summary: crate::summary::Summarizer::new(&dir, crate::config::notification_rewrite()),
         me: std::sync::OnceLock::new(),
+        desktop_seen: Mutex::new(None),
         layout: crate::layout::path().map(|path| LayoutWriter {
             path,
             host: platform::hostname(),
@@ -1577,6 +1615,12 @@ impl Daemon {
                         if a.muted {
                             p.muted_agent = None;
                         }
+                        // It was settling: the time left runs on (none left: it rises at once),
+                        // so a restart never loses the alert.
+                        if a.settling {
+                            let left = Duration::try_from_secs_f64(a.since + settle().as_secs_f64() - unix_now()).unwrap_or_default();
+                            self.arm_settle(p.id, a.since, left, false);
+                        }
                         p.agent = Some(a);
                     }
                 }
@@ -1962,9 +2006,18 @@ impl Daemon {
         }
     }
 
-    fn input(&self, client: u64, pane: u64, data: Vec<u8>) {
+    fn input(&self, client: &Client, pane: u64, data: Vec<u8>) {
         let Some(p) = self.pane(pane) else { return };
         let mut p = p.lock().unwrap();
+        // Anything but the report of the app losing focus: the user is at that Mac.
+        if client.mac.load(Ordering::Relaxed) && data != b"\x1b[O" {
+            *self.desktop_seen.lock().unwrap() = Some((Instant::now(), Some(pane), client.id));
+        }
+        // Typing in the pane: they have seen what it wanted (a held push is dropped).
+        if typed(&data) {
+            self.push.seen(pane);
+        }
+        let client = client.id;
         // Input never clears an agent's attention: opening a pane alone sends focus reports and
         // mouse motion. A reply makes the agent work again, and that clears it (set_agent).
         // Input marks the user present, but never picks the size: focus does (`pane.focus`).
@@ -1983,6 +2036,15 @@ impl Daemon {
         if seen {
             self.persist();
         }
+    }
+
+    /// How long a push for `pane` is held because the user is at a Mac: a Mac app that is still
+    /// connected saw them within `at_mac()`, somewhere other than this pane (being at the pane
+    /// itself is `user_present`). None: not at a Mac.
+    fn at_mac_hold(&self, pane: u64) -> Option<Duration> {
+        let hold = at_mac();
+        let (at, seen, client) = (*self.desktop_seen.lock().unwrap())?;
+        (at.elapsed() < hold && seen != Some(pane) && self.clients.lock().unwrap().contains_key(&client)).then_some(hold)
     }
 
     /// The colors applications in the pane get when they ask (OSC 4/10/11/12): those of the
@@ -2047,6 +2109,8 @@ impl Daemon {
         let old = p.agent.clone();
         let from = old.as_ref().map(|a| a.state.clone());
         let mut rewrite = None;
+        // The rewrite's run starts here (None: none started); its end is awaited below.
+        let mut started = None;
         if let Some(a) = new.as_mut() {
             // Muting belongs to this agent: kept while it's the same one, restored after a
             // restart when it shows up again, gone with a new one.
@@ -2065,42 +2129,85 @@ impl Daemon {
                 // hook or by Claude's title, never by a guess from output (or by input: the
                 // user looking at a pane sends focus and mouse reports; see `input`). Also
                 // cleared by agent.ack and when the agent goes away.
-                let raise = a.source == "hook" && matches!(a.state.as_str(), "waiting" | "done" | "error");
+                let hook = a.source == "hook";
+                // A hook's `done` settles first (`settle()`): agents often go on by themselves
+                // right after a turn ends, and that is no reason to call the user. Waiting and
+                // errors raise at once; so does a `done` when settling is off.
+                let settle_now = hook && a.state == "done" && !had && !settle().is_zero() && !a.muted;
+                let raise = hook && matches!(a.state.as_str(), "waiting" | "done" | "error") && !settle_now;
                 let working = !a.guess && matches!(a.state.as_str(), "running" | "starting");
                 a.attention = raise || (had && !working);
+                a.settling = settle_now;
+                a.present_at_done = a.state == "done" && p.user_present();
+                // Waiting and errors need the user. A finished turn may: the rewrite says (or
+                // the guess below, once attention is up).
+                a.needs_user = (hook && matches!(a.state.as_str(), "waiting" | "error")).then_some(true);
             }
             if a.muted {
                 // Nothing raises a muted agent's attention (hooks, BEL), so it never pushes.
+                if a.attention && !had {
+                    self.push.dropped(p.id, &a.kind, &a.state, a.needs_user, "muted");
+                }
                 a.attention = false;
+                a.settling = false;
+            }
+            // Never unknown while attention is up.
+            if a.attention && a.needs_user.is_none() {
+                a.needs_user = Some(a.state != "done" || crate::summary::needs_user_guess(a.message.as_deref(), a.tail.as_deref()));
+            }
+            // The agent went on working before its `done` settled: that turn's end is no news.
+            if let Some(o) = old.as_ref().filter(|o| o.settling && matches!(a.state.as_str(), "running" | "starting")) {
+                self.push.dropped(p.id, &o.kind, &o.state, o.needs_user, "settled away");
             }
             // A turn that ends while the user is at the pane needs no push or notification:
-            // they see it end. Waiting (a permission prompt, a question) and errors always do:
-            // the user may have stepped away right after typing, and the agent is stuck until
-            // they answer.
+            // they see it end (at the pane when it ended, or when it settled). Waiting (a
+            // permission prompt, a question) and errors always do: the user may have stepped
+            // away right after typing, and the agent is stuck until they answer.
             let rose = a.attention && !old.as_ref().is_some_and(|o| o.attention);
-            a.quiet = if rose { a.state == "done" && p.user_present() } else { old.as_ref().is_some_and(|o| o.quiet) };
+            a.quiet = if rose { a.state == "done" && (p.user_present() || a.present_at_done) } else { old.as_ref().is_some_and(|o| o.quiet) };
             a.since = match &old {
                 Some(o) if !changed => o.since,
                 _ => unix_now(),
             };
             // A rewrite belongs to its state and message: kept while they are, gone with them.
             match old.as_ref().filter(|o| o.state == a.state && o.message == a.message && o.since == a.since) {
-                Some(o) => (a.rewrite, a.rewrite_pending) = (o.rewrite.clone(), o.rewrite_pending),
-                None => (a.rewrite, a.rewrite_pending) = (None, false),
+                Some(o) => (a.rewrite, a.rewrite_pending, a.rewrite_tried) = (o.rewrite.clone(), o.rewrite_pending, o.rewrite_tried),
+                None => (a.rewrite, a.rewrite_pending, a.rewrite_tried) = (None, false, false),
             }
-            // Each rise that notifies gets its text rewritten (crate::summary).
-            if rose && !a.quiet {
-                rewrite = self.summary.start(a.summary_input());
-                a.rewrite = None;
-                a.rewrite_pending = rewrite.is_some();
+            // Each rise that notifies gets its text rewritten (crate::summary), and so does a
+            // turn's end as it starts to settle (unless the user is at the pane: its rise will
+            // be quiet), so the text and the label are there when it rises. The rise doesn't
+            // start a second one for the same state, message and time.
+            let entered = a.settling && !old.as_ref().is_some_and(|o| o.settling && o.since == a.since);
+            if ((rose && !a.quiet) || (entered && !a.present_at_done)) && !a.rewrite_tried {
+                started = self.summary.start(a.summary_input());
+                a.rewrite_pending = started.is_some();
+                a.rewrite_tried = started.is_some();
             }
+            // The push for a rise waits for the rewrite still under way.
+            if !a.rewrite_pending {
+                p.rewrite_rx = None;
+            } else if let Some(rx) = &started {
+                p.rewrite_rx = Some((a.since, rx.clone()));
+            }
+            if rose && !a.quiet && a.rewrite_pending {
+                rewrite = p.rewrite_rx.as_ref().filter(|(since, _)| *since == a.since).map(|(_, rx)| rx.clone());
+            }
+        } else {
+            p.rewrite_rx = None;
         }
         if new == old {
             return;
         }
         p.agent = new;
-        if let (Some(rx), Some(a)) = (rewrite.clone(), p.agent.as_ref()) {
+        if let (Some(rx), Some(a)) = (started, p.agent.as_ref()) {
             self.await_rewrite(p.id, a, rx);
+        }
+        // Settling starts its timer, once for that `done` (a second report of it keeps it).
+        if let Some(a) = p.agent.as_ref().filter(|a| a.settling) {
+            if !old.as_ref().is_some_and(|o| o.settling && o.since == a.since) {
+                self.arm_settle(p.id, a.since, settle(), true);
+            }
         }
         // Live Activities following this pane: kind, state, times, and the detail a
         // notification carries (the tool and its input; the summary when it waits or ends).
@@ -2143,9 +2250,12 @@ impl Daemon {
                 tab,
                 project: dir,
                 summary: a.summary(),
+                needs_user: a.needs_user,
             });
             let quiet = p.agent.as_ref().is_some_and(|a| a.quiet);
-            self.push.attention(p.id, attention(&p.agent), alert, quiet, rewrite);
+            // At a Mac, but not at this pane: the phone hears of it only if they don't look.
+            let hold = if attention(&p.agent) { self.at_mac_hold(p.id) } else { None };
+            self.push.attention(p.id, attention(&p.agent), alert, quiet, rewrite, hold);
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
         let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str()) || (!attention(&old) && attention(&p.agent));
@@ -2155,23 +2265,67 @@ impl Daemon {
         }
     }
 
-    /// When the rewrite started for `a` ends: its text becomes the agent's `summary` (a `pane`
-    /// event, and Live Activities follow), if the agent is still in that state with that message.
-    /// A failed rewrite only clears `summary_pending`.
-    fn await_rewrite(&self, pane: u64, a: &Agent, mut rx: tokio::sync::watch::Receiver<Option<String>>) {
+    /// When the rewrite started for `a` ends: its text becomes the agent's `summary` and its
+    /// label the agent's `needs_user` (a `pane` event, and Live Activities follow), if the agent
+    /// is still in that state with that message. A failed rewrite only clears `summary_pending`.
+    /// Clients hear (`settings`) when the run changed whether rewrites work.
+    fn await_rewrite(&self, pane: u64, a: &Agent, mut rx: RewriteRx) {
         let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) else { return };
         let (state, message, since) = (a.state.clone(), a.message.clone(), a.since);
+        let health = |d: &Daemon| {
+            let h = d.summary.health_json();
+            (h["state"].clone(), h["reason"].clone())
+        };
+        let before = health(self);
         tokio::spawn(async move {
-            let text = rx.wait_for(Option::is_some).await.ok().and_then(|v| v.clone());
+            let done = rx.wait_for(Option::is_some).await.ok().and_then(|v| v.clone());
+            if health(&me) != before {
+                me.broadcast("settings", me.settings_json());
+            }
             let Some(pp) = me.pane(pane) else { return };
             let mut p = pp.lock().unwrap();
             let Some(a) = p.agent.as_mut().filter(|a| a.state == state && a.message == message && a.since == since && a.rewrite_pending) else { return };
             a.rewrite_pending = false;
-            a.rewrite = text;
+            if let Some(r) = done {
+                a.rewrite = Some(r.text);
+                // The model's label decides for a finished turn; waiting and errors stay true.
+                if a.state == "done" {
+                    a.needs_user = r.needs_user.or(a.needs_user);
+                }
+            }
             let live = a.live();
+            p.rewrite_rx = None;
             me.push.agent(pane, live);
             me.pane_event(&p);
         });
+    }
+
+    /// Start the timer of a settling `done` (the agent's `since` names it): `finish_settle`
+    /// after `wait`. `save`: store the state first (not waiting for the next tick), so a restart
+    /// right after the turn ended still finds it settling.
+    fn arm_settle(&self, pane: u64, since: f64, wait: Duration, save: bool) {
+        let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) else { return };
+        tokio::spawn(async move {
+            if save {
+                me.persist();
+            }
+            tokio::time::sleep(wait).await;
+            me.finish_settle(pane, since);
+        });
+    }
+
+    /// The settle time of the `done` reported at `since` passed. If the agent is still there,
+    /// done and settling (it didn't go on, wasn't acknowledged or cleared), its attention rises
+    /// now: an `agent` event with `from` equal to its state, a `pane` event, and the push.
+    fn finish_settle(&self, pane: u64, since: f64) {
+        let Some(pp) = self.pane(pane) else { return };
+        let mut p = pp.lock().unwrap();
+        let Some(mut a) = p.agent.clone().filter(|a| a.state == "done" && a.settling && a.since == since) else { return };
+        a.settling = false;
+        a.attention = true;
+        // The rewrite's label if it came in time (a later one still replaces the guess).
+        a.needs_user = a.needs_user.or_else(|| Some(crate::summary::needs_user_guess(a.message.as_deref(), a.tail.as_deref())));
+        self.set_agent(&mut p, Some(a));
     }
 
     /// `agent.mute`: set or clear the pane's agent's `muted`. Muting clears attention.
@@ -2184,11 +2338,12 @@ impl Daemon {
         a.muted = on;
         if on {
             a.attention = false;
+            a.settling = false;
         }
         p.agent = Some(a);
         p.record(if on { "mute" } else { "unmute" }, Some(&old.state), None);
         if old.attention && on {
-            self.push.attention(p.id, false, None, false, None);
+            self.push.attention(p.id, false, None, false, None, None);
         }
         self.pane_event(p);
         self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": old.state}));
@@ -2232,6 +2387,11 @@ impl Daemon {
                     requests: Vec::new(),
                     rewrite: None,
                     rewrite_pending: false,
+                    rewrite_tried: false,
+                    needs_user: None,
+                    settling: false,
+                    tail: None,
+                    present_at_done: false,
                 });
                 // Another process of that kind (quit and started again): not the same agent.
                 let pgrp = fg.as_ref().map(|f| f.pgrp);
@@ -2382,6 +2542,15 @@ impl Daemon {
             None => (prev.as_ref().and_then(|a| a.tool.clone()), prev.as_ref().and_then(|a| a.tool_input.clone())),
         };
         let turn_started = if fresh { None } else if new_turn { Some(unix_now()) } else { prev.as_ref().and_then(|a| a.turn_started) };
+        // What `set_agent` keeps only while the state stays: a second `done` keeps its timer.
+        let same = prev.as_ref().filter(|a| a.state == state);
+        // The end of the reply that finished the turn (its last AGENT_TAIL_MAX chars).
+        let tail = p.get("tail").and_then(Value::as_str).filter(|_| state == "done").map(|t| {
+            let skip = t.chars().count().saturating_sub(AGENT_TAIL_MAX);
+            clotho_vt::printable(&t.chars().skip(skip).collect::<String>(), AGENT_TAIL_MAX)
+        });
+        let tail = tail.filter(|t| !t.is_empty()).or_else(|| same.and_then(|a| a.tail.clone()));
+        let (needs_user, settling, present_at_done) = same.map(|a| (a.needs_user, a.settling, a.present_at_done)).unwrap_or_default();
         let a = Agent {
             kind: kind.or(prev.as_ref().map(|a| a.kind.clone())).unwrap_or_else(|| "other".into()),
             state: state.into(),
@@ -2409,6 +2578,11 @@ impl Daemon {
             },
             rewrite: None,
             rewrite_pending: false,
+            rewrite_tried: false,
+            needs_user,
+            settling,
+            tail,
+            present_at_done,
         };
         self.set_agent(&mut pp, Some(a));
         Ok(json!({}))
@@ -2573,6 +2747,7 @@ impl Daemon {
             kill: tokio::sync::Notify::new(),
             control_max: control_max(),
             name: Mutex::new(String::new()),
+            mac: AtomicBool::new(false),
             peer_pid,
             colors: Mutex::new(None),
         });
@@ -2658,6 +2833,7 @@ impl Daemon {
                             hello = true;
                             let name = params.get("client").and_then(Value::as_str).unwrap_or("");
                             *client.name.lock().unwrap() = clotho_vt::printable(name, 64);
+                            client.mac.store(name.starts_with("clotho-mac"), Ordering::Relaxed);
                             if !name.starts_with("clothod-") {
                                 client.real.store(true, Ordering::SeqCst);
                                 self.had_real_client.store(true, Ordering::SeqCst);
@@ -2684,7 +2860,7 @@ impl Daemon {
                         self.stop.notify_one();
                     }
                 }
-                Frame::Input { pane, data } if hello => self.input(id, pane, data),
+                Frame::Input { pane, data } if hello => self.input(&client, pane, data),
                 Frame::FileData { stream, offset, flags, data } if hello => crate::fs::data(&client, stream, offset, flags, data),
                 _ => {}
             }
@@ -2738,7 +2914,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary", "alerts"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -2757,6 +2933,13 @@ impl Daemon {
             "client.colors" => {
                 let colors = p.get("colors").ok_or_else(|| err("bad_request", "missing colors (null clears them)"))?;
                 self.set_client_colors(client, Some(colors))?;
+                Ok(json!({}))
+            }
+            "client.active" => {
+                // A Mac app: its user is at it (not in any pane of this machine).
+                if client.mac.load(Ordering::Relaxed) {
+                    *self.desktop_seen.lock().unwrap() = Some((Instant::now(), None, client.id));
+                }
                 Ok(json!({}))
             }
             "debug.stats" => {
@@ -2784,6 +2967,8 @@ impl Daemon {
                 let mut pp = pp.lock().unwrap();
                 if let Some(mut a) = pp.agent.clone() {
                     a.attention = false;
+                    // Seen while it settled: nothing rises later.
+                    a.settling = false;
                     self.set_agent(&mut pp, Some(a));
                 }
                 Ok(json!({}))
@@ -3031,6 +3216,8 @@ impl Daemon {
                 }
                 self.focus_size(&mut pp, client.id);
                 self.use_colors_of(&mut pp, client.id);
+                // The user looks at it: a push held for this pane is dropped.
+                self.push.seen(pane);
                 Ok(json!({"cols": pp.cols, "rows": pp.rows}))
             }
             "pane.resize" => {
@@ -3057,7 +3244,7 @@ impl Daemon {
                 if self.pane(pane).is_none() {
                     return Err(err("not_found", format!("no pane {pane}")));
                 }
-                self.input(client.id, pane, data.as_bytes().to_vec());
+                self.input(client, pane, data.as_bytes().to_vec());
                 Ok(json!({}))
             }
             "pane.keys" => {
@@ -3075,7 +3262,7 @@ impl Daemon {
                     bytes.extend(clotho_vt::encode_key(modes, k).map_err(|e| err("bad_request", e))?);
                 }
                 if !bytes.is_empty() {
-                    self.input(client.id, pane, bytes);
+                    self.input(client, pane, bytes);
                 }
                 Ok(json!({}))
             }
@@ -3160,6 +3347,8 @@ impl Daemon {
         json!({
             "scrollback_lines": self.scrollback.load(Ordering::Relaxed),
             "notification_rewrite": self.summary.enabled(),
+            // Read-only: whether rewrites work (`settings.set` rejects it).
+            "notification_rewrite_health": self.summary.health_json(),
             "limits": {"scrollback_lines": {"min": 0, "max": crate::config::MAX_SCROLLBACK, "default": crate::config::DEFAULT_SCROLLBACK}},
             "config": crate::config::path().map(|p| p.to_string_lossy().into_owned()),
         })

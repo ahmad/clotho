@@ -46,8 +46,10 @@ with no clients and no panes, or when its last client disconnects (exit).
   ps         list every clothod process of this user (role, runtime dir, build, pid, age);
              anything not belonging to the default instance is marked extra
   summarize  read an agent's status as JSON on stdin (kind, state, message, and optional
-             prompt, tool, tool_input, permission) and print what a notification would say:
-             the message cleaned of Markdown, and the claude (Haiku) rewrite or why there is none
+             prompt, tool, tool_input, permission, tail) and print what a notification would
+             say: the message cleaned of Markdown, the claude (Haiku) rewrite or why there is
+             none, and whether the turn needs the user (the model's label, and the guess from
+             the text)
   build-id [FILE]
              print the install id (<version>-<hash>) of FILE, or of this binary
   version    print the version and build id
@@ -488,7 +490,9 @@ async fn summarize() -> Result<()> {
         tool: s("tool"),
         tool_input: s("tool_input"),
         permission: v.get("permission").and_then(Value::as_bool).unwrap_or(false),
+        tail: s("tail"),
     };
+    let guess = clothod::summary::needs_user_guess(input.message.as_deref(), input.tail.as_deref());
     let plain = input.message.as_deref().map(clothod::summary::plain);
     let scratch = std::env::temp_dir().join(format!("clothod-summarize-{}", std::process::id()));
     std::fs::create_dir_all(&scratch)?;
@@ -499,8 +503,8 @@ async fn summarize() -> Result<()> {
     };
     let _ = std::fs::remove_dir_all(&scratch);
     let out = match rewrite {
-        Ok(t) => json!({"plain": plain, "rewrite": t, "ms": started.elapsed().as_millis() as u64}),
-        Err(e) => json!({"plain": plain, "error": e, "ms": started.elapsed().as_millis() as u64}),
+        Ok(r) => json!({"plain": plain, "rewrite": r.text, "needs_user": r.needs_user, "needs_user_guess": guess, "ms": started.elapsed().as_millis() as u64}),
+        Err(e) => json!({"plain": plain, "error": e, "needs_user_guess": guess, "ms": started.elapsed().as_millis() as u64}),
     };
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())

@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,9 @@ pub struct Alert {
     /// `message` (or, without one, the tool it asks about) as one or two plain sentences: a
     /// small model's rewrite (crate::summary), else the message cleaned of Markdown.
     pub summary: Option<String>,
+    /// Whether the user has something to do (true for `waiting` and `error`; for `done` the
+    /// rewrite's or the heuristic's call). None: not known.
+    pub needs_user: Option<bool>,
 }
 
 impl Alert {
@@ -109,6 +113,9 @@ struct PaneState {
     /// The current rise is quiet: the user is at the pane (no push for it, now or delayed).
     quiet: bool,
     alert: Option<Alert>,
+    /// The push for this rise waits because the user is at the Mac (see [`Push::attention`]):
+    /// the rise and when the hold began. Cleared when it is sent or dropped.
+    held: Option<(u64, Instant)>,
 }
 
 /// A Live Activity following one pane's agent on one phone (`push.activity`).
@@ -236,6 +243,48 @@ struct Inner {
 pub struct Push {
     path: PathBuf,
     inner: Mutex<Inner>,
+    /// How many panes are held, so [`Push::seen`] (called per keystroke) costs one load when
+    /// none is.
+    held: AtomicUsize,
+}
+
+/// A plain finished turn: delivered without a sound (`silent` on `/v1/push`).
+fn silent(a: &Alert) -> bool {
+    a.state == "done" && a.needs_user == Some(false)
+}
+
+/// One push decision for clothod.log:
+/// `push <sent|held|dropped> pane=<id> agent=<kind> state=<state> label=<needs-you|done|unknown>
+/// [silent] [devices=<n>] [reason=<...>]`. Never the alert's texts or the machine's label.
+fn decision(what: &str, pane: u64, kind: &str, state: &str, needs_user: Option<bool>, devices: Option<usize>, reason: Option<&str>) -> String {
+    // Kind and state are short words, but a reported kind is any text: keep the line one line.
+    let word = |w: &str| -> String {
+        let w: String = w.chars().take(32).map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).collect();
+        if w.is_empty() { "-".into() } else { w }
+    };
+    let label = match needs_user {
+        Some(true) => "needs-you",
+        Some(false) => "done",
+        None => "unknown",
+    };
+    let mut line = format!("push {what} pane={pane} agent={} state={} label={label}", word(kind), word(state));
+    // Only a push that went out was silent.
+    if what == "sent" && state == "done" && needs_user == Some(false) {
+        line.push_str(" silent");
+    }
+    if let Some(n) = devices {
+        line.push_str(&format!(" devices={n}"));
+    }
+    if let Some(r) = reason {
+        line.push_str(&format!(" reason={r}"));
+    }
+    line
+}
+
+/// Log a decision about `alert` (None: an agent that is gone).
+fn log_alert(what: &str, pane: u64, alert: Option<&Alert>, devices: Option<usize>, reason: Option<&str>) {
+    let (kind, state, nu) = alert.map(|a| (a.kind.as_str(), a.state.as_str(), a.needs_user)).unwrap_or(("-", "-", None));
+    crate::log::line(decision(what, pane, kind, state, nu, devices, reason));
 }
 
 fn unix_now() -> f64 {
@@ -272,7 +321,7 @@ pub fn open(private_b64: &str, ciphertext_b64: &str, aad: &[u8]) -> Option<Vec<u
 }
 
 /// The record a phone decrypts: `{"v":1, "m", "p", "k", "s", "msg", "t"}`, plus what of
-/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `sm`, `d`, `rq` the alert has (docs/push.md).
+/// `w`, `wid`, `tb`, `pj`, `q`, `tool`, `cmd`, `sm`, `d`, `rq`, `nu` the alert has (docs/push.md).
 ///
 /// Each text is first held to its own cap (bytes, on a char boundary). If the record would still
 /// pass MAX_RECORD padded (long names, escape-heavy text), texts are halved in this order until
@@ -316,6 +365,9 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
         }
         if let Some(r) = &a.request {
             v["rq"] = json!(cut(r, 64));
+        }
+        if let Some(nu) = a.needs_user {
+            v["nu"] = json!(nu);
         }
         v
     };
@@ -408,7 +460,7 @@ impl Push {
         let path = dir.join("push.json");
         let regs = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let activities = std::fs::read(Self::activities_path(&path)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Arc::new(Push { path, inner: Mutex::new(Inner { regs, activities, ..Default::default() }) })
+        Arc::new(Push { path, inner: Mutex::new(Inner { regs, activities, ..Default::default() }), held: AtomicUsize::new(0) })
     }
 
     fn activities_path(path: &Path) -> PathBuf {
@@ -545,16 +597,37 @@ impl Push {
     /// A `quiet` rise (the user is at the pane) sends nothing.
     ///
     /// `rewrite`: a notification rewrite under way (crate::summary). The push waits for it up
-    /// to `summary::push_wait()`, then goes with whatever `alert.summary` holds.
-    pub fn attention(self: &Arc<Self>, pane: u64, on: bool, alert: Option<Alert>, quiet: bool, rewrite: Option<tokio::sync::watch::Receiver<Option<String>>>) {
+    /// to `summary::push_wait()`, then goes with whatever `alert.summary` and `alert.needs_user`
+    /// hold.
+    ///
+    /// `hold`: the user is at the Mac, which shows the alert. The push waits this long and goes
+    /// only if nobody looked at the pane ([`Push::seen`]) and it still wants the user.
+    pub fn attention(
+        self: &Arc<Self>,
+        pane: u64,
+        on: bool,
+        alert: Option<Alert>,
+        quiet: bool,
+        rewrite: Option<tokio::sync::watch::Receiver<Option<crate::summary::Rewrite>>>,
+        hold: Option<Duration>,
+    ) {
         let mut g = self.inner.lock().unwrap();
         if g.regs.is_empty() && !on {
-            g.panes.remove(&pane);
+            if let Some(mut ps) = g.panes.remove(&pane) {
+                if self.unhold(&mut ps) {
+                    log_alert("dropped", pane, ps.alert.as_ref(), None, Some("attention cleared"));
+                }
+            }
             return;
         }
+        // Without a phone there is nothing to hold (or to log).
+        let hold = hold.filter(|_| !g.regs.is_empty());
         let ps = g.panes.entry(pane).or_default();
         let rose = on && !ps.attention;
         ps.attention = on;
+        if !on && self.unhold(ps) {
+            log_alert("dropped", pane, ps.alert.as_ref(), None, Some("attention cleared"));
+        }
         if !rose {
             return;
         }
@@ -562,30 +635,89 @@ impl Push {
         ps.alert = alert;
         ps.quiet = quiet;
         if quiet {
+            log_alert("dropped", pane, ps.alert.as_ref(), None, Some("quiet"));
             return;
         }
-        let Some(mut rx) = rewrite else {
+        // Held from the rise on (the wait for the rewrite included), so looking at the pane
+        // right away drops it.
+        if hold.is_some() {
+            self.unhold(ps);
+            ps.held = Some((ps.rise, Instant::now()));
+            self.held.fetch_add(1, Ordering::Relaxed);
+            log_alert("held", pane, ps.alert.as_ref(), None, None);
+        }
+        if rewrite.is_none() && hold.is_none() {
             self.schedule(&mut g, pane);
             return;
-        };
+        }
         let rise = ps.rise;
         drop(g);
         let me = self.clone();
         tokio::spawn(async move {
-            let text = match tokio::time::timeout(crate::summary::push_wait(), rx.wait_for(Option::is_some)).await {
-                Ok(Ok(v)) => v.clone(),
-                _ => None,
-            };
+            let began = Instant::now();
+            if let Some(mut rx) = rewrite {
+                let done = match tokio::time::timeout(crate::summary::push_wait(), rx.wait_for(Option::is_some)).await {
+                    Ok(Ok(v)) => v.clone(),
+                    _ => None,
+                };
+                let mut g = me.inner.lock().unwrap();
+                let Some(ps) = g.panes.get_mut(&pane) else { return };
+                if ps.rise != rise || !ps.attention || ps.quiet {
+                    return;
+                }
+                if let (Some(r), Some(a)) = (done, ps.alert.as_mut()) {
+                    a.summary = Some(r.text);
+                    if r.needs_user.is_some() {
+                        a.needs_user = r.needs_user;
+                    }
+                }
+            }
+            if let Some(hold) = hold {
+                tokio::time::sleep(hold.saturating_sub(began.elapsed())).await;
+                let mut g = me.inner.lock().unwrap();
+                let Some(ps) = g.panes.get_mut(&pane) else { return };
+                // Seen at the Mac or cleared in the meantime: dropped, and logged, there.
+                if ps.rise != rise || !ps.attention || !ps.held.is_some_and(|(r, _)| r == rise) {
+                    return;
+                }
+                me.unhold(ps);
+            }
             let mut g = me.inner.lock().unwrap();
-            let Some(ps) = g.panes.get_mut(&pane) else { return };
-            if ps.rise != rise || !ps.attention || ps.quiet {
-                return;
+            if g.panes.get(&pane).is_some_and(|ps| ps.rise == rise && ps.attention && !ps.quiet) {
+                me.schedule(&mut g, pane);
             }
-            if let (Some(t), Some(a)) = (text, ps.alert.as_mut()) {
-                a.summary = Some(t);
-            }
-            me.schedule(&mut g, pane);
         });
+    }
+
+    /// End a pane's hold, if it has one. Returns whether it had.
+    fn unhold(&self, ps: &mut PaneState) -> bool {
+        let had = ps.held.take().is_some();
+        if had {
+            self.held.fetch_sub(1, Ordering::Relaxed);
+        }
+        had
+    }
+
+    /// The user looked at the pane (focused it or typed in it, from any client): a push held
+    /// for it is dropped, the Mac having shown it. Called per keystroke: one atomic load when
+    /// nothing is held.
+    pub fn seen(&self, pane: u64) {
+        if self.held.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut g = self.inner.lock().unwrap();
+        let Some(ps) = g.panes.get_mut(&pane) else { return };
+        if self.unhold(ps) {
+            // This rise is not sent, now or delayed.
+            ps.quiet = true;
+            log_alert("dropped", pane, ps.alert.as_ref(), None, Some("seen at the Mac"));
+        }
+    }
+
+    /// The daemon decided not to raise attention for an agent that would have alerted
+    /// (`settled away`, `muted`): logged, so the log explains why nothing arrived.
+    pub fn dropped(&self, pane: u64, kind: &str, state: &str, needs_user: Option<bool>, reason: &str) {
+        crate::log::line(decision("dropped", pane, kind, state, needs_user, None, Some(reason)));
     }
 
     /// Push the pane's alert now, or once its per-pane interval has passed.
@@ -603,7 +735,8 @@ impl Push {
                 let mut g = me.inner.lock().unwrap();
                 let Some(ps) = g.panes.get_mut(&pane) else { return };
                 ps.delayed = false;
-                if ps.attention && !ps.quiet {
+                // A held rise goes (or not) when its hold ends.
+                if ps.attention && !ps.quiet && ps.held.is_none() {
                     me.dispatch(&mut g, pane);
                 }
             });
@@ -617,7 +750,7 @@ impl Push {
         ps.last_sent = Some(Instant::now());
         let rise = ps.rise;
         let hour = Duration::from_secs(3600);
-        let mut changed = false;
+        let (mut devices, mut limited) = (0, 0);
         for i in 0..g.regs.len() {
             if g.regs[i].blocked {
                 continue;
@@ -628,16 +761,22 @@ impl Push {
             }
             if sent.len() >= PER_DEVICE_HOUR {
                 g.regs[i].last_error = Some(format!("rate limited: {PER_DEVICE_HOUR} alerts in the last hour; dropped one"));
-                changed = true;
+                limited += 1;
                 continue;
             }
             sent.push_back(Instant::now());
             let reg = g.regs[i].clone();
             let Some(body) = body(&reg, pane, &alert) else { continue };
+            devices += 1;
             let me = self.clone();
             tokio::spawn(async move { me.deliver(reg, body, pane, rise).await });
         }
-        if changed {
+        // Nothing logged without a phone to send to.
+        if devices > 0 {
+            log_alert("sent", pane, Some(&alert), Some(devices), None);
+        }
+        if limited > 0 {
+            log_alert("dropped", pane, Some(&alert), Some(limited), Some("rate limited"));
             self.save(&g.regs);
         }
     }
@@ -861,7 +1000,13 @@ impl Push {
 fn body(reg: &Reg, pane: u64, alert: &Alert) -> Option<Value> {
     let collapse = collapse_id(&reg.label, pane);
     let ciphertext = seal(&reg.key, &plaintext(&reg.label, pane, alert), collapse.as_bytes())?;
-    Some(json!({"handle": reg.handle, "ciphertext": ciphertext, "collapse_id": collapse}))
+    let mut body = json!({"handle": reg.handle, "ciphertext": ciphertext, "collapse_id": collapse});
+    // In the clear, so the relay can leave the sound out: it tells the relay and Apple that a
+    // turn finished with nothing for the user to do, and no more.
+    if silent(alert) {
+        body["silent"] = json!(true);
+    }
+    Some(body)
 }
 
 #[cfg(test)]
@@ -937,6 +1082,7 @@ mod tests {
             tab: Some("clothod".into()),
             project: Some("clotho".into()),
             summary: None,
+            needs_user: None,
         }
     }
 
@@ -955,6 +1101,97 @@ mod tests {
         assert!(raw.len() <= MAX_RECORD, "{}", raw.len());
         let v: Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(v["sm"].as_str().unwrap().len(), MAX_SUMMARY, "{v}");
+    }
+
+    #[test]
+    fn the_label_goes_in_nu_only_when_known() {
+        let v: Value = serde_json::from_slice(&plaintext(LABEL, 7, &full())).unwrap();
+        assert!(v.get("nu").is_none(), "{v}");
+        for nu in [true, false] {
+            let raw = plaintext(LABEL, 7, &Alert { needs_user: Some(nu), ..full() });
+            assert_eq!(raw.len(), PAD_TO, "still one padded size");
+            let v: Value = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(v["nu"], json!(nu));
+            assert_eq!(v["msg"], full().message.unwrap(), "the rest is unchanged");
+        }
+    }
+
+    #[test]
+    fn only_a_plain_done_is_silent() {
+        let reg = Reg { device: "d".into(), handle: "h".into(), key: PK.into(), label: LABEL.into(), relay: "https://relay.example".into(), env: "production".into(), created: 0.0, last_error: None, blocked: false };
+        let body_of = |state: &str, nu: Option<bool>| body(&reg, 7, &Alert { state: state.into(), needs_user: nu, ..full() }).unwrap();
+        let b = body_of("done", Some(false));
+        assert_eq!(b["silent"], json!(true));
+        assert!(open(SK, b["ciphertext"].as_str().unwrap(), b["collapse_id"].as_str().unwrap().as_bytes()).is_some(), "the record is sealed as before");
+        for (state, nu) in [("done", Some(true)), ("done", None), ("waiting", Some(true)), ("waiting", Some(false)), ("error", Some(true)), ("error", Some(false)), ("error", None)] {
+            assert!(body_of(state, nu).get("silent").is_none(), "{state} {nu:?}");
+        }
+        // The test alert (`push.test`) has no label: it sounds.
+        let test = body(&reg, 0, &Alert::basic("clotho", "done", Some("Test alert".into()), 1.0)).unwrap();
+        assert!(test.get("silent").is_none());
+    }
+
+    #[test]
+    fn decisions_are_logged_without_the_alerts_text() {
+        assert_eq!(decision("sent", 7, "claude", "done", Some(false), Some(2), None), "push sent pane=7 agent=claude state=done label=done silent devices=2");
+        assert_eq!(decision("dropped", 7, "claude", "done", Some(false), None, Some("settled away")), "push dropped pane=7 agent=claude state=done label=done reason=settled away");
+        assert_eq!(decision("held", 7, "claude", "waiting", Some(true), None, None), "push held pane=7 agent=claude state=waiting label=needs-you");
+        assert_eq!(decision("dropped", 3, "codex", "done", None, None, Some("seen at the Mac")), "push dropped pane=3 agent=codex state=done label=unknown reason=seen at the Mac");
+        assert_eq!(decision("dropped", 3, "claude", "done", Some(true), Some(1), Some("rate limited")), "push dropped pane=3 agent=claude state=done label=needs-you devices=1 reason=rate limited");
+        // A reported kind is any text: it stays one word on one line.
+        assert_eq!(decision("dropped", 1, "my agent\nx", "", None, None, Some("muted")), "push dropped pane=1 agent=my-agent-x state=- label=unknown reason=muted");
+    }
+
+    /// A held push goes when the hold ends, unless the pane was seen or stopped asking first.
+    #[test]
+    fn a_held_push_is_dropped_when_the_pane_is_seen() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let push = Push::load(dir.path());
+            // Nothing listens there: the send itself fails, after the decision under test.
+            let reg = json!({"device": "d", "handle": "h", "key": PK, "label": LABEL, "relay": "http://127.0.0.1:1"});
+            assert!(push.request("push.register", &reg).await.is_ok());
+            let hold = Some(Duration::from_millis(150));
+            let after = Duration::from_millis(400);
+            let sent = |pane: u64| push.inner.lock().unwrap().panes.get(&pane).is_some_and(|ps| ps.last_sent.is_some());
+            let held = || push.held.load(Ordering::Relaxed);
+            let rise = |pane: u64| push.attention(pane, true, Some(full()), false, None, hold);
+            let settle = || tokio::time::sleep(Duration::from_millis(30));
+
+            rise(1);
+            rise(2);
+            rise(3);
+            settle().await;
+            assert_eq!(held(), 3);
+            assert!(!sent(1) && !sent(2) && !sent(3), "nothing goes during the hold");
+            push.seen(9);
+            assert_eq!(held(), 3, "another pane seen changes nothing");
+            push.seen(2);
+            push.attention(3, false, None, false, None, None);
+            assert_eq!(held(), 1);
+            tokio::time::sleep(after).await;
+            assert_eq!(held(), 0);
+            assert!(sent(1), "not seen: sent when the hold ends");
+            assert!(!sent(2), "seen at the Mac: dropped");
+            assert!(!sent(3), "attention cleared: dropped");
+
+            // Held from the rise on, the wait for the rewrite included: seen then is dropped too.
+            let (_tx, rx) = tokio::sync::watch::channel(None);
+            push.attention(6, true, Some(full()), false, Some(rx), hold);
+            assert_eq!(held(), 1);
+            push.seen(6);
+            assert_eq!(held(), 0);
+            tokio::time::sleep(after).await;
+            assert!(!sent(6), "seen while its rewrite ran: dropped");
+
+            // A quiet rise is never held; without a hold it goes at once.
+            push.attention(4, true, Some(full()), true, None, hold);
+            push.attention(5, true, Some(full()), false, None, None);
+            settle().await;
+            assert_eq!(held(), 0);
+            assert!(!sent(4) && sent(5));
+        });
     }
 
     #[test]

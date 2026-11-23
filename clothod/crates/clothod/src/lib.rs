@@ -12,6 +12,7 @@ pub mod summary;
 pub mod git;
 pub mod launchd;
 pub mod layout;
+pub mod log;
 pub mod model;
 
 use std::io::Write;
