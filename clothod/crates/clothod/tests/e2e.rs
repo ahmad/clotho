@@ -5753,6 +5753,68 @@ async fn ack_or_mute_during_the_window_cancels_it() {
     let raised: Vec<Value> = agent_events(&mut c).into_iter().filter(|e| e["agent"]["attention"] == true).collect();
     assert!(raised.is_empty(), "{raised:?}");
     assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+    // The log says why nothing came, once for each.
+    let dropped = push_log(&env, "dropped");
+    let why = |p: u64, reason: &str| dropped.iter().filter(|l| l.contains(&format!("pane={p} ")) && l.ends_with(&format!("reason={reason}"))).count();
+    assert_eq!((dropped.len(), why(acked, "acknowledged"), why(muted, "muted")), (2, 1, 1), "{dropped:?}");
+}
+
+/// The agent works again in the window and the daemon is killed right after: the end of the
+/// window was stored at once, so the daemon that comes back has no window to finish and sends
+/// nothing for a working agent.
+#[tokio::test]
+async fn a_window_that_was_left_is_not_finished_after_a_restart() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_SETTLE_MS", "2500")];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let b = test_bin();
+    c.input(p, format!(r#"sh -c '"{b}" report running --agent claude --session r3; "{b}" report done --agent claude --message Finished.; sleep 60'"#).as_bytes());
+    c.input(p, b"\r");
+    wait_agent(&c, p, "done", |a| a["state"] == "done" && a["settling"] == true).await;
+    // Long enough for the periodic store (once a second) to have the window in it.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    report(&c, p, "running", "").await;
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("running"), Some(false), Some(false)));
+    // Killed well within the second the periodic store would take.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(c);
+    env.kill();
+    start_alerts(&mut env, &vars);
+    let c = env.client().await;
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("running"), Some(false), Some(false)), "restored as it was left");
+    // Past where the window would have ended: no rise and no push.
+    relay.none_for(Duration::from_millis(3000));
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("running"), Some(false), Some(false)));
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+}
+
+/// The window ends, the push goes, and the daemon is killed right after: the rise was stored at
+/// once, so the daemon that comes back doesn't raise and push a second time.
+#[tokio::test]
+async fn a_rise_is_not_repeated_after_a_restart() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_SETTLE_MS", "1200")];
+    let mut env = alerts_env(&vars);
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let b = test_bin();
+    c.input(p, format!(r#"sh -c '"{b}" report running --agent claude --session r4; "{b}" report done --agent claude --message Finished.; sleep 60'"#).as_bytes());
+    c.input(p, b"\r");
+    next_agent_event(&mut c, T, |e| e["pane"] == p && e["agent"]["attention"] == true).await.expect("the rise");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(c);
+    env.kill();
+    assert_eq!(opened(&relay.next().1)["s"], "done");
+    start_alerts(&mut env, &vars);
+    let c = env.client().await;
+    assert_eq!(flags(&pane_agent(&c, p).await), (Some("done"), Some(true), Some(false)), "restored as it was left");
+    relay.none_for(Duration::from_millis(2000));
+    assert_eq!(wait_push_log(&env, "sent", 1).await.len(), 1, "{}", env.log());
 }
 
 /// An upgrade (a restart of the logic process) in the window loses no alert: the timer is
@@ -6060,6 +6122,71 @@ async fn pushes_for_other_panes_hold_while_the_user_is_at_the_mac() {
     assert_log_has_none_of(&env, &["HOLD-ASK-2207", "may it deploy"]);
 }
 
+/// A rewrite slower than the push's own wait for it, but done within the hold: the held push
+/// goes out with the rewrite's text and the model's label, not the heuristic's.
+#[tokio::test]
+async fn a_held_push_carries_a_rewrite_that_came_during_the_hold() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[AT_MAC, ("CLOTHOD_SUMMARY_WAIT_MS", "200")], |e| fake_summarizer(e, "late", "sleep 0.8; echo NEEDS_USER; echo 'LATE-TEXT-9917 wants a decision.'"));
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    report(&c, b, "running", "").await;
+    type_in(&mac, a).await;
+    let t = Instant::now();
+    // No settle window here: the turn's end rises at once, labelled by the heuristic.
+    report(&c, b, "done", "Compared both databases.").await;
+    let now = pane_agent(&c, b).await;
+    assert_eq!((now["attention"].as_bool(), now["needs_user"].as_bool(), now["summary_pending"].as_bool()), (Some(true), Some(false), Some(true)), "{now}");
+    let (at, body) = relay.next();
+    assert!(at - t >= Duration::from_millis(1500), "sent early: {:?}", at - t);
+    let r = opened(&body);
+    assert_eq!((r["sm"].as_str(), r["nu"].as_bool()), (Some("LATE-TEXT-9917 wants a decision."), Some(true)), "the latest text and label: {r}");
+    assert!(body.get("silent").is_none(), "needs you is never silent: {body}");
+    let sent = wait_push_log(&env, "sent", 1).await;
+    assert!(sent[0].contains("label=needs-you") && !sent[0].contains("silent"), "{sent:?}");
+    relay.none_for(Duration::from_millis(800));
+    assert_log_has_none_of(&env, &["LATE-TEXT-9917"]);
+}
+
+/// The pane the user typed in last is held like the others once they are no longer counted as
+/// at it (60 s, here 300 ms) while still at the Mac (2 minutes, here 1.5 s).
+#[tokio::test]
+async fn the_pane_typed_in_last_is_held_once_presence_is_over() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC, ("CLOTHOD_TEST_PRESENCE_MS", "300")]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let b = mac_pane(&mac).await;
+    report(&c, b, "running", "").await;
+    type_in(&mac, b).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let t = Instant::now();
+    report(&c, b, "waiting", "May it deploy?").await;
+    assert_eq!(pane_agent(&c, b).await["attention"], true);
+    relay.none_for(Duration::from_millis(800));
+    assert_eq!(push_log(&env, "held").len(), 1, "{}", env.log());
+    let (at, body) = relay.next();
+    assert!(at - t >= Duration::from_millis(1500), "sent early: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "waiting");
+
+    // A finished turn there is held too (no longer quiet), and dropped when they type there.
+    report(&c, b, "running", "").await;
+    type_in(&mac, b).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    report(&c, b, "done", "Finished.").await;
+    let a = pane_agent(&c, b).await;
+    assert_eq!((a["attention"].as_bool(), a["quiet"].as_bool()), (Some(true), Some(false)), "{a}");
+    wait_push_log(&env, "held", 2).await;
+    type_in(&mac, b).await;
+    relay.none_for(Duration::from_millis(2500));
+    let dropped = push_log(&env, "dropped");
+    assert!(dropped.len() == 1 && dropped[0].ends_with("reason=seen at the Mac"), "{dropped:?}");
+}
+
 /// A held push goes away when someone looks at that pane (focus, typing), acknowledges it, or
 /// the agent works again.
 #[tokio::test]
@@ -6149,8 +6276,8 @@ async fn a_phone_or_cli_client_does_not_hold() {
     assert!(push_log(&env, "held").is_empty(), "{}", env.log());
 }
 
-/// At the pane itself nothing changed: an ask pushes at once (the user may have just stepped
-/// away), a finished turn is quiet.
+/// At the pane itself (typing there within the last 60 s) nothing changed: an ask pushes at once
+/// (the user may have just stepped away), a finished turn is quiet.
 #[tokio::test]
 async fn the_same_pane_rule_is_unchanged() {
     let relay = FakeRelay::start();

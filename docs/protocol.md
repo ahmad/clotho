@@ -901,19 +901,25 @@ The rules:
     `from` is `"done"`, with `settling` false and `quiet` decided then (see `quiet`).
   - `waiting` and `error` never settle. They raise at once, also during a window.
   - The window survives a daemon restart or upgrade: it is re-armed from the saved `settling` and
-    `since`, and raises at once if it is already past.
+    `since`, and raises at once if it is already past. Entering and leaving the window are both
+    stored at once, so a daemon that dies right after the agent worked again, or right after the
+    rise, comes back without a window: it doesn't raise for a working agent or raise twice.
 - **Label.** `needs_user` says whether the user has to act: always for `waiting` and `error`; for
   `done`, when the reply ends by asking the user something or says it is blocked. To judge that
   on a long reply, hooks send its end as `agent.report`'s `tail`: the last 600 characters, on one
   line, of a reply longer than the 300 that `message` keeps. The `clothod report` binary adds it
   from the payload the installed hooks already pass, so hooks need no reinstall. `tail` is only
   input for the label and the summary: it is not in the agent object.
-- **At the Mac.** While the user is at the Mac app, the daemon holds pushes to the phone for
-  other panes for up to 2 minutes, from the rise. This applies to every state, `waiting` and
-  `error` included; the Mac app shows the alert itself. A held push is dropped when the pane's
-  `attention` clears (the agent works again, `agent.ack`, the agent goes away) or when any client
-  focuses that pane (`pane.focus`) or types in it. Otherwise it is sent when the 2 minutes end,
-  with the latest text and label. A quiet rise (the user at that pane) is never held or sent.
+- **At the Mac.** While the user is at the Mac app, the daemon holds pushes to the phone for up
+  to 2 minutes, from the rise. This applies to every state, `waiting` and `error` included; the
+  Mac app shows the alert itself. A held push is dropped when the pane's `attention` clears (the
+  agent works again, `agent.ack`, the agent goes away) or when any client focuses that pane
+  (`pane.focus`) or types in it. Otherwise it is sent when the 2 minutes end, with the latest
+  text and label: a rewrite that finishes at any time during the hold is in it. The one pane
+  that is not held is the one the user is at (see `quiet`: input from a client showing it within
+  the last 60 s). There the earlier rule stands: a finished turn rises quietly and is never held
+  or sent, and `waiting` and `error` push at once. After those 60 s the pane the user typed in
+  last is held like every other pane, for as long as they count as at the Mac.
   The daemon knows the user is at the Mac from input in its own panes, by a client whose hello
   `client` starts with `clotho-mac`. For the other machines the Mac app says so with
   **`client.active`**: no params, result `{}`. It means "the user is at this app now" and counts
@@ -930,8 +936,9 @@ The rules:
   `push <sent|held|dropped> pane=<id> agent=<kind> state=<state>
   label=<needs-you|done|unknown> [silent] [devices=<n>] [reason=<why>]`. The reasons for
   `dropped` are `quiet` (the user was at the pane), `seen at the Mac`, `attention cleared`
-  (while held), `settled away` (the agent worked again within the settle window), `muted`, and
-  `rate limited`. `sent` and `held` are logged only when a phone is registered. The log never
+  (while held), `settled away` (the agent worked again within the settle window),
+  `acknowledged` (`agent.ack` within the settle window), `muted` (also `agent.mute` within the
+  settle window), and `rate limited`. `sent` and `held` are logged only when a phone is registered. The log never
   carries a message, summary, prompt, tool input, or a Workspace, Tab or machine name.
 - **Test timings**, like `CLOTHOD_TEST_PRESENCE_MS`: `CLOTHOD_TEST_SETTLE_MS` (default 30000;
   0 means no settle, the behaviour before 0.1.31) and `CLOTHOD_TEST_AT_MAC_MS` (default 120000,

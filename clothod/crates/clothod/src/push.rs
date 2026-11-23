@@ -601,7 +601,8 @@ impl Push {
     /// hold.
     ///
     /// `hold`: the user is at the Mac, which shows the alert. The push waits this long and goes
-    /// only if nobody looked at the pane ([`Push::seen`]) and it still wants the user.
+    /// only if nobody looked at the pane ([`Push::seen`]) and it still wants the user, with the
+    /// rewrite if it came at any time during the hold.
     pub fn attention(
         self: &Arc<Self>,
         pane: u64,
@@ -654,38 +655,37 @@ impl Push {
         drop(g);
         let me = self.clone();
         tokio::spawn(async move {
-            let began = Instant::now();
-            if let Some(mut rx) = rewrite {
-                let done = match tokio::time::timeout(crate::summary::push_wait(), rx.wait_for(Option::is_some)).await {
-                    Ok(Ok(v)) => v.clone(),
-                    _ => None,
-                };
-                let mut g = me.inner.lock().unwrap();
-                let Some(ps) = g.panes.get_mut(&pane) else { return };
-                if ps.rise != rise || !ps.attention || ps.quiet {
-                    return;
-                }
-                if let (Some(r), Some(a)) = (done, ps.alert.as_mut()) {
-                    a.summary = Some(r.text);
-                    if r.needs_user.is_some() {
-                        a.needs_user = r.needs_user;
+            let mut rewrite = rewrite;
+            match hold {
+                // Held: the rewrite has the whole hold to arrive.
+                Some(hold) => tokio::time::sleep(hold).await,
+                None => {
+                    if let Some(rx) = rewrite.as_mut() {
+                        let _ = tokio::time::timeout(crate::summary::push_wait(), rx.wait_for(Option::is_some)).await;
                     }
                 }
             }
-            if let Some(hold) = hold {
-                tokio::time::sleep(hold.saturating_sub(began.elapsed())).await;
-                let mut g = me.inner.lock().unwrap();
-                let Some(ps) = g.panes.get_mut(&pane) else { return };
+            let mut g = me.inner.lock().unwrap();
+            let Some(ps) = g.panes.get_mut(&pane) else { return };
+            if ps.rise != rise || !ps.attention || ps.quiet {
+                return;
+            }
+            if hold.is_some() {
                 // Seen at the Mac or cleared in the meantime: dropped, and logged, there.
-                if ps.rise != rise || !ps.attention || !ps.held.is_some_and(|(r, _)| r == rise) {
+                if !ps.held.is_some_and(|(r, _)| r == rise) {
                     return;
                 }
                 me.unhold(ps);
             }
-            let mut g = me.inner.lock().unwrap();
-            if g.panes.get(&pane).is_some_and(|ps| ps.rise == rise && ps.attention && !ps.quiet) {
-                me.schedule(&mut g, pane);
+            // The rewrite as it is now: the latest text and label go out.
+            let done = rewrite.and_then(|rx| rx.borrow().clone());
+            if let (Some(r), Some(a)) = (done, ps.alert.as_mut()) {
+                a.summary = Some(r.text);
+                if r.needs_user.is_some() {
+                    a.needs_user = r.needs_user;
+                }
             }
+            me.schedule(&mut g, pane);
         });
     }
 
@@ -1184,6 +1184,17 @@ mod tests {
             assert_eq!(held(), 0);
             tokio::time::sleep(after).await;
             assert!(!sent(6), "seen while its rewrite ran: dropped");
+
+            // A rewrite that comes at any time during the hold goes out with the push.
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            push.attention(7, true, Some(Alert { needs_user: Some(false), ..full() }), false, Some(rx), hold);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(!sent(7));
+            tx.send(Some(crate::summary::Rewrite { text: "It asks which one.".into(), needs_user: Some(true) })).unwrap();
+            tokio::time::sleep(after).await;
+            let latest = push.inner.lock().unwrap().panes[&7].alert.clone().unwrap();
+            assert!(sent(7));
+            assert_eq!((latest.summary.as_deref(), latest.needs_user), (Some("It asks which one."), Some(true)));
 
             // A quiet rise is never held; without a hold it goes at once.
             push.attention(4, true, Some(full()), true, None, hold);

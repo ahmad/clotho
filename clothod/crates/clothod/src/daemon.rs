@@ -351,7 +351,7 @@ impl Agent {
         let text = |k: &str| v.get(k).and_then(Value::as_str).map(String::from);
         let flag = |k: &str| v.get(k).and_then(Value::as_bool).unwrap_or(false);
         let state = text("state").filter(|s| AGENT_STATES.contains(&s.as_str()))?;
-        Some(Agent {
+        let mut a = Agent {
             kind: text("kind")?,
             state,
             source: "hook",
@@ -375,7 +375,13 @@ impl Agent {
             settling: flag("settling"),
             tail: None,
             present_at_done: false,
-        })
+        };
+        // Stored by a build without the label (before 0.1.31): never unknown while attention is
+        // up, here as in `set_agent`. The reply's end wasn't stored, so the message decides.
+        if a.attention && a.needs_user.is_none() {
+            a.needs_user = Some(a.state != "done" || crate::summary::needs_user_guess(a.message.as_deref(), None));
+        }
+        Some(a)
     }
 
     fn json(&self) -> Value {
@@ -519,8 +525,8 @@ fn settle() -> Duration {
     std::env::var("CLOTHOD_TEST_SETTLE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(SETTLE)
 }
 
-/// The user used a Mac app (typed in another pane, or it said `client.active`) within this long:
-/// they are at the Mac, and a push to the phone is held that long (`at_mac_hold`). 0: never.
+/// The user used a Mac app (typed in a pane, or it said `client.active`) within this long: they
+/// are at the Mac, and a push to the phone is held that long (`at_mac_hold`). 0: never.
 const AT_MAC: Duration = Duration::from_secs(120);
 
 fn at_mac() -> Duration {
@@ -717,9 +723,9 @@ pub struct Daemon {
     summary: Arc<crate::summary::Summarizer>,
     /// This daemon, for tasks that come back to it later.
     me: std::sync::OnceLock<std::sync::Weak<Daemon>>,
-    /// When a Mac app's user was last seen at it: typing in a pane (which one), or the app
+    /// When a Mac app's user was last seen at it (and which client): typing in a pane, or the app
     /// saying so (`client.active`, no pane), and which client.
-    desktop_seen: Mutex<Option<(Instant, Option<u64>, u64)>>,
+    desktop_seen: Mutex<Option<(Instant, u64)>>,
 }
 
 /// Work trees panes are in, and pull request lookups, shared by every pane on them.
@@ -2011,7 +2017,7 @@ impl Daemon {
         let mut p = p.lock().unwrap();
         // Anything but the report of the app losing focus: the user is at that Mac.
         if client.mac.load(Ordering::Relaxed) && data != b"\x1b[O" {
-            *self.desktop_seen.lock().unwrap() = Some((Instant::now(), Some(pane), client.id));
+            *self.desktop_seen.lock().unwrap() = Some((Instant::now(), client.id));
         }
         // Typing in the pane: they have seen what it wanted (a held push is dropped).
         if typed(&data) {
@@ -2038,13 +2044,14 @@ impl Daemon {
         }
     }
 
-    /// How long a push for `pane` is held because the user is at a Mac: a Mac app that is still
-    /// connected saw them within `at_mac()`, somewhere other than this pane (being at the pane
-    /// itself is `user_present`). None: not at a Mac.
-    fn at_mac_hold(&self, pane: u64) -> Option<Duration> {
+    /// How long a push for the pane is held because the user is at a Mac: a Mac app that is
+    /// still connected saw them within `at_mac()`, and they are not at this pane right now
+    /// (`user_present`, which lasts `presence()`: after that the pane they typed in last is held
+    /// like any other). None: not at a Mac, or at this pane.
+    fn at_mac_hold(&self, p: &Pane) -> Option<Duration> {
         let hold = at_mac();
-        let (at, seen, client) = (*self.desktop_seen.lock().unwrap())?;
-        (at.elapsed() < hold && seen != Some(pane) && self.clients.lock().unwrap().contains_key(&client)).then_some(hold)
+        let (at, client) = (*self.desktop_seen.lock().unwrap())?;
+        (at.elapsed() < hold && !p.user_present() && self.clients.lock().unwrap().contains_key(&client)).then_some(hold)
     }
 
     /// The colors applications in the pane get when they ask (OSC 4/10/11/12): those of the
@@ -2200,6 +2207,12 @@ impl Daemon {
             return;
         }
         p.agent = new;
+        // Leaving the settle window (the agent works again or went away, the rise, an ack) is
+        // stored at once, as entering it is: a daemon killed right after must not come back
+        // with a window to finish, and push for a working agent or push a second time.
+        if old.as_ref().is_some_and(|o| o.settling) && !p.agent.as_ref().is_some_and(|a| a.settling) {
+            self.persist_soon();
+        }
         if let (Some(rx), Some(a)) = (started, p.agent.as_ref()) {
             self.await_rewrite(p.id, a, rx);
         }
@@ -2254,7 +2267,7 @@ impl Daemon {
             });
             let quiet = p.agent.as_ref().is_some_and(|a| a.quiet);
             // At a Mac, but not at this pane: the phone hears of it only if they don't look.
-            let hold = if attention(&p.agent) { self.at_mac_hold(p.id) } else { None };
+            let hold = if attention(&p.agent) { self.at_mac_hold(p) } else { None };
             self.push.attention(p.id, attention(&p.agent), alert, quiet, rewrite, hold);
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
@@ -2300,6 +2313,17 @@ impl Daemon {
         });
     }
 
+    /// Store the state now, from a task: `persist` locks every pane, so it can't run under a
+    /// pane's lock. Marked dirty again after, so the next tick stores once more: a store that
+    /// started earlier (entering the window) may have reached the holder after this one.
+    fn persist_soon(&self) {
+        let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) else { return };
+        tokio::spawn(async move {
+            me.persist();
+            me.dirty.store(true, Ordering::Relaxed);
+        });
+    }
+
     /// Start the timer of a settling `done` (the agent's `since` names it): `finish_settle`
     /// after `wait`. `save`: store the state first (not waiting for the next tick), so a restart
     /// right after the turn ended still finds it settling.
@@ -2337,6 +2361,10 @@ impl Daemon {
         let mut a = old.clone();
         a.muted = on;
         if on {
+            // Muted while it settled: nothing rises later, and the log says why.
+            if a.settling {
+                self.push.dropped(p.id, &a.kind, &a.state, a.needs_user, "muted");
+            }
             a.attention = false;
             a.settling = false;
         }
@@ -2938,7 +2966,7 @@ impl Daemon {
             "client.active" => {
                 // A Mac app: its user is at it (not in any pane of this machine).
                 if client.mac.load(Ordering::Relaxed) {
-                    *self.desktop_seen.lock().unwrap() = Some((Instant::now(), None, client.id));
+                    *self.desktop_seen.lock().unwrap() = Some((Instant::now(), client.id));
                 }
                 Ok(json!({}))
             }
@@ -2967,7 +2995,10 @@ impl Daemon {
                 let mut pp = pp.lock().unwrap();
                 if let Some(mut a) = pp.agent.clone() {
                     a.attention = false;
-                    // Seen while it settled: nothing rises later.
+                    // Seen while it settled: nothing rises later, and the log says why.
+                    if a.settling {
+                        self.push.dropped(pane, &a.kind, &a.state, a.needs_user, "acknowledged");
+                    }
                     a.settling = false;
                     self.set_agent(&mut pp, Some(a));
                 }
@@ -3617,5 +3648,34 @@ async fn ticker(d: Arc<Daemon>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An agent stored by 0.1.30 has no `needs_user`: restored with attention up (an in-place
+    /// upgrade), it gets one, as docs/protocol.md promises ("never null while attention is up").
+    #[test]
+    fn a_restored_agent_with_attention_always_has_a_label() {
+        let saved = |state: &str, attention: bool, message: &str| json!({"kind": "claude", "state": state, "source": "hook", "message": message, "since": 1.0, "attention": attention, "pid": 1});
+        let label = |v: Value| Agent::from_saved(&v).unwrap().needs_user;
+        assert_eq!(label(saved("waiting", true, "May it deploy?")), Some(true));
+        assert_eq!(label(saved("error", true, "It broke.")), Some(true));
+        assert_eq!(label(saved("done", true, "All tests pass.")), Some(false));
+        assert_eq!(label(saved("done", true, "Which database should it use?")), Some(true));
+        // Without attention it stays unknown (it works, or its turn's end is still settling).
+        assert_eq!(label(saved("running", false, "")), None);
+        let mut settling = saved("done", false, "Which database should it use?");
+        settling["settling"] = json!(true);
+        assert_eq!(label(settling), None);
+        // A stored label is kept, whatever the text says.
+        let mut stored = saved("done", true, "Which database should it use?");
+        stored["needs_user"] = json!(false);
+        assert_eq!(label(stored), Some(false));
+        let mut stored = saved("done", true, "All tests pass.");
+        stored["needs_user"] = json!(true);
+        assert_eq!(label(stored), Some(true));
     }
 }
