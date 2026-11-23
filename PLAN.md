@@ -631,3 +631,22 @@ The iPhone and iPad get the same model after the Mac ships.
   - one extra Tailscale device for each app install and each machine (free on the Personal plan);
   - the iPhone's node pauses while the app is suspended (pushes still arrive through the relay);
   - a pinned Go toolchain on the dev box and the build Mac.
+
+## Fewer, clearer alerts (user, 2026-11-23)
+
+- The user: "need to be told when an agent is done, and if I'm needed. Currently getting too many random
+  notifications on mobile." This replaces the 2026-10-28 rule that every ended turn pushes at once.
+- Found on the dev box: the Haiku rewrite failed every time (the helper skips user settings, where that
+  machine's Claude login lives, so `claude` said "Not logged in"); every ended turn pushed with no settling;
+  "done" and "needs you" looked the same; pushes weren't logged.
+- Decisions:
+  - **Settle.** A finished turn waits about 30 s. If the agent works again in that time, nothing is sent.
+    Permission asks, questions and errors still go out at once.
+  - **Label.** A finished turn is either "Needs you" (it ends by asking the user something, or is blocked)
+    or "Done". Needs you makes a sound; Done arrives silently on the lock screen.
+  - **At the Mac.** If the user used the Mac app in the last couple of minutes, the Mac shows the alert and
+    the phone gets it only if the user hasn't looked at that agent within 2 minutes.
+  - The rewrite must work with a login that comes from the user's settings, still without running the
+    user's hooks. Every push decision is logged (never the message text).
+- Order: clothod first (protocol), then the Mac and the iPhone against it. After that: generic agent status
+  (OSC 9/99/777/7501, more agents), then worktree panes with a changes view.
