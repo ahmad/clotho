@@ -14,7 +14,13 @@ if not os.path.exists(manifest_path):
     sys.exit(f"error: {manifest_path} is missing; build the clothod releases first with clothod/scripts/dist.sh")
 key = open(manifest_path, "rb").read()
 if os.path.exists(stamp) and open(stamp, "rb").read() == key:
-    sys.exit(0)
+    # The stamp alone proves nothing: a cleaned or half-written output dir can keep it. Skip only when every
+    # packed file is there too.
+    packed = ["manifest.json"] + [build["file"] + ".deflate" for build in json.loads(key)["builds"].values()]
+    missing = [name for name in packed if not os.path.isfile(os.path.join(out, name))]
+    if not missing:
+        sys.exit(0)
+    print(f"stale stamp in {out}: {len(missing)} of {len(packed)} packed files missing ({missing[0]}); repacking")
 shutil.rmtree(out, ignore_errors=True)
 os.makedirs(out)
 shutil.copy(manifest_path, os.path.join(out, "manifest.json"))

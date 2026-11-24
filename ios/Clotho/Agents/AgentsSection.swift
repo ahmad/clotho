@@ -2,8 +2,10 @@ import ClothoKit
 import SwiftUI
 import UIKit
 
-/// The agents on every connected machine: those that need the user first ("Needs you"), then the rest (running,
-/// idle, resolved). Rows are compact; Resolve, Mute, Reply and History are swipe actions and the long-press menu.
+/// The agents on every connected machine, in three groups (AgentGroup): those that need the user ("Needs you",
+/// the longest wait first), those that just finished ("Done"), and the rest ("Working": running, idle, resolved,
+/// muted), folded away under its header until the user opens it. Pinned agents have their own section on top,
+/// always shown. Rows are compact; Resolve, Mute, Reply and History are swipe actions and the long-press menu.
 /// The Agents tab on the iPhone, and the top of the iPad's sidebar.
 struct AgentsSection: View {
     let rows: [AgentRow]
@@ -13,39 +15,53 @@ struct AgentsSection: View {
     @Binding var replying: AgentRow?
     @Binding var history: AgentRow?
     @ObservedObject private var pins = AgentPins.shared
+    /// Whether the Working group shows its rows. Kept on this device; folded until the user opens it.
+    @AppStorage(AgentsSection.workingExpandedKey) private var workingExpanded = false
+
+    static let workingExpandedKey = "agentsWorkingExpanded"
 
     var body: some View {
         if !rows.isEmpty {
             let pinned = pins.split(rows)
-            let parts = AgentRow.split(pinned.rest)
+            // The groups hold the agents that aren't pinned, and count only those.
+            let groups = AgentRow.groups(pinned.rest)
             if !pinned.pinned.isEmpty {
                 Section {
                     ForEach(pinned.pinned) { row in
-                        Group {
-                            if row.wantsAttention { attentionRow(row) } else { quietRow(row) }
-                        }
-                        .listRowBackground(Color.accentColor.opacity(0.09))
+                        groupRow(row)
+                            .listRowBackground(Color.accentColor.opacity(0.09))
                     }
                 } header: {
                     SectionCount(title: "Pinned", count: pinned.pinned.count)
                 }
             }
-            if !parts.attention.isEmpty {
+            if !groups.needsYou.isEmpty {
                 Section {
-                    ForEach(parts.attention) { row in
-                        attentionRow(row)
+                    ForEach(groups.needsYou) { row in
+                        attentionRow(row, openID: "needsYouAgent")
                     }
                 } header: {
-                    SectionCount(title: "Needs you", count: parts.attention.count)
+                    SectionCount(title: AgentGroup.needsYou.title, count: groups.needsYou.count)
                 }
             }
-            if !parts.quiet.isEmpty {
+            if !groups.done.isEmpty {
                 Section {
-                    ForEach(parts.quiet) { row in
-                        quietRow(row)
+                    ForEach(groups.done) { row in
+                        attentionRow(row, openID: "doneAgent")
                     }
                 } header: {
-                    SectionCount(title: "Quiet", count: parts.quiet.count)
+                    SectionCount(title: AgentGroup.done.title, count: groups.done.count)
+                }
+            }
+            if !groups.working.isEmpty {
+                Section {
+                    if workingExpanded {
+                        ForEach(groups.working) { row in
+                            quietRow(row)
+                        }
+                    }
+                } header: {
+                    WorkingHeader(count: groups.working.count, expanded: $workingExpanded)
                 }
             }
         }
@@ -53,6 +69,20 @@ struct AgentsSection: View {
 
     /// Room around each row, so the list reads easily.
     static let insets = EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20)
+
+    /// "Working, 3 agents": what VoiceOver reads for the Working group's header.
+    static func workingLabel(count: Int) -> String {
+        "\(AgentGroup.working.title), \(count) \(count == 1 ? "agent" : "agents")"
+    }
+
+    /// A row as its group shows it (the pinned section mixes the groups).
+    @ViewBuilder private func groupRow(_ row: AgentRow) -> some View {
+        switch row.group {
+        case .needsYou: attentionRow(row, openID: "needsYouAgent")
+        case .done: attentionRow(row, openID: "doneAgent")
+        case .working: quietRow(row)
+        }
+    }
 
     private func quietRow(_ row: AgentRow) -> some View {
         AgentRowView(row: row, pinned: pins.isPinned(row), open: { open(row) }, openID: "quietAgent")
@@ -62,10 +92,11 @@ struct AgentsSection: View {
             .contextMenu { pinButton(row); muteButton(row); historyButton(row) }
     }
 
-    private func attentionRow(_ row: AgentRow) -> some View {
+    /// A row of Needs you or Done: both have the daemon's attention, so both take Resolve.
+    private func attentionRow(_ row: AgentRow, openID: String) -> some View {
         let connection = connections.existing(row.machineID)
         return VStack(alignment: .leading, spacing: 8) {
-            AgentRowView(row: row, pinned: pins.isPinned(row), open: { open(row) }, openID: "needsYouAgent")
+            AgentRowView(row: row, pinned: pins.isPinned(row), open: { open(row) }, openID: openID)
             if let connection {
                 PermissionButtons(row: row, connection: connection)
             }
@@ -119,7 +150,7 @@ struct AgentsSection: View {
         }
     }
 
-    /// Mute keeps an agent under Quiet with no notifications until it's unmuted or its session ends; Unmute
+    /// Mute keeps an agent under Working with no notifications until it's unmuted or its session ends; Unmute
     /// undoes it (the agent comes back to the top the next time it needs the user). Daemons without
     /// `agent.mute` get neither.
     @ViewBuilder private func muteButton(_ row: AgentRow) -> some View {
@@ -134,7 +165,7 @@ struct AgentsSection: View {
         }
     }
 
-    /// `agent.ack`: the daemon clears attention for every client; the row moves to Quiet.
+    /// `agent.ack`: the daemon clears attention for every client; the row moves to Working.
     private func resolve(_ row: AgentRow) {
         connections.existing(row.machineID)?.ackAgent(row.pane)
     }
@@ -147,9 +178,10 @@ struct AgentsSection: View {
 ///     to know whether to fix them now.
 ///     devbox · Claude · 4m
 ///
-/// The sections say whether it needs the user, so the row doesn't repeat a status; only an error says so, in
-/// red. A muted agent has a crossed-out bell in its caption (Mute and Unmute are in the swipe and the menu).
-/// Quiet rows are dimmer, with one line of summary.
+/// The caption ends with how much the pane's work tree changed, when the machine counts it ("· +128 −32 · 6
+/// files"). The sections say whether it needs the user, so the row doesn't repeat a status; only an error says
+/// so, in red. A muted agent has a crossed-out bell in its caption (Mute and Unmute are in the swipe and the menu).
+/// A Done row has a lighter title; Working rows are dimmer, with one line of summary.
 struct AgentRowView: View {
     let row: AgentRow
     /// Pinned on this phone (AgentPins): a pin in the caption.
@@ -158,45 +190,41 @@ struct AgentRowView: View {
     var open: (() -> Void)? = nil
     var openID: String? = nil
 
-    private var needsYou: Bool { row.wantsAttention }
-
     var body: some View {
         if let open {
             Button(action: open) { content }
                 .buttonStyle(.plain)
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(accessibilityText)
+                .accessibilityLabel(Self.accessibilityText(row, pinned: pinned))
                 .accessibilityAddTraits(.isButton)
                 .accessibilityIdentifier(openID ?? "agentRow")
         } else {
             content
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel(accessibilityText)
+                .accessibilityLabel(Self.accessibilityText(row, pinned: pinned))
         }
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let group = row.group
+        return VStack(alignment: .leading, spacing: 4) {
             Text("\(row.workspace) › \(row.title)")
-                .font(.body.weight(needsYou ? .semibold : .medium))
-                .foregroundStyle(needsYou ? .primary : .secondary)
+                .font(.body.weight(Self.titleWeight(group)))
+                .foregroundStyle(group == .working ? .secondary : .primary)
                 .lineLimit(1).truncationMode(.middle)
             if let summary = row.summary {
                 Text(summary)
                     .font(.callout)
-                    .foregroundStyle(needsYou ? .secondary : .tertiary)
-                    .lineLimit(needsYou ? 2 : 1)
+                    .foregroundStyle(group == .working ? .tertiary : .secondary)
+                    .lineLimit(group == .working ? 1 : 2)
             }
-            HStack(spacing: 4) {
-                Text("\(row.machineName) · \(row.info.shortKindName)")
-                if let since = row.info.sinceDate {
-                    // Compact, as on the Mac ("1m", "2h"), updated each minute.
-                    TimelineView(.everyMinute) { context in
-                        Text("· " + AgentRowView.age(since, now: context.date)).monospacedDigit()
-                    }
-                }
-                if row.info.state == .error {
-                    Text("· Error").foregroundStyle(.red).fontWeight(.medium)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                // The age is compact, as on the Mac ("1m", "2h"), and updated each minute.
+                // One text with the error mark, so a caption that wraps (the accessibility sizes) keeps its order.
+                TimelineView(.everyMinute) { context in
+                    (Text(Self.caption(row, now: context.date))
+                        + Text(row.info.state == .error ? " · Error" : "").foregroundStyle(.red).fontWeight(.medium))
+                        .monospacedDigit()
                 }
                 if pinned {
                     Image(systemName: "pin.fill").imageScale(.small).foregroundStyle(Color.accentColor)
@@ -207,17 +235,42 @@ struct AgentRowView: View {
             }
             .font(.footnote)
             .foregroundStyle(.tertiary)
-            .lineLimit(1)
+            // Where it doesn't fit on one line (the iPad's sidebar, the larger text sizes) the caption wraps
+            // instead of losing its end, the change counts.
+            .lineLimit(2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
-    /// What VoiceOver (and the UI tests) read: the lines, then the status and "Muted".
-    private var accessibilityText: String {
+    /// Needs you stands out, Done is plain, Working as before.
+    private static func titleWeight(_ group: AgentGroup) -> Font.Weight {
+        switch group {
+        case .needsYou: return .semibold
+        case .done: return .regular
+        case .working: return .medium
+        }
+    }
+
+    /// The row's last line: "devbox · Claude · 4m", and with the pane's change counts "devbox · Claude · 4m ·
+    /// +128 −32 · 6 files" (ClothoKit's `ChangeCountText.strip`; nothing when nothing changed).
+    static func caption(_ row: AgentRow, now: Date = Date()) -> String {
+        var parts = [row.machineName, row.info.shortKindName]
+        if let since = row.info.sinceDate { parts.append(age(since, now: now)) }
+        if let changes = ChangeCountText.strip(row.changes) { parts.append(changes) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// What VoiceOver (and the UI tests) read: the lines, then the status ("Needs you", "Done", else the state;
+    /// an error that needs the user says both), the changes as said ("128 lines added, 32 removed, in 6 files"),
+    /// "Pinned" and "Muted".
+    static func accessibilityText(_ row: AgentRow, pinned: Bool = false) -> String {
         var parts = ["\(row.workspace) › \(row.title)"]
         if let summary = row.summary { parts.append(summary) }
         parts.append("\(row.machineName) · \(row.info.shortKindName) · \(row.status)")
+        let error = AgentInfo.State.error.label
+        if row.info.state == .error, row.status != error { parts.append(error) }
+        if let changes = ChangeCountText.spoken(row.changes) { parts.append(changes) }
         if pinned { parts.append("Pinned") }
         if row.isMuted { parts.append("Muted") }
         return parts.joined(separator: ", ")
@@ -238,6 +291,37 @@ private struct SectionCount: View {
         .textCase(nil)
         .padding(.top, 10)
         .padding(.bottom, 2)
+    }
+}
+
+/// The Working group's header: its name and count like the others, and the whole line is a button that shows
+/// or hides the group's rows.
+private struct WorkingHeader: View {
+    let count: Int
+    @Binding var expanded: Bool
+
+    var body: some View {
+        Button {
+            withAnimation { expanded.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .imageScale(.small)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                Text(AgentGroup.working.title)
+                Text("\(count)").foregroundStyle(.secondary).monospacedDigit()
+            }
+            .font(.footnote.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .textCase(nil)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(AgentsSection.workingLabel(count: count))
+        .accessibilityValue(expanded ? "expanded" : "collapsed")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("workingGroup")
     }
 }
 
@@ -265,10 +349,13 @@ extension AgentRow {
         return info.headline.flatMap { $0.isEmpty ? nil : $0 }
     }
 
-    /// "Needs you" for a waiting agent that asked for the user; else its state ("Running", "Done", "Error").
+    /// The row's group when it has the daemon's attention ("Needs you", "Done"); else its state ("Running",
+    /// "Waiting", "Error"). A settling agent reads "Done" and is in Working.
     var status: String {
-        if info.state == .waiting && wantsAttention { return "Needs you" }
-        return info.state.label
+        switch group {
+        case .needsYou, .done: return group.title
+        case .working: return info.state.label
+        }
     }
 
     var statusColor: Color {

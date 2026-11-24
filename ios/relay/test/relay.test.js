@@ -60,6 +60,64 @@ test("push delivers the ciphertext to the sealed token", async () => {
   });
 });
 
+test("silent: false sends the same payload as no field", async () => {
+  const h = await register();
+  const sent = [];
+  const res = await handle(post("/v1/push", { handle: h, ciphertext: "AAEC/w==", collapse_id: COLLAPSE, silent: false }), ENV, {
+    deliver: async (_env, msg) => { sent.push(msg); return { status: 200 }; },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(sent[0].payload, {
+    aps: { alert: { title: "Clotho", body: "An agent needs you" }, "mutable-content": 1, sound: "default", "thread-id": COLLAPSE },
+    e: "AAEC/w==",
+  });
+  assert.deepEqual(Object.keys(sent[0].payload.aps), ["alert", "mutable-content", "sound", "thread-id"]);
+});
+
+test("a silent push has no sound, is passive, and still runs the extension", async () => {
+  const h = await register();
+  const sent = [];
+  const res = await handle(post("/v1/push", { handle: h, ciphertext: "AAEC/w==", collapse_id: COLLAPSE, silent: true }), ENV, {
+    deliver: async (_env, msg) => { sent.push(msg); return { status: 200 }; },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].token, TOKEN);
+  assert.equal(sent[0].collapseID, COLLAPSE);
+  assert.equal(sent[0].pushType, undefined, "apnsDeliver's default: an alert push");
+  assert.equal(sent[0].priority, undefined, "apnsDeliver's default priority");
+  const { aps, e } = sent[0].payload;
+  assert.ok(!("sound" in aps));
+  assert.equal(aps["interruption-level"], "passive");
+  assert.equal(aps["mutable-content"], 1);
+  assert.equal(aps["thread-id"], COLLAPSE);
+  assert.equal(e, "AAEC/w==");
+  assert.deepEqual(sent[0].payload, {
+    aps: { alert: { title: "Clotho", body: "An agent needs you" }, "mutable-content": 1, "interruption-level": "passive", "thread-id": COLLAPSE },
+    e: "AAEC/w==",
+  });
+});
+
+test("silent must be a boolean", async () => {
+  const h = await register();
+  const deliver = async () => assert.fail("must not deliver");
+  for (const silent of ["yes", 1, null]) {
+    const res = await handle(post("/v1/push", { handle: h, ciphertext: "AA==", collapse_id: COLLAPSE, silent }), ENV, { deliver });
+    assert.equal(res.status, 400, JSON.stringify(silent));
+    assert.deepEqual(await res.json(), { error: "bad_request" });
+  }
+});
+
+test("a silent push keeps the size limit and the rate limit", async () => {
+  const h = await register();
+  const deliver = async () => assert.fail("must not deliver");
+  const long = await handle(post("/v1/push", { handle: h, ciphertext: "A".repeat(3004), collapse_id: COLLAPSE, silent: true }), ENV, { deliver });
+  assert.equal(long.status, 400);
+  const env = { ...ENV, RATE_LIMITER: { limit: async () => ({ success: false }) } };
+  const limited = await handle(post("/v1/push", { handle: h, ciphertext: "AA==", collapse_id: COLLAPSE, silent: true }), env, { deliver });
+  assert.equal(limited.status, 429);
+});
+
 test("push rejects tampered handles and bad bodies", async () => {
   const h = await register();
   const bytes = unb64url(h);

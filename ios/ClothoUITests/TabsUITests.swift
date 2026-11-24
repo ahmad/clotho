@@ -42,14 +42,16 @@ final class TabsUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Resolve"].exists, "a Resolve button shows on the row")
         let badge = app.tabBars.buttons["Agents"].value as? String ?? ""
         XCTAssertFalse(badge.isEmpty, "no badge on Agents")
-        // One muted agent for the screenshots: its bell is crossed out, and it moves under Quiet.
+        // One muted agent for the screenshots: its bell is crossed out, and it moves under Working.
         let erring = app.buttons.matching(NSPredicate(format: "identifier == 'needsYouAgent' AND label CONTAINS 'Error'")).firstMatch
         XCTAssertTrue(erring.waitForExistence(timeout: 5))
         erring.press(forDuration: 1.2)
         app.buttons["Mute"].tapWhenSettled()
-        // Under Quiet, which may be below the screen when earlier tests left agents (rows exist once shown).
+        // Under Working, which is folded until opened, and may be below the screen when earlier tests left agents
+        // (rows exist once shown).
         let muted = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Muted'")).firstMatch
         sleep(1)
+        app.setWorkingAgents(expanded: true)
         reveal(muted, in: app)
         XCTAssertTrue(muted.exists, "no muted row")
         for _ in 0..<8 where !asking.isHittable { app.swipeDown() }
@@ -62,7 +64,7 @@ final class TabsUITests: XCTestCase {
         app.buttons["Pin"].tapWhenSettled()
         for _ in 0..<10 where !app.staticTexts["Pinned"].exists { app.swipeDown() }
         XCTAssertTrue(app.staticTexts["Pinned"].waitForExistence(timeout: 5), "no Pinned section")
-        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'quietAgent'} AND label CONTAINS 'Pinned'")).count, 2)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'doneAgent', 'quietAgent'} AND label CONTAINS 'Pinned'")).count, 2)
         sleep(1)
         attach(app, "agents light")
 
@@ -98,7 +100,7 @@ final class TabsUITests: XCTestCase {
         // The fake agents' workspace was made right after the permission one: "Workspace N+1".
         let number = Int(place.split(separator: " ").dropFirst().first ?? "") ?? 0
         let running = "Workspace \(number + 1) ›"
-        let rows = app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'quietAgent'}"))
+        let rows = app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'doneAgent', 'quietAgent'}"))
         for predicate in [NSPredicate(format: "label CONTAINS 'Running' AND label BEGINSWITH %@", running),
                           NSPredicate(format: "label BEGINSWITH %@", place)] {
             let row = rows.matching(predicate).firstMatch
@@ -110,6 +112,8 @@ final class TabsUITests: XCTestCase {
             app.buttons["Close tab"].tapWhenSettled()
             XCTAssertTrue(app.navigationBars["Agents"].waitForExistence(timeout: 10))
         }
+        // Folded again, as later tests (and a new install) find it.
+        app.setWorkingAgents(expanded: false)
     }
 
     /// Scrolls down, then up, until `element` is on screen (a List builds rows only once they're on screen).

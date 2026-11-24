@@ -168,6 +168,91 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(try PushAlert.open(sealed, collapseID: "abc", key: key), alert)
     }
 
+    /// clothod's `nu` (the agent's `needs_user`) survives the record, true and false; a record without it
+    /// encodes no key, so it's what an older daemon sends.
+    func testNeedsUserRoundTrips() throws {
+        let key = Curve25519.KeyAgreement.PrivateKey()
+        for nu in [true, false] {
+            let alert = PushAlert(m: "label", p: 3, k: "claude", s: "done", w: "W", tb: "T", nu: nu)
+            let sealed = try PushAlert.seal(alert, collapseID: "abc", to: key.publicKey)
+            XCTAssertEqual(try PushAlert.open(sealed, collapseID: "abc", key: key).nu, nu)
+        }
+        let old = try JSONEncoder().encode(PushAlert(m: "label", p: 3, k: "claude", s: "done"))
+        XCTAssertFalse(String(decoding: old, as: UTF8.self).contains("\"nu\""))
+        XCTAssertNil(try JSONDecoder().decode(PushAlert.self, from: old).nu)
+    }
+
+    /// With `nu` and a workspace the title says first whether the user has to act, then where.
+    func testTitleWithNeedsUser() throws {
+        func alert(_ state: String, _ nu: Bool?, w: String? = "W", tb: String? = "T") -> PushAlert {
+            PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: state, msg: "All tests pass.", w: w, tb: tb, nu: nu)
+        }
+        for state in ["waiting", "error", "done"] {
+            XCTAssertEqual(try delivered(alert(state, true)).title, "Needs you · W › T", state)
+        }
+        // A waiting or failed agent needs the user whatever the flag says.
+        XCTAssertEqual(try delivered(alert("waiting", false)).title, "Needs you · W › T")
+        XCTAssertEqual(try delivered(alert("error", false)).title, "Needs you · W › T")
+        XCTAssertEqual(try delivered(alert("done", false)).title, "Done · W › T")
+        // No tab.
+        XCTAssertEqual(try delivered(alert("done", false, tb: nil)).title, "Done · W")
+        XCTAssertEqual(try delivered(alert("waiting", true, tb: "")).title, "Needs you · W")
+        // No workspace: AgentNotice's title, with its wording for the flag.
+        for (state, nu) in [("waiting", true), ("done", false)] {
+            let record = alert(state, nu, w: nil)
+            XCTAssertEqual(try delivered(record).title, record.notice(machine: "devbox").title)
+            XCTAssertEqual(try delivered(alert(state, nu, w: "")).title, record.notice(machine: "devbox").title)
+        }
+        XCTAssertEqual(try delivered(alert("done", false, w: nil)).title, "Claude is done on devbox")
+        // No `nu` (an older daemon): exactly as before.
+        XCTAssertEqual(try delivered(alert("done", nil)).title, "W · Claude finished")
+        XCTAssertEqual(try delivered(alert("waiting", nil)).title, "W · Claude is waiting")
+        // The subtitle and body stay AgentNotice's.
+        let out = try delivered(alert("done", false))
+        XCTAssertEqual(out.subtitle, alert("done", false).notice(machine: "devbox").subtitle)
+        XCTAssertEqual(out.body, "All tests pass.")
+    }
+
+    /// The pure title, for states a push doesn't carry: anything but waiting, error and done keeps AgentNotice's.
+    func testTitleFunction() {
+        let notice = PushAlert(m: "x", p: 1, k: "claude", s: "running", w: "W", nu: false).notice(machine: "devbox")
+        XCTAssertEqual(AlertText.title(notice, state: "running", needsUser: false, workspace: "W", tab: "T"), notice.title)
+        XCTAssertEqual(AlertText.title(notice, state: "running", needsUser: true, workspace: "W", tab: "T"), "Needs you · W › T")
+        XCTAssertEqual(AlertText.title(notice, state: "done", needsUser: nil, workspace: "W", tab: "T"), notice.title)
+    }
+
+    /// A turn that just finished with nothing for the user to do arrives silently; everything else keeps the
+    /// sound the relay sent.
+    func testPlainDoneIsSilent() throws {
+        func sound(_ state: String, _ nu: Bool?) throws -> UNNotificationSound? {
+            let alert = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: state, w: "W", tb: "T", nu: nu)
+            let key = Curve25519.KeyAgreement.PrivateKey()
+            let collapse = PushLabel.collapseID(label: alert.m, pane: alert.p)
+            let content = UNMutableNotificationContent()
+            content.sound = .default
+            content.threadIdentifier = collapse
+            content.userInfo = ["e": try PushAlert.seal(alert, collapseID: collapse, to: key.publicKey)]
+            return try XCTUnwrap(PushAlert.decrypt(content, key: key)).sound
+        }
+        XCTAssertNil(try sound("done", false))
+        XCTAssertNotNil(try sound("done", true))
+        XCTAssertNotNil(try sound("done", nil), "an older daemon's done alert sounds as before")
+        XCTAssertNotNil(try sound("waiting", false))
+        XCTAssertNotNil(try sound("waiting", true))
+        XCTAssertNotNil(try sound("error", false))
+    }
+
+    /// A permission ask with `nu`: the new title, and still the exact ask with its Allow and Deny actions.
+    func testPermissionAskWithNeedsUser() throws {
+        let alert = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: "waiting", msg: "Claude needs your permission to use Bash",
+                              w: "Platform", tb: "cargo test", tool: "Bash", cmd: "npm test", rq: "87b99bd3910be450", nu: true)
+        let out = try delivered(alert)
+        XCTAssertEqual(out.title, "Needs you · Platform › cargo test")
+        XCTAssertEqual(out.body, "Allow Bash: npm test?")
+        XCTAssertEqual(out.categoryIdentifier, AlertActions.permissionCategory)
+        XCTAssertEqual(out.userInfo["request"] as? String, "87b99bd3910be450")
+    }
+
     func testLabelRoundTrips() {
         let id = UUID()
         let label = PushLabel.make(machine: id, name: "dev box")

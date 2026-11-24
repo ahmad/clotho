@@ -23,7 +23,7 @@ final class NotificationService: UNNotificationServiceExtension {
            let target = PushLabel.parse(alert.m), ["waiting", "done", "error"].contains(alert.s) {
             let now = Date().timeIntervalSince1970
             let agent = AgentsSummary.Agent(machine: target.machine, machineName: target.name, pane: alert.p, workspace: alert.w,
-                                            kind: alert.k, state: alert.s, since: alert.t ?? now)
+                                            kind: alert.k, state: alert.s, since: alert.t ?? now, needsUser: alert.nu)
             if AgentsSummary.load().adding(agent, now: now).save() { WidgetCenter.shared.reloadAllTimelines() }
         }
         self.contentHandler = nil

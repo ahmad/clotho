@@ -44,11 +44,10 @@ final class AgentPins: ObservableObject {
         if next != keys { save(next) }
     }
 
-    /// Splits rows into the pinned ones (those that need the user first, then the newest) and the rest.
+    /// Splits rows into the pinned ones and the rest. The pinned go by group (those that need the user, with
+    /// the longest wait first, then the finished and then the rest, newest first: `AgentRow.groupOrder`).
     func split(_ rows: [AgentRow]) -> (pinned: [AgentRow], rest: [AgentRow]) {
-        let pinned = rows.filter(isPinned).sorted {
-            ($0.wantsAttention ? 0 : 1, -($0.info.since ?? 0), $0.id) < ($1.wantsAttention ? 0 : 1, -($1.info.since ?? 0), $1.id)
-        }
+        let pinned = rows.filter(isPinned).sorted(by: AgentRow.groupOrder)
         return (pinned, rows.filter { !isPinned($0) })
     }
 

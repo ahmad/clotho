@@ -517,7 +517,8 @@ final class Connections: ObservableObject {
         let now = Date().timeIntervalSince1970
         let current = rows.filter(\.wantsAttention).map {
             AgentsSummary.Agent(machine: $0.machineID, machineName: $0.machineName, pane: $0.pane, workspace: $0.workspace,
-                                kind: $0.info.kind, state: $0.info.state.rawValue, since: $0.info.since ?? now)
+                                kind: $0.info.kind, state: $0.info.state.rawValue, since: $0.info.since ?? now,
+                                needsUser: $0.info.needsUser)
         }
         if AgentsSummary(updated: now, agents: kept + current).normalized().save() { WidgetCenter.shared.reloadAllTimelines() }
     }

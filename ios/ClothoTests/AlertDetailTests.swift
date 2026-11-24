@@ -60,6 +60,29 @@ final class AlertDetailTests: XCTestCase {
         XCTAssertEqual(question.threadIdentifier, machine.uuidString + "/Platform", "the name when there's no id")
     }
 
+    /// A record with `nu` (the agent's `needs_user`), as clothod's JSON carries it: the title says first whether
+    /// the user has to act, then the workspace and tab; the subtitle, body and threading are unchanged.
+    func testNeedsUserTitles() throws {
+        let done: [String: Any] = ["s": "done", "msg": "All 214 tests pass.", "w": "Platform", "wid": 3, "tb": "cargo test",
+                                   "pj": "api-server", "q": "run the tests", "d": 245]
+        let plain = try deliver(record(done.merging(["nu": false]) { $1 })).0
+        XCTAssertEqual(plain.title, "Done · Platform › cargo test")
+        XCTAssertEqual(plain.subtitle, "devbox · api-server · 4m")
+        XCTAssertEqual(plain.body, "All 214 tests pass.")
+        XCTAssertEqual(plain.threadIdentifier, machine.uuidString + "/3")
+        XCTAssertEqual(try deliver(record(done.merging(["nu": true]) { $1 })).0.title, "Needs you · Platform › cargo test")
+
+        let permission = try deliver(record(["s": "waiting", "msg": "Claude needs your permission to use Bash", "nu": true,
+                                             "w": "Platform", "wid": 3, "tb": "cargo test", "tool": "Bash", "cmd": "npm test",
+                                             "rq": "9f1c2d3e4a5b6c7d"])).0
+        XCTAssertEqual(permission.title, "Needs you · Platform › cargo test")
+        XCTAssertEqual(permission.body, "Allow Bash: npm test?")
+        XCTAssertEqual(permission.categoryIdentifier, AlertActions.permissionCategory)
+        // No tab, then no workspace.
+        XCTAssertEqual(try deliver(record(["s": "error", "nu": true, "w": "Platform"])).0.title, "Needs you · Platform")
+        XCTAssertEqual(try deliver(record(["s": "waiting", "nu": true, "msg": "Which database?"])).0.title, "Claude needs you on devbox")
+    }
+
     /// An older daemon's record: today's text, threaded by machine.
     func testOlderRecordReadsAsBefore() throws {
         let (out, _) = try deliver(record(["s": "waiting", "msg": "Allow cargo test --release?"]))
@@ -198,6 +221,25 @@ final class AgentsSummaryTests: XCTestCase {
         XCTAssertEqual(merged.agents.map(\.pane), [7, 8])
         XCTAssertEqual(merged.agents.first?.state, "done")
         XCTAssertEqual(merged.updated, 31)
+    }
+
+    /// Those that need the user come first, then a plain Done (done with `needsUser` false), each newest first.
+    func testPlainDoneListsLast() {
+        var plain = agent(1, since: 100)
+        plain.state = "done"
+        plain.needsUser = false
+        var finished = agent(2, since: 50)
+        finished.state = "done"
+        var asks = agent(3, since: 40)
+        asks.state = "done"
+        asks.needsUser = true
+        var olderPlain = plain
+        olderPlain.pane = 5
+        olderPlain.since = 90
+        let summary = AgentsSummary(updated: 1, agents: [olderPlain, plain, agent(4, since: 10), asks, finished]).normalized()
+        XCTAssertEqual(summary.agents.map(\.pane), [2, 3, 4, 1, 5])
+        XCTAssertEqual(summary.needingYou, 3)
+        XCTAssertEqual(summary.adding(plain, now: 2).agents.map(\.pane), [2, 3, 4, 1, 5])
     }
 
     func testRoundTripsThroughTheKeychain() {

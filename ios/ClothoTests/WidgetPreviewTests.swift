@@ -17,8 +17,62 @@ final class WidgetPreviewTests: XCTestCase {
             .init(machine: machine, machineName: "devbox", pane: 9, workspace: "api-server", kind: "codex", state: "error",
                   since: now.timeIntervalSince1970 - 900),
             .init(machine: UUID(), machineName: "imac", pane: 3, workspace: "Notes", kind: "claude", state: "done",
-                  since: now.timeIntervalSince1970 - 4000),
+                  since: now.timeIntervalSince1970 - 4000, needsUser: false),
         ]))
+    }
+
+    private func agent(_ state: String, _ needsUser: Bool?, kind: String = "claude") -> AgentsSummary.Agent {
+        .init(machine: UUID(), machineName: "devbox", pane: 1, workspace: "Platform", kind: kind, state: state,
+              since: now.timeIntervalSince1970, needsUser: needsUser)
+    }
+
+    /// Every number counts only the agents that need the user; a plain Done is listed but not counted.
+    func testCountsLeaveOutPlainDone() {
+        XCTAssertEqual(entry.summary.agents.count, 3)
+        XCTAssertEqual(entry.summary.needingYou, 2)
+        XCTAssertEqual(NeedsYouView.heading(2), "2 need you")
+        XCTAssertEqual(NeedsYouView.heading(1), "1 needs you")
+        XCTAssertEqual(NeedsYouView.heading(0), "No agents need you")
+        let onlyDone = AgentsSummary(updated: 1, agents: [agent("done", false)])
+        XCTAssertEqual(onlyDone.needingYou, 0)
+        // Done without the flag (an older daemon) and done that needs the user both count.
+        XCTAssertEqual(AgentsSummary(updated: 1, agents: [agent("done", nil), agent("done", true)]).needingYou, 2)
+        XCTAssertEqual(AgentsSummary.empty.needingYou, 0)
+    }
+
+    /// ClothoKit's wording by `needsUser`; without it, by the state as before.
+    func testWordingByNeedsUser() {
+        XCTAssertEqual(NeedsYouView.what(agent("waiting", true)), "Claude needs you")
+        XCTAssertEqual(NeedsYouView.what(agent("error", true, kind: "codex")), "Codex needs you")
+        XCTAssertEqual(NeedsYouView.what(agent("done", true)), "Claude needs you")
+        XCTAssertEqual(NeedsYouView.what(agent("done", false)), "Claude is done")
+        XCTAssertEqual(NeedsYouView.what(agent("waiting", nil)), "Claude is waiting")
+        XCTAssertEqual(NeedsYouView.what(agent("done", nil)), "Claude finished")
+        XCTAssertEqual(NeedsYouView.what(agent("error", nil, kind: "codex")), "Codex hit an error")
+    }
+
+    /// A summary stored by an older app or extension has no `needsUser`: it still decodes, and reads as before.
+    func testOldSummaryDecodes() throws {
+        let json = #"{"updated":42,"agents":[{"machine":"00000000-0000-0000-0000-00000000C10D","machineName":"devbox","pane":7,"workspace":"Platform","kind":"claude","state":"done","since":40}]}"#
+        let summary = try JSONDecoder().decode(AgentsSummary.self, from: Data(json.utf8))
+        let old = try XCTUnwrap(summary.agents.first)
+        XCTAssertNil(old.needsUser)
+        XCTAssertEqual(summary.needingYou, 1)
+        XCTAssertEqual(NeedsYouView.what(old), "Claude finished")
+        // And what this app writes without the flag is what the older one reads: no key.
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(summary), as: UTF8.self).contains("needsUser"))
+        var flagged = old
+        flagged.needsUser = false
+        let back = try JSONDecoder().decode(AgentsSummary.Agent.self, from: try JSONEncoder().encode(flagged))
+        XCTAssertEqual(back.needsUser, false)
+    }
+
+    /// Only plain Done agents: they list under "No agents need you", and the numbers read 0.
+    func testOnlyPlainDoneRenders() throws {
+        let done = NeedsYouEntry(date: now, summary: AgentsSummary(updated: 1, agents: [agent("done", false)]))
+        for family in [WidgetFamily.systemSmall, .accessoryRectangular, .accessoryCircular] {
+            XCTAssertNotNil(ImageRenderer(content: NeedsYouView(entry: done, family: family).frame(width: 170, height: 170)).uiImage)
+        }
     }
 
     func testRendersEverySize() throws {

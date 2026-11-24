@@ -46,7 +46,11 @@ if [ "$action" = test ]; then
   mkdir -p /tmp/cki-ios-bin && rm -f /tmp/cki-ios-bin/clothod && cp "$CLOTHOD_DIST/macos-aarch64/clothod" /tmp/cki-ios-bin/clothod
   # Its own config file, so settings tests never write the user's ~/.config/clothod/config.toml.
   # Notification summaries come from a fake (scripts/fake-summarizer.sh), never a real claude.
+  # CLOTHOD_TEST_SETTLE_MS=300: a done report raises attention after about 0.4 s instead of 30 s, so tests can
+  # wait for it. CLOTHOD_TEST_AT_MAC_MS=0: no at-the-Mac hold before a push goes out in push tests.
+  # Daemons the app installs over SSH don't get this environment and keep the real timings.
   CLOTHOD_SUMMARIZER=$PWD/scripts/fake-summarizer.sh CLOTHOD_CONFIG=/tmp/cki-ios/config.toml \
+    CLOTHOD_TEST_SETTLE_MS=300 CLOTHOD_TEST_AT_MAC_MS=0 \
     /tmp/cki-ios-bin/clothod start --runtime-dir /tmp/cki-ios --ephemeral
   scripts/ssh-test-server.sh
   # The peer forwards its tailnet port 22 to that sshd.

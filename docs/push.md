@@ -27,7 +27,9 @@ clothod ──HTTPS──▶ relay ──HTTP/2──▶ APNs ──▶ iPhone �
    trusts.
 3. When a pane's agent `attention` goes from false to true (the same rule clients notify on; see
    protocol.md, Agents), clothod builds a small JSON record, encrypts it to each registered phone's
-   key, and sends `POST /v1/push {handle, ciphertext, collapse_id}` to the relay.
+   key, and sends `POST /v1/push {handle, ciphertext, collapse_id, silent?}` to the relay. A finished
+   turn raises `attention` only after the settle window, and a push can be held while the user is at
+   the Mac (Rate limits, below).
 4. The relay unseals the handle to the APNs token, signs an APNs JWT with the .p8, and posts the
    notification. The relay is stateless: it has no database of devices.
 5. On the phone, the notification service extension decrypts the payload and replaces the
@@ -92,21 +94,39 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
     rewritten by Claude Haiku on the machine as one or two plain sentences (at most 200 characters, no
     Markdown), or `msg` cleaned of Markdown when the rewrite failed or took over 6 s. Present whenever
     `msg` is. The machine's `notification_rewrite` setting (default on) turns the rewrite off.
+  - `nu` (since clothod 0.1.31, feature `alerts`): the agent's `needs_user` as a bool. True: the user
+    has to do something (every waiting and error, and a done whose reply ends by asking the user or is
+    blocked). False: a plain finished turn. Left out when not known (never `null`); clothod decides
+    the label before attention rises, so a record from 0.1.31 on has it. The phone words the alert by
+    it, "Needs you" or "Done", and plays no sound for a done with `nu` false. A record without `nu`
+    (older clothod) reads as before.
 
   `msg` is now the result: the last reply on done, the error on error, the question or permission on waiting.
 - How the phone shows it, the same for a push (the extension) and for the app's own foreground
   notification:
-  - title: "Platform · Claude finished" (workspace · agent state)
+  - title, when `nu` is present: "Needs you · Platform › api-server" for true and "Done · Platform ›
+    api-server" for false (what it is · Workspace › Tab). Without a Tab it is "Needs you · Platform":
+    clothod sends `tb` only for a Tab the user named, while the app's own banner names the Tab as its
+    lists show it (the pane's title or folder when the Tab has no name).
+    Without `nu`, or without a Workspace: "Platform · Claude finished" (Workspace · agent state), as
+    before.
   - subtitle: "devbox · api-server · 4m" (machine · project · duration)
   - body: `sm`, else `msg` cleaned of Markdown (ClothoKit's `PlainText`); raw Markdown never shows. A
     permission wait (waiting, with `tool`, and a `msg` that is a permission message or absent) always reads
     "Allow Bash: npm test?" first, never cut, and then `sm` in the room left: Allow approves the exact
     `tool` and `cmd`, not the summary. clothod sends `tool` only for permission waits, so "waiting with
     `tool`" is enough; the `msg` check is a guard. The app's own banner uses the agent's `summary` the same
-    way.
+    way. The subtitle and the body don't depend on `nu`.
+  - sound: the default sound, except none for a done with `nu` false (a plain finished turn). The
+    relay already sends such a push without a sound (`silent`, below); the app's own banner and a push
+    through an older relay drop it from `nu`.
+  - The groups in the Agents tab follow the same rule: an agent whose attention is up is under "Done"
+    when its state is done and `needs_user` is false or unknown, and under "Needs you" otherwise. The
+    widget counts the agents that need the user and lists a plain finished one (done, `needs_user`
+    false) after them as "Claude is done"; an agent whose `needs_user` isn't known counts, as before.
   - Alerts thread by machine and `wid`, so one workspace's alerts stack together.
   - An older record without these keys reads as before: "Claude finished on devbox", body `msg`,
-    threaded by machine. Each missing part simply drops out.
+    threaded by machine, with the sound. Each missing part simply drops out.
 - Sizes: every text is first held to its own cap, in bytes and cut on a character boundary: `msg` 400,
   `q` 240, `cmd` 240, `sm` 320, `w`, `tb`, `pj` and `tool` 96 each. (At the source they are shorter still: a
   reply is at most 300 characters, a prompt 120, a tool input 160.) If the padded record would still pass
@@ -127,6 +147,22 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
    "e": "<ciphertext>"}
   ```
   If the extension fails or runs out of time, iOS shows the generic text, which reveals nothing.
+- `silent` (since clothod 0.1.31): `/v1/push`'s body is `{handle, ciphertext, collapse_id}`, plus
+  `"silent": true` for a plain finished turn, and only then: state done with `nu` false. clothod never
+  sends it as false. It is outside the ciphertext, because the relay sets the sound and can't read the
+  record. For `"silent": true` the relay builds the payload without `sound` and with
+  `"interruption-level": "passive"`:
+  ```json
+  {"aps": {"alert": {"title": "Clotho", "body": "An agent needs you"},
+           "mutable-content": 1, "interruption-level": "passive", "thread-id": "<collapse id>"},
+   "e": "<ciphertext>"}
+  ```
+  The alert still shows on the lock screen and in Notification Center, and the extension still runs
+  and rewrites it. It makes no sound, doesn't light the screen and never breaks through a Focus.
+  clothod asks only for `silent`; the passive level is the relay's part. A missing `silent` or
+  `"silent": false` gets the payload above, with the sound. A `silent` that isn't a boolean is
+  answered 400 (`bad_request`). A relay deployed before this ignores the unknown field and plays the
+  sound as before, and the phone still drops it from `nu`.
 - `collapse_id` = the first 32 hex digits of SHA-256(`label` + "/" + `pane`). It is stable per pane, so a
   second alert for the same pane replaces the first. The app gives its own foreground notifications
   the same identifier, so a push and a local banner never stack.
@@ -135,7 +171,9 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
 
 What each party can still see: Apple sees the token, timing and ciphertext size (which padding makes the same for almost every alert). The relay and
 its host additionally see the sending machine's IP address. Neither sees machine names, pane
-titles, agent messages or anything from a terminal.
+titles, agent messages or anything from a terminal. `silent` adds one bit: the relay sees the flag,
+and Apple sees a passive alert without a sound, so both learn that this alert is a plain finished turn and
+not a question, a permission ask or an error. `nu` itself is inside the ciphertext.
 
 ## Auth between clothod and the relay
 
@@ -152,12 +190,51 @@ invalidates every handle; phones get new ones on their next launch.
 In clothod, per registration:
 - One push per attention false-to-true transition. Detection guesses never raise attention, so
   quiet output doesn't push.
+- Settle (since clothod 0.1.31, feature `alerts`): a turn that a hook reports as `done` doesn't
+  raise attention at once. clothod waits 30 s (the agent's `settling` is true meanwhile). If the
+  agent works again in that time (running or starting), nothing is raised and nothing is pushed: a
+  turn that resumes by itself, or one the user answers right away, never reaches the phone.
+  `agent.ack` in the window cancels it too, a muted agent never raises, and a second `done` report
+  keeps the same timer. `waiting` and `error` don't settle: they raise and push at once. The window
+  survives a daemon restart or upgrade (it is re-armed from the saved `settling` and `since`, and
+  raises at once if it is already past), so an upgrade never loses an alert.
 - Except a rise into `done` while the user is at the pane: a client that shows the pane
   (subscribed) sent it input within the last 60 s. The user sees that turn end, so attention is
   raised (badges and the Agents list show it) but no push is sent. `waiting` and `error` always
   push. The agent's `quiet` field (clothod 0.1.13) says so: true on such a rise, kept until the
   next one. The app shows no local banner for it either; a missing field (older daemons) means
-  false.
+  false. For a rise after the settle window, the user counts as at the pane if they were when
+  `done` was reported or are when the window ends.
+- At the Mac (since clothod 0.1.31): a push that would go out is held instead while the user is at
+  the Mac app, working in something else. "Mac" is a client whose hello `client` starts with
+  `clotho-mac`, so the CLI and test clients never count. The user is at it when such a client, still
+  connected, did one of three things within the last 2 minutes: typed in one of this machine's
+  panes, gained focus (the focus-in report, `ESC [ I`, which the app sends as pane input when it
+  comes to the front), or sent `client.active` (below). Nothing else counts: not the focus-out
+  report, and not mouse reports. The Mac app shows the alert itself. A held push is then
+  - dropped when the pane's attention clears (the agent works again, `agent.ack`, the agent goes
+    away), or when any client, the phone included, focuses that pane (`pane.focus`) or types in it:
+    the user has looked at that agent;
+  - dropped when the pane closes (`pane.close`, its Tab or Workspace closing, or its process
+    ending): no push is sent for a pane that no longer exists. The same goes for a push still
+    waiting for its rewrite or for the per-pane interval;
+  - sent after 2 minutes otherwise, with the latest text and label.
+
+  A hold survives a restart of the daemon (an in-place upgrade): when it ends is stored with the
+  pane. The daemon that comes back holds the push again for the time that was left, and sends it at
+  once if the hold ended while it was down. That push carries the cleaned original text and the
+  stored label (a rewrite is not stored). A push that was sent or dropped before the restart is not
+  sent again.
+
+  This applies to every state, `waiting` and `error` included. The one pane that is not held is the
+  one the user is at. There the same-pane 60 s rule above is unchanged: a done the user watched end
+  is quiet and is never held or sent, and `waiting` and `error` push at once. After those 60 s that
+  pane is held like every other, for as long as the user counts as at the Mac.
+- One machine can only see its own panes, so typing in a pane on the dev box says nothing to the
+  build Mac's clothod. `client.active` (no params; docs/protocol.md) closes that gap: while the user
+  is at the Mac app, it sends `client.active` to each connected machine whose panes they aren't
+  typing in, and that machine holds its pushes the same way. A Mac app that doesn't send it (an
+  older one) still holds pushes on the machine the user types on.
 - Reports from an agent that the pane's agent runs (an SDK app under test, `claude -p` from a tool,
   `codex exec`) are ignored: `agent.report` answers `{"ignored": "nested"}`, and the pane's agent,
   its attention and pushes are untouched.
@@ -173,6 +250,36 @@ In clothod, per registration:
   drops the queue.
 - 410 deletes the registration. 400 or 403 (bad handle) is logged in `last_error` and that
   registration is skipped until the phone registers again.
+
+Test timings, in the style of `CLOTHOD_TEST_PRESENCE_MS` (the 60 s rule): `CLOTHOD_TEST_SETTLE_MS`
+(default 30000; 0 means no settle, the behaviour before 0.1.31) and `CLOTHOD_TEST_AT_MAC_MS`
+(default 120000, both the "within 2 minutes" and the hold; 0 turns the hold off).
+
+The decision log (since clothod 0.1.31): every push decision is one line in `clothod.log` (in the
+state directory, see clothod/README.md), with the UTC time in front like its other lines:
+
+```
+clothod: 2026-11-23T18:04:11.532Z push sent pane=7 agent=claude state=done label=done silent devices=2
+clothod: 2026-11-23T18:05:40.118Z push held pane=7 agent=claude state=waiting label=needs-you
+clothod: 2026-11-23T18:05:52.904Z push dropped pane=7 agent=claude state=waiting label=needs-you reason=seen at the Mac
+clothod: 2026-11-23T18:09:02.377Z push held pane=4 agent=claude state=waiting label=needs-you reason=restored
+```
+
+`push <sent|held|dropped> pane=<id> agent=<kind> state=<state> label=<needs-you|done|unknown>
+[silent] [devices=<n>] [reason=<why>]`:
+- `sent`: handed to the relay for `devices` phones (a later relay failure shows in `last_error`).
+  `held`: waiting because the user is at the Mac, with `reason=restored` when it is a hold taken
+  back after a restart. `dropped`: not sent, with the `reason`: `quiet` (the user was at the pane),
+  `seen at the Mac`, `attention cleared` (while held), `pane closed` (the pane was closed or its
+  process ended before the push went out: while held, waiting for the rewrite, or for the per-pane
+  interval), `settled away` (the agent worked again within the settle window), `acknowledged`
+  (`agent.ack` within the settle window), `muted` (also `agent.mute` within the settle window), or
+  `rate limited` (with the number of `devices` over the hourly limit).
+- `label` is `nu`: `needs-you`, `done`, or `unknown`. `silent` marks a push sent with `silent`.
+- **The log never carries text:** no message, summary, prompt, tool or command, no Workspace, Tab or
+  project name, and not the machine's label. `agent` and `state` are cut to 32 characters of
+  letters, digits, `-` and `_`.
+- Sends and holds are logged only when a phone is registered; without one there is nothing to decide.
 
 In the relay, per handle: a token bucket of 120 an hour (Cloudflare's rate-limiting binding in the
 Worker option; in memory otherwise), answering 429. APNs errors map through: 410 for

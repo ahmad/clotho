@@ -91,7 +91,20 @@ async function providerToken(env, now) {
 }
 
 /// The notification as APNs gets it. The generic text shows only if the extension can't decrypt.
-export function apnsPayload(ciphertext, collapseID) {
+/// A silent one still runs the extension (mutable-content) and still shows, but makes no sound and doesn't
+/// light the screen.
+export function apnsPayload(ciphertext, collapseID, silent = false) {
+  if (silent) {
+    return {
+      aps: {
+        alert: { title: "Clotho", body: "An agent needs you" },
+        "mutable-content": 1,
+        "interruption-level": "passive",
+        "thread-id": collapseID,
+      },
+      e: ciphertext,
+    };
+  }
   return {
     aps: {
       alert: { title: "Clotho", body: "An agent needs you" },
@@ -135,7 +148,8 @@ export async function handle(request, env, { deliver = apnsDeliver, now = Date.n
     const body = await readJSON(request);
     if (!body || typeof body.handle !== "string" || !COLLAPSE.test(body.collapse_id ?? "")
         || typeof body.ciphertext !== "string" || body.ciphertext.length > MAX_CIPHERTEXT
-        || !CIPHERTEXT.test(body.ciphertext)) {
+        || !CIPHERTEXT.test(body.ciphertext)
+        || (body.silent !== undefined && typeof body.silent !== "boolean")) {
       return json(400, { error: "bad_request" });
     }
     const target = await openHandle(env, body.handle);
@@ -144,7 +158,7 @@ export async function handle(request, env, { deliver = apnsDeliver, now = Date.n
       const { success } = await env.RATE_LIMITER.limit({ key: body.handle.slice(0, 64) });
       if (!success) return json(429, { error: "rate_limited" });
     }
-    const res = await deliver(env, { ...target, payload: apnsPayload(body.ciphertext, body.collapse_id), collapseID: body.collapse_id, now });
+    const res = await deliver(env, { ...target, payload: apnsPayload(body.ciphertext, body.collapse_id, body.silent === true), collapseID: body.collapse_id, now });
     if (res.status === 200) return json(200, {});
     const reason = res.reason ?? "";
     if (res.status === 410 || reason === "BadDeviceToken" || reason === "Unregistered" || reason === "DeviceTokenNotForTopic") {

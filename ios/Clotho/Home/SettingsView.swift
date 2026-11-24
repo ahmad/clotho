@@ -164,8 +164,29 @@ struct SettingsView: View {
     }
 }
 
+extension SettingsView {
+    /// The line under a machine's "Summarize agent messages" switch when its rewrite isn't working, on a daemon
+    /// that reports the rewrite's health (feature `alerts`): why it fails, or that the machine has no Claude Code
+    /// to run it. Nil for ok, off, not yet known and no health: the switch alone. The wording is the Mac's
+    /// (`MachinesSettings.rewriteCaption`).
+    static func healthCaption(_ health: DaemonSettings.RewriteHealth?, alerts: Bool) -> (text: String, failing: Bool)? {
+        guard alerts, let health else { return nil }
+        switch health.state {
+        case .failing:
+            // On one line, whatever the daemon sent.
+            let reason = health.reason.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }.flatMap { $0.isEmpty ? nil : $0 }
+            return (reason.map { "Not working: \($0)" } ?? "Not working", true)
+        case .unavailable:
+            return ("Claude Code wasn't found on this machine", false)
+        case .ok, .unknown, .off:
+            return nil
+        }
+    }
+}
+
 /// One machine's "Summarize agent messages" switch (`notification_rewrite`, clothod 0.1.29). It lives on the
-/// machine, so the Mac and every phone see the same.
+/// machine, so the Mac and every phone see the same. Under it, when the machine's rewrite isn't working, why
+/// (`notification_rewrite_health`, clothod 0.1.32); it follows the daemon's `settings` event.
 private struct SummaryToggle: View {
     @ObservedObject var connection: MachineConnection
     @ObservedObject private var store: ModelStore
@@ -179,6 +200,10 @@ private struct SummaryToggle: View {
 
     private var name: String { connection.machine.displayName }
 
+    private var health: (text: String, failing: Bool)? {
+        SettingsView.healthCaption(store.settings?.notificationRewriteHealth, alerts: store.hello?.features.contains(.alerts) == true)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if store.hello?.features.contains(.summary) != true {
@@ -188,6 +213,14 @@ private struct SummaryToggle: View {
                 Toggle(name, isOn: Binding(get: { on }, set: { change($0) }))
                     .disabled(busy)
                     .accessibilityIdentifier("summarize-\(name)")
+                if let health {
+                    // No line limit: it wraps at the larger text sizes. VoiceOver reads it right after the switch.
+                    Text(health.text)
+                        .font(.caption)
+                        .foregroundStyle(health.failing ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("summarizeHealth-\(name)")
+                }
             } else {
                 LabeledContent(name) { ProgressView() }
             }

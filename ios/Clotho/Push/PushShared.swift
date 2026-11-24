@@ -90,12 +90,17 @@ struct PushAlert: Codable, Equatable, Sendable {
     var rq: String?
     /// A short summary of `msg` by a small model (clothod 0.1.29): the body when it's there.
     var sm: String?
+    /// The agent's `needs_user`: true when the user has to act, false for a turn that just finished. Nil from a
+    /// daemon that doesn't send it, and the alert then reads as it did before.
+    var nu: Bool?
 
     init(v: Int = 1, m: String, p: UInt64, k: String, s: String, msg: String? = nil, t: Double? = nil,
          w: String? = nil, wid: UInt64? = nil, tb: String? = nil, pj: String? = nil, q: String? = nil,
-         tool: String? = nil, cmd: String? = nil, d: Double? = nil, rq: String? = nil, sm: String? = nil) {
+         tool: String? = nil, cmd: String? = nil, d: Double? = nil, rq: String? = nil, sm: String? = nil,
+         nu: Bool? = nil) {
         self.v = v; self.m = m; self.p = p; self.k = k; self.s = s; self.msg = msg; self.t = t
         self.w = w; self.wid = wid; self.tb = tb; self.pj = pj; self.q = q; self.tool = tool; self.cmd = cmd; self.d = d; self.rq = rq; self.sm = sm
+        self.nu = nu
     }
 
     /// The alert's text (ClothoKit's AgentNotice, the same as the app's own banner and the Mac's): the summary
@@ -103,7 +108,7 @@ struct PushAlert: Codable, Equatable, Sendable {
     /// first. With neither, the body is the prompt, then the tab title.
     func notice(machine name: String) -> AgentNotice {
         AgentNotice(kind: k, state: s, machine: name, workspace: w, project: pj, duration: d, result: msg,
-                    tool: tool, toolInput: cmd, fallback: q ?? tb, summary: sm)
+                    tool: tool, toolInput: cmd, fallback: q ?? tb, summary: sm, needsUser: nu)
     }
 
     static let info = Data("clotho push v1".utf8)
@@ -129,7 +134,9 @@ struct PushAlert: Codable, Equatable, Sendable {
               let target = PushLabel.parse(alert.m),
               PushLabel.collapseID(label: alert.m, pane: alert.p) == content.threadIdentifier,
               let out = content.mutableCopy() as? UNMutableNotificationContent else { return nil }
-        AlertText.apply(alert.notice(machine: target.name), to: out)
+        // The relay sets the interruption level; here only the text, and no sound for a plain Done.
+        AlertText.apply(alert.notice(machine: target.name), state: alert.s, needsUser: alert.nu, workspace: alert.w,
+                        tab: alert.tb, to: out)
         out.threadIdentifier = AlertText.thread(machine: target.machine, workspace: alert.wid.map(String.init) ?? alert.w)
         var info = out.userInfo
         info.removeValue(forKey: "e")
@@ -168,13 +175,36 @@ enum PushLabel {
     }
 }
 
-/// How an agent alert shows: AgentNotice's text, threaded by machine and workspace so one workspace's alerts
-/// stack. The same for a push (ClothoNotify) and the app's foreground notification.
+/// How an agent alert shows: AgentNotice's subtitle and body under a title that says first whether the user
+/// has to act, threaded by machine and workspace so one workspace's alerts stack. The same for a push
+/// (ClothoNotify) and the app's foreground notification.
 enum AlertText {
-    static func apply(_ notice: AgentNotice, to content: UNMutableNotificationContent) {
-        content.title = notice.title
+    /// Sets the title, subtitle and body. A turn that just finished with nothing for the user to do
+    /// (`state` done, `needsUser` false) is silent; otherwise the sound is left as it is (a push keeps the
+    /// relay's, and the app sets its own banner's).
+    static func apply(_ notice: AgentNotice, state: String, needsUser: Bool?, workspace: String?, tab: String?,
+                      to content: UNMutableNotificationContent) {
+        content.title = title(notice, state: state, needsUser: needsUser, workspace: workspace, tab: tab)
         content.subtitle = notice.subtitle
         content.body = notice.body
+        if state == "done", needsUser == false { content.sound = nil }
+    }
+
+    /// "Needs you · Platform › cargo test" when the user has to act (`needsUser`, or a waiting or failed
+    /// agent), "Done · Platform › cargo test" for a turn that just finished; without a tab, "Needs you ·
+    /// Platform". A record without `needsUser` (an older daemon) or without a workspace keeps AgentNotice's title.
+    static func title(_ notice: AgentNotice, state: String, needsUser: Bool?, workspace: String?, tab: String?) -> String {
+        guard let needsUser, let workspace, !workspace.isEmpty else { return notice.title }
+        let lead: String
+        if needsUser || state == "waiting" || state == "error" {
+            lead = "Needs you"
+        } else if state == "done" {
+            lead = "Done"
+        } else {
+            return notice.title
+        }
+        guard let tab, !tab.isEmpty else { return "\(lead) · \(workspace)" }
+        return "\(lead) · \(workspace) › \(tab)"
     }
 
     /// Machine and workspace (its id, else its name); the machine alone when the workspace isn't known.

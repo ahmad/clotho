@@ -12,9 +12,10 @@ final class AgentPinsTests: XCTestCase {
     override func setUp() { defaults = UserDefaults(suiteName: suite) }
     override func tearDown() { defaults.removePersistentDomain(forName: suite) }
 
-    private func row(_ machine: UUID, _ pane: PaneID, _ state: AgentInfo.State, attention: Bool, since: Double) -> AgentRow {
+    private func row(_ machine: UUID, _ pane: PaneID, _ state: AgentInfo.State, attention: Bool, since: Double,
+                     needsUser: Bool? = nil) -> AgentRow {
         AgentRow(machineID: machine, machineName: "m", pane: pane, tab: 1, workspace: "w", title: "t",
-                 info: AgentInfo(kind: "claude", state: state, since: since, attention: attention))
+                 info: AgentInfo(kind: "claude", state: state, since: since, attention: attention, needsUser: needsUser))
     }
 
     func testPinsSurviveARelaunch() {
@@ -26,15 +27,21 @@ final class AgentPinsTests: XCTestCase {
         XCTAssertFalse(AgentPins(defaults: defaults).isPinned(machine: devbox, pane: 7))
     }
 
-    func testPinnedRowsGoFirstNeedsYouThenNewest() {
+    func testPinnedRowsGoFirstByGroup() {
         let pins = AgentPins(defaults: defaults)
         let old = row(devbox, 1, .running, attention: false, since: 100)
-        let new = row(devbox, 2, .done, attention: false, since: 300)
-        let asking = row(imac, 3, .waiting, attention: true, since: 50)
+        let resolved = row(devbox, 2, .done, attention: false, since: 300)
+        let asking = row(imac, 3, .waiting, attention: true, since: 250, needsUser: true)
         let other = row(imac, 4, .waiting, attention: true, since: 400)
-        [old, new, asking].forEach(pins.toggle)
-        let split = pins.split([old, new, asking, other])
-        XCTAssertEqual(split.pinned.map(\.pane), [3, 2, 1], "needs you first, then the newest")
+        let finished = row(devbox, 5, .done, attention: true, since: 200, needsUser: false)
+        let justFinished = row(devbox, 6, .done, attention: true, since: 350)
+        let failed = row(imac, 7, .error, attention: true, since: 50, needsUser: true)
+        let question = row(imac, 8, .done, attention: true, since: 150, needsUser: true)
+        let all = [old, resolved, asking, other, finished, justFinished, failed, question]
+        all.filter { $0.pane != 4 }.forEach(pins.toggle)
+        let split = pins.split(all)
+        XCTAssertEqual(split.pinned.map(\.pane), [7, 8, 3, 6, 5, 2, 1],
+                       "needs you with the longest wait first, then done and the rest, each newest first")
         XCTAssertEqual(split.rest.map(\.pane), [4], "a pinned agent isn't repeated below")
     }
 

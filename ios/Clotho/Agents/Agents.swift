@@ -13,6 +13,9 @@ struct AgentRow: Identifiable, Hashable {
     let workspace: String
     let title: String
     let info: AgentInfo
+    /// How much changed in the pane's work tree, when the machine counts it (feature `git.changes`); the
+    /// caption shows it.
+    var changes: PaneGit.Changes? = nil
 
     var id: String { "\(machineID.uuidString)/\(pane)" }
 
@@ -26,11 +29,12 @@ struct AgentRow: Identifiable, Hashable {
     /// A muted agent never wants it (AgentInfo.needsAttention).
     var wantsAttention: Bool { info.needsAttention }
 
-    /// Muted by the user (agent.mute): it stays under Quiet and sends no notifications until unmuted or until
+    /// Muted by the user (agent.mute): it stays under Working and sends no notifications until unmuted or until
     /// this agent session ends.
     var isMuted: Bool { info.isMuted }
 
     /// Anything wanting attention first (waiting, then errors, then finished), then the rest; newest first within each.
+    /// The order of `Connections.agentRows` and of the Working group; the list's groups are `groups` (AgentGroups).
     static func sorted(_ rows: [AgentRow]) -> [AgentRow] {
         func rank(_ row: AgentRow) -> Int {
             switch (row.info.state, row.wantsAttention) {
@@ -50,15 +54,17 @@ struct AgentRow: Identifiable, Hashable {
         }
     }
 
-    /// The Agents list's two parts: agents that need the user (the daemon's `attention`), at the top with a
-    /// Resolve action, and the quiet rest (running, idle, resolved), folded away. Resolving on any device
-    /// clears attention everywhere; the agent comes back to the top when attention is raised again.
+    /// Agents with the daemon's `attention` (Needs you and Done together, as the tab's badge counts them) and
+    /// the rest. The list itself shows `groups` (AgentGroups). Resolving on any device clears attention
+    /// everywhere; the agent comes back to the top when attention is raised again.
     static func split(_ rows: [AgentRow]) -> (attention: [AgentRow], quiet: [AgentRow]) {
         let sorted = sorted(rows)
         return (sorted.filter(\.wantsAttention), sorted.filter { !$0.wantsAttention })
     }
 
-    static func == (a: AgentRow, b: AgentRow) -> Bool { a.id == b.id && a.info == b.info && a.title == b.title }
+    static func == (a: AgentRow, b: AgentRow) -> Bool {
+        a.id == b.id && a.info == b.info && a.title == b.title && a.changes == b.changes
+    }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
@@ -67,13 +73,16 @@ extension MachineConnection {
     /// without an `agent` get a made-up one, so the list can be worked on before clothod reports agents.
     var agentRows: [AgentRow] {
         let state = store.state
+        let features = store.hello?.features
         var rows: [AgentRow] = []
         for workspace in state.workspaces {
             for tab in workspace.tabs {
                 for id in tab.layout.panes {
                     guard let pane = state.pane(id), let info = pane.agent ?? fakeAgent(for: pane) else { continue }
+                    // A made-up agent gets made-up counts; a real one its pane's, from a daemon that counts them.
+                    let changes = pane.agent == nil ? MachineConnection.fakeChanges(info) : AgentRow.changes(of: pane.git, features: features)
                     rows.append(AgentRow(machineID: machine.id, machineName: machine.displayName, pane: id, tab: tab.id,
-                                         workspace: workspace.name, title: store.displayTitle(of: tab), info: info))
+                                         workspace: workspace.name, title: store.displayTitle(of: tab), info: info, changes: changes))
                 }
             }
         }
@@ -155,11 +164,27 @@ extension MachineConnection {
             .waiting: "Allow `cargo test --release`?", .running: "Editing src/protocol.rs",
             .done: "Finished: 3 files changed", .error: "API error: overloaded", .starting: "Starting",
         ]
+        // Waiting and errors need the user; a finished turn does on odd panes only, so every group has rows.
+        let needsUser: Bool?
+        switch state {
+        case .waiting, .error: needsUser = true
+        case .done: needsUser = pane.id % 2 == 1
+        default: needsUser = nil
+        }
         return AgentInfo(kind: pane.id % 2 == 0 ? "codex" : "claude", state: state, source: "hook", message: messages[state],
                          since: Date().timeIntervalSince1970 - Double(pane.id) * 90,
                          attention: state != .running && state != .starting && !fakeAcked.contains(pane.id)
                             && !fakeMuted.contains(pane.id),
-                         muted: fakeMuted.contains(pane.id))
+                         muted: fakeMuted.contains(pane.id), needsUser: needsUser)
+    }
+
+    /// Made-up change counts for a made-up agent: on the waiting and the finished ones.
+    private static func fakeChanges(_ info: AgentInfo) -> PaneGit.Changes? {
+        switch info.state {
+        case .waiting: return PaneGit.Changes(uncommitted: .init(files: 6, added: 128, removed: 32))
+        case .done: return PaneGit.Changes(uncommitted: .init(files: 3, added: 41, removed: 7))
+        default: return nil
+        }
     }
 }
 
@@ -300,14 +325,16 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// The local banner for an agent change, if it calls for one: only when the daemon raises attention
     /// (false → true) into waiting, done or error, not on every state change. Never for a muted agent, or for
     /// a quiet rise (a turn that ended while the user was at the pane, which the daemon doesn't push either);
-    /// those still badge and show in the Agents list, which follow `needsAttention`. It reads like the push
-    /// for the same rise (AlertText), which it replaces (same identifier).
+    /// those still badge and show in the Agents list, which follow `needsAttention`. Nor for a settling one,
+    /// whose attention hasn't risen yet. It reads like the push for the same rise (AlertText), which it
+    /// replaces (same identifier), and like it a turn that only finished (done, `needsUser` false) is silent.
     static func banner(machine: Machine, pane: PaneID, place: Place, before: AgentInfo?, after: AgentInfo?) -> UNNotificationRequest? {
         guard let after, after.notifiesRise(from: before) else { return nil }
         let content = UNMutableNotificationContent()
-        AlertText.apply(notice(machine: machine, place: place, agent: after), to: content)
+        AlertText.apply(notice(machine: machine, place: place, agent: after), state: after.state.rawValue,
+                        needsUser: after.needsUser, workspace: place.workspace, tab: place.tab, to: content)
         content.threadIdentifier = AlertText.thread(machine: machine.id, workspace: place.workspaceID.map(String.init) ?? place.workspace)
-        content.sound = .default
+        content.sound = after.playsSound ? .default : nil
         var info: [String: Any] = ["machine": machine.id.uuidString, "pane": pane]
         let request = after.state == .waiting ? after.pendingRequests.first?.id : nil
         if let request { info["request"] = request }
@@ -324,7 +351,7 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
                     // The oldest pending request, as the push for this wait describes it (and AgentNotice(info:)).
                     tool: agent.pendingRequests.first?.tool ?? agent.tool,
                     toolInput: agent.pendingRequests.first.map { $0.summary } ?? agent.toolInput,
-                    fallback: agent.prompt ?? place.tab, summary: agent.summary)
+                    fallback: agent.prompt ?? place.tab, summary: agent.summary, needsUser: agent.needsUser)
     }
 
     /// Removes delivered agent notifications (local or pushed) for a machine's panes that no longer want attention.

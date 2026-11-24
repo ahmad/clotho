@@ -21,9 +21,11 @@ final class PinUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.showTab("Agents")
 
-        // Our agent is the newest row of the newest workspace; find it by its workspace.
+        // Our agent is the newest row of the newest workspace; find it by its workspace. It may be a running or
+        // starting one, under Working, which is folded until opened (the app keeps it open from here on).
         let workspace = newestWorkspace(app)
-        let rowButtons = app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'quietAgent'}"))
+        app.setWorkingAgents(expanded: true)
+        let rowButtons = app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'doneAgent', 'quietAgent'}"))
         let ours = rowButtons.matching(NSPredicate(format: "label BEGINSWITH %@", workspace + " ›")).firstMatch
         reveal(ours, in: app)
         XCTAssertTrue(ours.exists, "no agent row for \(workspace)")
@@ -37,7 +39,7 @@ final class PinUITests: XCTestCase {
         XCTAssertTrue(pinned.waitForExistence(timeout: 5), "the row isn't marked pinned")
         XCTAssertTrue(app.staticTexts["Pinned"].exists, "no Pinned section")
         // (A list row shows up twice in the tree, the cell and its button; the button has the row's identifier.)
-        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'quietAgent'} AND label BEGINSWITH %@", workspace + " ›")).count, 1,
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier IN {'needsYouAgent', 'doneAgent', 'quietAgent'} AND label BEGINSWITH %@", workspace + " ›")).count, 1,
                        "a pinned agent shows twice")
         XCTAssertLessThan(app.staticTexts["Pinned"].frame.minY, pinned.frame.minY)
         attach(app, "pinned")
@@ -73,6 +75,8 @@ final class PinUITests: XCTestCase {
         sleep(3)
         XCTAssertFalse(pinned.exists)
         attach(app, "after close")
+        // Folded again, as later tests (and a new install) find it.
+        app.setWorkingAgents(expanded: false)
     }
 
     /// The last "Workspace N" on Machines' list: the one this test made.

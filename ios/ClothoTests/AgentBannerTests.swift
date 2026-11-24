@@ -48,4 +48,51 @@ final class AgentBannerTests: XCTestCase {
         XCTAssertNil(banner(nil, detected), "a detected agent gone quiet doesn't need the user")
         XCTAssertNil(banner(waiting, nil), "the agent went away")
     }
+
+    /// The title says what the banner wants, from the daemon's `needs_user`, and where (AlertText.title); the
+    /// body stays AgentNotice's.
+    func testTitleSaysNeedsYouOrDone() throws {
+        let asking = try agent(#"{"kind":"claude","state":"waiting","source":"hook","attention":true,"needs_user":true,"message":"Which database?"}"#)
+        XCTAssertEqual(banner(nil, asking)?.content.title, "Needs you · Platform › cargo test")
+        XCTAssertEqual(banner(nil, asking)?.content.body, "Which database?")
+        let question = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"needs_user":true,"message":"Shall I push?"}"#)
+        XCTAssertEqual(banner(nil, question)?.content.title, "Needs you · Platform › cargo test")
+        let failed = try agent(#"{"kind":"claude","state":"error","source":"hook","attention":true,"needs_user":true}"#)
+        XCTAssertEqual(banner(nil, failed)?.content.title, "Needs you · Platform › cargo test")
+        let finished = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"needs_user":false,"message":"All tests pass"}"#)
+        XCTAssertEqual(banner(nil, finished)?.content.title, "Done · Platform › cargo test")
+        XCTAssertEqual(banner(nil, finished)?.content.body, "All tests pass")
+        // An older daemon sends no needs_user: the title is AgentNotice's, as before.
+        let older = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"message":"All tests pass"}"#)
+        XCTAssertEqual(banner(nil, older)?.content.title,
+                       AgentNotifier.notice(machine: machine, place: .init(workspace: "Platform", workspaceID: 3, tab: "cargo test"), agent: older).title)
+        XCTAssertEqual(banner(nil, older)?.content.title, "Platform · Claude finished")
+    }
+
+    /// A turn that only finished is silent; anything the user has to act on, or from an older daemon, keeps its sound.
+    func testOnlyAPlainDoneIsSilent() throws {
+        let finished = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"needs_user":false}"#)
+        let plain = try XCTUnwrap(banner(nil, finished), "a plain Done still shows a banner")
+        XCTAssertNil(plain.content.sound)
+        let question = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"needs_user":true}"#)
+        XCTAssertNotNil(try XCTUnwrap(banner(nil, question)).content.sound, "done, but the user has to answer")
+        let older = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true}"#)
+        XCTAssertNotNil(try XCTUnwrap(banner(nil, older)).content.sound, "an older daemon: as before")
+        let asking = try agent(#"{"kind":"claude","state":"waiting","source":"hook","attention":true,"needs_user":true}"#)
+        XCTAssertNotNil(try XCTUnwrap(banner(nil, asking)).content.sound)
+        let failed = try agent(#"{"kind":"claude","state":"error","source":"hook","attention":true,"needs_user":false}"#)
+        XCTAssertNotNil(try XCTUnwrap(banner(nil, failed)).content.sound, "only done is ever silent")
+    }
+
+    /// A turn in the daemon's settle window hasn't asked for the user yet: no banner until attention rises.
+    func testSettlingShowsNoBanner() throws {
+        let running = try agent(#"{"kind":"claude","state":"running","source":"hook","attention":false}"#)
+        let settling = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":false,"settling":true}"#)
+        XCTAssertNil(banner(running, settling))
+        let odd = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"settling":true,"needs_user":true}"#)
+        XCTAssertNil(banner(running, odd), "settling wins, whatever else came with it")
+        // The window ends: attention rises, and that is the rise the banner is for.
+        let settled = try agent(#"{"kind":"claude","state":"done","source":"hook","attention":true,"needs_user":false}"#)
+        XCTAssertNotNil(banner(settling, settled))
+    }
 }

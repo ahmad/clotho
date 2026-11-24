@@ -15,7 +15,13 @@ struct AgentsSummary: Codable, Equatable, Sendable {
         var state: String
         /// When it started needing the user (unix seconds).
         var since: Double
+        /// The agent's `needs_user`. Optional, so a summary stored by an older app or extension still decodes;
+        /// nil reads by the state, as before.
+        var needsUser: Bool?
         var id: String { "\(machine.uuidString)/\(pane)" }
+        /// False only for a turn that just finished with nothing for the user to do: it lists after the others
+        /// and isn't counted.
+        var needsYou: Bool { !(state == "done" && needsUser == false) }
     }
 
     var updated: Double
@@ -25,9 +31,13 @@ struct AgentsSummary: Codable, Equatable, Sendable {
     /// The widget shows at most this many; more only make the item bigger.
     static let maxAgents = 12
 
-    /// Newest first, at most `maxAgents`.
+    /// How many need the user: what the widget counts. Plain Done agents are listed but not counted.
+    var needingYou: Int { agents.filter(\.needsYou).count }
+
+    /// Those that need the user first, then newest first; at most `maxAgents`.
     func normalized() -> AgentsSummary {
-        AgentsSummary(updated: updated, agents: Array(agents.sorted { $0.since > $1.since }.prefix(Self.maxAgents)))
+        let sorted = agents.sorted { ($0.needsYou ? 0 : 1, -$0.since) < ($1.needsYou ? 0 : 1, -$1.since) }
+        return AgentsSummary(updated: updated, agents: Array(sorted.prefix(Self.maxAgents)))
     }
 
     /// An alert's agent added (or replacing the same pane's), for the notification extension: it knows
