@@ -2310,8 +2310,11 @@ impl Daemon {
             // Attention stays up and the agent says something else (a second `done`): a push
             // for this rise that has not gone out yet (held, waiting for its rewrite or for the
             // per-pane interval) goes out with the new text and its label.
+            // Only for a state that alerts: detection's output-only guess (`running` while
+            // attention stays up) is not what the push says.
+            let alerts = !a.guess && matches!(a.state.as_str(), "waiting" | "done" | "error");
             let other_text = o.state != a.state || o.message != a.message || o.tail != a.tail;
-            if a.attention && (other_text || o.needs_user != a.needs_user) {
+            if a.attention && alerts && (other_text || o.needs_user != a.needs_user) {
                 self.push.refresh(p.id, self.alert_of(p, a), other_text);
             }
         }

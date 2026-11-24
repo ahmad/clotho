@@ -6395,6 +6395,47 @@ async fn a_restart_during_the_hold_still_pushes() {
     assert_log_has_none_of(&env, &["May it deploy"]);
 }
 
+/// A detected (hookless) agent rings the bell while the user is at the Mac, then goes on
+/// printing: detection guesses `running`, which doesn't clear attention. The held push goes out
+/// as what the bell said (`waiting`), never as the guess.
+#[tokio::test]
+async fn a_held_push_for_a_detected_agent_is_not_sent_as_its_guessed_state() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[("CLOTHOD_TEST_AT_MAC_MS", "4000")]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    let fake = env.dir.path().join("codex");
+    std::fs::write(&fake, "#!/bin/sh\nsleep 4; printf '\\007'; while :; do printf x; sleep 0.3; done\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    c.input(b, format!("{}\r", fake.display()).as_bytes());
+    // The user types in another pane at the Mac until the bell.
+    let deadline = Instant::now() + T;
+    loop {
+        type_in(&mac, a).await;
+        let now = pane_agent(&c, b).await;
+        if now["attention"] == true {
+            assert_eq!((now["kind"].as_str(), now["state"].as_str()), (Some("codex"), Some("waiting")), "{now}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no attention after the bell: {now}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    wait_push_log(&env, "held", 1).await;
+    let now = wait_agent(&c, b, "guessed running", |a| a["state"] == "running").await;
+    assert_eq!(now["attention"], true, "a guess doesn't clear attention: {now}");
+    assert!(push_log(&env, "sent").is_empty(), "the guess came during the hold:\n{}", env.log());
+    let (_, body) = relay.next();
+    let r = opened(&body);
+    assert_eq!((r["k"].as_str(), r["s"].as_str(), r["p"].as_u64(), r["nu"].as_bool()), (Some("codex"), Some("waiting"), Some(b), Some(true)), "{r}");
+    let sent = wait_push_log(&env, "sent", 1).await;
+    assert!(sent[0].contains("state=waiting label=needs-you"), "{sent:?}");
+    relay.none_for(Duration::from_millis(1200));
+    assert_eq!(push_log(&env, "sent").len(), 1, "{}", env.log());
+}
+
 /// The hold ended while the daemon was down: the push goes as soon as it is back.
 #[tokio::test]
 async fn a_hold_that_ended_during_a_restart_pushes_at_once() {

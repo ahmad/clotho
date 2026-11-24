@@ -109,7 +109,8 @@ struct PaneState {
     /// Bumped on every rise, so a queued or retried push for an older rise can tell.
     rise: u64,
     last_sent: Option<Instant>,
-    delayed: bool,
+    /// The rise whose push waits out the per-pane interval (a task sends it then).
+    delayed: Option<u64>,
     /// The current rise is quiet: the user is at the pane (no push for it, now or delayed).
     quiet: bool,
     alert: Option<Alert>,
@@ -809,19 +810,27 @@ impl Push {
     fn schedule(self: &Arc<Self>, g: &mut Inner, pane: u64) {
         let t = timing();
         let Some(ps) = g.panes.get_mut(&pane) else { return };
+        // Already sent, or dropped.
+        if !ps.pending {
+            return;
+        }
         let wait = ps.last_sent.map(|at| (at + t.per_pane).saturating_duration_since(Instant::now())).unwrap_or_default();
         if wait.is_zero() {
             self.dispatch(g, pane);
-        } else if !ps.delayed {
-            ps.delayed = true;
+        } else if ps.delayed != Some(ps.rise) {
+            let rise = ps.rise;
+            ps.delayed = Some(rise);
             let me = self.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(wait).await;
                 let mut g = me.inner.lock().unwrap();
                 let Some(ps) = g.panes.get_mut(&pane) else { return };
-                ps.delayed = false;
-                // A held rise goes (or not) when its hold ends.
-                if ps.attention && !ps.quiet && ps.held.is_none() {
+                if ps.delayed == Some(rise) {
+                    ps.delayed = None;
+                }
+                // Only the rise this was delayed for, if it still waits to go: a later rise
+                // goes by its own schedule (after its rewrite, or its hold).
+                if ps.rise == rise && ps.pending && ps.attention && !ps.quiet && ps.held.is_none() {
                     me.dispatch(&mut g, pane);
                 }
             });
@@ -1385,6 +1394,63 @@ mod tests {
             let a = now(2);
             assert!(push.inner.lock().unwrap().panes[&2].last_sent.is_some());
             assert_eq!((a.message.as_deref(), a.summary.as_deref(), a.needs_user), (Some("Should I push?"), Some("Should I push?"), Some(true)));
+        });
+    }
+
+    /// A push delayed by the per-pane interval belongs to its rise. When that rise cleared and
+    /// another rose (still waiting for its rewrite), the delayed send is not that one's: the
+    /// new rise goes once, with its rewrite; without a rewrite, once the interval has passed.
+    #[test]
+    fn a_delayed_push_is_not_sent_for_a_later_rise() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let push = Push::load(dir.path());
+            let reg = json!({"device": "d", "handle": "h", "key": PK, "label": LABEL, "relay": "http://127.0.0.1:1"});
+            assert!(push.request("push.register", &reg).await.is_ok());
+            let sent = || push.inner.lock().unwrap().sent.get("d").map_or(0, |s| s.len());
+            // The pane's last push went so long ago that 300 ms of its interval are left.
+            let left = Duration::from_millis(300);
+            let age = |pane: u64| {
+                let at = Instant::now().checked_sub(timing().per_pane - left).unwrap();
+                push.inner.lock().unwrap().panes.get_mut(&pane).unwrap().last_sent = Some(at);
+            };
+            let ask = Alert { message: Some("Should I push?".into()), needs_user: Some(true), ..full() };
+
+            // Sent; cleared; a rise that is delayed; cleared; a rise that waits for its rewrite.
+            push.attention(1, true, Some(ask.clone()), false, None, None);
+            assert_eq!(sent(), 1);
+            age(1);
+            push.attention(1, false, None, false, None, None);
+            push.attention(1, true, Some(ask.clone()), false, None, None);
+            push.attention(1, false, None, false, None, None);
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            push.attention(1, true, Some(ask.clone()), false, Some(rx), None);
+            tokio::time::sleep(left + Duration::from_millis(200)).await;
+            assert_eq!(sent(), 1, "the delayed send of the earlier rise took the new one, without its rewrite");
+            tx.send(Some(crate::summary::Rewrite { text: "It asks whether to push.".into(), needs_user: Some(true) })).unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(sent(), 2, "sent once the rewrite came");
+            {
+                let g = push.inner.lock().unwrap();
+                let ps = &g.panes[&1];
+                assert_eq!(ps.alert.as_ref().unwrap().summary.as_deref(), Some("It asks whether to push."));
+                assert!(!ps.pending && ps.delayed.is_none(), "nothing left to send a second time");
+            }
+
+            // The same without a rewrite: the later rise still goes, once, when the interval ends.
+            push.attention(2, true, Some(ask.clone()), false, None, None);
+            assert_eq!(sent(), 3);
+            age(2);
+            push.attention(2, false, None, false, None, None);
+            push.attention(2, true, Some(ask.clone()), false, None, None);
+            push.attention(2, false, None, false, None, None);
+            push.attention(2, true, Some(ask), false, None, None);
+            assert_eq!(sent(), 3, "within the interval");
+            tokio::time::sleep(left + Duration::from_millis(200)).await;
+            assert_eq!(sent(), 4);
+            let g = push.inner.lock().unwrap();
+            assert!(!g.panes[&2].pending && g.panes[&2].delayed.is_none());
         });
     }
 
