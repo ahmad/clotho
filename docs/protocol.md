@@ -599,7 +599,9 @@ then in `/opt/homebrew/bin` and `/usr/local/bin`, and on macOS in the developer 
 (`/usr/bin/git` itself is never run: without the tools it opens an install dialog). It runs
 only these commands: `config --list`, `status --porcelain=v2`, `diff-index`, `diff-tree`,
 `merge-base`, `rev-list --count`, `rev-parse`, `hash-object` (of nothing, for the empty tree),
-and for a worktree `check-ref-format`, `worktree add`, and `worktree remove` and `update-ref -d`
+and for a worktree `check-ref-format`, `worktree add --no-checkout`, `read-tree --reset -u HEAD`
+in the new worktree (under a config listing made there, so what the config includes only for
+that worktree's git dir or branch is overridden too), and `worktree remove` and `update-ref -d`
 to take back one that failed. It runs them from `/`, with an
 empty environment, without the system and global config, with every setting that could run a
 program or reach the network overridden, and with a timeout, an output cap and a process-group

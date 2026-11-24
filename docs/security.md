@@ -280,6 +280,22 @@ All of it goes through one runner (`crate::gitrun`). Nothing else in the daemon 
    `filter.<name>.*` it finds with an empty command and `required=false`. The same listing
    finds each `protocol.<name>.allow`, which would win over `protocol.allow=never`, and sets it
    to `never`. A config with more than 256 such names, or over 1 MiB, is refused.
+
+   **The listing is only good for where it was made.** A config can include a file on a
+   condition: `includeIf "gitdir:…"` on the git dir, `includeIf "onbranch:…"` on the branch
+   that is checked out. A linked worktree has its own git dir (`.git/worktrees/<name>`) and
+   its own branch, so a filter can be defined for it alone and be missing from a listing made
+   in the main work tree. Every job therefore lists the config from the work tree it is about
+   to run git in. Creating a worktree is the one job that touches two: the request comes from
+   an existing work tree and the files are written in a new one, on a new branch. It is done
+   in two steps. `worktree add --no-checkout`, under the listing of the work tree the request
+   came from, makes the branch, the folder and the git dir and writes no file (no filter has
+   anything to run on). Then a second runner is opened on the new worktree, which lists the
+   config again as git sees it from there (its git dir, its branch), and `read-tree --reset -u
+   HEAD` under that listing writes the index and the files. If either step fails, the worktree
+   and the branch are taken back. (Before this, in the unreleased first version of the
+   feature, one `worktree add` did the checkout under the first listing, and a smudge or
+   process filter included only for `gitdir:**/worktrees/**` or for the new branch ran.)
 2. **`git diff` writes the index**, and so does `git status` unless told not to: they refresh
    stat information and write it back, taking `index.lock`. The runner uses plumbing only:
    `status --porcelain=v2` under `--no-optional-locks`, and `diff-index` and `diff-tree` for
@@ -305,10 +321,11 @@ regular files only, non-blocking (a FIFO can't hang it), at most 1 MiB each.
   hooks all name a marker script (fsmonitor, pager, sshCommand, alternateRefsCommand, external
   diff, a diff driver's command and textconv, a required clean/smudge/process filter, and
   hooks). Over the summary, `git.changes`, four `git.diff`s and a worktree Tab, the daemon and
-  its children made 48 `execve` calls: 2 of clothod itself (serve and the holder), 2 of
-  `/bin/sh` (the panes), and 44 of git (`config`, `status`, `diff-index`, `diff-tree`,
-  `merge-base`, `rev-list`, `rev-parse`, `check-ref-format`, `worktree`, and the `branch`,
-  `symbolic-ref` and `reset` that `worktree add` runs itself). Nothing else, and none failed.
+  its children made 49 `execve` calls: 2 of clothod itself (serve and the holder), 2 of
+  `/bin/sh` (the panes), and 45 of git (`version`, `config`, `status`, `diff-index`,
+  `diff-tree`, `merge-base`, `rev-list`, `rev-parse`, `check-ref-format`, `worktree`,
+  `read-tree`, and the `branch` and `symbolic-ref` that `worktree add --no-checkout` runs
+  itself). Nothing else, and none failed.
   `.git/index` was byte-for-byte and mtime-for-mtime what it was before.
 - macOS, Apple git 2.54.0 (Apple Git-157), the build Mac: the same tests pass (the marker never
   appears, the index is unchanged). No syscall trace was taken there.
@@ -326,7 +343,11 @@ regular files only, non-blocking (a FIFO can't hang it), at most 1 MiB each.
   `a_dropped_call_kills_the_whole_process_group`, `the_output_cap_truncates_and_stops_reading`,
   `an_old_or_unknown_git_is_unsupported`, `open_refuses_what_it_cannot_make_safe`,
   `find_git_honours_the_override_and_is_never_relative`.
-- `worktree::tests::hooks_and_filters_never_run`, `each_refusal_leaves_no_branch_and_no_folder`,
+- `worktree::tests::hooks_and_filters_never_run`,
+  `filters_included_only_for_the_new_worktree_never_run` (smudge and process filters defined
+  only under `includeIf "gitdir:**/worktrees/**"` and only under `includeIf "onbranch:…"` for
+  the new branch; its control checks out the same files the ordinary way and requires all
+  four to run), `each_refusal_leaves_no_branch_and_no_folder`,
   `a_failed_add_rolls_the_branch_back`, `a_locked_half_made_worktree_is_taken_back`.
 - e2e `a_hostile_repo_cannot_run_anything_through_the_daemon` (the whole path, through the
   protocol) and `git_requests_do_not_block_the_connection` (a git that hangs).
@@ -351,11 +372,12 @@ regular files only, non-blocking (a FIFO can't hang it), at most 1 MiB each.
 - **Git older than 2.31** is `git_unsupported`. No workaround is attempted.
 - **A config that changes between the scan and the command** is out of scope: the filter and
   protocol names are listed when a job starts, and a filter added to the config in the
-  milliseconds after that is not overridden for that job. Whoever can write `.git/config` at
+  milliseconds after that is not overridden for that job. The same goes for a branch switched
+  in those milliseconds under an `includeIf "onbranch:…"`. Whoever can write `.git/config` at
   will already runs code as the user.
 - **Resource use** is bounded per call (time, output), per job (the config scan, at most 5 s,
-  then 6 s of git for a summary, a list or a diff, and 10 s in all for a request; two minutes
-  for a checkout) and per daemon (two git jobs at once), not by the
+  then 6 s of git for a summary, a list or a diff, and 10 s in all for a request; for a
+  worktree, 30 s to add it and two minutes to write its files) and per daemon (two git jobs at once), not by the
   repository's size: a very large repository gives `timeout` or uncounted lines, and is then
   read again less often (ten times the last run's duration apart).
 - **What clients get is still untrusted data.** File names and diff text come from the

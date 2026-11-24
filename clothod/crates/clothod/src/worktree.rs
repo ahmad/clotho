@@ -28,8 +28,10 @@ const BASE_MAX: usize = 255;
 /// Longest piece of git's own words, or of a path, in an error message (characters).
 const MESSAGE_MAX: usize = 300;
 
-/// `worktree add` checks out a whole tree: it gets two minutes. It prints a line or two.
-const ADD: Limits = Limits { timeout: Duration::from_secs(120), max_stdout: 64 << 10 };
+/// `worktree add --no-checkout` makes a branch and a folder. It prints a line or two.
+const ADD: Limits = Limits { timeout: Duration::from_secs(30), max_stdout: 64 << 10 };
+/// Writing a whole tree's files gets two minutes.
+const CHECKOUT: Limits = Limits { timeout: Duration::from_secs(120), max_stdout: 64 << 10 };
 /// The look-ups before it.
 const QUICK: Limits = Limits { timeout: Duration::from_secs(10), max_stdout: 4096 };
 /// Each step of undoing a failed add.
@@ -110,10 +112,11 @@ async fn commit(repo: &Repo, rev: &str) -> Result<Option<String>, Failure> {
     Ok((out.code == Some(0) && is_sha(&sha)).then_some(sha))
 }
 
-/// Take back what a failed `worktree add` made, through git only (no file is ever deleted here):
-/// the worktree, then the branch if it still points at `sha`. Returns what is still there.
+/// Take back what a failed `worktree add` or checkout made, through git only (no file is ever
+/// deleted here): the worktree, then the branch if it still points at `sha`. Returns what is
+/// still there.
 async fn undo(repo: &Repo, path: &Path, name: &str, sha: &str) -> Option<String> {
-    // Twice `--force`: a git that was killed in its checkout (a timeout) leaves the worktree
+    // Twice `--force`: a `worktree add` that was killed half way (a timeout) leaves the worktree
     // locked ("initializing"), and one `--force` refuses a locked one. The caller checked that
     // nothing was at `path` before the add, under LOCK, so what is there is this call's own.
     let _ = run(repo, &["worktree".as_ref(), "remove".as_ref(), "--force".as_ref(), "--force".as_ref(), "--".as_ref(), path.as_os_str()], UNDO).await;
@@ -133,8 +136,8 @@ async fn undo(repo: &Repo, path: &Path, name: &str, sha: &str) -> Option<String>
 /// Make a linked worktree for the repository `cwd` is in, on a new branch `name`, in a new folder
 /// beside the main work tree. The branch starts at `base` (any commit-ish), or at the HEAD of the
 /// work tree `cwd` is in. Nothing the repository configures runs: no hooks, no filters (so LFS
-/// files stay pointers). On any failure the repository is left as it was, or the message says
-/// what remains.
+/// files stay pointers), whichever work tree, git dir or branch its config names them for. On
+/// any failure the repository is left as it was, or the message says what remains.
 pub async fn create(cwd: &Path, name: &str, base: Option<&str>) -> Result<Created, Failure> {
     let not_a_repo = || ("not_a_repo", "that folder is not in a git repository".to_string());
     if !cwd.is_absolute() {
@@ -175,18 +178,37 @@ pub async fn create(cwd: &Path, name: &str, base: Option<&str>) -> Result<Create
         None => commit(&repo, "HEAD").await?.ok_or_else(|| ("bad_base", "the repository has no commit to start from".to_string()))?,
     };
 
-    let args: [&OsStr; 9] = ["worktree".as_ref(), "add".as_ref(), "--quiet".as_ref(), "--no-track".as_ref(), "-b".as_ref(), name.as_ref(), "--".as_ref(), path.as_os_str(), sha.as_ref()];
-    let (code, why) = match run(&repo, &args, ADD).await {
-        Ok(out) if out.code == Some(0) && !out.truncated => {
-            return Ok(Created { path: std::fs::canonicalize(&path).unwrap_or(path), branch: name.to_string(), head: sha[..7].to_string() });
-        }
-        Ok(out) => ("git_failed", git_says(&out)),
-        Err(e) => failure(&e),
+    // The add makes the branch, the folder and the worktree's git dir, and checks nothing out:
+    // `repo` was scanned from the work tree the request came from, and the config can hold more
+    // for the new one (`includeIf "gitdir:…"` on its git dir, `includeIf "onbranch:…"` on its
+    // branch), filters included. So the files are written by a second runner, opened on the new
+    // worktree once it exists and scanned from there.
+    let add: [&OsStr; 10] = ["worktree".as_ref(), "add".as_ref(), "--quiet".as_ref(), "--no-checkout".as_ref(), "--no-track".as_ref(), "-b".as_ref(), name.as_ref(), "--".as_ref(), path.as_os_str(), sha.as_ref()];
+    let made = match run(&repo, &add, ADD).await {
+        Ok(out) if out.code == Some(0) && !out.truncated => checkout(&path).await,
+        Ok(out) => Err(("git_failed", git_says(&out))),
+        Err(e) => Err(failure(&e)),
+    };
+    let (code, why) = match made {
+        Ok(()) => return Ok(Created { path: std::fs::canonicalize(&path).unwrap_or(path), branch: name.to_string(), head: sha[..7].to_string() }),
+        Err(e) => e,
     };
     Err(match undo(&repo, &path, name, &sha).await {
         Some(left) => (code, format!("{why} (left behind: {left})")),
         None => (code, why),
     })
+}
+
+/// Fill the worktree at `path`, made with `--no-checkout`, with its HEAD: the index and the files.
+/// The runner is opened here, on the new worktree, so its config scan is the one git itself will
+/// see while it writes the files.
+async fn checkout(path: &Path) -> Result<(), Failure> {
+    let repo = Repo::open(path).await.map_err(|e| failure(&e))?;
+    match run(&repo, &["read-tree", "--reset", "-u", "HEAD"].map(OsStr::new), CHECKOUT).await {
+        Ok(out) if out.code == Some(0) && !out.truncated => Ok(()),
+        Ok(out) => Err(("git_failed", git_says(&out))),
+        Err(e) => Err(failure(&e)),
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +460,70 @@ mod tests {
         // A refusal after the checks, and one with an undo, run nothing either.
         assert_eq!(create(&root, "safe", None).await.unwrap_err().0, "worktree_exists");
         assert_eq!(create(&root, "other", Some("nope")).await.unwrap_err().0, "bad_base");
+        assert!(!marker.exists(), "creating a worktree ran the script: {}", std::fs::read_to_string(&marker).unwrap());
+    }
+
+    /// A config can hold more for the new worktree than for the one the request came from:
+    /// `includeIf "gitdir:…"` matches the new worktree's own git dir (`.git/worktrees/<name>`),
+    /// and `includeIf "onbranch:…"` its new branch. Filters defined only there must not run.
+    #[tokio::test]
+    async fn filters_included_only_for_the_new_worktree_never_run() {
+        let tmp = tmp();
+        let (root, _, _) = repo(tmp.path());
+        let beside = root.parent().unwrap().to_path_buf();
+        let (evil, marker) = (beside.join("evil.sh"), beside.join("marker"));
+        script(&evil, &format!("#!/bin/sh\necho \"ran $*\" >> {}\nexit 0\n", marker.display()));
+        let kinds = ["gitdir-smudge", "gitdir-process", "onbranch-smudge", "onbranch-process"];
+        let mut attributes = String::new();
+        for kind in kinds {
+            write(&root.join(format!("{kind}.txt")), &format!("{kind}\n"));
+            attributes.push_str(&format!("{kind}.txt filter={kind}\n"));
+        }
+        write(&root.join(".gitattributes"), &attributes);
+        git_ok(&root, &["add", "-A"]);
+        git_ok(&root, &["commit", "-q", "-m", "attributes"]);
+
+        // `sh <script>`, not the script itself: see `script`.
+        let e = format!("sh {}", evil.display());
+        let mut config = std::fs::read_to_string(root.join(".git/config")).unwrap();
+        config.push_str("[includeIf \"gitdir:**/worktrees/**\"]\n\tpath = gitdir.inc\n[includeIf \"onbranch:cond*\"]\n\tpath = onbranch.inc\n");
+        std::fs::write(root.join(".git/config"), config).unwrap();
+        for when in ["gitdir", "onbranch"] {
+            let inc = format!("[filter \"{when}-smudge\"]\n\tsmudge = {e} {when}-smudge\n[filter \"{when}-process\"]\n\tprocess = {e} {when}-process\n");
+            write(&root.join(".git").join(format!("{when}.inc")), &inc);
+        }
+        // Seen from the main work tree, on `main`, the config names no filter at all.
+        assert!(!git_ok(&root, &["config", "--list"]).contains("filter."));
+
+        // The control: in a copy, git the ordinary way runs all four for a worktree on `cond`.
+        let control = beside.join("control");
+        assert!(Command::new("/bin/cp").arg("-a").arg(&root).arg(&control).status().unwrap().success());
+        // One file at a time: git gives up at a process filter that doesn't speak its protocol.
+        let control_cond = beside.join("control-cond");
+        git_ok(&control, &["worktree", "add", "--no-checkout", "-b", "cond", control_cond.to_str().unwrap()]);
+        git_ok(&control_cond, &["checkout", "HEAD", "--", ".gitattributes"]);
+        for kind in kinds {
+            git(&control_cond, &["checkout", "HEAD", "--", &format!("{kind}.txt")]);
+        }
+        let ran = std::fs::read_to_string(&marker).expect("the control must run the marker script");
+        for kind in kinds {
+            assert!(ran.contains(&format!("ran {kind}\n")), "{kind} did not run in the control: {ran}");
+        }
+        std::fs::remove_file(&marker).unwrap();
+
+        let made = create(&root, "cond", None).await.unwrap();
+        assert_eq!(made.path, beside.join("proj-cond"));
+        // The files come out as they are stored, and the worktree is clean.
+        for kind in kinds {
+            assert_eq!(std::fs::read_to_string(made.path.join(format!("{kind}.txt"))).unwrap(), format!("{kind}\n"));
+        }
+        assert_eq!(git_ok(&made.path, &["rev-parse", "--abbrev-ref", "HEAD"]), "cond");
+        // Another name: only the `gitdir:` include applies.
+        create(&root, "other", None).await.unwrap();
+        // From inside a linked worktree, where the scan of the caller's side sees `gitdir.inc`
+        // but not the new branch's `onbranch.inc`.
+        let again = create(&made.path, "cond2", None).await.unwrap();
+        assert_eq!(std::fs::read_to_string(again.path.join("onbranch-process.txt")).unwrap(), "onbranch-process\n");
         assert!(!marker.exists(), "creating a worktree ran the script: {}", std::fs::read_to_string(&marker).unwrap());
     }
 
