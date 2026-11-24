@@ -52,37 +52,18 @@ final class SidebarToggleTests: XCTestCase {
         XCTAssertEqual(toggled, 1, "it toggles")
     }
 
-    /// Settings › General › Show Agents in the sidebar, and View ▸ Show Agents Panel: off removes the
-    /// panel and its divider, and the workspaces take the full height; it's saved.
-    func testAgentsPanelCanBeHidden() throws {
+    /// The Agents panel is gone (the inbox is part of the one list), and its View menu command with it:
+    /// the list reaches the footer.
+    func testNoAgentsPanel() throws {
         _ = NSApplication.shared
-        let saved = UserDefaults.standard.object(forKey: AppDelegate.showAgentsPanelKey)
-        defer { UserDefaults.standard.set(saved, forKey: AppDelegate.showAgentsPanelKey) }
         let sidebar = SidebarView(frame: NSRect(x: 0, y: 0, width: 240, height: 700))
         sidebar.layoutSubtreeIfNeeded()
-        XCTAssertTrue(sidebar.agentsViews.allSatisfy { !$0.isHidden }, "on by default")
-        let footerTop = sidebar.footer.frame.maxY
-        XCTAssertGreaterThan(sidebar.workspacesScroll.frame.minY, footerTop + 80, "the Agents panel sits between")
-
-        sidebar.showsAgents = false
-        sidebar.layoutSubtreeIfNeeded()
-        XCTAssertTrue(sidebar.agentsViews.allSatisfy(\.isHidden))
-        XCTAssertEqual(sidebar.workspacesScroll.frame.minY, footerTop, accuracy: 0.5, "the workspaces reach the footer")
-
-        sidebar.showsAgents = true
-        sidebar.layoutSubtreeIfNeeded()
-        XCTAssertGreaterThan(sidebar.workspacesScroll.frame.minY, footerTop + 80, "and back")
-
-        // The app's setting: saved, and the View menu's checkmark follows it.
-        let app = AppDelegate()
-        NSApp.mainMenu = AppDelegate.makeMainMenu()
-        app.setShowsAgentsPanel(false)
-        XCTAssertFalse(app.showsAgentsPanel)
-        XCTAssertEqual(UserDefaults.standard.object(forKey: AppDelegate.showAgentsPanelKey) as? Bool, false)
-        let item = try XCTUnwrap(NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).first { $0.title == "Show Agents Panel" })
-        XCTAssertEqual(item.state, .off)
-        app.toggleAgentsPanel(nil)
-        XCTAssertTrue(app.showsAgentsPanel)
-        XCTAssertEqual(item.state, .on)
+        XCTAssertEqual(sidebar.workspacesScroll.frame.minY, sidebar.footer.frame.maxY, accuracy: 0.5, "the list reaches the footer")
+        XCTAssertEqual(sidebar.workspacesScroll.frame.maxY, 700 - SidebarView.topInset, accuracy: 0.5)
+        XCTAssertEqual(sidebar.subviews.compactMap { $0 as? NSScrollView }.count, 1, "one scrolling list")
+        let menu = AppDelegate.makeMainMenu()
+        let titles = menu.items.compactMap(\.submenu).flatMap(\.items).map(\.title)
+        XCTAssertFalse(titles.contains("Show Agents Panel"))
+        XCTAssertTrue(titles.contains("Toggle Sidebar"), "the View menu's other commands are there")
     }
 }

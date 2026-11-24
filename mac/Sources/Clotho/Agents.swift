@@ -2,7 +2,7 @@ import AppKit
 import ClothoKit
 import UserNotifications
 
-// Coding agents (Claude Code, Codex, …) on every machine: the sidebar's Agents section, badges on
+// Coding agents (Claude Code, Codex, …) on every machine: the sidebar's inbox, marks on
 // workspaces and tabs, notifications when one needs the user, and the dock badge. Agent state comes from
 // each daemon's pane `agent` field; every connected machine keeps an event subscription, which is cheap
 // (no pane output flows for panes that aren't on screen).
@@ -39,13 +39,6 @@ struct AgentEntry {
         }
     }
 
-    /// The Agents panel: agents whose `attention` the daemon raised (until resolved, on any device, or
-    /// until someone types into the pane) at the top; every other agent in the section below.
-    static func split(_ entries: [AgentEntry]) -> (attention: [AgentEntry], others: [AgentEntry]) {
-        let sorted = sorted(entries)
-        return (sorted.filter(\.info.needsAttention), sorted.filter { !$0.info.needsAttention })
-    }
-
     var place: String {
         [workspace?.name, tabTitle].compactMap { $0 }.joined(separator: " › ")
     }
@@ -54,7 +47,7 @@ struct AgentEntry {
 extension AgentInfo.State {
     var color: NSColor {
         switch self {
-        case .waiting: return Theme.warning
+        case .waiting: return Theme.caution
         case .running: return Theme.accent
         case .starting, .unknown: return Theme.dimText
         case .done: return Theme.success
@@ -94,12 +87,6 @@ extension AgentInfo {
         }
     }
 
-    /// The color a badge shows for this agent, or nil when it needs no badge (a settling one has none:
-    /// its attention hasn't risen).
-    var badgeColor: NSColor? {
-        needsAttention ? shownState.color : (state == .running || state == .starting ? Theme.accent : nil)
-    }
-
     /// A finished turn that asks the user something (clothod 0.1.31's `needs_user`), not yet seen: it
     /// reads "Needs you", where a turn that only finished reads "Done".
     var asksUser: Bool { state == .done && needsUser == true && needsAttention }
@@ -137,7 +124,7 @@ extension AgentInfo {
 extension AppDelegate {
     // MARK: Collecting
 
-    /// Whether a machine's agents show in the Agents section, notify and count toward the dock badge.
+    /// Whether a machine's agents show in the sidebar's inbox, notify and count toward the dock badge.
     func monitorsAgents(_ key: MachineKey) -> Bool {
         UserDefaults.standard.object(forKey: "MonitorAgents.\(key)") as? Bool ?? true
     }
@@ -165,28 +152,12 @@ extension AppDelegate {
         return AgentEntry.sorted(entries)
     }
 
-    /// Monitored machines that can't be reached, so their agents aren't silently missing.
-    func unreachableMonitoredMachines() -> [(name: String, reason: String)] {
-        connections.values.filter { monitorsAgents($0.key) }.compactMap { session in
-            if case .reconnecting(let reason) = session.store.connection { return (session.title, reason) }
-            return nil
-        }.sorted { $0.name < $1.name }
-    }
-
-    /// The most urgent agent badge for a workspace or tab on a machine.
-    func agentBadge(machine: MachineKey, panes: [PaneID]) -> NSColor? {
-        guard monitorsAgents(machine), let state = connections[machine]?.store.state else { return nil }
-        let agents = panes.compactMap { state.pane($0)?.agent }
-        let urgent = agents.filter(\.needsAttention).min { $0.urgency < $1.urgency }
-        return (urgent ?? agents.first { $0.badgeColor != nil })?.badgeColor
-    }
-
     // MARK: Opening
 
     /// Shows the agent's pane (its machine, workspace, tab and pane). Looking doesn't resolve it: the
     /// checkmark does, or typing into the pane (the daemon clears attention on input).
     ///
-    /// Every way here is the user asking (an Agents row, its menu, the command bar, a notification), so the
+    /// Every way here is the user asking (an inbox row, its menu, the command bar, a notification), so the
     /// focus that follows is theirs: the pane gets its `pane.focus`, which also drops a held phone push. A
     /// notification click has to say so itself: it reaches the app with no key or mouse event, and with
     /// Clotho already in front nothing comes forward either.
@@ -402,7 +373,7 @@ extension AppDelegate {
     /// Whether the switches let a notification about this agent out (see `notifySwitch`).
     func notifies(_ agent: AgentInfo) -> Bool { notifies(agent.notifySwitch) }
 
-    /// Notification switches, for the Agents menu and the sidebar's Agents header.
+    /// Notification switches, for the Agents menu and the sidebar's inbox headers.
     func agentsNotificationMenu() -> NSMenu {
         let menu = NSMenu(title: "Agents")
         fillAgentsMenu(menu)
@@ -502,7 +473,7 @@ extension AppDelegate {
             default: break
             }
         }
-        // Elapsed times in the Agents section stay current.
+        // Elapsed times in the inbox and the pane headers stay current.
         agentClock = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sync() }
         }
@@ -548,122 +519,83 @@ final class AgentNotificationDelegate: NSObject, UNUserNotificationCenterDelegat
     }
 }
 
-/// An agent in the sidebar: state icon, kind and machine, where it is, what it says, and how long ago its
-/// state changed.
+/// An agent in the sidebar's inbox, on one line: its mark, where it is ("workspace › tab") and what it asks
+/// or last said, which takes the rest of the row and truncates. The machine, the kind of agent, its state
+/// and the full text are in the tooltip and the accessibility label. Nothing else is in the row: Mute and
+/// Resolve float over its trailing end under the pointer.
 final class AgentRow: ChromeItem {
-    private let icon = NSImageView()
-    private let detail = NSTextField(labelWithString: "")
-    private let elapsed = NSTextField(labelWithString: "")
-    /// The Resolve checkmark: always in place (so nothing moves), shown only while the row is hovered.
-    private(set) var resolve: ClosureButton?
+    static var height: CGFloat { s(26) }
+    /// How much of the row the title may take, from the row's leading edge, so the text after it always shows.
+    static let titleShare: CGFloat = 0.6
     static let fade: TimeInterval = 0.12
 
-    /// With `onResolve`, the row has a checkmark that resolves the agent (agents needing attention).
-    /// The Mute button (bell.slash), left of Resolve and shown on hover the same way.
+    let mark: AgentMarkView
+    /// What the agent asks or last said (hidden when it said nothing).
+    let summary = NSTextField(labelWithString: "")
+    /// The Resolve checkmark and, left of it, Mute (bell.slash): always in place, shown only under the pointer.
+    private(set) var resolve: ClosureButton?
     private(set) var mute: ClosureButton?
-    /// Mute and Resolve on their backing, floating over the row's right end on hover.
+    /// Mute and Resolve on their backing, floating over the row's trailing end on hover.
     private(set) var actions: ActionsOverlay?
-    /// The time's distance from the row's right edge, with or without actions.
-    static var timeInset: CGFloat { s(8) }
-    /// The elapsed-time label, for layout tests.
-    var elapsedLabel: NSTextField { elapsed }
-    /// The small bell.slash a muted agent shows in the Quiet section.
-    private(set) var mutedMarker: NSImageView?
 
-    /// With `onResolve` (and `onMute`), the row has hover-only Resolve (and Mute) buttons: agents that need
-    /// attention.
-    init(_ entry: AgentEntry, onResolve: (() -> Void)? = nil, onMute: (() -> Void)? = nil) {
-        super.init(closable: false)
+    /// "Needs you: Claude Code, clotho › alerts on devbox. Allow Bash: cargo test".
+    static func description(_ entry: AgentEntry) -> String {
         let info = entry.info
-        let shown = info.shownState
-        icon.image = NSImage(systemSymbolName: shown.symbol, accessibilityDescription: shown.label)?
-            .withSymbolConfiguration(.init(pointSize: s(11), weight: .semibold))
-        icon.contentTintColor = shown.color
-        // Where it is: machine · workspace (bold) › tab, as on iOS.
-        let strong = info.needsAttention ? Theme.foreground : Theme.secondaryText
-        let quiet: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s(12)), .foregroundColor: Theme.dimText]
-        let title = NSMutableAttributedString(string: entry.machineName + " · ", attributes: quiet)
-        title.append(NSAttributedString(string: entry.workspace?.name ?? "Workspace", attributes: [
-            .font: NSFont.systemFont(ofSize: s(12), weight: .semibold), .foregroundColor: strong,
-        ]))
-        if let tab = entry.tabTitle, !tab.isEmpty {
-            title.append(NSAttributedString(string: " › " + tab, attributes: quiet))
-        }
+        var text = "\(info.mark?.label ?? info.shownState.label): \(info.kindName)"
+        if !entry.place.isEmpty { text += ", \(entry.place)" }
+        text += " on \(entry.machineName)"
+        if let said = info.inboxText, !said.isEmpty { text += ". \(said)" }
+        return text
+    }
+
+    /// With `onResolve` (and `onMute`), the row has the hover-only Resolve (and Mute) buttons: agents that
+    /// need the user or finished. A working agent's row has none.
+    init(_ entry: AgentEntry, onResolve: (() -> Void)? = nil, onMute: (() -> Void)? = nil) {
+        mark = AgentMarkView(entry.info.mark ?? .working)
+        super.init(closable: false)
         colorsOwnTitle = true
-        // Attributed text brings its own line breaking, so truncation is set on it as well.
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        title.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: title.length))
-        label.attributedStringValue = title
+        label.stringValue = entry.place.isEmpty ? (entry.paneTitle ?? entry.info.kindName) : entry.place
+        label.font = NSFont.systemFont(ofSize: s(12))
+        label.textColor = Theme.foreground
+        label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
-        label.cell?.wraps = false
-        label.cell?.truncatesLastVisibleLine = true
-        // Hovering a cut-off title or detail shows all of it in place, as Finder does.
-        label.allowsExpansionToolTips = true
-        detail.allowsExpansionToolTips = true
-        // Which agent, then what it says.
-        detail.stringValue = [info.kind, info.headline ?? (shown.label == "Idle" ? "idle" : nil)].compactMap { $0 }.joined(separator: " · ")
-        detail.font = NSFont.systemFont(ofSize: s(11))
-        detail.textColor = Theme.dimText
-        detail.lineBreakMode = .byTruncatingTail
-        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        elapsed.stringValue = info.sinceDate.map(Self.elapsed) ?? ""
-        elapsed.font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
-        elapsed.textColor = Theme.dimText
-        elapsed.setContentHuggingPriority(.required, for: .horizontal)
-        elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
-        toolTip = [
-            title.string,
-            "\(info.kindName) on \(entry.machineName): \(shown.label)",
-            entry.place.isEmpty ? nil : entry.place,
-            info.prompt.map { "Asked: \($0)" },
-            info.summary.map(PlainText.oneLine),
-            info.result,
-            info.tool.flatMap { tool in info.state == .waiting ? nil : "Last tool: \(tool)" + (info.toolInput.map { " \($0)" } ?? "") },
-            info.turnDuration.flatMap(AgentNotice.duration).map { "Took \($0)" },
-            info.isHookSourced ? "Reported by \(info.kindName)'s hooks" : "Detected from the terminal",
-        ].compactMap { $0 }.joined(separator: "\n")
-        for view in [icon, detail, elapsed] {
+        label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        // Above the summary's, so the summary gives way first; the cap below keeps it from being squeezed out.
+        label.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(490), for: .horizontal)
+        let said = entry.info.inboxText ?? ""
+        summary.stringValue = said
+        summary.isHidden = said.isEmpty
+        summary.font = NSFont.systemFont(ofSize: s(12))
+        summary.textColor = Theme.dimText
+        summary.lineBreakMode = .byTruncatingTail
+        summary.maximumNumberOfLines = 1
+        summary.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        summary.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        toolTip = Self.description(entry)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(Self.description(entry))
+        for view in [mark, summary] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        // The time is pinned to the right edge whether or not the row has actions; a muted agent's
-        // bell.slash sits just before it. The title truncates before them, never under.
-        var timeLeading = elapsed.leadingAnchor
-        if info.isMuted {
-            let marker = NSImageView()
-            marker.image = NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Muted")?
-                .withSymbolConfiguration(.init(pointSize: s(10), weight: .regular))
-            marker.contentTintColor = Theme.dimText
-            marker.toolTip = "Muted: it won't come back until you unmute it (right-click)"
-            marker.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(marker)
-            NSLayoutConstraint.activate([
-                marker.trailingAnchor.constraint(equalTo: elapsed.leadingAnchor, constant: s(-4)),
-                marker.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-                marker.widthAnchor.constraint(equalToConstant: s(12)),
-            ])
-            mutedMarker = marker
-            timeLeading = marker.leadingAnchor
-        }
-        // The title moves right of the icon, and up to make room for the detail line.
-        constraints.filter { $0.firstItem === label }.forEach { $0.isActive = false }
+        // The mark sits in the chevron's column and the title starts where workspace names do.
+        let inset = MachineHeader.nameInset
+        constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.constant = inset }
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
-            icon.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: s(14)),
-            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: s(6)),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: s(5)),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: timeLeading, constant: s(-6)),
-            elapsed.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.timeInset),
-            elapsed.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            detail.leadingAnchor.constraint(equalTo: label.leadingAnchor),
-            detail.topAnchor.constraint(equalTo: label.bottomAnchor, constant: s(1)),
-            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.timeInset),
+            mark.centerXAnchor.constraint(equalTo: leadingAnchor, constant: s(10) + DisclosureChevron.size / 2),
+            mark.centerYAnchor.constraint(equalTo: centerYAnchor),
+            summary.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: s(6)),
+            summary.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            summary.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
         ])
+        if !said.isEmpty {
+            // The title ends within its share of the row.
+            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: Self.titleShare, constant: -inset).isActive = true
+        }
 
-        // Hover actions (Mute, then Resolve, right-aligned) float over the right end of the row, on a
-        // backing in the hover colour that fades in from its leading edge, so the time underneath is
+        // Hover actions (Mute, then Resolve, right-aligned) float over the trailing end of the row, on a
+        // backing in the hover colour that fades in from its leading edge, so the text underneath is
         // covered rather than pushed aside.
         let makeButton = { (symbol: String, name: String, tip: String, action: @escaping () -> Void) -> ClosureButton in
             let button = ClosureButton(title: "", action: action)
@@ -672,6 +604,7 @@ final class AgentRow: ChromeItem {
             button.isBordered = false
             button.contentTintColor = Theme.dimText
             button.toolTip = tip
+            button.setAccessibilityLabel(name)
             button.translatesAutoresizingMaskIntoConstraints = false
             button.widthAnchor.constraint(equalToConstant: s(20)).isActive = true
             button.heightAnchor.constraint(equalToConstant: s(20)).isActive = true
@@ -688,8 +621,8 @@ final class AgentRow: ChromeItem {
             overlay.translatesAutoresizingMaskIntoConstraints = false
             addSubview(overlay)
             NSLayoutConstraint.activate([
-                overlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-4)),
-                overlay.centerYAnchor.constraint(equalTo: elapsed.centerYAnchor),
+                overlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-2)),
+                overlay.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
             actions = overlay
             onHoverChanged = { [weak self] on in self?.showResolve(on, animated: true) }
@@ -709,23 +642,11 @@ final class AgentRow: ChromeItem {
             actions.animator().alphaValue = alpha
         }
     }
-
-    /// "now", "45s", "12m", "3h", "2d".
-    static func elapsed(since date: Date) -> String {
-        let seconds = max(0, Int(Date().timeIntervalSince(date)))
-        switch seconds {
-        case ..<10: return "now"
-        case ..<60: return "\(seconds)s"
-        case ..<3600: return "\(seconds / 60)m"
-        case ..<86400: return "\(seconds / 3600)h"
-        default: return "\(seconds / 86400)d"
-        }
-    }
 }
 
 
 /// The hover actions on an agent row: buttons on a backing in the row's hover colour, whose leading edge
-/// fades in over a few points so whatever it covers (the time) disappears smoothly.
+/// fades in over a few points so whatever it covers (the end of the row's text) disappears smoothly.
 final class ActionsOverlay: NSView {
     static var fadeWidth: CGFloat { s(12) }
     private let fade = CAGradientLayer()

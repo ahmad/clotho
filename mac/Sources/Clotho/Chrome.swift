@@ -467,6 +467,7 @@ final class TabBarView: NSView {
         stack.spacing = s(4)
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
             .withSymbolConfiguration(.init(pointSize: s(12), weight: .medium))
+        applyBreadcrumb()
     }
 
     override init(frame: NSRect) {
@@ -477,6 +478,7 @@ final class TabBarView: NSView {
         stack.spacing = s(4)
         stack.distribution = .fill
         stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(breadcrumbLabel)
         addSubview(stack)
 
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
@@ -515,7 +517,7 @@ final class TabBarView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?)], selected: TabID?) {
+    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?)], selected: TabID?) {
         latest = { [weak self] in self?.update(tabs: tabs, selected: selected) }
         // Held while a title is edited, or a drag is in flight (rebuilding would remove what's dragged).
         if items.values.contains(where: { $0.item.isEditing }) || ChromeDrag.isActive {
@@ -523,7 +525,7 @@ final class TabBarView: NSView {
             return
         }
         // Only the selection changed (a click): the tabs stay, so one being pressed can still be dragged.
-        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, badge: $0.badge) }
+        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, mark: $0.mark) }
         if shape == lastShape, !items.isEmpty {
             for (id, entry) in items { entry.item.isSelected = id == selected }
             return
@@ -542,12 +544,17 @@ final class TabBarView: NSView {
             item.label.stringValue = (tab.maximized ? "⤢ " : "") + tab.title
             item.label.alignment = .center
             item.label.font = NSFont.systemFont(ofSize: s(13))
-            // The title fills the space between the dot's slot and the ×'s, both always kept, and truncates
-            // there: nothing in a tab moves when a dot or the × comes and goes.
+            // The title fills the space between the mark's slot and the ×'s, both always kept, and truncates
+            // there: nothing in a tab moves when a mark or the × comes and goes.
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = Self.dotSlot }
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
             item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
-            item.toolTip = index < 9 ? "\(tab.title) (⌘\(index + 1))" : tab.title
+            // "alerts, Needs you": the tab's name, and its most urgent agent's state when it has one.
+            let named = tab.mark.map { "\(tab.title), \($0.label)" } ?? tab.title
+            item.toolTip = index < 9 ? "\(named) (⌘\(index + 1))" : named
+            item.setAccessibilityElement(true)
+            item.setAccessibilityRole(.button)
+            item.setAccessibilityLabel(named)
             item.onClick = { [weak self] in self?.onSelect?(tab.id) }
             item.dragPayload = { [weak self] in
                 guard let self, canDrag(), let workspace else { return nil }
@@ -556,19 +563,14 @@ final class TabBarView: NSView {
             item.onDoubleClick = { [weak self] in self?.beginRename(tab.id) }
             item.onClose = { [weak self] in self?.onClose?(tab.id) }
             item.isSelected = tab.id == selected
-            if let badge = tab.badge {
-                // An agent in this tab: a dot in the slot at the tab's leading edge.
-                let dot = NSView()
-                dot.wantsLayer = true
-                dot.layer?.cornerRadius = s(3)
-                dot.layer?.backgroundColor = badge.cgColor
-                dot.translatesAutoresizingMaskIntoConstraints = false
-                item.addSubview(dot)
+            if let mark = tab.mark {
+                // An agent in this tab: its mark, centred in the slot at the tab's leading edge (a ring that
+                // turns while it works, a dot otherwise).
+                let view = AgentMarkView(mark)
+                item.addSubview(view)
                 NSLayoutConstraint.activate([
-                    dot.leadingAnchor.constraint(equalTo: item.leadingAnchor, constant: s(9)),
-                    dot.centerYAnchor.constraint(equalTo: item.centerYAnchor),
-                    dot.widthAnchor.constraint(equalToConstant: s(6)),
-                    dot.heightAnchor.constraint(equalToConstant: s(6)),
+                    view.centerXAnchor.constraint(equalTo: item.leadingAnchor, constant: s(12)),
+                    view.centerYAnchor.constraint(equalTo: item.centerYAnchor),
                 ])
             }
             stack.addArrangedSubview(item)
@@ -594,11 +596,54 @@ final class TabBarView: NSView {
     /// The last tabs built, to tell a selection-only update apart.
     private var lastShape: [TabShape]?
     private struct TabShape: Equatable {
-        var id: TabID, title: String, custom: String?, maximized: Bool, badge: NSColor?
+        var id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?
+    }
+
+    /// Where the focused tab is ("devbox › clotho › alerts"): its machine, workspace and own title, drawn dim
+    /// (the workspace in the foreground colour) in the middle of the bar's free space after the +. It shows
+    /// only when it fits there with `breadcrumbMargin` clear on both sides, and clicks go through it, so
+    /// the space still drags the window.
+    var breadcrumb: (machine: String, workspace: String, tab: String)? {
+        didSet {
+            if let breadcrumb, let oldValue, breadcrumb == oldValue { return }
+            if breadcrumb == nil, oldValue == nil { return }
+            applyBreadcrumb()
+        }
+    }
+    let breadcrumbLabel = PassthroughLabel(labelWithString: "")
+    static var breadcrumbMargin: CGFloat { s(16) }
+
+    private func applyBreadcrumb() {
+        if let breadcrumb {
+            let dim: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: s(12)), .foregroundColor: Theme.dimText]
+            let text = NSMutableAttributedString(string: breadcrumb.machine + " › ", attributes: dim)
+            text.append(NSAttributedString(string: breadcrumb.workspace, attributes: [
+                .font: NSFont.systemFont(ofSize: s(12), weight: .semibold), .foregroundColor: Theme.foreground,
+            ]))
+            text.append(NSAttributedString(string: " › " + breadcrumb.tab, attributes: dim))
+            breadcrumbLabel.attributedStringValue = text
+        } else {
+            breadcrumbLabel.stringValue = ""
+        }
+        needsLayout = true
+    }
+
+    /// Centres the breadcrumb between the + and the bar's trailing edge, or hides it when it doesn't fit.
+    private func layoutBreadcrumb() {
+        // Measured from the cell: the label is placed by frame, and its text was just set.
+        let big = NSRect(x: 0, y: 0, width: 10_000, height: 10_000)
+        let size = breadcrumbLabel.stringValue.isEmpty ? NSSize.zero : (breadcrumbLabel.cell?.cellSize(forBounds: big) ?? .zero)
+        let free = bounds.maxX - addButton.frame.maxX
+        let fits = size.width > 0 && free >= size.width + Self.breadcrumbMargin * 2
+        if breadcrumbLabel.isHidden == fits { breadcrumbLabel.isHidden = !fits }
+        guard fits else { return }
+        let frame = NSRect(x: (addButton.frame.maxX + (free - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded(),
+                           width: size.width.rounded(.up), height: size.height)
+        if breadcrumbLabel.frame != frame { breadcrumbLabel.frame = frame }
     }
 
     /// Every tab's width: the bar shared equally, between a minimum and a maximum. It depends only on
-    /// the number of tabs and the bar's width, never on titles, dots, hover or selection, so tabs don't
+    /// the number of tabs and the bar's width, never on titles, marks, hover or selection, so tabs don't
     /// jump when an agent retitles its pane or a tab is selected.
     static func tabWidth(count: Int, barWidth: CGFloat) -> CGFloat {
         guard count > 0 else { return maxTabWidth }
@@ -608,7 +653,7 @@ final class TabBarView: NSView {
     }
     static var maxTabWidth: CGFloat { s(240) }
     static var minTabWidth: CGFloat { s(72) }
-    /// Room at a tab's leading edge for its agent dot, kept whether or not there is one.
+    /// Room at a tab's leading edge for its agent mark, kept whether or not there is one.
     static var dotSlot: CGFloat { s(22) }
     private var widths: [NSLayoutConstraint] = []
 
@@ -621,6 +666,7 @@ final class TabBarView: NSView {
     /// Tabs keep their width until the bar's width changes (the window or sidebar resizing).
     override func layout() {
         super.layout()
+        layoutBreadcrumb()
         let width = Self.tabWidth(count: widths.count, barWidth: bounds.width)
         guard let current = widths.first?.constant, current != width else { return }
         widths.forEach { $0.constant = width }
@@ -677,6 +723,11 @@ final class TabBarView: NSView {
     }
 }
 
+/// A label that takes no clicks: they go to what's behind it.
+final class PassthroughLabel: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 final class SidebarView: NSView {
     static let width: CGFloat = 190
     /// Room at the top for the window buttons.
@@ -707,11 +758,13 @@ final class SidebarView: NSView {
 
     /// A row the keyboard can move to.
     enum Item: Hashable {
+        /// An agent's row in the inbox.
+        case agent(MachineKey, PaneID)
         case workspace(MachineKey, WorkspaceID)
     }
-    /// The rows in order, top to bottom, as the arrow keys walk them.
+    /// The rows in order, top to bottom, as the arrow keys walk them: the inbox's, then the workspaces'.
     private(set) var order: [Item] = []
-    private var itemRows: [Item: SidebarRow] = [:]
+    private var itemRows: [Item: ChromeItem] = [:]
     /// The selected row: the focused workspace's.
     private var selectedItem: Item?
     /// The keyboard's row while the sidebar has keyboard focus.
@@ -745,36 +798,18 @@ final class SidebarView: NSView {
     var onCreateWorkspace: ((MachineKey) -> Void)?
     /// The footer's Manage Machines….
     var onManageMachines: (() -> Void)?
-    /// The footer, pinned under the Agents panel (for tests).
+    /// The footer, pinned under the list (for tests).
     private(set) var footer: SidebarFooter!
     var machineMenu: ((MachineKey) -> NSMenu)?
 
-    // Two panels, as in herdr: on top, one column grouped by machine (this Mac, then each saved SSH
-    // machine, each with its workspaces); at the bottom, every agent on every machine. A divider between
-    // them sets the agents panel's height.
+    // One scrolling column: the inbox on top (the agents that need the user, the finished ones, the working
+    // ones), then every machine (this Mac, then each saved SSH machine) with its workspaces. The footer
+    // is pinned under it.
     private let column = NSStackView()
-    private let agentsColumn = NSStackView()
-    private var agentsHeight: NSLayoutConstraint!
-    static let agentsHeightRange: ClosedRange<CGFloat> = 90...900
-    /// The divider and the Agents panel (tests).
-    private(set) var agentsViews: [NSView] = []
-    /// The workspaces list (tests).
+    /// The scrolling list (tests).
     private(set) var workspacesScroll: NSScrollView!
-    /// The workspaces list ends at the divider with the Agents panel, or at the footer without it.
-    private var sessionsToDivider: NSLayoutConstraint!
-    private var sessionsToFooter: NSLayoutConstraint!
-
-    /// Settings › General › Show Agents in the sidebar (and View ▸ Show Agents Panel). Off removes the
-    /// Agents panel and its divider, and the workspaces use the full height. Dots, ⌘P and notifications
-    /// don't change.
-    var showsAgents = true {
-        didSet {
-            agentsViews.forEach { $0.isHidden = !showsAgents }
-            sessionsToDivider.isActive = showsAgents
-            sessionsToFooter.isActive = !showsAgents
-            needsLayout = true
-        }
-    }
+    /// Whether the inbox's Working section is open; closed unless opened.
+    static let workingExpandedKey = "InboxWorkingExpanded"
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -782,50 +817,24 @@ final class SidebarView: NSView {
         layer?.backgroundColor = Theme.sidebar.cgColor
 
         let scroll = Self.scrollingColumn(column)
-        let agentsScroll = Self.scrollingColumn(agentsColumn)
-        let divider = AgentsDivider()
-        divider.onDrag = { [weak self] y in self?.setAgentsHeight(y) }
-        divider.onEnd = { [weak self] in
-            guard let self else { return }
-            UserDefaults.standard.set(Double(agentsHeight.constant), forKey: "AgentsPanelHeight")
-        }
         footer = SidebarFooter(frame: .zero)
         footer.onMachines = { [weak self] in self?.onManageMachines?() }
-        for view in [scroll, divider, agentsScroll, footer!] {
+        for view in [scroll, footer!] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         // Rows that scroll under a still pointer get no enter or exit events.
-        for clip in [scroll.contentView, agentsScroll.contentView] {
-            clip.postsBoundsChangedNotifications = true
-            hoverObservers.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshHover() }
-            })
-        }
-        let saved = CGFloat(UserDefaults.standard.double(forKey: "AgentsPanelHeight"))
-        agentsHeight = agentsScroll.heightAnchor.constraint(equalToConstant: saved > 0 ? saved : 220)
-        // The workspaces panel keeps some room even when the window is short.
-        let sessionsMinimum = scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 80)
-        agentsHeight.priority = .defaultHigh
-        agentsViews = [divider, agentsScroll]
+        scroll.contentView.postsBoundsChangedNotifications = true
+        hoverObservers.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshHover() }
+        })
         workspacesScroll = scroll
-        sessionsToDivider = scroll.bottomAnchor.constraint(equalTo: divider.topAnchor)
-        sessionsToFooter = scroll.bottomAnchor.constraint(equalTo: footer.topAnchor)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.topInset),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            sessionsToDivider,
-            sessionsMinimum,
-            divider.leadingAnchor.constraint(equalTo: leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
-            divider.heightAnchor.constraint(equalToConstant: 9),
-            divider.bottomAnchor.constraint(equalTo: agentsScroll.topAnchor),
-            agentsScroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            agentsScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            agentsScroll.bottomAnchor.constraint(equalTo: footer.topAnchor),
-            agentsHeight,
-            // Always visible, outside the scrolling lists.
+            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor),
+            // Always visible, outside the scrolling list.
             footer.leadingAnchor.constraint(equalTo: leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -859,13 +868,11 @@ final class SidebarView: NSView {
         withAppearance { layer?.backgroundColor = Theme.sidebar.cgColor }
     }
 
-    /// Re-applies the app zoom to the columns, which are built once; their rows are rebuilt by update.
+    /// Re-applies the app zoom to the column, which is built once; its rows are rebuilt by update.
     func applyScale() {
         footer.applyScale()
-        for stack in [column, agentsColumn] {
-            stack.spacing = Self.rowSpacing
-            stack.edgeInsets = NSEdgeInsets(top: s(6), left: s(8), bottom: s(12), right: s(8))
-        }
+        column.spacing = Self.rowSpacing
+        column.edgeInsets = NSEdgeInsets(top: s(6), left: s(8), bottom: s(12), right: s(8))
     }
 
     /// A vertical stack in a scroll view that hides its scroller when idle.
@@ -896,12 +903,6 @@ final class SidebarView: NSView {
         return scroll
     }
 
-    /// `y` is the pointer's height above the sidebar's bottom edge.
-    private func setAgentsHeight(_ y: CGFloat) {
-        let maximum = max(Self.agentsHeightRange.lowerBound, bounds.height - Self.topInset - 90)
-        agentsHeight.constant = min(max(y.rounded(), Self.agentsHeightRange.lowerBound), min(maximum, Self.agentsHeightRange.upperBound))
-    }
-
     required init?(coder: NSCoder) { fatalError() }
 
     // Vertical rhythm: rows sit close together, a machine's header a little apart from its rows,
@@ -909,17 +910,19 @@ final class SidebarView: NSView {
     static var rowHeight: CGFloat { s(28) }
     static var rowSpacing: CGFloat { s(2) }
     static var groupSpacing: CGFloat { s(18) }
+    /// Between the inbox's sections, and before the Workspaces title.
+    static var sectionSpacing: CGFloat { s(12) }
 
     var onOpenAgent: ((MachineKey, PaneID) -> Void)?
-    /// The checkmark on an agent that needs attention.
+    /// The checkmark on an inbox row.
     var onResolveAgent: ((MachineKey, PaneID) -> Void)?
     /// The bell.slash next to it.
     var onMuteAgent: ((MachineKey, PaneID) -> Void)?
     var agentRowMenu: ((MachineKey, PaneID, Bool) -> NSMenu)?
     var agentsMenu: (() -> NSMenu)?
 
-    func update(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) {
-        latest = { [weak self] in self?.update(agents: agents, unreachable: unreachable, groups: groups) }
+    func update(agents: [AgentEntry], groups: [SidebarGroup]) {
+        latest = { [weak self] in self?.update(agents: agents, groups: groups) }
         // Held while a name is edited, or a drag is in flight (rebuilding would remove what's dragged).
         if isEditing || ChromeDrag.isActive {
             pending = latest
@@ -927,7 +930,7 @@ final class SidebarView: NSView {
         }
         // A click changes only the selection: move it on the rows there are rather than building them
         // all again (a rebuild costs tens of milliseconds, and it delayed the click's highlight).
-        let signature = layoutSignature(agents: agents, unreachable: unreachable, groups: groups)
+        let signature = layoutSignature(agents: agents, groups: groups)
         if signature == lastSignature, column.arrangedSubviews.count > 0 {
             applySelection(groups)
             return
@@ -938,56 +941,40 @@ final class SidebarView: NSView {
         itemRows = [:]
         selectedItem = nil
         column.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        agentsColumn.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        // The agents panel: agents that need the user on top, each with a checkmark to resolve it; every
-        // other agent (running, idle, resolved) in a section below, collapsed unless opened.
-        let (attention, others) = AgentEntry.split(agents)
-        let agentsHeader = MachineHeader(title: attention.isEmpty ? "Agents" : "Agents · \(attention.count)",
-                                         status: (attention.isEmpty ? nil : AgentInfo.State.waiting.color, nil), newWorkspaceTooltip: nil)
-        agentsHeader.contextMenu = { [weak self] in self?.agentsMenu?() }
-        add(agentsHeader, to: agentsColumn)
-        agentsColumn.setCustomSpacing(s(4), after: agentsHeader)
-        let addAgent = { [weak self] (entry: AgentEntry, resolvable: Bool) in
-            guard let self else { return }
-            let row = AgentRow(entry, onResolve: resolvable ? { [weak self] in self?.onResolveAgent?(entry.machine, entry.pane) } : nil,
-                               onMute: resolvable && entry.canMute ? { [weak self] in self?.onMuteAgent?(entry.machine, entry.pane) } : nil)
-            row.onClick = { [weak self] in self?.onOpenAgent?(entry.machine, entry.pane) }
-            row.contextMenu = { [weak self] in self?.agentRowMenu?(entry.machine, entry.pane, entry.offersReplies) }
-            add(row, height: s(40), to: agentsColumn)
+        // The inbox: every agent with a mark, in three sections above the machines. A section with nothing
+        // in it isn't there, and with no section at all the column is the workspace list alone.
+        let inbox = AgentInbox.sections(agents)
+        if !inbox.needsYou.isEmpty {
+            addSectionHeader("Needs you", count: inbox.needsYou.count, inbox: true)
+            inbox.needsYou.forEach { addAgent($0, actions: true) }
         }
-        attention.forEach { addAgent($0, true) }
-        if attention.isEmpty, !others.isEmpty {
-            add(note("Nothing needs you", tooltip: "Agents show here when they finish, fail or wait for you.", color: Theme.dimText),
-                to: agentsColumn)
+        if !inbox.done.isEmpty {
+            addSectionHeader("Done", count: inbox.done.count, inbox: true)
+            inbox.done.forEach { addAgent($0, actions: true) }
         }
-        if !others.isEmpty {
-            let expanded = UserDefaults.standard.bool(forKey: "AgentsOthersExpanded")
-            let section = DisclosureRow(title: "Quiet", count: others.count, expanded: expanded)
-            section.toolTip = "Agents that don't need you: running, idle or resolved"
+        if !inbox.working.isEmpty {
+            // Closed unless opened: working agents don't need the user.
+            let expanded = UserDefaults.standard.bool(forKey: Self.workingExpandedKey)
+            let section = DisclosureRow(title: "Working", count: inbox.working.count, expanded: expanded)
+            section.toolTip = "Agents that are running"
+            section.contextMenu = { [weak self] in self?.agentsMenu?() }
             section.onClick = { [weak self, weak section] in
                 section?.chevron.setExpanded(!expanded, animated: true) {
-                    UserDefaults.standard.set(!expanded, forKey: "AgentsOthersExpanded")
+                    UserDefaults.standard.set(!expanded, forKey: Self.workingExpandedKey)
                     self?.latest?()
                 }
             }
-            if let last = agentsColumn.arrangedSubviews.last { agentsColumn.setCustomSpacing(s(6), after: last) }
-            add(section, height: s(26), to: agentsColumn)
-            agentsColumn.setCustomSpacing(s(2), after: section)
-            if expanded { others.forEach { addAgent($0, false) } }
+            if let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.sectionSpacing, after: last) }
+            add(section, height: AgentRow.height)
+            if expanded { inbox.working.forEach { addAgent($0, actions: false) } }
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
             let names = { (list: [AgentEntry]) in list.map { "\($0.pane):\($0.info.state.rawValue)" }.joined(separator: " ") }
-            log("agents: attention [\(names(attention))] others [\(names(others))]")
+            log("inbox: needs you [\(names(inbox.needsYou))] done [\(names(inbox.done))] working [\(names(inbox.working))]")
         }
-        for machine in unreachable {
-            add(note("\(machine.name) is unreachable, so its agents aren't shown", tooltip: machine.reason, color: Theme.dimText),
-                to: agentsColumn)
-        }
-        if agents.isEmpty && unreachable.isEmpty {
-            add(note("No agents running", tooltip: "Claude Code and Codex running in any pane show up here.", color: Theme.dimText),
-                to: agentsColumn)
-        }
+        // Under an inbox the machines get a title of their own.
+        if !column.arrangedSubviews.isEmpty { addSectionHeader("Workspaces", count: nil, inbox: false) }
 
         for (index, group) in groups.enumerated() {
             if index > 0, let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.groupSpacing, after: last) }
@@ -1042,6 +1029,27 @@ final class SidebarView: NSView {
 
     /// Everything the rows show, apart from which one is selected.
     private var lastSignature = ""
+
+    /// A section's title: "NEEDS YOU  2", "DONE  1", "WORKSPACES". An inbox section's has the notification
+    /// switches on its right-click.
+    private func addSectionHeader(_ title: String, count: Int?, inbox: Bool) {
+        if let last = column.arrangedSubviews.last { column.setCustomSpacing(Self.sectionSpacing, after: last) }
+        let header = SectionHeader(title: title, count: count)
+        if inbox { header.contextMenu = { [weak self] in self?.agentsMenu?() } }
+        add(header, height: SectionHeader.height)
+    }
+
+    /// An agent's row in the inbox. `actions`: Mute and Resolve under the pointer (not for working agents).
+    private func addAgent(_ entry: AgentEntry, actions: Bool) {
+        let row = AgentRow(entry, onResolve: actions ? { [weak self] in self?.onResolveAgent?(entry.machine, entry.pane) } : nil,
+                           onMute: actions && entry.canMute ? { [weak self] in self?.onMuteAgent?(entry.machine, entry.pane) } : nil)
+        row.onClick = { [weak self] in self?.onOpenAgent?(entry.machine, entry.pane) }
+        row.contextMenu = { [weak self] in self?.agentRowMenu?(entry.machine, entry.pane, entry.offersReplies) }
+        add(row, height: AgentRow.height)
+        let item = Item.agent(entry.machine, entry.pane)
+        order.append(item)
+        itemRows[item] = row
+    }
 
     // MARK: Hover
 
@@ -1124,21 +1132,20 @@ final class SidebarView: NSView {
         refreshHover()
     }
 
-    private func layoutSignature(agents: [AgentEntry], unreachable: [(name: String, reason: String)], groups: [SidebarGroup]) -> String {
+    private func layoutSignature(agents: [AgentEntry], groups: [SidebarGroup]) -> String {
         var parts: [String] = ["\(UIScale.factor) \(effectiveAppearance.name.rawValue)", collapsed.sorted().joined(separator: ","),
-                               "\(UserDefaults.standard.bool(forKey: "AgentsOthersExpanded"))"]
+                               "\(UserDefaults.standard.bool(forKey: Self.workingExpandedKey))"]
         for agent in agents {
             parts.append("a \(agent.machine) \(agent.machineName) \(agent.pane) \(agent.paneTitle ?? "") \(agent.tabTitle ?? "") "
                          + "\(agent.workspace?.name ?? "") \(agent.canReply) \(agent.canMute) \(agent.info)")
         }
-        for machine in unreachable { parts.append("u \(machine.name) \(machine.reason)") }
         for group in groups {
             parts.append("g \(group.key) \(group.title) \(String(describing: group.status.color)) \(group.status.text ?? "") "
                          + "\(group.isConnected) \(group.isLocal) \(group.retryPaused ?? "-")")
             for workspace in group.workspaces {
                 let rowKey = Self.rowKey(group.key, workspace.id)
                 parts.append("w \(workspace.id) \(heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name) "
-                             + "\(String(describing: group.badges[workspace.id]))")
+                             + "\(String(describing: group.marks[workspace.id])) \(workspace.tabs.count)")
             }
         }
         return parts.joined(separator: "\n")
@@ -1168,7 +1175,7 @@ final class SidebarView: NSView {
         rows.values.contains { $0.row.isEditing }
     }
 
-    /// A workspace's row: its name, and its most urgent agent's dot on the trailing edge.
+    /// A workspace's row: its name, then its agents chip and its tab count on the trailing edge.
     private func addWorkspace(_ workspace: Workspace, of group: SidebarGroup) {
         let key = group.key
         let rowKey = Self.rowKey(key, workspace.id)
@@ -1176,7 +1183,7 @@ final class SidebarView: NSView {
         row.onNewTab = { [weak self] in self?.onNewTab?(key, workspace.id) }
         let name = heldNames.title(for: rowKey, model: workspace.name) ?? workspace.name
         row.label.stringValue = name
-        row.toolTip = workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs"
+        row.toolTip = SidebarRow.tabsText(workspace.tabs.count)
         row.onClick = { [weak self] in self?.onSelect?(key, workspace.id) }
         row.dragPayload = { [weak self] in
             guard let self, canDrag(key) else { return nil }
@@ -1188,7 +1195,7 @@ final class SidebarView: NSView {
         row.highlight = WorkspaceHighlights.get(key, workspace.id)?.color
         rows[rowKey] = (row, name)
         row.isSelected = workspace.id == group.selected
-        row.setBadge(group.badges[workspace.id])
+        row.set(mark: group.marks[workspace.id], tabs: workspace.tabs.count)
         add(row, height: Self.rowHeight)
         let item = Item.workspace(key, workspace.id)
         order.append(item)
@@ -1221,10 +1228,10 @@ final class SidebarView: NSView {
     override var acceptsFirstResponder: Bool { wantsKeyboard }
     var hasKeyboard: Bool { window?.firstResponder === self }
 
-    /// Takes the keyboard, with the cursor on the selected row.
+    /// Takes the keyboard, with the cursor on the selected workspace's row (not on the inbox above it).
     func takeKeyboard() {
         wantsKeyboard = true
-        cursor = selectedItem ?? order.first
+        cursor = selectedItem ?? order.first { if case .workspace = $0 { return true } else { return false } } ?? order.first
         window?.makeFirstResponder(self)
     }
 
@@ -1246,13 +1253,19 @@ final class SidebarView: NSView {
         if let shown, let row = itemRows[shown] { row.scrollToVisible(row.bounds) }
     }
 
-    /// ↑ ↓ move through workspace rows, selecting as they go; Return renames; Esc goes back to the terminal.
+    /// ↑ ↓ move through the inbox's rows and the workspace rows. A workspace is selected as the cursor
+    /// reaches it and Return renames it; an agent's row only takes the cursor, and Return opens its pane.
+    /// Esc goes back to the terminal.
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 126: move(by: -1)
         case 125: move(by: 1)
         case 36, 76:
-            if case .workspace(let key, let id) = cursor { beginRename(key, id) }
+            switch cursor {
+            case .workspace(let key, let id): beginRename(key, id)
+            case .agent(let key, let pane): onOpenAgent?(key, pane)
+            case nil: break
+            }
         case 53:
             wantsKeyboard = false
             onFocusTerminal?()
@@ -1305,7 +1318,7 @@ final class SidebarView: NSView {
     /// A machine's workspace rows, top to bottom (drops; collapsed machines have none).
     func workspaceRows(of machine: MachineKey) -> [(id: WorkspaceID, row: SidebarRow)] {
         order.compactMap { item in
-            guard case .workspace(let key, let id) = item, key == machine, let row = itemRows[item] else { return nil }
+            guard case .workspace(let key, let id) = item, key == machine, let row = itemRows[item] as? SidebarRow else { return nil }
             return (id, row)
         }
     }
@@ -1362,30 +1375,11 @@ final class SidebarView: NSView {
         }
     }
 
-    private func add(_ view: NSView, height: CGFloat? = nil, to target: NSStackView? = nil) {
-        let column = target ?? self.column
+    private func add(_ view: NSView, height: CGFloat? = nil) {
         column.addArrangedSubview(view)
         // Everything spans the column, so it follows the sidebar's width.
         view.widthAnchor.constraint(equalTo: column.widthAnchor, constant: s(-16)).isActive = true
         if let height { view.heightAnchor.constraint(equalToConstant: height).isActive = true }
-    }
-
-    /// A line of dim text, aligned with row titles.
-    private func note(_ text: String, tooltip: String?, color: NSColor) -> NSView {
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = NSFont.systemFont(ofSize: s(12))
-        label.textColor = color
-        label.toolTip = tooltip
-        let wrapper = NSView()
-        label.translatesAutoresizingMaskIntoConstraints = false
-        wrapper.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: s(10)),
-            label.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor, constant: s(-10)),
-            label.topAnchor.constraint(equalTo: wrapper.topAnchor, constant: s(4)),
-            label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: s(-4)),
-        ])
-        return wrapper
     }
 
     /// A dim, single-line action, with its icon where row titles start.
@@ -1434,7 +1428,7 @@ final class MachineHeader: NSView {
     /// workspace rows and buttons line up with it.
     static var nameInset: CGFloat { s(30) }
 
-    /// `collapsed` nil: no disclosure chevron (the Agents header). `count` shows after the title while
+    /// `collapsed` nil: no disclosure chevron. `count` shows after the title while
     /// collapsed, so a closed group still says how many workspaces it holds.
     init(title: String, status: (color: NSColor?, text: String?), newWorkspaceTooltip: String?,
          collapsed: Bool? = nil, count: Int = 0) {
@@ -1460,7 +1454,7 @@ final class MachineHeader: NSView {
         newWorkspaceButton = add
         add.toolTip = newWorkspaceTooltip
         add.isHidden = newWorkspaceTooltip == nil
-        // A machine's chevron comes first, in the Quiet header's column; the name, its rows and their
+        // A machine's chevron comes first, in the Working header's column; the name, its rows and their
         // buttons all start at nameInset after it.
         let chevron = DisclosureChevron(expanded: collapsed == false)
         chevron.isHidden = collapsed == nil
@@ -1505,24 +1499,49 @@ final class MachineHeader: NSView {
     }
 }
 
-/// The line between the workspaces and agents panels; drag it to resize the agents panel.
-final class AgentsDivider: NSView {
-    var onDrag: ((CGFloat) -> Void)?
-    var onEnd: (() -> Void)?
+/// A section's title in the sidebar's column ("NEEDS YOU", "DONE", "WORKSPACES"): small, uppercase and dim,
+/// with the section's count at the trailing edge.
+final class SectionHeader: NSView {
+    static var height: CGFloat { s(22) }
+    var contextMenu: (() -> NSMenu?)?
+    let title = NSTextField(labelWithString: "")
+    let count = NSTextField(labelWithString: "")
 
-    override func draw(_ dirtyRect: NSRect) {
-        Theme.divider.setFill()
-        NSRect(x: 0, y: (bounds.height / 2).rounded(), width: bounds.width, height: s(1)).fill()
+    init(title text: String, count number: Int?) {
+        super.init(frame: .zero)
+        title.stringValue = text.uppercased()
+        title.font = NSFont.systemFont(ofSize: s(10.5), weight: .semibold)
+        title.textColor = Theme.dimText
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        count.stringValue = number.map { "\($0)" } ?? ""
+        count.font = NSFont.monospacedDigitSystemFont(ofSize: s(10.5), weight: .semibold)
+        count.textColor = Theme.dimText
+        count.isHidden = number == nil
+        count.setContentHuggingPriority(.required, for: .horizontal)
+        count.setContentCompressionResistancePriority(.required, for: .horizontal)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(number.map { "\(text), \($0) \($0 == 1 ? "agent" : "agents")" } ?? text)
+        for view in [title, count] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            count.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-10)),
+            count.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: count.leadingAnchor, constant: s(-6)),
+        ])
     }
 
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeUpDown) }
-    override func mouseDown(with event: NSEvent) {}
-    override func mouseDragged(with event: NSEvent) {
-        guard let sidebar = superview else { return }
-        // The pointer's height above the sidebar's bottom is the agents panel's new height.
-        onDrag?(sidebar.convert(event.locationInWindow, from: nil).y)
-    }
-    override func mouseUp(with event: NSEvent) { onEnd?() }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
+
+    // Like the rest of the sidebar's empty space, it drags the window.
+    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
 /// The sidebar's draggable right edge.
@@ -1559,59 +1578,106 @@ private final class FlippedView: NSView {
     override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
 }
 
-/// A row of the sidebar's workspace list: the name in line with the machine's, and a dot on the trailing
-/// edge (the workspace's most urgent agent), whose place the hover button takes.
+/// A row of the sidebar's workspace list: the name in line with the machine's, and on the trailing edge the
+/// workspace's agents chip (its most urgent agent state, and how many of its agents are in it) and then
+/// its tab count, whose place the hover button takes. The name truncates before them.
 class SidebarRow: ChromeItem {
-    let badge = NSView()
-    /// Where the dot's centre (and the hover button's) sits, from the row's trailing edge.
-    static var dotInset: CGFloat { s(13) }
+    /// The agents chip; hidden while no agent in the workspace has a mark.
+    let badge = AgentChip(AgentMarkCount(mark: .working, count: 1))
+    /// "3 tabs", or "3" in a narrow row (which still reads "3 tabs" to accessibility and in its tooltip).
+    let tabCount = NSTextField(labelWithString: "")
+    /// Where the hover button's centre sits, from the row's trailing edge.
+    static var buttonInset: CGFloat { s(14) }
+    /// A row narrower than this shows its tab count as digits only.
+    static var compactBelow: CGFloat { s(180) }
 
-    /// `trailingSpace`: what the title leaves free at the end, for the dot and the hover button.
-    init(indent: CGFloat, fontSize: CGFloat, closable: Bool = true, trailingSpace: CGFloat = s(12)) {
+    private(set) var mark: AgentMarkCount?
+    private(set) var tabs = 0
+    private var nameToChip: NSLayoutConstraint!
+    private var nameToCount: NSLayoutConstraint!
+
+    static func tabsText(_ count: Int) -> String { count == 1 ? "1 tab" : "\(count) tabs" }
+
+    /// "clotho, 1 needs you, 3 tabs".
+    static func accessibilityText(name: String, mark: AgentMarkCount?, tabs: Int) -> String {
+        ([name] + (mark.map { ["\($0.count) \($0.mark.label.lowercased())"] } ?? []) + [tabsText(tabs)]).joined(separator: ", ")
+    }
+
+    init(indent: CGFloat, fontSize: CGFloat, closable: Bool = true) {
         super.init(closable: closable)
         label.font = NSFont.systemFont(ofSize: s(fontSize))
         selectionStyle = .row
         closeShowsWhenSelected = false
-        badge.wantsLayer = true
-        badge.layer?.cornerRadius = s(3.5)
         badge.isHidden = true
-        badge.translatesAutoresizingMaskIntoConstraints = false
+        tabCount.font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
+        tabCount.textColor = Theme.dimText
+        tabCount.alignment = .right
+        tabCount.setContentHuggingPriority(.required, for: .horizontal)
+        tabCount.setContentCompressionResistancePriority(.required, for: .horizontal)
+        tabCount.translatesAutoresizingMaskIntoConstraints = false
         addSubview(badge)
+        addSubview(tabCount)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.constant = indent }
-        // The title stops before the dot's column, shown or not, so titles truncate at one edge.
+        // The name stops before the chip, or before the tab count when there's no chip.
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
         if closeButton.superview != nil {
             constraints.filter { $0.firstItem === closeButton && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
-            closeButton.centerXAnchor.constraint(equalTo: trailingAnchor, constant: -Self.dotInset).isActive = true
+            closeButton.centerXAnchor.constraint(equalTo: trailingAnchor, constant: -Self.buttonInset).isActive = true
         }
+        nameToChip = label.trailingAnchor.constraint(lessThanOrEqualTo: badge.leadingAnchor, constant: s(-6))
+        nameToCount = label.trailingAnchor.constraint(lessThanOrEqualTo: tabCount.leadingAnchor, constant: s(-8))
         NSLayoutConstraint.activate([
-            badge.centerXAnchor.constraint(equalTo: trailingAnchor, constant: -Self.dotInset),
+            tabCount.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
+            tabCount.centerYAnchor.constraint(equalTo: centerYAnchor),
+            // At least the hover button's room, so the button never reaches the chip.
+            tabCount.widthAnchor.constraint(greaterThanOrEqualToConstant: s(14)),
+            badge.trailingAnchor.constraint(equalTo: tabCount.leadingAnchor, constant: s(-6)),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
-            badge.widthAnchor.constraint(equalToConstant: s(7)),
-            badge.heightAnchor.constraint(equalToConstant: s(7)),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -(Self.dotInset + trailingSpace)),
+            nameToCount,
         ])
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Shows a colored dot (nil hides it).
-    func setBadge(_ color: NSColor?) {
-        badge.layer?.backgroundColor = color?.cgColor
-        badgeColor = color
+    /// The workspace's mark (nil: no chip) and how many tabs it has.
+    func set(mark: AgentMarkCount?, tabs: Int) {
+        self.mark = mark
+        self.tabs = tabs
+        if let mark { badge.value = mark }
+        badge.isHidden = mark == nil
+        nameToChip.isActive = false
+        nameToCount.isActive = false
+        (mark == nil ? nameToCount : nameToChip)?.isActive = true
+        tabCount.toolTip = Self.tabsText(tabs)
+        tabCount.setAccessibilityLabel(Self.tabsText(tabs))
+        applyTabCount()
+        setAccessibilityLabel(Self.accessibilityText(name: label.stringValue, mark: mark, tabs: tabs))
         closeVisibilityChanged()
     }
 
-    private var badgeColor: NSColor?
+    /// Whether the row is too narrow for "3 tabs" and shows "3".
+    var isCompact: Bool { bounds.width < Self.compactBelow }
 
-    /// The dot gives its place to the hover button while that shows.
+    private func applyTabCount() {
+        let text = isCompact ? "\(tabs)" : Self.tabsText(tabs)
+        if tabCount.stringValue != text { tabCount.stringValue = text }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        applyTabCount()
+    }
+
+    /// The tab count gives its place to the hover button while that shows; the chip stays.
     override func closeVisibilityChanged() {
-        badge.isHidden = badgeColor == nil || !closeButton.isHidden
+        tabCount.isHidden = !closeButton.isHidden
     }
 }
 
-/// A workspace: its name and its most urgent agent's dot. Under the pointer it offers a new tab (+) in the
-/// dot's place; closing it is in its right-click menu (and ⇧⌘W), not on the row.
+/// A workspace: its name, its agents chip and its tab count. Under the pointer it offers a new tab (+) in the
+/// tab count's place; closing it is in its right-click menu (and ⇧⌘W), not on the row.
 final class WorkspaceRow: SidebarRow {
     var onNewTab: (() -> Void)?
     /// The + that makes a tab in this workspace: the trailing button, shown on hover.
@@ -1743,7 +1809,7 @@ final class DisclosureChevron: NSView {
     }
 }
 
-/// A subsection header inside a panel, such as the Agents panel's Quiet section: a row that highlights on
+/// A section header that opens and closes, such as the inbox's Working section: a row that highlights on
 /// hover and toggles on click, with the chevron in the rows' icon column, the title in secondary text, and a
 /// small count badge at the end, like Mail's and Finder's sidebars.
 final class DisclosureRow: ChromeItem {
@@ -1771,7 +1837,7 @@ final class DisclosureRow: ChromeItem {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
-        // The title follows the chevron, which sits where the agent rows show their status icons.
+        // The title follows the chevron, which sits where the agent rows show their marks.
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.isActive = false }
         NSLayoutConstraint.activate([
             chevron.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),

@@ -382,8 +382,11 @@ extension PaneHostView {
             addSubview(controller.highlights)
             controller.bar.translatesAutoresizingMaskIntoConstraints = false
             addSubview(controller.bar)
+            // Under the header.
+            let top = controller.bar.topAnchor.constraint(equalTo: topAnchor, constant: Self.belowHeader)
+            belowHeaderConstraints.add(top)
             NSLayoutConstraint.activate([
-                controller.bar.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding + 2),
+                top,
                 controller.bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + PaneCloseButton.size + 10)),
             ])
             if let selected = terminal.getSelection(), !selected.isEmpty, !selected.contains("\n") {

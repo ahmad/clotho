@@ -68,15 +68,18 @@ extension AppDelegate {
         quickOpen?.setNeedsReload()
         let agents = agentEntries()
         ClickTrace.measure("sidebar update") {
-            sidebar.update(agents: agents, unreachable: unreachableMonitoredMachines(), groups: sidebarGroups())
+            sidebar.update(agents: agents, groups: sidebarGroups())
         }
         updateDockBadge(agents)
         let tabs = (workspace?.tabs ?? []).map {
             (id: $0.id, title: store.displayTitle(of: $0), custom: $0.title, maximized: maximized[tabKey($0.id)] != nil,
-             badge: agentBadge(machine: focusedMachine, panes: $0.layout.panes))
+             mark: agentMark(machine: focusedMachine, panes: $0.layout.panes)?.mark)
         }
         tabBar.machine = focusedMachine
         tabBar.workspace = workspace?.id
+        tabBar.breadcrumb = workspace.flatMap { workspace in
+            tab.map { (machine: focusedConnection.title, workspace: workspace.name, tab: store.displayTitle(of: $0)) }
+        }
         tabBar.update(tabs: tabs, selected: tab?.id)
 
         // One view per pane on every connected machine, kept while the pane exists so its screen survives
@@ -111,6 +114,13 @@ extension AppDelegate {
             host.showsFocusRing = shown.count > 1 && maximizedPane == nil
             host.restored = state.pane(id)?.restored
             host.git = git(id, in: store)
+            // The header, the outline and the ask bar. An agent on a machine whose agents aren't watched
+            // shows nowhere, so not here either.
+            let pane = state.pane(id)
+            host.chrome = PaneChrome(agent: monitorsAgents(focusedMachine) ? pane?.agent : nil, command: pane?.command, cwd: pane?.cwd,
+                                     home: store.hello?.machine?.home, canDecide: store.features.contains(.agentDecide))
+            // The 30 s clock (`agentClock`) lands here, so the header's time moves on.
+            host.refreshElapsed()
         }
 
         let machineName = focusedConnection.title
@@ -171,6 +181,17 @@ extension AppDelegate {
         host.terminal.onDropFiles = { [weak self] urls in self?.dropFiles(urls, on: key) }
         host.terminal.onPaste = { [weak self] terminal in self?.pasteImage(into: terminal, key: .command) ?? false }
         host.terminal.contextMenu = { [weak self] in self?.paneMenu(for: key) }
+        host.onDecide = { [weak self] request, decision in
+            self?.decide(machine: key.machine, pane: key.pane, request: request, decision)
+        }
+        host.agentMenu = { [weak self, weak session] in
+            guard let self else { return nil }
+            // The quick replies only when the agent itself says it waits for the user, as in the inbox.
+            let agent = session?.store.state.pane(key.pane)?.agent
+            let canReply = session?.store.hello?.features.contains(.paneKeys) == true && agent?.state == .waiting
+                && agent?.needsAttention == true && agent?.isHookSourced == true
+            return agentMenu(machine: key.machine, pane: key.pane, canReply: canReply)
+        }
         host.onClose = { [weak self] in
             guard let self, focusedMachine == key.machine else { return }
             close(pane: key.pane)
@@ -244,7 +265,8 @@ extension AppDelegate {
         window.makeFirstResponder(activeTerminal)
     }
 
-    /// Keys the window handles before the terminal sees them. Mac editing keys in a pane (Shift-Return,
+    /// Keys the window handles before the terminal sees them. ⌘↩ and ⌘. answer a pane's permission
+    /// request while its ask bar shows. Mac editing keys in a pane (Shift-Return,
     /// ⌘←, ⌘→, ⌘⌫) go out the way other Mac terminals send them; see `sendEditingKey`. Ctrl-Return
     /// renames the current workspace in place (Finder's rename is Return on a selected item; the
     /// terminal needs plain Return, so the sidebar takes it with Control).
@@ -254,6 +276,9 @@ extension AppDelegate {
             // Typing in a pane that took the keyboard without the user (see `sync`) is the user at it.
             paneFocusReporter?.userActed()
             if let terminal = window.firstResponder as? PaneTerminalView {
+                // ⌘↩ allows and ⌘. denies the permission request shown in this pane (AskBar.swift). Only
+                // then: with no request showing, ⌘. reaches the terminal as before.
+                if PaneHostView.handleAskKey(event, firstResponder: terminal) { return nil }
                 if terminal.sendEditingKey(event) { return nil }
                 // ⌃V with an image, for an agent on another machine (see ImagePaste).
                 if event.charactersIgnoringModifiers?.lowercased() == "v", event.modifierFlags.intersection([.shift, .control, .option, .command]) == .control,

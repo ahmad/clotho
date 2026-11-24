@@ -173,7 +173,7 @@ extension AppDelegate {
             add("Connect and Start a Workspace") { [weak self] in self?.connect(machine, startWorkspace: true) }
         }
         add("Browse Files") { [weak self] in self?.showFileBrowser(on: machine) }
-        // Agents on this machine show in the Agents section, notify and count toward the dock badge.
+        // Agents on this machine show in the sidebar's inbox, notify and count toward the dock badge.
         let monitor = ClosureMenuItem(title: "Monitor Agents") { [weak self] in
             guard let self else { return }
             setMonitorsAgents(key, !monitorsAgents(key))

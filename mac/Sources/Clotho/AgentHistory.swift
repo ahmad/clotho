@@ -1,7 +1,7 @@
 import AppKit
 import ClothoKit
 
-// An agent's history (the Agents row's menu › History…): every state change, attention raised and
+// An agent's history (the agent's menu › History…): every state change, attention raised and
 // cleared, mutes and messages the daemon recorded for the pane (`agent.history`, its last 200), newest
 // at the top, with times. It stays current while open.
 
@@ -141,7 +141,7 @@ final class AgentHistoryWindowController: NSWindowController, NSWindowDelegate, 
             return (state.symbol, state.color, from + state.label, detail)
         case .attention:
             return entry.attention == true
-                ? ("bell.fill", Theme.warning, "Needs you", detail)
+                ? ("bell.fill", Theme.caution, "Needs you", detail)
                 : ("checkmark", Theme.success, "Resolved", detail)
         case .update:
             return ("text.bubble", Theme.dimText, "Update", detail)

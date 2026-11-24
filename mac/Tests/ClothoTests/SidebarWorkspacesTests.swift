@@ -4,7 +4,7 @@ import XCTest
 @testable import Clotho
 
 /// The sidebar lists workspaces only (their tabs are in the tab bar and ⌘P): each with its most urgent
-/// agent's dot, a + for a new tab on hover, and Close in its right-click menu. The arrow keys walk them.
+/// agent state in a chip and its tab count, a + for a new tab on hover, and Close in its right-click menu. The arrow keys walk them.
 @MainActor
 final class SidebarWorkspacesTests: XCTestCase {
     private var window: NSWindow!
@@ -28,11 +28,11 @@ final class SidebarWorkspacesTests: XCTestCase {
                                                                  Tab(id: 11, activePane: 110, layout: .pane(110))])
         let docs = Workspace(id: 2, name: docsName, tabs: [Tab(id: 20, activePane: 200, layout: .pane(200))])
         return SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces ? [platform, docs] : [],
-                            selected: selected, isConnected: true, isLocal: true, badges: [1: .systemOrange])
+                            selected: selected, isConnected: true, isLocal: true, marks: [1: AgentMarkCount(mark: .needsYou, count: 1)])
     }
 
     private func update(_ group: SidebarGroup? = nil) {
-        sidebar.update(agents: [], unreachable: [], groups: [group ?? self.group()])
+        sidebar.update(agents: [], groups: [group ?? self.group()])
         sidebar.layoutSubtreeIfNeeded()
     }
 
@@ -43,14 +43,18 @@ final class SidebarWorkspacesTests: XCTestCase {
 
     private var rows: [SidebarRow] { all(SidebarRow.self) }
 
-    func testWorkspacesOnlyWithTheirAgentsDot() {
+    func testWorkspacesOnlyWithTheirAgentsChipAndTabCount() {
         update()
         XCTAssertEqual(rows.map(\.label.stringValue), ["Platform", "Docs"], "no tab rows")
         XCTAssertTrue(rows.allSatisfy { $0 is WorkspaceRow })
         XCTAssertTrue(rows[0].isSelected)
         XCTAssertFalse(rows[0].badge.isHidden, "Platform's waiting agent shows")
+        XCTAssertEqual(rows[0].badge.value, AgentMarkCount(mark: .needsYou, count: 1))
         XCTAssertTrue(rows[1].badge.isHidden, "Docs has nothing running")
         XCTAssertEqual(rows[0].toolTip, "2 tabs")
+        XCTAssertEqual(rows.map(\.tabCount.stringValue), ["2 tabs", "1 tab"])
+        XCTAssertEqual(rows.map { $0.accessibilityLabel() }, ["Platform, 1 needs you, 2 tabs", "Docs, 1 tab"])
+        XCTAssertTrue(all(SectionHeader.self).isEmpty, "no agents: no inbox and no Workspaces title")
         XCTAssertTrue(all(NSView.self).allSatisfy { !String(describing: type(of: $0)).contains("Toggle") }, "no [+]/[−] toggles")
     }
 
@@ -67,6 +71,13 @@ final class SidebarWorkspacesTests: XCTestCase {
         XCTAssertFalse(rows[1] === before[1], "a new name rebuilds")
         XCTAssertEqual(rows[1].label.stringValue, "Notes")
         XCTAssertTrue(rows[1].isSelected)
+        // So do a workspace's mark and its number of tabs.
+        var changed = group(selected: 2, docsName: "Notes")
+        changed.marks[2] = AgentMarkCount(mark: .working, count: 1)
+        let named = rows
+        update(changed)
+        XCTAssertFalse(rows[1] === named[1], "a new mark rebuilds")
+        XCTAssertFalse(rows[1].badge.isHidden)
     }
 
     /// Under the pointer a workspace shows only a + (a new tab there).

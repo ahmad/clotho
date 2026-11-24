@@ -13,8 +13,12 @@ import ClothoKit
 // by how well the name matches, workspaces first among matches as good (see `CommandBar.band`), each with
 // a dim "machine › workspace" path. Clearing the text returns to the tree as it was; Tab leaves the search
 // at the selected row (expanded), ⇧Tab at its parent. Row keys: ⌘⌫ closes the selected tab or workspace
-// (asking first), ⌥↩ opens a new tab there, ⌘1–9 pick a row, ⌘P closes. Only the rows in view are drawn,
-// so it stays instant with many machines. Matching is ClothoKit's FuzzyMatch, as on iOS.
+// (asking first), ⌥↩ opens a new tab there (or allows, on an agent's row with a permission request), ⌘1–9
+// pick a row, ⌘P closes. Only the rows in view are drawn, so it stays instant with many machines. Matching
+// is ClothoKit's FuzzyMatch, as on iOS.
+//
+// A state word in the search ("needs", "needs you", "working", "done") puts the agents in that state on
+// top, under their own header (see `CommandBar.stateFilter`).
 
 /// One row of the command bar.
 struct CommandBarEntry {
@@ -23,9 +27,10 @@ struct CommandBarEntry {
     /// Breaks ties while searching, after match quality and kind: 0 an agent waiting for you, 1 the
     /// current workspace, 2 the rest.
     var tier: Int
-    /// The agent dot (the tab's or workspace's most urgent agent).
-    var dot: NSColor?
-    /// The agent's state, such as "waiting: Allow Bash?".
+    /// The agent's mark (a tab's or workspace's most urgent agent's), as every other surface draws it.
+    var mark: AgentMark?
+    /// The agent's state, such as "waiting for you: fix the login bug"; for a row with a `request`, the
+    /// request itself ("Allow Bash: npm test").
     var detail: String?
     /// Panes in the tab, shown when more than one.
     var panes = 1
@@ -33,6 +38,14 @@ struct CommandBarEntry {
     var path: String? = nil
     /// An icon in place of the kind's (commands).
     var symbol: String? = nil
+    /// The git branch there (an agent's pane's, a tab's, a workspace's active tab's), shown at the trailing
+    /// side.
+    var branch: String? = nil
+    /// Agent rows: when its state last changed, for the order under a state word.
+    var since: Double? = nil
+    /// Agent rows: the oldest permission request it waits on, when its machine can answer it
+    /// (`agent.decide`). ⌥↩ allows it.
+    var request: PermissionRequest? = nil
 }
 
 extension CommandTree.Node {
@@ -78,9 +91,84 @@ enum CommandBar {
     /// tier (waiting agents, the current workspace, the rest), then by FuzzyMatch's score. So a workspace
     /// whose name starts with the query leads every tab that only contains it. Returns each entry with the
     /// matched positions in its title.
+    ///
+    /// With a state word ("needs", "working", "done": see `stateFilter`) the agents in that state lead, and
+    /// only the best plain matches follow (see `search`).
     static func results(all: [CommandBarEntry], current: [CommandBarEntry], query: String) -> [(entry: CommandBarEntry, indices: [Int])] {
+        search(all: all, current: current, query: query).rows
+    }
+
+    /// `results`, with what leads them: `marks` is the state filter (empty without a state word) and
+    /// `lead` how many rows on top are agents in that state. Those are ranked by the rest of the query, or
+    /// in the inbox's order when there is none (Needs you: the longest wait first). After them come the
+    /// whole query's matches as without a state word, but only those whose title starts with it or has a
+    /// word that does, so a tab really named "done" is still found. `stateWords: false` reads no state
+    /// word (picking a workspace).
+    static func search(all: [CommandBarEntry], current: [CommandBarEntry], query: String, stateWords: Bool = true)
+        -> (rows: [(entry: CommandBarEntry, indices: [Int])], marks: Set<AgentMark>, lead: Int) {
         let query = query.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return current.prefix(limit).map { ($0, []) } }
+        guard !query.isEmpty else { return (current.prefix(limit).map { ($0, []) }, [], 0) }
+        let filter: (marks: Set<AgentMark>, rest: String) = stateWords ? stateFilter(query) : ([], query)
+        guard !filter.marks.isEmpty else { return (ranked(all, query: query).prefix(limit).map { ($0.entry, $0.indices) }, [], 0) }
+        let agents = all.filter { entry in entry.item.kind == .agent && entry.mark.map(filter.marks.contains) == true }
+        var lead: [(entry: CommandBarEntry, indices: [Int])]
+        if filter.rest.isEmpty {
+            lead = inboxOrder(agents).map { ($0, []) }
+        } else {
+            let byID = Dictionary(agents.map { ($0.item.id, $0) }, uniquingKeysWith: { first, _ in first })
+            lead = QuickOpen.rank(agents.map(\.item), query: filter.rest, limit: agents.count).compactMap { result in
+                byID[result.item.id].map { ($0, result.titleIndices) }
+            }
+        }
+        lead = Array(lead.prefix(limit))
+        let leading = Set(lead.map(\.entry.item.id))
+        let plain = ranked(all, query: query).filter { $0.band <= 1 && !leading.contains($0.entry.item.id) }
+        return (lead + plain.prefix(limit - lead.count).map { ($0.entry, $0.indices) }, filter.marks, lead.count)
+    }
+
+    /// The state words in a query, as whole words in any case: "needs" (with or without "you" after it)
+    /// means the agents that need the user and the ones that failed, "working" the working ones, "done"
+    /// the finished ones. `rest` is the query without them.
+    static func stateFilter(_ query: String) -> (marks: Set<AgentMark>, rest: String) {
+        var marks: Set<AgentMark> = []
+        var rest: [Substring] = []
+        var afterNeeds = false
+        for word in query.split(whereSeparator: \.isWhitespace) {
+            let wasAfterNeeds = afterNeeds
+            afterNeeds = false
+            switch word.lowercased() {
+            case "needs":
+                marks.formUnion([.needsYou, .error])
+                afterNeeds = true
+            case "you" where wasAfterNeeds: break
+            case "working": marks.insert(.working)
+            case "done": marks.insert(.done)
+            default: rest.append(word)
+            }
+        }
+        return marks.isEmpty ? ([], query) : (marks, rest.joined(separator: " "))
+    }
+
+    /// Agent rows as the sidebar's inbox orders them (`AgentInbox.sections`): those that need the user or
+    /// failed, the longest wait first (one with no time last); then the finished and the working, the most
+    /// recent first.
+    static func inboxOrder(_ agents: [CommandBarEntry]) -> [CommandBarEntry] {
+        func recent(_ mark: AgentMark) -> [CommandBarEntry] {
+            agents.filter { $0.mark == mark }.sorted { ($0.since ?? 0) > ($1.since ?? 0) }
+        }
+        let needsYou = agents.filter { $0.mark == .needsYou || $0.mark == .error }
+            .sorted { ($0.since ?? .infinity) < ($1.since ?? .infinity) }
+        return needsYou + recent(.done) + recent(.working)
+    }
+
+    /// The header over the agents a state word lists: "Needs you", "Done", "Working" (failed agents are
+    /// under Needs you, as in the inbox).
+    static func stateTitle(_ marks: Set<AgentMark>) -> String {
+        [AgentMark.needsYou, .done, .working].filter(marks.contains).map(\.label).joined(separator: ", ")
+    }
+
+    /// Every match for `query`, best first, with its `band`.
+    private static func ranked(_ all: [CommandBarEntry], query: String) -> [(entry: CommandBarEntry, indices: [Int], band: Int)] {
         var byID: [String: CommandBarEntry] = [:]
         for entry in all { byID[entry.item.id] = entry }
         let ranked = QuickOpen.rank(all.map(\.item), query: query, limit: all.count)
@@ -94,7 +182,7 @@ enum CommandBar {
         }
         // A stable sort keeps FuzzyMatch's order among equals.
         let sorted = matched.sorted { $0.key != $1.key ? $0.key.lexicographicallyPrecedes($1.key) : $0.order < $1.order }
-        return sorted.prefix(limit).map { ($0.entry, $0.indices) }
+        return sorted.map { ($0.entry, $0.indices, $0.key[0]) }
     }
 
     /// How well `query` matches a row's title, best first: 0 the title starts with it ("api" for "api" or
@@ -159,6 +247,7 @@ extension AppDelegate {
             self?.commandBarNewTab(entry)
             self?.quickOpen?.dismiss()
         }
+        overlay.onAllow = { [weak self] entry in self?.commandBarAllow(entry) }
         overlay.reload = { [weak self] in
             guard let self else { return nil }
             model = commandBarModel()
@@ -328,6 +417,13 @@ extension AppDelegate {
         if let workspace { newTab(in: workspace, on: key) } else { newWorkspace(on: key) }
     }
 
+    /// ⌥↩ on an agent's row with a permission request: allows that request. The bar stays open.
+    func commandBarAllow(_ entry: CommandBarEntry) {
+        guard case let .agent(machine, pane)? = CommandTree.Node(entryID: entry.item.id), let request = entry.request else { return NSSound.beep() }
+        log("command bar: allow \(entry.item.title)")
+        decide(machine: machine, pane: pane, request: request.id, .allow)
+    }
+
     /// Closes a tab on any machine, asking first (see confirmClose).
     func closeTab(_ id: TabID, on key: MachineKey) {
         guard let backend = connections[key]?.store.backend else { return }
@@ -363,10 +459,14 @@ extension AppDelegate {
             let place = [entry.workspace?.name, entry.tabTitle].compactMap { $0 }.joined(separator: " › ")
             let id = "agent|\(entry.machine)|\(entry.pane)"
             let here = entry.machine == focusedMachine && entry.workspace?.id == currentWorkspace
+            let store = connections[entry.machine]?.store
+            // The request ⌥↩ allows: the oldest, as the pane's ask bar shows, when the daemon can answer it.
+            let request = store?.features.contains(.agentDecide) == true ? entry.info.pendingRequests.first : nil
             all.append(CommandBarEntry(item: QuickOpenItem(kind: .agent, title: title, subtitle: "\(entry.machineName) · \(place)", id: id),
                                        tier: entry.info.needsAttention ? 0 : here ? 1 : 2,
-                                       dot: entry.info.badgeColor, detail: Self.agentDetail(entry.info),
-                                       path: ([entry.machineName] + [entry.workspace?.name, entry.tabTitle].compactMap { $0 }).joined(separator: " › ")))
+                                       mark: entry.info.mark, detail: request?.askText ?? Self.agentDetail(entry.info),
+                                       path: ([entry.machineName] + [entry.workspace?.name, entry.tabTitle].compactMap { $0 }).joined(separator: " › "),
+                                       branch: store.flatMap { git(entry.pane, in: $0) }?.branch, since: entry.info.since, request: request))
             actions[id] = { [weak self] in self?.openAgent(machine: entry.machine, pane: entry.pane) }
             if Self.needsYou(entry.info) { needsYou.append((entry.machine, entry.pane)) }
         }
@@ -407,20 +507,21 @@ extension AppDelegate {
                                                                subtitle: [session.title, workspaceGit?.place].compactMap { $0 }.joined(separator: " · "),
                                                                id: workspaceID),
                                            tier: here ? 1 : 2,
-                                           dot: agentBadge(machine: key, panes: workspace.tabs.flatMap(\.layout.panes)),
+                                           mark: agentMark(machine: key, panes: workspace.tabs.flatMap(\.layout.panes))?.mark,
                                            detail: workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs",
-                                           path: session.title))
+                                           path: session.title, branch: workspaceGit?.branch))
                 // Its last active tab, by the model's rules (LocalFocus), as a sidebar click.
                 actions[workspaceID] = { [weak self] in self?.focusNow(.workspace(workspace.id), on: key, trace: "command bar") }
                 for tab in workspace.tabs {
                     let id = "tab|\(key)|\(tab.id)"
                     let panes = tab.layout.panes
                     let agent = Self.mostUrgent(panes.compactMap { state.pane($0)?.agent })
+                    let tabGit = git(of: tab, in: store)
                     all.append(CommandBarEntry(item: QuickOpenItem(kind: .tab, title: store.displayTitle(of: tab),
-                                                                   subtitle: ([session.title, workspace.name] + [git(of: tab, in: store)?.searchText].compactMap { $0 }).joined(separator: " · "), id: id),
-                                               tier: here ? 1 : 2, dot: agentBadge(machine: key, panes: panes),
+                                                                   subtitle: ([session.title, workspace.name] + [tabGit?.searchText].compactMap { $0 }).joined(separator: " · "), id: id),
+                                               tier: here ? 1 : 2, mark: agentMark(machine: key, panes: panes)?.mark,
                                                detail: agent.map(Self.agentDetail), panes: panes.count,
-                                               path: "\(session.title) › \(workspace.name)"))
+                                               path: "\(session.title) › \(workspace.name)", branch: tabGit?.branch))
                     actions[id] = { [weak self] in self?.focusNow(.tab(tab.id), on: key, trace: "command bar") }
                 }
             }
@@ -465,6 +566,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     var onClose: ((CommandBarEntry) -> Void)?
     /// ⌥↩ on a row.
     var onNewTab: ((CommandBarEntry) -> Void)?
+    /// ⌥↩ on an agent's row that waits on a permission request: allow it. The bar stays open.
+    var onAllow: ((CommandBarEntry) -> Void)?
     /// ⌘↩ on a tab: its panes beside the current pane.
     var onOpenBeside: ((CommandBarEntry) -> Void)?
     /// A ">" command for the selected row (`subject`), with the picked `target` for one that needs it.
@@ -478,6 +581,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     private let field = NSTextField()
     private let list = NSStackView()
     private let footer = NSTextField(labelWithString: "")
+    private let footerEsc = NSTextField(labelWithString: "esc")
     private let empty = NSTextField(labelWithString: "No matches")
     private(set) var all: [CommandBarEntry]
     private var byID: [String: CommandBarEntry] = [:]
@@ -486,6 +590,10 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// Search results while something is typed.
     private(set) var results: [(entry: CommandBarEntry, indices: [Int])] = []
     private var searchSelected = 0
+    /// With a state word typed: the states it lists and how many rows on top are agents in them.
+    private(set) var stateLead: (marks: Set<AgentMark>, count: Int) = ([], 0)
+    /// The headers drawn over the rows, top to bottom, as shown ("NEEDS YOU  2", "MATCHES").
+    private(set) var headings: [String] = []
     /// The first row drawn: only `visibleRows` rows are, around the selection.
     private(set) var windowStart = 0
     static let visibleRows = 14
@@ -524,7 +632,15 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         footer.font = .systemFont(ofSize: s(11))
         footer.textColor = Theme.faintText
         footer.lineBreakMode = .byTruncatingTail
-        let footerRow = NSStackView(views: [footer])
+        // The hints give way in a narrow card; "esc" stays at the trailing edge.
+        footer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        footerEsc.font = footer.font
+        footerEsc.textColor = Theme.faintText
+        footerEsc.setContentCompressionResistancePriority(.required, for: .horizontal)
+        footerEsc.setContentHuggingPriority(.required, for: .horizontal)
+        let footerRow = NSStackView(views: [footer, NSView(), footerEsc])
+        footerRow.orientation = .horizontal
+        footerRow.spacing = s(8)
         footerRow.edgeInsets = NSEdgeInsets(top: s(7), left: s(16), bottom: s(8), right: s(16))
 
         let stack = NSStackView(views: [top, Self.rule(), list, Self.rule(), footerRow])
@@ -553,8 +669,12 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             card.centerXAnchor.constraint(equalTo: centerXAnchor),
             card.topAnchor.constraint(equalTo: topAnchor, constant: s(90)),
-            card.widthAnchor.constraint(equalToConstant: s(620)),
+            // Never wider than the window leaves room for, so it doesn't clip in a narrow one.
+            card.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -Self.sideMargin * 2),
         ])
+        let width = card.widthAnchor.constraint(equalToConstant: Self.cardWidth)
+        width.priority = .defaultHigh
+        width.isActive = true
         render()
     }
 
@@ -594,6 +714,15 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     }
 
     static let placeholder = "Search workspaces, tabs and agents, or > for commands"
+    /// The card's width where the window has room, and the least it keeps clear on each side.
+    static var cardWidth: CGFloat { s(620) }
+    static var sideMargin: CGFloat { s(16) }
+    static let openHints = "↩ Open   ⌘↩ Open beside   ⌥↩ New tab"
+    static let allowHints = "↩ Open   ⌘↩ Open beside   ⌥↩ Allow"
+    /// The footer's hints (tests).
+    var footerText: String { footer.stringValue }
+    /// Whether "esc" shows at the footer's trailing edge (command mode and picking say it in their own line).
+    var footerShowsEsc: Bool { !footerEsc.isHidden }
 
     private func endPick() {
         picking = nil
@@ -701,7 +830,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         index()
         tree.update(outline)
         if isSearching {
-            results = CommandBar.results(all: all, current: [], query: query)
+            rank()
             searchSelected = selectedID.flatMap { id in results.firstIndex { $0.entry.item.id == id } } ?? min(searchSelected, max(0, results.count - 1))
         }
         render()
@@ -726,7 +855,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         case #selector(insertBacktab(_:)): isSearching ? leaveSearch(atParent: true) : collapse()
         case #selector(insertNewline(_:)): open()
         // ⌥↩
-        case #selector(insertNewlineIgnoringFieldEditor(_:)): newTab()
+        case #selector(insertNewlineIgnoringFieldEditor(_:)): allowOrNewTab()
         case #selector(cancelOperation(_:)): cancel()
         default: return false
         }
@@ -819,6 +948,22 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         onNewTab?(entry)
     }
 
+    /// ⌥↩: on an agent's row that waits on a permission request, allows it; the bar stays open and the
+    /// selection moves to the next row, ready for the next request. On any other row, a new tab there.
+    func allowOrNewTab() {
+        guard !isCommandMode, picking == nil, let entry = selectedEntry else { return }
+        guard entry.request != nil else { return newTab() }
+        onAllow?(entry)
+        if isSearching {
+            // The row leaves when the model catches up; `apply` keeps the selection on this next one by id.
+            searchSelected = min(searchSelected + 1, max(0, results.count - 1))
+        } else {
+            // No preview: the selection only moves on, the tab on screen stays.
+            _ = tree.move(1)
+        }
+        render()
+    }
+
     /// ⌘↩: the selected tab's panes beside the current pane (the app checks it can).
     func openBeside() {
         guard !isCommandMode, picking == nil, let entry = selectedEntry, entry.item.kind == .tab else { return NSSound.beep() }
@@ -861,8 +1006,21 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         update()
     }
 
+    /// Ranks the search again. Picking a workspace lists workspaces only and reads no state word.
+    private func rank() {
+        guard isSearching else {
+            results = []
+            stateLead = ([], 0)
+            return
+        }
+        let found = picking == nil ? CommandBar.search(all: all, current: [], query: query)
+            : CommandBar.search(all: all.filter { $0.item.kind == .workspace }, current: [], query: query, stateWords: false)
+        results = found.rows
+        stateLead = (found.marks, found.lead)
+    }
+
     private func update() {
-        results = isSearching ? CommandBar.results(all: picking == nil ? all : all.filter { $0.item.kind == .workspace }, current: [], query: query) : []
+        rank()
         searchSelected = 0
         if isCommandMode, let text = CommandList.commandQuery(query) {
             let context = commandContext?(tree.selection) ?? CommandContext()
@@ -878,10 +1036,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     private func render() {
         list.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        headings = []
+        // Command mode and picking keep their own lines; otherwise three hints, and "esc" at the far side.
+        let ownLine = isCommandMode || picking != nil
         footer.stringValue = isCommandMode ? "↑↓ move    ↩ run    esc back"
             : picking != nil ? "↑↓ move    → expand    ↩ move here    esc cancel"
-            : isSearching ? "↑↓ move    ↩ open    ⌘↩ beside    tab expand    ⇧tab up    ⌥↩ new tab    ⌘⌫ close    esc back"
-            : "↑↓ move    → expand    ← back    ↩ open    ⌘↩ beside    ⌥↩ new tab    ⌘⌫ close    esc back"
+            : selectedEntry?.request != nil ? Self.allowHints : Self.openHints
+        footerEsc.isHidden = ownLine
         let rows = rows
         if rows.isEmpty {
             empty.stringValue = isCommandMode ? "No commands" : isSearching ? "No matches" : "No workspaces"
@@ -902,6 +1063,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
                 list.addArrangedSubview(heading)
                 heading.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -s(12)).isActive = true
                 lastSection = row.section
+            }
+            // A state word: its agents under their own header, the plain matches under another.
+            if shown.row == nil, isSearching, stateLead.count > 0, index == 0 || index == stateLead.count {
+                let heading = index == 0 ? heading(CommandBar.stateTitle(stateLead.marks), count: stateLead.count, color: Theme.accent)
+                    : heading("Matches", color: Theme.dimText)
+                list.addArrangedSubview(heading)
+                heading.widthAnchor.constraint(equalTo: list.widthAnchor, constant: -s(12)).isActive = true
             }
             let number = index - windowStart
             var entry = shown.entry
@@ -948,10 +1116,26 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         } else {
             text = "Machines"
         }
+        return heading(text, color: section == .needsYou ? Theme.accent : Theme.dimText, hint: hint)
+    }
+
+    /// A header over some rows: its name in capitals, how many rows it has (when given), and a hint at the
+    /// trailing side.
+    private func heading(_ text: String, count: Int? = nil, color: NSColor, hint: String? = nil) -> NSView {
         let label = NSTextField(labelWithString: text.uppercased())
         label.font = .systemFont(ofSize: s(10.5), weight: .semibold)
-        label.textColor = section == .needsYou ? Theme.accent : Theme.dimText
+        label.textColor = color
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var views: [NSView] = [label]
+        headings.append(text.uppercased() + (count.map { "  \($0)" } ?? ""))
+        if let count {
+            let number = NSTextField(labelWithString: "\(count)")
+            number.font = .monospacedDigitSystemFont(ofSize: s(10.5), weight: .regular)
+            number.textColor = Theme.dimText
+            views.append(number)
+            if hint == nil { views.append(NSView()) }
+        }
         if let hint {
             let right = NSTextField(labelWithString: hint)
             right.font = .systemFont(ofSize: s(10.5))
@@ -972,10 +1156,23 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .arrow) }
 }
 
-/// One row: the agent dot (or the kind's icon), the title with the matched letters in the accent colour,
-/// the agent's state and the pane count, where it is, and its ⌘ number.
+/// One row: the agent's mark (or the kind's icon), the title with the matched letters in the accent colour,
+/// one dim line (where it is and the agent's state; a permission request comes first), the pane count, and at the trailing side
+/// the git branch and the row's ⌘ number.
 final class QuickOpenRow: NSView {
     private let action: () -> Void
+    /// The agent's mark at the row's lead, when it has one.
+    private(set) var markView: AgentMarkView?
+    /// The dim line after the title, when there is something to say.
+    private(set) var subtitle: NSTextField?
+    /// The trailing group: the branch, then the ⌘ number. More goes in before the number (a change count).
+    let trailing = NSStackView()
+    /// The branch (its symbol and name) in the trailing group, when the row has one.
+    private(set) var branchView: NSStackView?
+    private(set) var branchLabel: NSTextField?
+    static var branchMaxWidth: CGFloat { s(160) }
+    /// On a row with a permission request the branch gets less, so the request shows whole in the card.
+    static var branchWidthBesideRequest: CGFloat { s(96) }
 
     /// `depth` indents a tree row; `disclosure` draws its chevron (nil: none, false: collapsed, true:
     /// expanded); `showPath` adds where it is (search results, Needs you, machines' status).
@@ -988,20 +1185,17 @@ final class QuickOpenRow: NSView {
         layer?.backgroundColor = selected ? Theme.accent.withAlphaComponent(0.22).cgColor : NSColor.clear.cgColor
 
         let lead: NSView
-        if let dot = entry.dot {
-            let view = NSView()
-            view.wantsLayer = true
-            view.layer?.backgroundColor = dot.cgColor
-            view.layer?.cornerRadius = s(3.5)
+        if let mark = entry.mark {
+            let view = AgentMarkView(mark)
             let holder = NSView()
-            view.translatesAutoresizingMaskIntoConstraints = false
             holder.addSubview(view)
             NSLayoutConstraint.activate([
                 view.centerXAnchor.constraint(equalTo: holder.centerXAnchor),
                 view.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
-                view.widthAnchor.constraint(equalToConstant: s(7)),
-                view.heightAnchor.constraint(equalToConstant: s(7)),
+                view.widthAnchor.constraint(equalToConstant: AgentMarkView.side),
+                view.heightAnchor.constraint(equalToConstant: AgentMarkView.side),
             ])
+            markView = view
             lead = holder
         } else {
             let kindSymbol = switch entry.item.kind {
@@ -1032,20 +1226,50 @@ final class QuickOpenRow: NSView {
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         var views: [NSView] = (depth > 0 ? [indent] : []) + [chevron, lead, title]
-        if let detail = entry.detail {
-            views.append(Self.dim(detail, compression: .defaultLow - 2))
+        // One dim line: where it is, then what it says. It gives way first, then the branch, then the title.
+        // A permission request leads its line, so what ⌥↩ would allow is the last thing cut, and the branch
+        // beside it is kept short.
+        let place = showPath ? entry.path ?? entry.item.subtitle : nil
+        let parts = entry.request != nil ? [entry.detail, place] : [place, entry.detail]
+        let line = parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        if !line.isEmpty {
+            let label = Self.dim(line, compression: .defaultLow - 2)
+            label.toolTip = line
+            subtitle = label
+            views.append(label)
         }
         if entry.panes > 1 {
             let panes = Self.dim("\(entry.panes) panes", compression: .required)
             views.append(panes)
         }
         views.append(NSView())
-        if showPath { views.append(Self.dim(entry.path ?? entry.item.subtitle, compression: .defaultLow - 1, head: true)) }
+
+        trailing.orientation = .horizontal
+        trailing.spacing = s(8)
+        trailing.setHuggingPriority(.required, for: .horizontal)
+        if let branch = entry.branch, !branch.isEmpty {
+            let icon = NSImageView(image: NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "Branch")?
+                .withSymbolConfiguration(.init(pointSize: s(10), weight: .regular)) ?? NSImage())
+            icon.contentTintColor = Theme.dimText
+            icon.setContentCompressionResistancePriority(.required, for: .horizontal)
+            let name = Self.dim(branch, compression: .defaultLow - 1)
+            name.lineBreakMode = .byTruncatingMiddle
+            name.toolTip = branch
+            let group = NSStackView(views: [icon, name])
+            group.orientation = .horizontal
+            group.spacing = s(4)
+            group.setHuggingPriority(.required, for: .horizontal)
+            group.widthAnchor.constraint(lessThanOrEqualToConstant: entry.request != nil ? Self.branchWidthBesideRequest : Self.branchMaxWidth).isActive = true
+            trailing.addArrangedSubview(group)
+            branchView = group
+            branchLabel = name
+        }
         // Rows past the ninth keep an empty slot, so every row is the same height.
         let key = Self.dim(shortcut.map { "⌘\($0)" } ?? "", compression: .required)
         key.font = .monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
         key.widthAnchor.constraint(greaterThanOrEqualToConstant: s(22)).isActive = true
-        views.append(key)
+        trailing.addArrangedSubview(key)
+        views.append(trailing)
 
         let row = NSStackView(views: views)
         row.orientation = .horizontal
@@ -1059,15 +1283,30 @@ final class QuickOpenRow: NSView {
             row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor),
         ])
+
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(Self.accessibilityLabel(entry, place: entry.path ?? entry.item.subtitle))
+    }
+
+    /// What VoiceOver says for a row: its title, the agent's state, where it is, and the branch.
+    static func accessibilityLabel(_ entry: CommandBarEntry, place: String?) -> String {
+        [entry.item.title, entry.mark?.label, place, entry.branch.map { "branch \($0)" }]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        action()
+        return true
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private static func dim(_ text: String, compression: NSLayoutConstraint.Priority, head: Bool = false) -> NSTextField {
+    private static func dim(_ text: String, compression: NSLayoutConstraint.Priority) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: s(12))
         label.textColor = Theme.dimText
-        label.lineBreakMode = head ? .byTruncatingHead : .byTruncatingTail
+        label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(compression, for: .horizontal)
         return label
     }

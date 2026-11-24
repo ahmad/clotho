@@ -291,14 +291,14 @@ extension AppDelegate {
         let local = connections[Self.localKey]!
         groups.append(SidebarGroup(key: Self.localKey, title: local.title, status: connectionStatus(local.store.connection, isLocal: true),
                                    workspaces: local.store.state.workspaces, selected: selectedWorkspace(in: local),
-                                   isConnected: true, isLocal: true, badges: workspaceBadges(local)))
+                                   isConnected: true, isLocal: true, marks: workspaceMarks(local)))
         for machine in remoteMachines {
             if let session = connections[machine.key] {
                 let paused = session.store.retryPaused
                 let status = paused ? Self.pausedStatus(machine.label) : connectionStatus(session.store.connection, isLocal: false)
                 groups.append(SidebarGroup(key: machine.key, title: machine.label, status: status,
                                            workspaces: session.store.state.workspaces, selected: selectedWorkspace(in: session),
-                                           isConnected: true, isLocal: false, badges: workspaceBadges(session),
+                                           isConnected: true, isLocal: false, marks: workspaceMarks(session),
                                            retryPaused: paused ? Self.pausedReason(session.store.connection) : nil))
             } else {
                 // Not connected: a grey dot when ssh works, red with ssh's message when it doesn't.
@@ -310,18 +310,18 @@ extension AppDelegate {
                 case .unknown, .checking: status = (nil, nil)
                 }
                 groups.append(SidebarGroup(key: machine.key, title: machine.label, status: status,
-                                           workspaces: [], selected: nil, isConnected: false, isLocal: false, badges: [:]))
+                                           workspaces: [], selected: nil, isConnected: false, isLocal: false))
             }
         }
         return groups
     }
 
-    private func workspaceBadges(_ session: MachineConnection) -> [WorkspaceID: NSColor] {
-        var badges: [WorkspaceID: NSColor] = [:]
+    private func workspaceMarks(_ session: MachineConnection) -> [WorkspaceID: AgentMarkCount] {
+        var marks: [WorkspaceID: AgentMarkCount] = [:]
         for workspace in session.store.state.workspaces {
-            badges[workspace.id] = agentBadge(machine: session.key, panes: workspace.tabs.flatMap(\.layout.panes))
+            marks[workspace.id] = agentMark(machine: session.key, panes: workspace.tabs.flatMap(\.layout.panes))
         }
-        return badges
+        return marks
     }
 
     private func selectedWorkspace(in session: MachineConnection) -> WorkspaceID? {
@@ -364,8 +364,8 @@ struct SidebarGroup {
     /// Connected (or connecting) machines list their workspaces; others offer Connect.
     let isConnected: Bool
     let isLocal: Bool
-    /// Agent badges for workspaces: each one's most urgent agent's.
-    let badges: [WorkspaceID: NSColor]
+    /// Each workspace's most urgent agent state and how many of its agents are in it.
+    var marks: [WorkspaceID: AgentMarkCount] = [:]
     /// The machine stopped retrying on its own: why (the Reconnect button's tooltip); nil while it isn't.
     var retryPaused: String? = nil
 }

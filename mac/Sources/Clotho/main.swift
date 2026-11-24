@@ -19,6 +19,11 @@ enum Theme {
         color(dark: ClothoPalette.dark[keyPath: value], light: ClothoPalette.light[keyPath: value])
     }
 
+    /// One of the palette's ANSI colours (0–15).
+    private static func ansi(_ index: Int) -> NSColor {
+        color(dark: ClothoPalette.dark.ansi[index], light: ClothoPalette.light.ansi[index])
+    }
+
     static let background = token(\.background)
     static let foreground = token(\.foreground)
     static let accent = token(\.accent)
@@ -43,11 +48,13 @@ enum Theme {
     /// The dimmed backdrop behind overlay cards.
     static let backdrop = NSColor(name: nil) { $0.isDark ? NSColor.black.withAlphaComponent(0.45) : NSColor.black.withAlphaComponent(0.18) }
 
-    // States: agents, machines and transfers.
-    static let success = color(dark: 0x57C78A, light: 0x2E7D4F)
+    // States: agents, machines and transfers. The palette's ANSI green, yellow and red, so a state reads
+    // the same in the chrome as in a terminal (see AgentMark for agents).
+    static let success = ansi(2)
+    static let caution = ansi(3)
+    static let danger = ansi(1)
+    /// File conflicts and find highlights. Not an agent state: a waiting agent is `caution`.
     static let warning = color(dark: 0xE5A01A, light: 0x9A6A00)
-    static let caution = color(dark: 0xC8A35A, light: 0x8A6400)
-    static let danger = color(dark: 0xC76156, light: 0xB3392F)
 
     /// Colours turned into CGColors outside drawing (layer backgrounds set while building views) resolve
     /// against the thread's current appearance, which is the system's unless set. With Settings ›
@@ -439,8 +446,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Carries settings over, once, from the "Clotho Next" builds that ran beside the herdr-based app
     // (bundle id app.clotho.desktop.next), without replacing anything already set here.
     func migrateLegacyPreferences() {
-        guard !isDevBuild else { return }
         let defaults = UserDefaults.standard
+        // The sidebar's Agents panel is gone (the inbox took its place), and its settings with it.
+        for key in ["ShowAgentsPanel", "AgentsPanelHeight", "AgentsOthersExpanded"] { defaults.removeObject(forKey: key) }
+        guard !isDevBuild else { return }
         guard !defaults.bool(forKey: "MigratedNextPreferences") else { return }
         let legacy = defaults.persistentDomain(forName: "app.clotho.desktop.next") ?? [:]
         let keys = ["FontSize", "LocalBrowserPath", "HideSidebar", "NSWindow Frame ClothoMainWindow"]
@@ -540,7 +549,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.onAddMachine = { [weak self] in self?.addMachine(nil) }
         sidebar.onCreateWorkspace = { [weak self] key in self?.createWorkspace(on: key) }
         wireSettingsButtons(sidebar)
-        applyAgentsPanelSetting()
         sidebar.onReconnect = { [weak self] in self?.reconnect($0) }
         sidebar.footer.onSetAppearance = { [weak self] in self?.setAppearance($0) }
         sidebar.onOpenAgent = { [weak self] machine, pane in self?.openAgent(machine: machine, pane: pane) }
@@ -1127,8 +1135,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let enabled = (handler as? NSMenuItemValidation)?.validateMenuItem(item) ?? true
                     return log("menutarget: \(title) (\(NSStringFromSelector(action))) from \(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil") → \(type(of: handler)), enabled \(enabled)")
                 }
-                // "agentspanel:on" / "agentspanel:off" shows or hides the sidebar's Agents panel (the setting).
-                if step.hasPrefix("agentspanel:") { return setShowsAgentsPanel(step.hasSuffix(":on")) }
                 // "sidebarfiles:on" / "sidebarfiles:off" shows or hides the file sidebar; "sidebarfiles:<path>"
                 // browses to a folder (the follow button shows). (Not "files…": that's the browser's.)
                 if step.hasPrefix("sidebarfiles:") {
@@ -1171,7 +1177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
         // FakeAgents=YES (with Backend=fake) puts fake agents in this Mac's panes and moves them through
-        // their states, for building the Agents section without clothod.
+        // their states, for building the inbox, the pane header and the ask bar without clothod.
         if UserDefaults.standard.bool(forKey: "FakeAgents"), let fake = connections[Self.localKey]?.store.backend as? FakeBackend {
             let steps: [(TimeInterval, Int, AgentInfo?)] = [
                 (3, 0, AgentInfo(kind: "claude", state: .running, source: "hook", message: "Editing Sources/Model.swift")),
@@ -1179,7 +1185,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 (3, 2, AgentInfo(kind: "claude", state: .starting)),
                 // Quiet, not raised: shows as idle and never notifies.
                 (5, 2, AgentInfo(kind: "claude", state: .waiting, message: "No output for a while", attention: false)),
-                (6, 0, AgentInfo(kind: "claude", state: .waiting, source: "hook", message: "Allow running `swift test`?")),
+                // A permission request the fake answers (`agent.decide`): the pane's ask bar, Allow and Deny.
+                (6, 0, AgentInfo(kind: "claude", state: .waiting, source: "hook", message: "Allow running `swift test`?",
+                                 requests: [PermissionRequest(id: "fake-1", tool: "Bash", summary: "swift test")])),
                 (8, 1, AgentInfo(kind: "codex", state: .done, message: "All 15 tests pass")),
                 (10, 2, AgentInfo(kind: "claude", state: .error, source: "hook", message: "API rate limit reached")),
                 // clothod 0.1.31 (`alerts`), in panes 3 to 5 when the workspace has them: a finished turn that
@@ -1361,8 +1369,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if defaults.string(forKey: "Backend") == "fake" {
             log("backend: fake")
             // The fake says hello as it always did, unless a default asks for what 0.1.31 daemons have.
+            // FakeAgents also answers permission requests and mutes; FakeFeatures="agent.decide,agent.mute"
+            // adds hello features by name without the scripted agents (the window render tests).
             let alerts = defaults.bool(forKey: "FakeAgents") || defaults.string(forKey: "FakeRewriteHealth") != nil
-            return (FakeBackend(extraFeatures: alerts ? ["settings", "summary", "alerts"] : []), nil)
+            var features = alerts ? ["settings", "summary", "alerts"] : []
+            if defaults.bool(forKey: "FakeAgents") { features += ["agent.decide", "agent.mute"] }
+            features += (defaults.string(forKey: "FakeFeatures") ?? "").split(separator: ",").map(String.init)
+            return (FakeBackend(extraFeatures: features), nil)
         }
         let override = [defaults.string(forKey: "ClothodPath"), env["CLOTHOD_BIN"]].compactMap { $0 }.first
         let bundled = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("clothod").path
@@ -1623,7 +1636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !animate, hide { sidebar.isHidden = true }
     }
 
-    // Wide enough to read long agent titles in the Agents panel (rows stay one line each).
+    // Wide enough to read long agent titles in the sidebar's inbox (rows stay one line each).
     static let sidebarWidthRange: ClosedRange<CGFloat> = 150...640
 
     /// The width the sidebar was last dragged to.

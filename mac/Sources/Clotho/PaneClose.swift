@@ -2,7 +2,8 @@ import AppKit
 
 // Hovering near a pane's top-right corner shows a small × that closes the pane, the same as ⌘W on it:
 // it asks first (unless "Don't ask again" was chosen), and closing a tab's last pane closes the tab. It
-// floats over the terminal and takes no rows, so the shell's size never changes.
+// sits at the trailing end of the pane's header (PaneHeader.swift), in room the header keeps free, so
+// nothing moves when it shows and the shell's size never changes.
 
 /// The round × button.
 final class PaneCloseButton: NSView {
@@ -52,8 +53,8 @@ final class PaneCloseButton: NSView {
 }
 
 extension PaneHostView {
-    /// The ×'s margin inside the host's padding, from its top and right edges.
-    static var closeMargin: CGFloat { 6 }
+    /// The ×'s margin from the host's right edge.
+    static var closeMargin: CGFloat { 4 }
 
     /// The corner the pointer has to be in for the × to show (flipped: the top right).
     var closeCorner: NSRect {
@@ -78,18 +79,19 @@ extension PaneHostView {
         positionCloseButton()
     }
 
-    /// In the host's own top-right corner, the one the pointer hovers to show it, whatever size the
-    /// terminal is: another client (an iPhone) can make the terminal much narrower than the pane.
+    /// At the header's trailing end, in the host's own top-right corner (the one the pointer hovers to
+    /// show it), whatever size the terminal is: another client (an iPhone) can make the terminal much
+    /// narrower than the pane.
     func positionCloseButton() {
         guard let closeButton else { return }
         let frame = closeButtonFrame
         if closeButton.frame != frame { closeButton.frame = frame }
     }
 
-    /// Where the × goes (flipped): padding and margin in from the host's top and right edges.
+    /// Where the × goes (flipped): a margin in from the host's right edge, centred in the header.
     var closeButtonFrame: NSRect {
-        let size = PaneCloseButton.size, inset = Self.padding + Self.closeMargin
-        return NSRect(x: bounds.maxX - inset - size, y: inset, width: size, height: size)
+        let size = PaneCloseButton.size
+        return NSRect(x: bounds.maxX - Self.closeMargin - size, y: ((PaneHeader.height - size) / 2).rounded(), width: size, height: size)
     }
 
     func updateCornerTracking() {

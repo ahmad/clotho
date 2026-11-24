@@ -269,6 +269,27 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         }
     }
 
+    /// The header across the top (PaneHeader.swift): the agent's chip or the program, and the folder.
+    let header = PaneHeader()
+    /// The permission request at the bottom, while the pane's agent waits on one (AskBar.swift).
+    var askBar: AskBar?
+    /// The amber line around a pane whose agent needs the user: above the content, inside the focus ring.
+    let outline = CALayer()
+    /// What the header, the outline and the ask bar show, from the model on every sync.
+    var chrome = PaneChrome() {
+        didSet {
+            guard chrome != oldValue else { return }
+            updateChrome()
+        }
+    }
+    /// Answers a permission request by its id (the ask bar's buttons, ⌘↩ and ⌘.).
+    var onDecide: ((String, PermissionDecision) -> Void)?
+    /// The agent's menu, for the header's chip.
+    var agentMenu: (() -> NSMenu?)?
+    /// The top constraints of what floats under the header (the restored note, the find bar), kept at
+    /// `belowHeader` through a zoom.
+    let belowHeaderConstraints = NSHashTable<NSLayoutConstraint>.weakObjects()
+
     /// The pane's `restored` mark, from the model on every sync.
     var restored: PaneRestore? {
         didSet {
@@ -293,6 +314,7 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         didSet {
             updateBorder()
             if oldValue != isFocusedPane, git != nil { updateGitStrip() }
+            askBar?.isFocused = isFocusedPane
         }
     }
     var showsFocusRing = false {
@@ -321,10 +343,30 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         terminal.enableFileDrops()
         terminal.withoutReplies { terminal.resize(cols: pane.cols, rows: pane.rows) }
         addSubview(terminal)
+        addSubview(header)
+        header.chip.onMenu = { [weak self] in self?.agentMenu?() }
+        // Until the first sync brings the rest.
+        chrome = PaneChrome(command: pane.command, cwd: pane.cwd)
+        header.show(chrome)
+        outline.zPosition = 100
+        outline.isHidden = true
+        layer?.addSublayer(outline)
+        scaleObserver = NotificationCenter.default.addObserver(forName: UIScale.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scaleChanged() }
+        }
         store.register(self, for: pane.id)
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private var scaleObserver: NSObjectProtocol?
+
+    /// The app's zoom changed: the header and the ask bar are sized from it.
+    private func scaleChanged() {
+        header.applyScale()
+        askBar?.applyScale()
+        needsLayout = true
+    }
 
     // MARK: Subscription
 
@@ -370,6 +412,8 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     /// Called when the pane leaves the model for good.
     func detach() {
         store.unregister(paneID)
+        if let scaleObserver { NotificationCenter.default.removeObserver(scaleObserver) }
+        scaleObserver = nil
         subscribed = false
         removeFromSuperview()
     }
@@ -478,8 +522,10 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         let reserve = NSScroller.preferredScrollerStyle == .legacy
             ? NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) : 0
         let width = bounds.width - Self.padding * 2 - reserve
-        // A pane in a repo keeps room for the git strip, whether or not it's focused.
-        let height = bounds.height - Self.padding * 2 - (size == nil ? gitStripHeight : 0)
+        // Every pane has the header, so a new pane's first size (`size` given) counts it too. This pane
+        // also keeps room for its ask bar while one shows, and in a repo for the git strip, whether or
+        // not it's focused.
+        let height = bounds.height - PaneHeader.height - Self.padding * 2 - (size == nil ? askBarHeight + gitStripHeight : 0)
         return Size(cols: max(2, Int(width / cell.width)), rows: max(1, Int(height / cell.height)))
     }
 
@@ -518,10 +564,24 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         // so SwiftTerm's own frame-driven resize keeps the terminal at the pane's size.
         let optimal = terminal.getOptimalFrameSize()
         let size = CGSize(width: optimal.width + 0.5, height: optimal.height + 0.5)
-        // Anchored top-left, so a pane sized by another client lines up like a normal terminal.
-        let frame = NSRect(origin: CGPoint(x: Self.padding, y: Self.padding), size: size)
+        // Anchored top-left under the header, so a pane sized by another client lines up like a normal terminal.
+        let frame = NSRect(origin: CGPoint(x: Self.padding, y: PaneHeader.height + Self.padding), size: size)
         if terminal.frame != frame { terminal.frame = frame }
+        let headerFrame = NSRect(x: 0, y: 0, width: bounds.width, height: PaneHeader.height)
+        if header.frame != headerFrame {
+            header.frame = headerFrame
+            header.needsLayout = true
+        }
+        header.trailingReserve = bounds.maxX - closeButtonFrame.minX + s(6)
+        for constraint in belowHeaderConstraints.allObjects where constraint.constant != Self.belowHeader {
+            constraint.constant = Self.belowHeader
+        }
         positionCloseButton()
+        if let askBar, askBar.frame != askBarFrame {
+            askBar.frame = askBarFrame
+            askBar.needsLayout = true
+        }
+        updateOutline()
         gitStrip?.frame = NSRect(x: 0, y: bounds.height - GitStrip.height, width: bounds.width, height: GitStrip.height)
         searchLayoutChanged()
         if wantsSubscription, bounds.width > 0, bounds.height > 0 { subscribe() }
@@ -542,6 +602,7 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
         withAppearance {
             layer?.borderColor = (isFocusedPane && showsFocusRing ? Theme.accent.withAlphaComponent(0.7) : NSColor.clear).cgColor
         }
+        updateOutline()
     }
 
     /// SwiftTerm's own selection colour, kept for the dark palette.

@@ -31,11 +31,11 @@ final class SidebarHoverTests: XCTestCase {
             Workspace(id: id, name: "Workspace \(id)", tabs: [Tab(id: TabID(id * 10), activePane: PaneID(id * 100), layout: .pane(PaneID(id * 100)))])
         }
         return SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces,
-                            selected: ids.first ?? 1, isConnected: true, isLocal: true, badges: [:])
+                            selected: ids.first ?? 1, isConnected: true, isLocal: true)
     }
 
     private func update(_ ids: [WorkspaceID]) {
-        sidebar.update(agents: [], unreachable: [], groups: [group(ids)])
+        sidebar.update(agents: [], groups: [group(ids)])
         sidebar.layoutSubtreeIfNeeded()
         settle()
     }

@@ -35,8 +35,8 @@ final class NewWorkspaceRenameTests: XCTestCase {
                       tabs: [Tab(id: TabID(id * 10), activePane: PaneID(id * 10), layout: .pane(PaneID(id * 10)))])
         }
         let group = SidebarGroup(key: "local", title: "This Mac", status: (nil, nil), workspaces: workspaces, selected: ids.last,
-                                 isConnected: true, isLocal: true, badges: [:])
-        sidebar.update(agents: [], unreachable: [], groups: [group])
+                                 isConnected: true, isLocal: true)
+        sidebar.update(agents: [], groups: [group])
         sidebar.layoutSubtreeIfNeeded()
     }
 

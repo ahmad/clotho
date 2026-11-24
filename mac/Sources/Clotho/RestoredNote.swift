@@ -1,8 +1,8 @@
 import AppKit
 import ClothoKit
 
-// A pane clothod brought back after a restart (`restored`) shows a quiet note at its top right, over the
-// terminal (taking no rows, so the shell's size never changes): "Restored after restart", plus
+// A pane clothod brought back after a restart (`restored`) shows a quiet note at its top right, under the
+// pane's header and over the terminal (taking no rows, so the shell's size never changes): "Restored after restart", plus
 // "· resumed Claude session" when it resumed one. × dismisses it on the daemon, for every device; the
 // daemon also drops it on the first typing in the pane. The find bar takes its place while open.
 
@@ -73,9 +73,11 @@ extension PaneHostView {
         let note = restoredNote ?? {
             let note = RestoredNote()
             addSubview(note)
+            // Under the header (the pane's × is in the header, above it).
+            let top = note.topAnchor.constraint(equalTo: topAnchor, constant: Self.belowHeader)
+            belowHeaderConstraints.add(top)
             NSLayoutConstraint.activate([
-                note.topAnchor.constraint(equalTo: topAnchor, constant: Self.padding + 2),
-                // Left of the pane's × (PaneClose.swift), which shows in the corner on hover.
+                top,
                 note.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + PaneCloseButton.size + 10)),
                 note.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.8),
             ])

@@ -35,29 +35,3 @@ extension AppDelegate {
         ]
     }
 }
-
-// The sidebar's Agents panel, on or off (Settings › General › Sidebar, View ▸ Show Agents Panel).
-extension AppDelegate {
-    static let showAgentsPanelKey = "ShowAgentsPanel"
-
-    /// On unless switched off.
-    var showsAgentsPanel: Bool {
-        UserDefaults.standard.object(forKey: Self.showAgentsPanelKey) as? Bool ?? true
-    }
-
-    func setShowsAgentsPanel(_ on: Bool) {
-        UserDefaults.standard.set(on, forKey: Self.showAgentsPanelKey)
-        log("sidebar: agents panel \(on ? "shown" : "hidden")")
-        applyAgentsPanelSetting()
-        settingsWindow?.reload()
-    }
-
-    @objc func toggleAgentsPanel(_ sender: Any?) { setShowsAgentsPanel(!showsAgentsPanel) }
-
-    /// The sidebar and the View menu's checkmark follow the setting.
-    func applyAgentsPanelSetting() {
-        sidebar?.showsAgents = showsAgentsPanel
-        let items = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items) ?? []
-        items.first { $0.action == #selector(toggleAgentsPanel(_:)) }?.state = showsAgentsPanel ? .on : .off
-    }
-}

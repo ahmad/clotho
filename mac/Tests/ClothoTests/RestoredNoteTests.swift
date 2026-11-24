@@ -4,7 +4,7 @@ import ClothoKit
 import XCTest
 @testable import Clotho
 
-/// A pane brought back after a restart shows a quiet note over its top right, which takes no rows (the
+/// A pane brought back after a restart shows a quiet note at its top right, under the header, which takes no rows (the
 /// terminal keeps its size); × clears it on the daemon for every device, and the find bar takes its place
 /// while open.
 @MainActor
@@ -68,11 +68,16 @@ final class RestoredNoteTests: XCTestCase {
         XCTAssertEqual(note.label.stringValue, "Restored after restart · resumed Claude session")
         XCTAssertEqual(host.terminal.frame, terminalFrame, "the note takes no rows")
         XCTAssertGreaterThan(note.frame.midX, host.bounds.midX, "top right")
-        XCTAssertLessThan(note.frame.minY, 20, "at the top (the host is flipped)")
+        XCTAssertEqual(note.frame.minY, PaneHostView.belowHeader, accuracy: 0.5, "at the top (the host is flipped)")
+        XCTAssertGreaterThanOrEqual(note.frame.minY, host.header.frame.maxY, "under the header, not over it")
+        XCTAssertEqual(host.terminal.frame.minY, PaneHeader.height + PaneHostView.padding, accuracy: 0.5)
 
         // The find bar takes its place, and gives it back.
         host.showFind()
         XCTAssertNil(host.restoredNote)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(try XCTUnwrap(host.search).bar.frame.minY, PaneHostView.belowHeader, accuracy: 0.5, "the find bar too")
+        XCTAssertEqual(host.terminal.frame, terminalFrame, "and it takes no rows either")
         host.hideFind()
         XCTAssertNotNil(host.restoredNote)
 

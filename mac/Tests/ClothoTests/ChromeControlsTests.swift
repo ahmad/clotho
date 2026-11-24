@@ -67,9 +67,9 @@ final class ChromeControlsTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         let close = try XCTUnwrap(host.closeButton)
         XCTAssertTrue(host.closeCorner.contains(close.frame), "inside the corner it shows for")
-        let inset = PaneHostView.padding + PaneHostView.closeMargin
-        XCTAssertEqual(host.bounds.maxX - close.frame.maxX, inset, accuracy: 0.5, "padding and a margin from the host's right edge")
-        XCTAssertEqual(close.frame.minY, inset, accuracy: 0.5, "and from its top")
+        XCTAssertEqual(host.bounds.maxX - close.frame.maxX, PaneHostView.closeMargin, accuracy: 0.5, "a margin from the host's right edge")
+        XCTAssertTrue(host.header.frame.contains(close.frame), "inside the header")
+        XCTAssertEqual(close.frame.midY, host.header.frame.midY, accuracy: 0.5, "centred in it")
         XCTAssertEqual(host.fittedSize(), size, "it takes no rows")
         close.button.performClick(nil)
         XCTAssertEqual(closed, 1)
@@ -93,15 +93,14 @@ final class ChromeControlsTests: XCTestCase {
         pane.rows = 12
         let host = PaneHostView(pane: pane, store: store, font: .monospacedSystemFont(ofSize: 12, weight: .regular))
         host.onClose = {}
-        let inset = PaneHostView.padding + PaneHostView.closeMargin
         for width: CGFloat in [1200, 900] {
             host.frame = NSRect(x: 0, y: 0, width: width, height: 700)
             host.layoutSubtreeIfNeeded()
             XCTAssertLessThan(host.terminal.frame.maxX, width / 2, "the terminal is much narrower than the host")
             host.setCornerHover(true)
             let close = try XCTUnwrap(host.closeButton)
-            XCTAssertEqual(close.frame.maxX, width - inset, accuracy: 0.5, "at the host's right edge, not the terminal's")
-            XCTAssertEqual(close.frame.minY, inset, accuracy: 0.5)
+            XCTAssertEqual(close.frame.maxX, width - PaneHostView.closeMargin, accuracy: 0.5, "at the host's right edge, not the terminal's")
+            XCTAssertTrue(host.header.frame.contains(close.frame), "inside the header")
             XCTAssertGreaterThan(close.frame.minX, host.terminal.frame.maxX, "not mid-pane")
             XCTAssertTrue(host.closeCorner.contains(close.frame), "inside the corner it shows for")
         }
@@ -150,14 +149,15 @@ final class ChromeControlsTests: XCTestCase {
         }
         let group = { (paused: String?) in
             SidebarGroup(key: "devbox", title: "devbox", status: paused == nil ? (nil, "Checking devbox…") : AppDelegate.pausedStatus("devbox"),
-                         workspaces: [], selected: nil, isConnected: true, isLocal: false, badges: [:], retryPaused: paused)
+                         workspaces: [], selected: nil, isConnected: true, isLocal: false, retryPaused: paused)
         }
-        sidebar.update(agents: [], unreachable: [], groups: [group(nil)])
+        sidebar.update(agents: [], groups: [group(nil)])
         XCTAssertTrue(buttons().isEmpty, "no button while it's still trying")
-        sidebar.update(agents: [], unreachable: [("devbox", "Can't resolve devbox")], groups: [group("Can't resolve devbox")])
+        sidebar.update(agents: [], groups: [group("Can't resolve devbox")])
         XCTAssertTrue(texts("New Workspace").isEmpty, "no New Workspace on a machine it can't reach")
-        let note = try XCTUnwrap(texts("devbox is unreachable, so its agents aren't shown").first)
-        XCTAssertEqual(note.textColor, Theme.dimText, "muted, not red")
+        XCTAssertTrue(texts("devbox is unreachable, so its agents aren't shown").isEmpty, "the machine's own header says it")
+        let status = try XCTUnwrap(texts("Can't reach devbox").first)
+        XCTAssertEqual(status.textColor, Theme.dimText, "muted, not red")
         let button = try XCTUnwrap(buttons().first)
         XCTAssertEqual(AppDelegate.pausedStatus("devbox").1, "Can't reach devbox")
         XCTAssertTrue(button.toolTip?.contains("Can't resolve devbox") == true, "the reason, on hover")

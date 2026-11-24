@@ -1,7 +1,7 @@
 import AppKit
 
 /// The app's zoom: one factor (View › Zoom In / Zoom Out / Actual Size) that scales every chrome font and
-/// metric (sidebar, Agents panel, tab bar, notices, toasts, Settings) and the terminal font together.
+/// metric (sidebar, tab bar, pane headers, notices, toasts, Settings) and the terminal font together.
 /// Chrome sizes are written as `s(points at 100%)`, so layouts stay proportional at any zoom.
 enum UIScale {
     static let range: ClosedRange<CGFloat> = 0.8...1.6

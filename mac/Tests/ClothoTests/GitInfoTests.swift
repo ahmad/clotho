@@ -36,6 +36,8 @@ final class GitInfoTests: XCTestCase {
         window.contentView!.addSubview(host)
         host.layoutSubtreeIfNeeded()
         let outside = host.fittedSize()
+        let room = host.bounds.height - PaneHeader.height - PaneHostView.padding * 2
+        XCTAssertEqual(outside.rows, Int(room / host.cellSize.height), "the rows under the header")
 
         host.git = git
         host.isFocusedPane = true
@@ -46,6 +48,7 @@ final class GitInfoTests: XCTestCase {
         XCTAssertEqual(strip.frame.maxY, host.bounds.maxY, accuracy: 0.5, "at the bottom (the host is flipped)")
         let inRepo = host.fittedSize()
         XCTAssertLessThan(inRepo.rows, outside.rows, "room for the strip")
+        XCTAssertEqual(inRepo.rows, Int((room - GitStrip.height) / host.cellSize.height), "less the header and the strip")
         host.isFocusedPane = false
         XCTAssertTrue(strip.isHidden, "only the focused pane shows it")
         XCTAssertEqual(host.fittedSize(), inRepo, "a focus change never resizes the shell")

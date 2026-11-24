@@ -98,7 +98,6 @@ extension AppDelegate {
                      hiddenInMenu: true, listed: false),
             Shortcut(menu: "View", title: "Toggle File Sidebar", key: "b", modifiers: [.command, .option], action: #selector(showOrHideFileSidebar(_:))),
             Shortcut(menu: "View", title: "Move Focus to Sidebar", key: "s", modifiers: [.command, .option], action: #selector(focusSidebar(_:))),
-            Shortcut(menu: "View", title: "Show Agents Panel", key: "", action: #selector(toggleAgentsPanel(_:)), listed: false),
 
             Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
             Shortcut(menu: "Workspace", title: "Close Workspace", key: "w", modifiers: [.command, .shift], action: #selector(closeActiveWorkspace(_:))),

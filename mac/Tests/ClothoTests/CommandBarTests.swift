@@ -1,4 +1,5 @@
 import AppKit
+import ClothoFake
 import ClothoKit
 import XCTest
 @testable import Clotho
@@ -6,7 +7,8 @@ import XCTest
 /// ⌘P, the command bar: with nothing typed a tree (Needs you, then this machine's workspaces with the
 /// current one open; → expands, ← collapses and climbs to the machine list; arrows preview tabs; Esc goes
 /// back); typing searches every machine flat (best names first, workspaces leading); Tab/⇧Tab leave the
-/// search; ⌘⌫ closes, ⌥↩ opens a new tab, ⌘1–9 pick a row, and ⌘P again closes the bar.
+/// search; ⌘⌫ closes, ⌥↩ opens a new tab (or allows an agent's permission request), ⌘1–9 pick a row, and ⌘P
+/// again closes the bar. A state word ("needs", "working", "done") lists the agents in that state first.
 @MainActor
 final class CommandBarTests: XCTestCase {
     private var window: NSWindow!
@@ -25,10 +27,10 @@ final class CommandBarTests: XCTestCase {
         window.close()
     }
 
-    private func tab(_ title: String, machine: String, workspace: String, tier: Int, panes: Int = 1, dot: NSColor? = nil, detail: String? = nil,
+    private func tab(_ title: String, machine: String, workspace: String, tier: Int, panes: Int = 1, mark: AgentMark? = nil, detail: String? = nil,
                      id: String? = nil) -> CommandBarEntry {
         CommandBarEntry(item: QuickOpenItem(kind: .tab, title: title, subtitle: "\(machine) · \(workspace)", id: id ?? "tab|\(machine)|\(title)"),
-                        tier: tier, dot: dot, detail: detail, panes: panes, path: "\(machine) › \(workspace)")
+                        tier: tier, mark: mark, detail: detail, panes: panes, path: "\(machine) › \(workspace)")
     }
 
     /// This Mac ("local", MacBook) with "Platform" (current: api 11, web 12, docs 13) and "Notes" (notes
@@ -36,12 +38,12 @@ final class CommandBarTests: XCTestCase {
     private var current: [CommandBarEntry] {
         [tab("api", machine: "MacBook", workspace: "Platform", tier: 1, id: "tab|local|11"),
          tab("web", machine: "MacBook", workspace: "Platform", tier: 1, panes: 2, id: "tab|local|12"),
-         tab("docs", machine: "MacBook", workspace: "Platform", tier: 1, dot: .systemOrange, detail: "waiting: Allow Bash?", id: "tab|local|13")]
+         tab("docs", machine: "MacBook", workspace: "Platform", tier: 1, mark: .needsYou, detail: "waiting: Allow Bash?", id: "tab|local|13")]
     }
 
     private var all: [CommandBarEntry] {
         [CommandBarEntry(item: QuickOpenItem(kind: .agent, title: "Claude Code: deploy api", subtitle: "devbox · Infra › deploy", id: "agent|bb|7"),
-                         tier: 0, dot: .systemOrange, detail: "waiting: Allow Bash?", path: "devbox › Infra › deploy"),
+                         tier: 0, mark: .needsYou, detail: "waiting: Allow Bash?", path: "devbox › Infra › deploy"),
          CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Platform", subtitle: "MacBook", id: "ws|local|1"), tier: 1, path: "MacBook")]
             + current
             + [CommandBarEntry(item: QuickOpenItem(kind: .workspace, title: "Notes", subtitle: "MacBook", id: "ws|local|2"), tier: 2, path: "MacBook"),
@@ -62,8 +64,8 @@ final class CommandBarTests: XCTestCase {
     private var newTabs: [String] = []
 
     /// Opens the bar as ⌘P does with "web" (12) current in Platform.
-    private func open(tab current: TabID = 12) {
-        bar = QuickOpenOverlay(all: all, tree: CommandTree(outline: outline, machine: "local", workspace: 1, tab: current))
+    private func open(tab current: TabID = 12, all entries: [CommandBarEntry]? = nil, outline: CommandTree.Outline? = nil) {
+        bar = QuickOpenOverlay(all: entries ?? all, tree: CommandTree(outline: outline ?? self.outline, machine: "local", workspace: 1, tab: current))
         bar.frame = window.contentView!.bounds
         window.contentView!.addSubview(bar)
         bar.onOpen = { [weak self] in self?.opened.append($0.item.id) }
@@ -460,6 +462,340 @@ final class CommandBarTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start) / 7, 0.05, "under 50 ms a keystroke for 600 tabs")
     }
 
+    // MARK: State words, marks and branches, ⌥↩ Allow
+
+    private func agent(_ title: String, pane: Int, mark: AgentMark?, since: Double? = nil, request: PermissionRequest? = nil,
+                       branch: String? = nil, detail: String? = nil, machine: String = "bb") -> CommandBarEntry {
+        CommandBarEntry(item: QuickOpenItem(kind: .agent, title: "Claude Code: \(title)", subtitle: "devbox · Infra › \(title)", id: "agent|\(machine)|\(pane)"),
+                        tier: mark == .working || mark == nil ? 2 : 0, mark: mark, detail: request?.askText ?? detail,
+                        path: "devbox › Infra › \(title)", branch: branch, since: since, request: request)
+    }
+
+    private let cargoTest = PermissionRequest(id: "r7", tool: "Bash", summary: "cargo test -p clothod")
+
+    /// The fixture's rows plus agents in every state: three that need the user (a wait on a request, a
+    /// failure and a finished turn that asks), two finished, two working, and one with no mark.
+    private var withAgents: [CommandBarEntry] {
+        Array(all.dropFirst()) + [
+            agent("deploy api", pane: 7, mark: .needsYou, since: 300, request: cargoTest, branch: "release/2026-11-with-a-very-long-branch-name-indeed"),
+            agent("migrate db", pane: 8, mark: .error, since: 100, branch: "main", detail: "error: migration failed"),
+            agent("api review", pane: 9, mark: .needsYou, since: 200, detail: "needs you: Should I push?"),
+            agent("lint", pane: 10, mark: .done, since: 150, detail: "done: Lint is clean"),
+            agent("api docs", pane: 11, mark: .done, since: 250, detail: "done: Docs written"),
+            agent("refactor", pane: 12, mark: .working, since: 50, detail: "running: split the module"),
+            agent("bench", pane: 13, mark: .working, since: 60, detail: "running"),
+            agent("idle one", pane: 14, mark: nil, detail: "idle"),
+            tab("done", machine: "MacBook", workspace: "Notes", tier: 2, id: "tab|local|22"),
+            tab("needs-review", machine: "MacBook", workspace: "Notes", tier: 2, id: "tab|local|23"),
+        ]
+    }
+
+    private var agentsOutline: CommandTree.Outline {
+        CommandTree.Outline(machines: [.init(key: "local", workspaces: [.init(id: 1, tabs: [11, 12, 13]), .init(id: 2, tabs: [21, 22, 23])]),
+                                       .init(key: "bb", workspaces: [.init(id: 3, tabs: [31])])],
+                            needsYou: [(machine: "bb", pane: 7), (machine: "bb", pane: 8), (machine: "bb", pane: 9)])
+    }
+
+    func testStateFilterParsing() {
+        func check(_ query: String, _ marks: Set<AgentMark>, _ rest: String, line: UInt = #line) {
+            let filter = CommandBar.stateFilter(query)
+            XCTAssertEqual(filter.marks, marks, query, line: line)
+            XCTAssertEqual(filter.rest, rest, query, line: line)
+        }
+        check("needs", [.needsYou, .error], "")
+        check("Needs you api", [.needsYou, .error], "api")
+        check("NEEDS YOU", [.needsYou, .error], "")
+        check("working", [.working], "")
+        check("done x", [.done], "x")
+        check("api done", [.done], "api")
+        check("api", [], "api")
+        check("needsy", [], "needsy")
+        check("undone", [], "undone")
+        check("you", [], "you")
+        check("needs api you", [.needsYou, .error], "api you")
+    }
+
+    func testNeedsListsTheAgentsThatNeedYouOldestFirst() {
+        let found = CommandBar.search(all: withAgents, current: [], query: "needs")
+        XCTAssertEqual(found.lead, 3)
+        XCTAssertEqual(found.marks, [.needsYou, .error])
+        XCTAssertEqual(found.rows.prefix(3).map(\.entry.item.id), ["agent|bb|8", "agent|bb|9", "agent|bb|7"],
+                       "the failed one, the one that asks and the one that waits, the longest wait first")
+        XCTAssertEqual(found.rows.dropFirst(3).map(\.entry.item.title), ["needs-review"], "then only names that start with it")
+        XCTAssertEqual(CommandBar.results(all: withAgents, current: [], query: "Needs You").map(\.entry.item.id),
+                       ["agent|bb|8", "agent|bb|9", "agent|bb|7"])
+        // An agent with no time is last.
+        let untimed = withAgents + [agent("no time", pane: 20, mark: .needsYou)]
+        XCTAssertEqual(CommandBar.search(all: untimed, current: [], query: "needs").rows.prefix(4).last?.entry.item.id, "agent|bb|20")
+    }
+
+    func testAStateWordWithMoreNarrowsItsAgents() {
+        let found = CommandBar.search(all: withAgents, current: [], query: "needs api")
+        XCTAssertEqual(found.lead, 2)
+        XCTAssertEqual(Set(found.rows.map(\.entry.item.id)), ["agent|bb|7", "agent|bb|9"], "deploy api and api review, no other agent or tab")
+        XCTAssertFalse(found.rows[0].indices.isEmpty, "the matched letters of the rest")
+    }
+
+    func testDoneShowsDoneAgentsThenATabNamedDone() {
+        let found = CommandBar.search(all: withAgents, current: [], query: "done")
+        XCTAssertEqual(found.rows.map(\.entry.item.id), ["agent|bb|11", "agent|bb|10", "tab|local|22"],
+                       "finished agents, the most recent first, then the tab really named done")
+        XCTAssertEqual(found.lead, 2)
+        let working = CommandBar.search(all: withAgents, current: [], query: "working")
+        XCTAssertEqual(working.rows.map(\.entry.item.id), ["agent|bb|13", "agent|bb|12"])
+    }
+
+    func testAStateWordWithNoSuchAgentsStillMatchesNames() {
+        let found = CommandBar.search(all: all + [tab("done", machine: "MacBook", workspace: "Notes", tier: 2, id: "tab|local|22")], current: [], query: "done")
+        XCTAssertEqual(found.lead, 0)
+        XCTAssertEqual(found.rows.map(\.entry.item.id), ["tab|local|22"])
+        XCTAssertTrue(CommandBar.search(all: all, current: [], query: "working").rows.isEmpty)
+        // Without a state word nothing changes: every match, in today's order.
+        XCTAssertEqual(CommandBar.search(all: all, current: [], query: "api").rows.map(\.entry.item.title),
+                       ["api", "api-gateway", "Claude Code: deploy api"])
+        XCTAssertEqual(CommandBar.search(all: all, current: [], query: "api").lead, 0)
+    }
+
+    func testTheLimitHoldsWithAStateWord() {
+        let many = (0..<30).map { agent("job \($0)", pane: 100 + $0, mark: .working, since: Double($0)) }
+        let found = CommandBar.search(all: many + withAgents, current: [], query: "working")
+        XCTAssertEqual(found.rows.count, CommandBar.limit)
+        XCTAssertEqual(found.lead, CommandBar.limit)
+    }
+
+    func testAStateWordDrawsItsHeaders() {
+        open(all: withAgents, outline: agentsOutline)
+        XCTAssertEqual(bar.headings.first, "NEEDS YOU", "the tree's own header")
+        bar.setQuery("needs")
+        XCTAssertEqual(bar.headings, ["NEEDS YOU  3", "MATCHES"])
+        XCTAssertEqual(bar.stateLead.count, 3)
+        bar.setQuery("done")
+        XCTAssertEqual(bar.headings, ["DONE  2", "MATCHES"])
+        bar.setQuery("working")
+        XCTAssertEqual(bar.headings, ["WORKING  2"], "no Matches header with nothing under it")
+        bar.setQuery("api")
+        XCTAssertTrue(bar.headings.isEmpty, "a plain search has none")
+    }
+
+    private func row(_ entry: CommandBarEntry, showPath: Bool = true, width: CGFloat = 600) -> QuickOpenRow {
+        let row = QuickOpenRow(entry: entry, indices: [], selected: false, shortcut: 1, showPath: showPath) {}
+        row.frame = NSRect(x: 0, y: 0, width: width, height: 30)
+        window.contentView!.addSubview(row)
+        row.layoutSubtreeIfNeeded()
+        return row
+    }
+
+    func testARowDrawsTheMarkTheSubtitleAndTheBranch() throws {
+        let asking = withAgents.first { $0.item.id == "agent|bb|7" }!
+        let shown = row(asking)
+        XCTAssertEqual(shown.markView?.mark, .needsYou, "the mark every other surface draws")
+        XCTAssertEqual(shown.subtitle?.stringValue, "Allow Bash: cargo test -p clothod · devbox › Infra › deploy api",
+                       "the request first, so it is the last thing cut")
+        XCTAssertEqual(row(withAgents.first { $0.item.id == "agent|bb|9" }!).subtitle?.stringValue,
+                       "devbox › Infra › api review · needs you: Should I push?", "otherwise where it is, then what it says")
+        let branch = try XCTUnwrap(shown.branchView)
+        XCTAssertEqual(shown.branchLabel?.stringValue, asking.branch)
+        XCTAssertEqual(shown.branchLabel?.lineBreakMode, .byTruncatingMiddle)
+        XCTAssertLessThanOrEqual(branch.frame.width, QuickOpenRow.branchWidthBesideRequest + 0.5, "a long branch is cut in the middle, shorter beside a request")
+        XCTAssertGreaterThan(branch.frame.width, 60, "and still shows")
+        var noRequest = asking
+        noRequest.request = nil
+        let wide = try XCTUnwrap(row(noRequest).branchView).frame.width
+        XCTAssertLessThanOrEqual(wide, QuickOpenRow.branchMaxWidth + 0.5, "at most 160 pt")
+        XCTAssertGreaterThan(wide, QuickOpenRow.branchWidthBesideRequest)
+        XCTAssertTrue(shown.trailing.arrangedSubviews.first === branch, "in the trailing group, before the ⌘ number")
+        XCTAssertEqual(shown.trailing.arrangedSubviews.count, 2)
+        let frame = branch.convert(branch.bounds, to: shown)
+        XCTAssertGreaterThan(frame.minX, shown.bounds.midX, "at the trailing side")
+        XCTAssertEqual(shown.bounds.maxX - shown.trailing.convert(shown.trailing.bounds, to: shown).maxX, 10, accuracy: 1, "the group ends at the row's inset")
+        XCTAssertEqual(shown.accessibilityLabel(), "Claude Code: deploy api, Needs you, devbox › Infra › deploy api, branch \(asking.branch!)")
+
+        // A tree row shows no path: the detail alone. No mark: the kind's icon. No branch: only the number.
+        let plain = row(tab("web", machine: "MacBook", workspace: "Platform", tier: 1, panes: 2, detail: "running"), showPath: false)
+        XCTAssertNil(plain.markView)
+        XCTAssertEqual(plain.subtitle?.stringValue, "running")
+        XCTAssertNil(plain.branchView)
+        XCTAssertEqual(plain.trailing.arrangedSubviews.count, 1)
+        XCTAssertEqual(plain.accessibilityLabel(), "web, MacBook › Platform")
+        XCTAssertNil(row(tab("zsh", machine: "MacBook", workspace: "Platform", tier: 1), showPath: false).subtitle)
+
+        // Narrow: nothing leaves the row.
+        let narrow = row(asking, width: 300)
+        XCTAssertLessThanOrEqual(narrow.trailing.convert(narrow.trailing.bounds, to: narrow).maxX, narrow.bounds.maxX + 0.5)
+        XCTAssertEqual(narrow.fittingSize.height, shown.fittingSize.height, accuracy: 0.5)
+        // In the 620 pt card's row (608 pt) the whole request shows.
+        let inCard = try XCTUnwrap(row(asking, width: 608).subtitle)
+        let request = NSAttributedString(string: "Allow Bash: cargo test -p clothod", attributes: [.font: inCard.font!]).size().width
+        XCTAssertGreaterThanOrEqual(inCard.frame.width, request, "the request isn't cut in the card")
+    }
+
+    func testTheFooterShowsThreeHintsAndAllowOnAnAskRow() {
+        open(all: withAgents, outline: agentsOutline)
+        XCTAssertEqual(bar.footerText, "↩ Open   ⌘↩ Open beside   ⌥↩ New tab")
+        XCTAssertTrue(bar.footerShowsEsc, "esc at the trailing edge")
+        bar.setQuery("needs")
+        XCTAssertNil(bar.selectedEntry?.request, "the failed agent leads")
+        XCTAssertEqual(bar.footerText, "↩ Open   ⌘↩ Open beside   ⌥↩ New tab")
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7")
+        XCTAssertEqual(bar.footerText, "↩ Open   ⌘↩ Open beside   ⌥↩ Allow")
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(bar.footerText, "↩ Open   ⌘↩ Open beside   ⌥↩ New tab")
+        bar.setQuery(">")
+        XCTAssertEqual(bar.footerText, "↑↓ move    ↩ run    esc back", "command mode keeps its own line")
+        XCTAssertFalse(bar.footerShowsEsc)
+    }
+
+    func testOptionReturnAllowsOnlyOnAnAskRow() {
+        open(all: withAgents, outline: agentsOutline)
+        var allowed: [String] = []
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        bar.setQuery("needs")
+        XCTAssertTrue(command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))))
+        XCTAssertEqual(newTabs, ["agent|bb|8"], "an agent with no request: a new tab, as before")
+        XCTAssertTrue(allowed.isEmpty)
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+        XCTAssertEqual(newTabs.count, 1)
+        XCTAssertNotNil(bar.superview, "the bar stays open")
+        XCTAssertEqual(dismissed, 0)
+        XCTAssertEqual(bar.selected, 3, "on the next row")
+        XCTAssertEqual(selectedTitle, "needs-review")
+        // Not in command mode.
+        bar.setQuery(">")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed.count, 1)
+        XCTAssertEqual(newTabs.count, 1)
+        // In the tree: the selection moves on without previewing the tab it lands on.
+        bar.setQuery("")
+        while bar.selectedEntry?.request == nil { command(#selector(NSResponder.moveUp(_:))) }
+        let before = previewed.count
+        let index = bar.selected
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7", "r7"])
+        XCTAssertEqual(bar.selected, index + 1)
+        XCTAssertEqual(previewed.count, before, "no preview")
+        XCTAssertNotNil(bar.superview)
+    }
+
+    func testTheCardFitsANarrowWindow() {
+        open()
+        bar.frame = NSRect(x: 0, y: 0, width: 500, height: 600)
+        bar.setQuery("api")
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertLessThanOrEqual(bar.card.frame.width, 500 - 32 + 0.5, "never wider than the overlay less 32 pt")
+        XCTAssertGreaterThanOrEqual(bar.card.frame.minX, 16 - 0.5)
+        XCTAssertLessThanOrEqual(bar.card.frame.maxX, 500 - 16 + 0.5)
+        bar.frame = NSRect(x: 0, y: 0, width: 1140, height: 600)
+        bar.layoutSubtreeIfNeeded()
+        XCTAssertEqual(bar.card.frame.width, 620, accuracy: 0.5, "620 pt where there is room")
+    }
+
+    private func waitFor(_ what: String, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() {
+            if Date() > deadline { return XCTFail("timed out waiting for \(what)") }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    /// The app's own model and wiring against a fake daemon with `agent.decide`: rows carry the mark, the
+    /// branch and the request; ⌥↩ allows it and the bar stays open on the next row.
+    func testTheAppsRowsCarryMarkBranchAndRequestAndOptionReturnAllows() async throws {
+        let app = AppDelegate()
+        let fake = FakeBackend(extraFeatures: ["agent.decide"])
+        let connection = MachineConnection(machine: .local, backend: fake)
+        let key = AppDelegate.localKey
+        app.connections[key] = connection
+        let store = connection.store
+        try await store.start()
+        defer { store.stop() }
+        let first = try await fake.createWorkspace(name: "clothod", spawn: SpawnOptions(command: ["/bin/sleep", "30"]))
+        let second = try await fake.createWorkspace(name: "relay", spawn: SpawnOptions(command: ["/bin/sleep", "30"]))
+        try await waitFor("the panes") { store.state.pane(first.pane) != nil && store.state.pane(second.pane) != nil }
+        fake.setGit(first.pane, PaneGit(repo: "clotho", root: "/p/clotho", branch: "fix-login", head: "a1b2c3d"))
+        fake.setAgent(first.pane, AgentInfo(kind: "claude", state: .waiting, source: "hook", since: 100, attention: true,
+                                            requests: [PermissionRequest(id: "r1", tool: "Bash", summary: "cargo test -p clothod"),
+                                                       PermissionRequest(id: "r1b", tool: "Edit", summary: "src/main.rs")]))
+        fake.setAgent(second.pane, AgentInfo(kind: "claude", state: .waiting, source: "hook", since: 200, attention: true,
+                                             requests: [PermissionRequest(id: "r2", tool: "Bash", summary: "npm test")]))
+        try await waitFor("the agents and git") {
+            store.state.pane(first.pane)?.agent?.pendingRequests.count == 2 && store.state.pane(second.pane)?.agent != nil
+                && store.state.pane(first.pane)?.git != nil
+        }
+
+        var model = app.commandBarModel()
+        let firstID = "agent|\(key)|\(first.pane)", secondID = "agent|\(key)|\(second.pane)"
+        let asking = try XCTUnwrap(model.all.first { $0.item.id == firstID })
+        XCTAssertEqual(asking.mark, .needsYou)
+        XCTAssertEqual(asking.branch, "fix-login")
+        XCTAssertEqual(asking.since, 100)
+        XCTAssertEqual(asking.request?.id, "r1", "the oldest request")
+        XCTAssertEqual(asking.detail, "Allow Bash: cargo test -p clothod", "the exact tool and command")
+        let other = try XCTUnwrap(model.all.first { $0.item.id == secondID })
+        XCTAssertNil(other.branch, "outside a repo")
+        XCTAssertEqual(other.detail, "Allow Bash: npm test")
+        let tabRow = try XCTUnwrap(model.all.first { $0.item.id == "tab|\(key)|\(first.tab)" })
+        XCTAssertEqual(tabRow.mark, .needsYou)
+        XCTAssertEqual(tabRow.branch, "fix-login")
+        XCTAssertNil(tabRow.request, "only the agent's own row allows")
+        let workspaceRow = try XCTUnwrap(model.all.first { $0.item.id == "ws|\(key)|\(first.workspace)" })
+        XCTAssertEqual(workspaceRow.mark, .needsYou)
+        XCTAssertEqual(workspaceRow.branch, "fix-login", "its active tab's")
+
+        bar = QuickOpenOverlay(all: model.all, tree: CommandTree(outline: model.outline, machine: model.machine, workspace: model.workspace, tab: model.tab))
+        bar.frame = window.contentView!.bounds
+        window.contentView!.addSubview(bar)
+        bar.onAllow = { app.commandBarAllow($0) }
+        bar.onNewTab = { [weak self] in self?.newTabs.append($0.item.id) }
+        bar.onDismiss = { [weak self] in self?.dismissed += 1 }
+        bar.focusField()
+
+        // Searching: the longest wait is on top; ⌥↩ allows its request and moves to the next row.
+        bar.setQuery("needs")
+        XCTAssertEqual(bar.results.prefix(2).map(\.entry.item.id), [firstID, secondID])
+        XCTAssertEqual(bar.footerText, QuickOpenOverlay.allowHints)
+        XCTAssertTrue(command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))))
+        try await waitFor("the decision") { fake.decisions.count == 1 }
+        XCTAssertEqual(fake.decisions.first?.pane, first.pane)
+        XCTAssertEqual(fake.decisions.first?.request, "r1")
+        XCTAssertEqual(fake.decisions.first?.decision, .allow)
+        XCTAssertTrue(bar.superview === window.contentView, "still open")
+        XCTAssertEqual(dismissed, 0)
+        XCTAssertTrue(newTabs.isEmpty)
+        XCTAssertEqual(bar.selectedEntry?.item.id, secondID, "on the next row")
+
+        // The model catches up: the first agent's next request shows, and the selection stays where it is.
+        try await waitFor("the request leaving the model") { store.state.pane(first.pane)?.agent?.pendingRequests.map(\.id) == ["r1b"] }
+        model = app.commandBarModel()
+        bar.apply(all: model.all, outline: model.outline)
+        XCTAssertEqual(bar.selectedEntry?.item.id, secondID, "kept by id")
+        XCTAssertEqual(bar.results.first?.entry.detail, "Allow Edit: src/main.rs")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        try await waitFor("the second decision") { fake.decisions.count == 2 }
+        XCTAssertEqual(fake.decisions.last?.request, "r2")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(fake.decisions.count, 2, "one allow a press")
+
+        // A daemon without agent.decide: no request on the row, so ⌥↩ is New Tab there.
+        let plain = AppDelegate()
+        let old = FakeBackend()
+        let oldConnection = MachineConnection(machine: .local, backend: old)
+        plain.connections[key] = oldConnection
+        try await oldConnection.store.start()
+        defer { oldConnection.store.stop() }
+        let pane = try await old.createWorkspace(name: "one", spawn: SpawnOptions(command: ["/bin/sleep", "30"])).pane
+        old.setAgent(pane, AgentInfo(kind: "claude", state: .waiting, source: "hook", attention: true,
+                                     requests: [PermissionRequest(id: "r9", tool: "Bash", summary: "ls")]))
+        try await waitFor("the agent") { oldConnection.store.state.pane(pane)?.agent != nil }
+        let row = try XCTUnwrap(plain.commandBarModel().all.first { $0.item.id == "agent|\(key)|\(pane)" })
+        XCTAssertNil(row.request)
+        XCTAssertNotEqual(row.detail, "Allow Bash: ls")
+    }
+
     /// Review images of the bar as the app draws it, with an agent in Needs you, light and dark. Runs
     /// only with CLOTHO_SNAPSHOT_DIR set (CLOTHO_SNAPSHOT_DIR=/tmp/orch-ui-shots swift test --filter …).
     func testSnapshotsForReview() throws {
@@ -477,6 +813,20 @@ final class CommandBarTests: XCTestCase {
             card.cacheDisplay(in: card.bounds, to: rep)
             try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(folder)/u-cmdp-needs-you-\(name).png"))
             bar.removeFromSuperview()
+            // Filtered by "needs", in a narrow and a wide window: the whole overlay, so the card's margins show.
+            for width in [500, 1140] {
+                window.setContentSize(NSSize(width: width, height: 600))
+                open(all: withAgents, outline: agentsOutline)
+                bar.setQuery("needs")
+                command(#selector(NSResponder.moveDown(_:)))
+                command(#selector(NSResponder.moveDown(_:)))
+                bar.layoutSubtreeIfNeeded()
+                guard let rep = bar.bitmapImageRepForCachingDisplay(in: bar.bounds) else { return XCTFail("no image") }
+                bar.cacheDisplay(in: bar.bounds, to: rep)
+                try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(folder)/u-cmdp-needs-filter-\(name)-\(width).png"))
+                bar.removeFromSuperview()
+            }
+            window.setContentSize(NSSize(width: 900, height: 600))
         }
     }
 }

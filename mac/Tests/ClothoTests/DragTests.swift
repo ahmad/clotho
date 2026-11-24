@@ -94,9 +94,9 @@ final class DragTests: XCTestCase {
         func group(_ key: String, _ title: String, _ ids: [WorkspaceID]) -> SidebarGroup {
             let workspaces = ids.map { Workspace(id: $0, name: "W\($0)", tabs: [Tab(id: TabID($0 * 10), activePane: PaneID($0 * 10), layout: .pane(PaneID($0 * 10)))]) }
             return SidebarGroup(key: key, title: title, status: (nil, nil), workspaces: workspaces, selected: ids.first,
-                                isConnected: true, isLocal: key == "local", badges: [:])
+                                isConnected: true, isLocal: key == "local")
         }
-        sidebar.update(agents: [], unreachable: [], groups: [group("local", "This Mac", [1, 2, 3]), group("devbox", "devbox", [7, 8])])
+        sidebar.update(agents: [], groups: [group("local", "This Mac", [1, 2, 3]), group("devbox", "devbox", [7, 8])])
         sidebar.layoutSubtreeIfNeeded()
         return sidebar
     }

@@ -67,7 +67,11 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(settings.window?.contentLayoutRect.height ?? 0, general.fittingSize.height, accuracy: 1,
                        "the window is exactly as tall as its contents")
         XCTAssertEqual(settings.general.appearanceControl?.segmentCount, 3, "System, Light, Dark")
-        XCTAssertEqual(general.descendants(of: NSSwitch.self).count, 5, "three notification switches, the Agents panel, automatic updates")
+        XCTAssertEqual(general.descendants(of: NSSwitch.self).count, 4, "three notification switches and automatic updates")
+        let titles = general.descendants(of: NSTextField.self).map(\.stringValue)
+        XCTAssertFalse(titles.contains("Sidebar"), "no Sidebar section: the Agents panel and its switch are gone")
+        XCTAssertFalse(titles.contains("Show Agents in the sidebar"))
+        XCTAssertTrue(titles.contains("Notifications") || titles.contains("NOTIFICATIONS"), "\(titles)")
     }
 
     func testMachinesListsThisMacFirstWithSwitchesAndStatus() throws {
