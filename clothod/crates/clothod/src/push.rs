@@ -120,6 +120,9 @@ struct PaneState {
     /// The held alert was replaced ([`Push::refresh`]): the rewrite the hold waits for is of
     /// the earlier message, and is not put into it.
     rewrite_stale: bool,
+    /// The current rise's push has not gone out yet: it is held, waits for its rewrite, or
+    /// waits out the per-pane interval. Until it goes, [`Push::refresh`] can replace its alert.
+    pending: bool,
 }
 
 /// A Live Activity following one pane's agent on one phone (`push.activity`).
@@ -241,6 +244,9 @@ struct Inner {
     activity_send: HashMap<(u64, String), ActivitySend>,
     regs: Vec<Reg>,
     panes: HashMap<u64, PaneState>,
+    /// Panes a client closed whose process has not ended yet ([`Push::pane_closing`]): nothing
+    /// rises for them any more. Gone from here with the pane ([`Push::pane_gone`]).
+    closing: std::collections::HashSet<u64>,
     sent: HashMap<String, VecDeque<Instant>>,
 }
 
@@ -654,17 +660,16 @@ impl Push {
         self.held.load(Ordering::Relaxed) > 0
     }
 
-    /// The agent's message changed while its attention stayed up: a push still held for it
-    /// goes out with this alert (the new text and its label), not the one from the rise.
+    /// What the agent says changed while its attention stayed up: a push for this rise that
+    /// has not gone out yet (held, waiting for its rewrite, or for the per-pane interval) goes
+    /// out with this alert (the new text and its label), not the one from the rise. `stale`:
+    /// the text is another one, so the rewrite the push waits for is not put into it.
     /// Nothing changes for a push that already went, or was dropped.
-    pub fn refresh(&self, pane: u64, alert: Alert) {
-        if !self.holding() {
-            return;
-        }
+    pub fn refresh(&self, pane: u64, alert: Alert, stale: bool) {
         let mut g = self.inner.lock().unwrap();
-        if let Some(ps) = g.panes.get_mut(&pane).filter(|ps| ps.held.is_some()) {
+        if let Some(ps) = g.panes.get_mut(&pane).filter(|ps| ps.attention && ps.pending) {
             ps.alert = Some(alert);
-            ps.rewrite_stale = true;
+            ps.rewrite_stale |= stale;
         }
     }
 
@@ -680,6 +685,10 @@ impl Push {
         hold_reason: Option<&str>,
     ) {
         let mut g = self.inner.lock().unwrap();
+        // A closed pane's agent has nobody to call (a last report as its process ends).
+        if g.closing.contains(&pane) {
+            return;
+        }
         if g.regs.is_empty() && !on {
             if let Some(mut ps) = g.panes.remove(&pane) {
                 if self.unhold(&mut ps) {
@@ -693,8 +702,11 @@ impl Push {
         let ps = g.panes.entry(pane).or_default();
         let rose = on && !ps.attention;
         ps.attention = on;
-        if !on && self.unhold(ps) {
-            log_alert("dropped", pane, ps.alert.as_ref(), None, Some("attention cleared"));
+        if !on {
+            ps.pending = false;
+            if self.unhold(ps) {
+                log_alert("dropped", pane, ps.alert.as_ref(), None, Some("attention cleared"));
+            }
         }
         if !rose {
             return;
@@ -702,6 +714,7 @@ impl Push {
         ps.rise += 1;
         ps.alert = alert;
         ps.quiet = quiet;
+        ps.pending = !quiet;
         ps.rewrite_stale = false;
         if quiet {
             log_alert("dropped", pane, ps.alert.as_ref(), None, Some("quiet"));
@@ -781,6 +794,7 @@ impl Push {
         if self.unhold(ps) {
             // This rise is not sent, now or delayed.
             ps.quiet = true;
+            ps.pending = false;
             log_alert("dropped", pane, ps.alert.as_ref(), None, Some("seen at the Mac"));
         }
     }
@@ -817,6 +831,7 @@ impl Push {
     /// Send the pane's current alert to every phone, within each one's hourly budget.
     fn dispatch(self: &Arc<Self>, g: &mut Inner, pane: u64) {
         let Some(ps) = g.panes.get_mut(&pane) else { return };
+        ps.pending = false;
         let Some(alert) = ps.alert.clone() else { return };
         ps.last_sent = Some(Instant::now());
         let rise = ps.rise;
@@ -906,9 +921,31 @@ impl Push {
         }
     }
 
-    /// The pane closed: its activities end with the last state they showed.
+    /// A client closed the pane (its process ends a moment later): a push for it that has not
+    /// gone out yet is dropped, and nothing rises for it any more.
+    pub fn pane_closing(&self, pane: u64) {
+        let mut g = self.inner.lock().unwrap();
+        g.closing.insert(pane);
+        self.forget(&mut g, pane);
+    }
+
+    /// Forget the pane's push state. A push that had not gone out yet (held, waiting for its
+    /// rewrite or for the per-pane interval) is dropped and logged: the tasks waiting to send
+    /// it, and the retries of one on its way, find no pane and send nothing.
+    fn forget(&self, g: &mut Inner, pane: u64) {
+        let Some(mut ps) = g.panes.remove(&pane) else { return };
+        let held = self.unhold(&mut ps);
+        if held || (ps.attention && ps.pending && !g.regs.is_empty()) {
+            log_alert("dropped", pane, ps.alert.as_ref(), None, Some("pane closed"));
+        }
+    }
+
+    /// The pane is gone (its process ended): a push not yet out is dropped, and its activities
+    /// end with the last state they showed.
     pub fn pane_gone(self: &Arc<Self>, pane: u64) {
         let mut g = self.inner.lock().unwrap();
+        g.closing.remove(&pane);
+        self.forget(&mut g, pane);
         let last = g.live.remove(&pane);
         if !g.activities.iter().any(|a| a.pane == pane) {
             return;
@@ -1335,14 +1372,14 @@ mod tests {
             let asks = Alert { message: Some("Should I push?".into()), summary: Some("Should I push?".into()), needs_user: Some(true), ..full() };
             let now = |pane: u64| push.inner.lock().unwrap().panes[&pane].alert.clone().unwrap();
 
-            // Not held: nothing to replace.
+            // Already sent: nothing to replace.
             push.attention(1, true, Some(plain.clone()), false, None, None);
-            push.refresh(1, asks.clone());
+            push.refresh(1, asks.clone(), true);
             assert_eq!(now(1).needs_user, Some(false));
 
             let (tx, rx) = tokio::sync::watch::channel(None);
             push.attention(2, true, Some(plain), false, Some(rx), Some(Duration::from_millis(150)));
-            push.refresh(2, asks);
+            push.refresh(2, asks, true);
             tx.send(Some(crate::summary::Rewrite { text: "The tests pass.".into(), needs_user: Some(false) })).unwrap();
             tokio::time::sleep(Duration::from_millis(400)).await;
             let a = now(2);

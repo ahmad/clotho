@@ -6547,6 +6547,164 @@ async fn a_held_push_carries_the_latest_message() {
     relay.none_for(Duration::from_millis(800));
 }
 
+/// A pane that is closed (`pane.close`) or whose process ends while its push is held at the
+/// Mac: the phone never hears "needs you" for a pane that no longer exists. Each drop is logged
+/// once, and a restart holds nothing again.
+#[tokio::test]
+async fn a_held_push_is_dropped_when_its_pane_closes_or_ends() {
+    let relay = FakeRelay::start();
+    let vars = [AT_MAC];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    // The second one's process ends by itself once `stop` exists (typing `exit` there would
+    // count as seeing the pane).
+    let stop = env.dir.path().join("stop");
+    let waits = format!("while [ ! -e '{}' ]; do sleep 0.05; done", stop.display());
+    let (closed, ended) = (new_pane(&c, sh()).await, new_pane(&c, with(sh(), json!({"command": ["/bin/sh", "-c", waits]}))).await);
+    type_in(&mac, a).await;
+    for b in [closed, ended] {
+        report(&c, b, "running", "").await;
+        report(&c, b, "waiting", "GONE-ASK-4418 may it deploy?").await;
+        assert_eq!(pane_agent(&c, b).await["attention"], true);
+    }
+    wait_push_log(&env, "held", 2).await;
+    c.request("pane.close", json!({"pane": closed})).await.unwrap();
+    std::fs::write(&stop, "").unwrap();
+    wait_push_log(&env, "dropped", 2).await;
+    // Past the hold: neither went out.
+    relay.none_for(Duration::from_millis(2500));
+    let dropped = push_log(&env, "dropped");
+    assert_eq!(dropped.len(), 2, "{dropped:?}");
+    for b in [closed, ended] {
+        let of: Vec<_> = dropped.iter().filter(|l| l.contains(&format!("pane={b} "))).collect();
+        assert!(of.len() == 1 && of[0].ends_with("reason=pane closed"), "pane {b}: {dropped:?}");
+    }
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+    let panes = c.request("state.get", json!({})).await.unwrap().to_string();
+    assert!(!panes.contains(&format!("\"pane\":{closed}")) && !panes.contains(&format!("\"pane\":{ended}")), "{panes}");
+
+    // The daemon that comes back holds and sends nothing for them.
+    drop((c, mac));
+    env.kill();
+    start_alerts(&mut env, &vars);
+    let _c = env.client().await;
+    relay.none_for(Duration::from_millis(2500));
+    assert_eq!(push_log(&env, "held").len(), 2, "nothing held again:\n{}", env.log());
+    assert_eq!(push_log(&env, "dropped").len(), 2, "{}", env.log());
+    assert!(push_log(&env, "sent").is_empty(), "{}", env.log());
+    assert_log_has_none_of(&env, &["GONE-ASK-4418", "may it deploy"]);
+}
+
+/// The agent says something else while the push for its rise still waits for the rewrite: the
+/// push carries that text and its label, not the first text's rewrite ("All tests pass." then
+/// "Should I push?" is not a silent Done).
+#[tokio::test]
+async fn a_push_waiting_for_its_rewrite_carries_the_latest_message() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[("CLOTHOD_SUMMARY_WAIT_MS", "3000")], |e| fake_summarizer(e, "slowdone", "sleep 1; echo DONE; echo 'The tests pass.'"));
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", "All tests pass.").await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["attention"].as_bool(), a["summary_pending"].as_bool()), (Some(true), Some(true)), "{a}");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    report(&c, p, "done", "Should I push?").await;
+    assert_eq!(pane_agent(&c, p).await["needs_user"], true);
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["msg"].as_str(), r["sm"].as_str(), r["nu"].as_bool()), (Some("Should I push?"), Some("Should I push?"), Some(true)), "{r}");
+    assert!(body.get("silent").is_none(), "{body}");
+    let sent = wait_push_log(&env, "sent", 1).await;
+    assert!(sent[0].contains("label=needs-you"), "{sent:?}");
+    relay.none_for(Duration::from_millis(1500));
+}
+
+/// The same for a push that waits out the per-pane interval (here 1 s).
+#[tokio::test]
+async fn a_delayed_push_carries_the_latest_message() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[]);
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "waiting", "May it deploy?").await;
+    let (first, body) = relay.next();
+    assert_eq!(opened(&body)["s"], "waiting");
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", "All tests pass.").await;
+    assert_eq!(pane_agent(&c, p).await["needs_user"], false);
+    report(&c, p, "done", "Should I push?").await;
+    let (at, body) = relay.next();
+    assert!(at - first >= Duration::from_millis(900), "not delayed: {:?}", at - first);
+    let r = opened(&body);
+    assert_eq!((r["msg"].as_str(), r["nu"].as_bool()), (Some("Should I push?"), Some(true)), "{r}");
+    assert!(body.get("silent").is_none(), "{body}");
+    relay.none_for(Duration::from_millis(1500));
+}
+
+/// The text is the message and the end of the reply: another `tail` under the same `message`
+/// drops the first one's rewrite, and the rise gets a rewrite (and label) of its own.
+#[tokio::test]
+async fn another_end_of_the_reply_gets_its_own_rewrite() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[("CLOTHOD_TEST_SETTLE_MS", "1500")], |e| {
+        let seen = e.dir.path().join("bytail.in");
+        fake_summarizer(e, "bytail", &format!("if grep -q 'also tag it' '{}'; then echo NEEDS_USER; echo 'Asks whether to tag it.'; else echo DONE; echo 'The tests pass.'; fi", seen.display()))
+    });
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    let done = |tail: &str| c.request("agent.report", json!({"pane": p, "state": "done", "kind": "claude", "message": "All tests pass.", "tail": tail}));
+    report(&c, p, "running", "").await;
+    done("Everything is green.").await.unwrap();
+    let a = wait_agent(&c, p, "the first rewrite", |a| a["summary_pending"] == false && a["needs_user"] == false).await;
+    assert_eq!((flags(&a), a["summary"].as_str()), ((Some("done"), Some(false), Some(true)), Some("The tests pass.")), "{a}");
+    done("Everything is green. Should I also tag it?").await.unwrap();
+    let a = pane_agent(&c, p).await;
+    assert!(a["needs_user"].is_null() && a["settling"] == true, "{a}");
+    assert_eq!(a["summary"], "All tests pass.", "the first end's rewrite is gone: {a}");
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["nu"].as_bool(), r["sm"].as_str()), (Some(true), Some("Asks whether to tag it.")), "{r}");
+    assert!(body.get("silent").is_none(), "{body}");
+    assert_eq!(runs(&env, "bytail"), 2, "one per text");
+    relay.none_for(Duration::from_millis(500));
+}
+
+/// A held push follows another end of the reply like another message: it goes out with the
+/// label of the text as it is then.
+#[tokio::test]
+async fn a_held_push_carries_the_latest_end_of_the_reply() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    let done = |tail: &str| c.request("agent.report", json!({"pane": b, "state": "done", "kind": "claude", "message": "All tests pass.", "tail": tail}));
+    report(&c, b, "running", "").await;
+    type_in(&mac, a).await;
+    done("Everything is green.").await.unwrap();
+    assert_eq!(pane_agent(&c, b).await["needs_user"], false);
+    wait_push_log(&env, "held", 1).await;
+    done("Everything is green. Should I also tag it?").await.unwrap();
+    assert_eq!(pane_agent(&c, b).await["needs_user"], true);
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["msg"].as_str(), r["nu"].as_bool()), (Some("All tests pass."), Some(true)), "{r}");
+    assert!(body.get("silent").is_none(), "{body}");
+    let sent = wait_push_log(&env, "sent", 1).await;
+    assert!(sent[0].contains("label=needs-you"), "{sent:?}");
+    relay.none_for(Duration::from_millis(800));
+}
+
 /// Only what the user does counts as being at the Mac: typing, or the app gaining focus (and
 /// `client.active`). A terminal's own reports don't: mouse motion from a pointer drifting over
 /// a pane with mouse reporting on, or the app losing focus.

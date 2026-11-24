@@ -924,14 +924,24 @@ The rules:
   once (no second rewrite, no second push), in a `pane` event; with `attention` down and
   nothing settling (after `agent.ack`) it stays `null`. So "All tests pass." followed by
   "Should I push?" never stays a plain Done.
+  The rewrite belongs to the same text: another `tail` under the same `message` drops it like
+  another `message` does (`summary` is the cleaned `message` again, and a rewrite still under
+  way for the earlier text is not used).
+  A push for the rise that has not gone out yet follows the text too. While it waits for the
+  rewrite (up to 6 s), for the per-pane interval, or is held at the Mac (below), a report that
+  changes `state`, `message`, `tail` or the label with `attention` still up replaces what it
+  will carry: it goes out with the latest text and label, and without the earlier text's
+  rewrite. A push that already went is not sent again.
 - **At the Mac.** While the user is at the Mac app, the daemon holds pushes to the phone for up
   to 2 minutes, from the rise. This applies to every state, `waiting` and `error` included; the
   Mac app shows the alert itself. A held push is dropped when the pane's `attention` clears (the
-  agent works again, `agent.ack`, the agent goes away) or when any client focuses that pane
-  (`pane.focus`) or types in it. Otherwise it is sent when the 2 minutes end, with the latest
+  agent works again, `agent.ack`, the agent goes away), when any client focuses that pane
+  (`pane.focus`) or types in it, or when the pane closes (`pane.close`, its Tab or Workspace
+  closing, or its process ending): no push is sent for a pane that no longer exists, held or
+  still waiting for its rewrite or the per-pane interval. Otherwise it is sent when the 2 minutes end, with the latest
   text and label: a rewrite that finishes at any time during the hold is in it, and so is a
-  `message` the agent reported during the hold in place of the one that rose (then without the
-  earlier message's rewrite).
+  `message` or `tail` the agent reported during the hold in place of the one that rose (then
+  without the earlier text's rewrite).
   A hold survives a restart of the daemon (an in-place upgrade): when it ends is stored with
   the pane as it begins, and removed as it ends (sent or dropped). The daemon that comes back
   holds the push again for the time that was left, logged as `held` with `reason=restored`,
@@ -966,7 +976,8 @@ The rules:
   label=<needs-you|done|unknown> [silent] [devices=<n>] [reason=<why>]`. `held` has
   `reason=restored` when it is a hold taken back after a restart. The reasons for
   `dropped` are `quiet` (the user was at the pane), `seen at the Mac`, `attention cleared`
-  (while held), `settled away` (the agent worked again within the settle window),
+  (while held), `pane closed` (the pane was closed or its process ended before the push went
+  out: while held, waiting for the rewrite, or for the per-pane interval), `settled away` (the agent worked again within the settle window),
   `acknowledged` (`agent.ack` within the settle window), `muted` (also `agent.mute` within the
   settle window), and `rate limited`. `sent` and `held` are logged only when a phone is registered. The log never
   carries a message, summary, prompt, tool input, or a Workspace, Tab or machine name.

@@ -2232,8 +2232,9 @@ impl Daemon {
                 Some(o) if !changed => o.since,
                 _ => unix_now(),
             };
-            // A rewrite belongs to its state and message: kept while they are, gone with them.
-            match old.as_ref().filter(|o| o.state == a.state && o.message == a.message && o.since == a.since) {
+            // A rewrite belongs to its state and text (the message and the reply's end): kept
+            // while they are, gone with them.
+            match old.as_ref().filter(|o| o.state == a.state && o.message == a.message && o.tail == a.tail && o.since == a.since) {
                 Some(o) => (a.rewrite, a.rewrite_pending, a.rewrite_tried) = (o.rewrite.clone(), o.rewrite_pending, o.rewrite_tried),
                 None => (a.rewrite, a.rewrite_pending, a.rewrite_tried) = (None, false, false),
             }
@@ -2305,13 +2306,13 @@ impl Daemon {
             // At a Mac, but not at this pane: the phone hears of it only if they don't look.
             let hold = if attention(&p.agent) { self.at_mac_hold(p) } else { None };
             self.push.attention(p.id, attention(&p.agent), alert, quiet, rewrite, hold);
-        } else if self.push.holding() {
+        } else if let (Some(o), Some(a)) = (&old, &p.agent) {
             // Attention stays up and the agent says something else (a second `done`): a push
-            // still held for it goes out with the new text and its label.
-            if let (Some(o), Some(a)) = (&old, &p.agent) {
-                if a.attention && o.message != a.message {
-                    self.push.refresh(p.id, self.alert_of(p, a));
-                }
+            // for this rise that has not gone out yet (held, waiting for its rewrite or for the
+            // per-pane interval) goes out with the new text and its label.
+            let other_text = o.state != a.state || o.message != a.message || o.tail != a.tail;
+            if a.attention && (other_text || o.needs_user != a.needs_user) {
+                self.push.refresh(p.id, self.alert_of(p, a), other_text);
             }
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
@@ -2324,11 +2325,12 @@ impl Daemon {
 
     /// When the rewrite started for `a` ends: its text becomes the agent's `summary` and its
     /// label the agent's `needs_user` (a `pane` event, and Live Activities follow), if the agent
-    /// is still in that state with that message. A failed rewrite only clears `summary_pending`.
+    /// is still in that state with that text (message and tail). A failed rewrite only clears
+    /// `summary_pending`.
     /// Clients hear (`settings`) when the run changed whether rewrites work.
     fn await_rewrite(&self, pane: u64, a: &Agent, mut rx: RewriteRx) {
         let Some(me) = self.me.get().and_then(std::sync::Weak::upgrade) else { return };
-        let (state, message, since) = (a.state.clone(), a.message.clone(), a.since);
+        let (state, message, tail, since) = (a.state.clone(), a.message.clone(), a.tail.clone(), a.since);
         let health = |d: &Daemon| {
             let h = d.summary.health_json();
             (h["state"].clone(), h["reason"].clone())
@@ -2341,7 +2343,7 @@ impl Daemon {
             }
             let Some(pp) = me.pane(pane) else { return };
             let mut p = pp.lock().unwrap();
-            let Some(a) = p.agent.as_mut().filter(|a| a.state == state && a.message == message && a.since == since && a.rewrite_pending) else { return };
+            let Some(a) = p.agent.as_mut().filter(|a| a.state == state && a.message == message && a.tail == tail && a.since == since && a.rewrite_pending) else { return };
             a.rewrite_pending = false;
             if let Some(r) = done {
                 a.rewrite = Some(r.text);
@@ -3574,6 +3576,10 @@ impl Daemon {
     /// SIGHUP the panes; SIGKILL whatever is still there 3 s later.
     fn hang_up(&self, panes: &[u64]) {
         for &pane in panes {
+            // Closed: no push for it from here on, also while its process takes time to end.
+            if self.pane(pane).is_some() {
+                self.push.pane_closing(pane);
+            }
             self.to_holder(&ToHolder::Kill { pane, signal: "HUP".into() });
         }
         let panes = panes.to_vec();
