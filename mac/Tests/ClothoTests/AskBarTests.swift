@@ -372,9 +372,19 @@ final class AskBarTests: XCTestCase {
         let second = PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")
         try await ask([npmTest, second], in: host, pane)
         let bar = try XCTUnwrap(host.askBar)
-        XCTAssertTrue(bar.isEnabled, "the first request in a pane with no bar a moment ago needs no wait")
+        // The first request in the pane starts off too: a ⌘. meant as the agent's ESC, a ⌘↩ or a click
+        // can be on its way as it arrives.
+        XCTAssertFalse(bar.allow.isEnabled, "the first request in a pane settles like any other")
+        XCTAssertFalse(bar.deny.isEnabled)
         XCTAssertTrue(window.makeFirstResponder(host.terminal))
         let allow = key(36, "\r", .command)
+        XCTAssertTrue(PaneHostView.handleAskKey(allow, firstResponder: window.firstResponder), "swallowed")
+        XCTAssertTrue(PaneHostView.handleAskKey(key(47, ".", .command), firstResponder: window.firstResponder), "⌘. too: not typed into the agent")
+        bar.allow.performClick(nil)
+        bar.deny.performClick(nil)
+        XCTAssertEqual(decided, [], "nothing answers a request the user never saw")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(bar.allow.isEnabled && bar.deny.isEnabled)
         XCTAssertTrue(PaneHostView.handleAskKey(allow, firstResponder: window.firstResponder))
         XCTAssertEqual(decided, ["r1 allow"])
 
@@ -411,8 +421,10 @@ final class AskBarTests: XCTestCase {
         func handled(_ event: NSEvent) -> Bool { PaneHostView.handleAskKey(event, firstResponder: window.firstResponder) }
 
         try await ask([npmTest], in: host, pane)
-        XCTAssertEqual(host.askBar?.isEnabled, true, "no bar before it: no wait")
+        XCTAssertEqual(host.askBar?.isEnabled, false, "every new bar starts off")
         XCTAssertTrue(window.makeFirstResponder(host.terminal))
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(host.askBar?.isEnabled, true)
         XCTAssertTrue(handled(allow))
         XCTAssertEqual(decided, ["r1 allow"])
         // Allowed: the agent has no request, then asks for the next thing.
@@ -451,10 +463,59 @@ final class AskBarTests: XCTestCase {
             XCTAssertEqual(decided.last, "\(id) \(decision)")
         }
 
-        // A bar long gone: the next request needs no wait.
+        // A bar long gone: the next request waits all the same (the pane rebuilt, or a request out of nowhere).
         try await ask([], in: host, pane)
         try await Task.sleep(nanoseconds: 800_000_000)
         try await ask([PermissionRequest(id: "r9", tool: "Edit", summary: "main.swift")], in: host, pane)
-        XCTAssertEqual(host.askBar?.isEnabled, true)
+        let last = try XCTUnwrap(host.askBar)
+        XCTAssertFalse(last.isEnabled)
+        XCTAssertTrue(handled(deny), "swallowed")
+        XCTAssertEqual(decided.count, 5)
+        try await waitFor("the last bar's buttons") { last.isEnabled }
+    }
+
+    /// ⌘↩ and ⌘. wait again when they come to mean a bar that already shows: its pane took the keyboard
+    /// (the user's click, another device's focus, a pane that exited), or its window became key. The
+    /// buttons stay on: a click's target is the request under it.
+    func testTheKeysWaitWhenTheyComeToMeanThisBar() async throws {
+        AskBar.settleDelay = 0.3
+        let (asking, askingPane) = try await host(frame: NSRect(x: 0, y: 0, width: 440, height: 400))
+        let (other, _) = try await host(frame: NSRect(x: 450, y: 0, width: 440, height: 400))
+        var decided: [String] = []
+        asking.onDecide = { request, decision in decided.append("\(request) \(decision.rawValue)") }
+        let allow = key(36, "\r", .command), deny = key(47, ".", .command)
+        func handled(_ event: NSEvent) -> Bool { PaneHostView.handleAskKey(event, firstResponder: window.firstResponder) }
+
+        XCTAssertTrue(window.makeFirstResponder(other.terminal))
+        try await ask([npmTest], in: asking, askingPane)
+        let bar = try XCTUnwrap(asking.askBar)
+        try await waitFor("the buttons") { bar.isEnabled }
+        // The keyboard comes to the asking pane: the request has shown for long, but not as the keys' target.
+        XCTAssertTrue(window.makeFirstResponder(asking.terminal))
+        XCTAssertTrue(bar.allow.isEnabled && bar.deny.isEnabled, "the buttons stay on")
+        XCTAssertTrue(handled(allow), "swallowed")
+        XCTAssertTrue(handled(deny))
+        XCTAssertEqual(decided, [], "a press on its way to the other pane answers nothing here")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(handled(allow))
+        XCTAssertEqual(decided, ["r1 allow"])
+
+        // The window becomes key with the keyboard already in the pane.
+        try await ask([PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")], in: asking, askingPane)
+        try await waitFor("the buttons for r2") { bar.isEnabled }
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        XCTAssertTrue(handled(allow))
+        XCTAssertTrue(handled(deny))
+        XCTAssertEqual(decided, ["r1 allow"])
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(handled(deny))
+        XCTAssertEqual(decided, ["r1 allow", "r2 deny"])
+
+        // A click on Allow is the user's own, on the request under it: no wait for it.
+        try await ask([PermissionRequest(id: "r3", tool: "Edit", summary: "main.swift")], in: asking, askingPane)
+        try await waitFor("the buttons for r3") { bar.isEnabled }
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        bar.allow.performClick(nil)
+        XCTAssertEqual(decided, ["r1 allow", "r2 deny", "r3 allow"])
     }
 }

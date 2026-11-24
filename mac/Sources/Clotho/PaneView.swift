@@ -38,6 +38,8 @@ final class PaneTerminalView: TerminalView {
     override var hasFocus: Bool {
         get { Self.assumesKeyWindow ? hasKeyboard : super.hasFocus }
         set {
+            // The keyboard came here: ⌘↩ and ⌘. now mean this pane's ask bar (AskBar.swift).
+            if newValue, !hasKeyboard { (superview as? PaneHostView)?.askBar?.becameKeyTarget() }
             hasKeyboard = newValue
             super.hasFocus = newValue
         }
@@ -273,8 +275,6 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     let header = PaneHeader()
     /// The permission request at the bottom, while the pane's agent waits on one (AskBar.swift).
     var askBar: AskBar?
-    /// When the ask bar last went away: a request that shows right after can't be answered at once.
-    var askBarRemoved: Date?
     /// The amber line around a pane whose agent needs the user: above the content, inside the focus ring.
     let outline = CALayer()
     /// What the header, the outline and the ask bar show, from the model on every sync.

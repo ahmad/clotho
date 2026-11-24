@@ -124,6 +124,8 @@ final class UIRefreshRenderTests: XCTestCase {
                 try await settle()
 
                 let bar = try XCTUnwrap(host(asking)?.askBar, "the ask bar, \(size) \(mode.rawValue)")
+                // Every request starts off for `AskBar.settleDelay`: the pictures show the buttons on.
+                try await wait("the ask bar's buttons") { bar.isEnabled }
                 // The narrow window's pane has no room for all of it: the tool and the command stay.
                 let fits = bar.label.stringValue == "Allow Bash: cargo test -p clothod"
                 XCTAssertTrue(fits || bar.label.stringValue == "Bash: cargo test -p clothod", bar.label.stringValue)
@@ -146,6 +148,8 @@ final class UIRefreshRenderTests: XCTestCase {
                 app.showQuickOpen(nil)
                 let overlay = try XCTUnwrap(app.quickOpen)
                 overlay.setQuery("needs")
+                // "⌥↩ Allow" is dimmed for `AskBar.settleDelay` when a request comes under the selection.
+                try await wait("the footer's Allow hint") { !overlay.allowHintDimmed }
                 try await settle()
                 saveSnapshot(of: app.container, to: "\(folder)/window-\(size)-\(mode.rawValue)-cmdp-needs.png")
                 overlay.cancel()

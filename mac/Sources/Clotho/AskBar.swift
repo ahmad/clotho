@@ -9,10 +9,11 @@ import ClothoKit
 // In a narrow pane the tool and the start of the command stay readable: the label drops its "Allow "
 // (the button says it) and loses its tail, and the Allow button drops its ⌘↩.
 //
-// A request that takes another's place can't be answered for a moment (`settleDelay`), and a held key
-// never answers: a long ⌘↩ or a double tap meant for one request must not allow the next one unread.
-// The same holds when the bar went away in between (the agent had no request for an instant): a bar
-// that comes back within `settleDelay` of the last one starts off.
+// One rule: a request can be answered only once it has been the target of Allow and Deny, in view, for
+// `settleDelay`. So every request starts off: the first one in a pane (a ⌘. meant as the agent's ESC, or
+// a ⌘↩, can be on its way as it arrives) and each one that takes another's place (a double tap). ⌘↩ and
+// ⌘. wait again when they come to mean this bar: its pane took the keyboard, or its window became key.
+// A held key never answers.
 
 final class AskBar: NSView {
     static var height: CGFloat { max(28, s(30)) }
@@ -20,8 +21,8 @@ final class AskBar: NSView {
     static var margin: CGFloat { s(8) }
     /// How long the buttons stay off after a press whose request didn't leave the model (a failed decide).
     static var retryDelay: TimeInterval = 3
-    /// How long the buttons and keys stay off after another request takes the shown one's place, or
-    /// shows right after the pane's last bar went.
+    /// How long a request shows before it can be answered: the buttons and keys stay off that long after
+    /// the bar shows a request, and the keys after they come to mean this bar.
     static var settleDelay: TimeInterval = 0.5
 
     let label = NSTextField(labelWithString: "")
@@ -37,14 +38,14 @@ final class AskBar: NSView {
     }
     /// The request a press answered, until it leaves the model or `retryDelay` passes.
     private(set) var sent: String?
-    /// The request that just took another's place, until `settleDelay` passes.
+    /// The request that just showed, until `settleDelay` passes.
     private(set) var settling: String?
+    /// From when ⌘↩ and ⌘. answer: `settleDelay` after they came to mean this bar.
+    private var keysFrom = Date.distantPast
 
     override var isFlipped: Bool { true }
 
-    /// `settles`: the pane showed another request a moment ago, so this one starts off like one that
-    /// took its place.
-    init(_ request: PermissionRequest, settles: Bool = false) {
+    init(_ request: PermissionRequest) {
         self.request = request
         super.init(frame: .zero)
         wantsLayer = true
@@ -67,8 +68,20 @@ final class AskBar: NSView {
         for view in [label, more, deny, allow] as [NSView] { addSubview(view) }
         applyScale()
         show(request, more: 0)
-        if settles { settle() }
+        settle()
         updateAllowTitle()
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)), name: NSWindow.didBecomeKeyNotification, object: nil)
+    }
+
+    @objc private func windowBecameKey(_ notification: Notification) {
+        if let window, notification.object as AnyObject? === window { becameKeyTarget() }
+    }
+
+    /// ⌘↩ and ⌘. now mean this bar (its pane's terminal took the keyboard, or its window became key),
+    /// whoever moved the keyboard: a press on its way was for something else. The buttons stay on: a
+    /// click's target is the request under it.
+    func becameKeyTarget() {
+        keysFrom = Date().addingTimeInterval(Self.settleDelay)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -135,9 +148,10 @@ final class AskBar: NSView {
     @objc private func denyTapped() { decide(.deny) }
 
     /// Answers the request shown, once: the buttons stay off until it leaves the model, or come back
-    /// after `retryDelay` when it didn't (the decide failed).
-    func decide(_ decision: PermissionDecision) {
-        guard isEnabled else { return }
+    /// after `retryDelay` when it didn't (the decide failed). `byKey`: ⌘↩ or ⌘., which also wait for
+    /// `keysFrom`.
+    func decide(_ decision: PermissionDecision, byKey: Bool = false) {
+        guard isEnabled, !byKey || Date() >= keysFrom else { return }
         let id = request.id
         sent = id
         updateEnabled()
@@ -226,15 +240,13 @@ extension PaneHostView {
             guard let bar = askBar else { return }
             bar.removeFromSuperview()
             askBar = nil
-            askBarRemoved = Date()
             // The terminal gets its rows back (layout sends the viewport).
             needsLayout = true
             return
         }
         let bar = askBar ?? {
-            // Right after the last bar went (a double tap can still be on its way): this one settles first.
-            let recent = askBarRemoved.map { Date().timeIntervalSince($0) < AskBar.settleDelay } ?? false
-            let bar = AskBar(first, settles: recent)
+            // Every new bar starts off (`AskBar.settleDelay`): the user hasn't read its request yet.
+            let bar = AskBar(first)
             bar.onDecide = { [weak self] request, decision in self?.onDecide?(request.id, decision) }
             addSubview(bar)
             askBar = bar
@@ -271,7 +283,7 @@ extension PaneHostView {
         }
         // A held key is swallowed and never answers: its repeats can arrive after the next request has
         // taken this one's place.
-        if !event.isARepeat { bar.decide(decision) }
+        if !event.isARepeat { bar.decide(decision, byKey: true) }
         return true
     }
 }

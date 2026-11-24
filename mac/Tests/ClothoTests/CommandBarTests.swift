@@ -18,12 +18,18 @@ final class CommandBarTests: XCTestCase {
     private var restored = 0
     private var dismissed = 0
 
+    private var settleDelay: TimeInterval = 0
+
     override func setUp() {
         _ = NSApplication.shared
+        // No wait before ⌥↩ allows the request under the selection, except where a test is about it.
+        settleDelay = AskBar.settleDelay
+        AskBar.settleDelay = 0
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
     }
 
     override func tearDown() {
+        AskBar.settleDelay = settleDelay
         window.close()
     }
 
@@ -695,6 +701,7 @@ final class CommandBarTests: XCTestCase {
     /// A held ⌥↩ repeats like fresh presses: it must not allow the next rows, nor open a tab once the
     /// selection reaches a row with no request.
     func testAHeldOptionReturnAllowsOnceAndOpensNoTab() {
+        AskBar.settleDelay = 0.3
         let second = PermissionRequest(id: "r9", tool: "Bash", summary: "npm test")
         let entries = withAgents.map { $0.item.id == "agent|bb|9" ? agent("api review", pane: 9, mark: .needsYou, since: 200, request: second) : $0 }
         open(all: entries, outline: agentsOutline)
@@ -705,6 +712,7 @@ final class CommandBarTests: XCTestCase {
         bar.setQuery("needs")
         command(#selector(NSResponder.moveDown(_:)))
         XCTAssertEqual(bar.selectedEntry?.request?.id, "r9", "two agents wait, one under the other")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
         XCTAssertEqual(allowed, ["r9"])
         XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "on the next request")
@@ -713,8 +721,9 @@ final class CommandBarTests: XCTestCase {
         XCTAssertEqual(allowed, ["r9"], "the repeats allow nothing")
         XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "and move nothing")
         held = false
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
-        XCTAssertEqual(allowed, ["r9", "r7"], "a fresh press allows the next")
+        XCTAssertEqual(allowed, ["r9", "r7"], "a fresh press allows the next, once it has shown selected for the settle delay")
         XCTAssertNil(bar.selectedEntry?.request, "now on a row with no request")
         held = true
         for _ in 0..<5 { command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))) }
@@ -729,6 +738,92 @@ final class CommandBarTests: XCTestCase {
         XCTAssertTrue(newTabs.isEmpty)
     }
 
+    /// Two agents wait, one under the other. ⌥↩ allows the first and the selection moves on to the second:
+    /// the second tap of a double ⌥↩ doesn't allow that one ("npm test", then "rm -rf build" unread).
+    func testASecondPressRightAfterAnAllowWaitsOnTheNextRow() {
+        AskBar.settleDelay = 0.3
+        let second = PermissionRequest(id: "r9", tool: "Bash", summary: "rm -rf build")
+        let entries = withAgents.map { $0.item.id == "agent|bb|9" ? agent("api review", pane: 9, mark: .needsYou, since: 400, request: second) : $0 }
+        var allowed: [String] = []
+        // Searching ("needs": the failed agent, then r7, then r9), then in the tree's Needs you rows.
+        for searching in [true, false] {
+            open(all: entries, outline: CommandTree.Outline(machines: agentsOutline.machines, needsYou: [(machine: "bb", pane: 7), (machine: "bb", pane: 9)]))
+            bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+            allowed = []
+            if searching { bar.setQuery("needs") }
+            while bar.selectedEntry?.request?.id != "r7" { command(#selector(NSResponder.moveUp(_:))) }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            XCTAssertFalse(bar.allowHintDimmed)
+            command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+            XCTAssertEqual(allowed, ["r7"])
+            XCTAssertEqual(bar.selectedEntry?.request?.id, "r9", "the selection moved on to the next request")
+            XCTAssertEqual(bar.footerText, QuickOpenOverlay.allowHints)
+            XCTAssertTrue(bar.allowHintDimmed, "⌥↩ Allow is dimmed: the request only just came under the selection")
+            XCTAssertTrue(command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))), "the second tap is swallowed")
+            XCTAssertEqual(allowed, ["r7"], "and allows nothing, searching: \(searching)")
+            XCTAssertEqual(bar.selectedEntry?.request?.id, "r9", "nor moves the selection")
+            XCTAssertTrue(newTabs.isEmpty)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            XCTAssertFalse(bar.allowHintDimmed, "back after the settle delay")
+            command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+            XCTAssertEqual(allowed, ["r7", "r9"], "a press after the settle delay allows it")
+        }
+    }
+
+    /// Whatever brings a request under the selection, ⌥↩ waits the settle delay from then: typing,
+    /// a state word, an arrow key, leaving the commands, a model change, the window coming forward.
+    func testEveryWayARequestComesUnderTheSelectionWaits() {
+        AskBar.settleDelay = 0.3
+        var allowed: [String] = []
+        /// The request now selected is refused at once and allowed after the delay.
+        func check(_ how: String, _ id: String = "r7", line: UInt = #line) {
+            XCTAssertEqual(bar.selectedEntry?.request?.id, id, how, line: line)
+            XCTAssertTrue(bar.allowHintDimmed, how, line: line)
+            let before = allowed
+            command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+            XCTAssertEqual(allowed, before, "refused: \(how)", line: line)
+            XCTAssertTrue(newTabs.isEmpty, how, line: line)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+            XCTAssertFalse(bar.allowHintDimmed, how, line: line)
+        }
+        func reopen(_ outline: CommandTree.Outline? = nil) {
+            open(all: withAgents, outline: outline ?? agentsOutline)
+            bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        }
+        // Typing: the only result. Then the same request after the commands (">") and back.
+        reopen()
+        bar.setQuery("deploy")
+        check("typed")
+        bar.setQuery(">")
+        XCTAssertFalse(bar.allowHintDimmed)
+        bar.setQuery("deploy")
+        check("back from the commands")
+        // The window comes forward with the bar open.
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+        check("the window became key")
+        NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: NSWindow())
+        XCTAssertFalse(bar.allowHintDimmed, "another window's doesn't count")
+        // A state word, then the user's own arrow keys: treated the same.
+        bar.setQuery("needs")
+        XCTAssertNil(bar.selectedEntry?.request)
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveDown(_:)))
+        check("an arrow key")
+        // The tree: an arrow key onto the Needs you row, and a model change that puts a request on the selected row.
+        reopen()
+        while bar.selectedEntry?.request == nil { command(#selector(NSResponder.moveUp(_:))) }
+        check("an arrow key in the tree")
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveUp(_:)))
+        check("away and back")
+        let next = PermissionRequest(id: "r7b", tool: "Edit", summary: "src/main.rs")
+        bar.apply(all: withAgents.map { $0.item.id == "agent|bb|7" ? agent("deploy api", pane: 7, mark: .needsYou, since: 300, request: next) : $0 },
+                  outline: agentsOutline)
+        check("the model put another request on the row", "r7b")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7b"], "after the wait one press allows it")
+    }
+
     /// One agent with two requests on the last row: the selection stays on it, and its next request can't
     /// be allowed until it has shown for the ask bar's settle delay.
     func testARequestThatJustTookAnothersPlaceIsNotAllowedYet() {
@@ -740,6 +835,7 @@ final class CommandBarTests: XCTestCase {
         bar.onAllow = { allowed.append($0.request?.id ?? "none") }
         bar.setQuery("deploy")
         XCTAssertEqual(bar.results.count, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
         XCTAssertEqual(allowed, ["r7"])
         XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "the only row keeps the selection")
@@ -773,7 +869,8 @@ final class CommandBarTests: XCTestCase {
         bar.setQuery("needs")
         command(#selector(NSResponder.moveDown(_:)))
         XCTAssertEqual(bar.selectedEntry?.request?.id, "r9", "the user's own move")
-        XCTAssertFalse(bar.allowHintDimmed, "a request the user moved to can be allowed at once")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(bar.allowHintDimmed, "it has shown selected for the settle delay")
         // r9 is answered elsewhere: its agent works again and its row leaves the results.
         let after = withAgents.map { $0.item.id == "agent|bb|9" ? agent("api review", pane: 9, mark: .working, since: 400, detail: "running") : $0 }
         bar.apply(all: after, outline: agentsOutline)
@@ -800,6 +897,7 @@ final class CommandBarTests: XCTestCase {
         bar.onAllow = { allowed.append($0.request?.id ?? "none") }
         allowed = []
         while bar.selectedEntry?.request?.id != "r7" { command(#selector(NSResponder.moveUp(_:))) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         XCTAssertFalse(bar.allowHintDimmed)
         let answered = entries.map { $0.item.id == "agent|bb|7" ? agent("deploy api", pane: 7, mark: .working, since: 400, detail: "running") : $0 }
         bar.apply(all: answered, outline: outline([9, 8]))
@@ -829,7 +927,9 @@ final class CommandBarTests: XCTestCase {
         bar.onAllow = { allowed.append($0.request?.id ?? "none") }
         bar.setQuery("deploy")
         XCTAssertEqual(bar.footerText, QuickOpenOverlay.allowHints)
-        XCTAssertFalse(bar.allowHintDimmed, "a request that was there when the bar opened")
+        XCTAssertTrue(bar.allowHintDimmed, "the request only just came under the selection")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(bar.allowHintDimmed, "a request that has shown selected for the settle delay")
         command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
         XCTAssertEqual(allowed, ["r7"])
         XCTAssertEqual(bar.selectedEntry?.request?.id, "r7")

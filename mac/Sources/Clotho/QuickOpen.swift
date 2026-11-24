@@ -605,12 +605,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         guard let event = NSApp.currentEvent, event.type == .keyDown else { return false }
         return event.isARepeat
     }
-    /// Every permission request the rows have carried while the bar is open.
-    private var knownRequests: Set<String> = []
-    /// Requests that showed up after the bar opened, or came under the selection without the user moving
-    /// it (the selected row left), and when: the user hasn't read them yet, so ⌥↩ leaves them alone for
-    /// `AskBar.settleDelay`.
-    private var arrived: [String: Date] = [:]
+    /// The request under the selection, the one ⌥↩ would allow, and since when. `render` keeps it, so it
+    /// starts over however that request got there: the bar opened on it, the user moved or typed, the
+    /// model changed, the selection moved on after an allow, the window became key. ⌥↩ leaves it alone
+    /// for `AskBar.settleDelay` from then.
+    private var target: (id: String, since: Date)?
+    /// The one pending footer refresh, for when "⌥↩ Allow" comes back.
+    private var footerRefresh: DispatchWorkItem?
     /// Requests ⌥↩ allowed here, and when: not sent again while the model catches up (`AskBar.retryDelay`).
     private var allowed: [String: Date] = [:]
 
@@ -620,7 +621,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         initialSelection = tree.selection
         super.init(frame: .zero)
         index()
-        knownRequests = Set(all.compactMap(\.request?.id))
+        NotificationCenter.default.addObserver(self, selector: #selector(windowBecameKey(_:)), name: NSWindow.didBecomeKeyNotification, object: nil)
 
         field.placeholderString = Self.placeholder
         field.font = .systemFont(ofSize: s(16))
@@ -701,6 +702,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         rule.fillColor = Theme.divider
         rule.heightAnchor.constraint(equalToConstant: 1).isActive = true
         return rule
+    }
+
+    /// The window was in the back: a ⌥↩ pressed as it comes forward wasn't for the request selected here.
+    @objc private func windowBecameKey(_ notification: Notification) {
+        guard let window, notification.object as AnyObject? === window, let id = target?.id else { return }
+        target = (id, Date())
+        updateFooter()
     }
 
     private func index() {
@@ -844,19 +852,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// New model contents, keeping the place (and the selected search result, by id).
     func apply(all: [CommandBarEntry], outline: CommandTree.Outline) {
         let selectedID = isSearching ? selectedEntry?.item.id : nil
-        let selectedRequest = selectedEntry?.request?.id
         self.all = all
         index()
-        let now = Date()
-        for id in all.compactMap(\.request?.id) where knownRequests.insert(id).inserted { arrived[id] = now }
         tree.update(outline)
         if isSearching {
             rank()
             searchSelected = selectedID.flatMap { id in results.firstIndex { $0.entry.item.id == id } } ?? min(searchSelected, max(0, results.count - 1))
         }
-        // The selection is on another request and the user didn't put it there (its row left, answered
-        // on the phone or in the terminal): a ⌥↩ on its way was meant for the one before.
-        if let id = selectedEntry?.request?.id, id != selectedRequest { arrived[id] = now }
         render()
     }
 
@@ -977,7 +979,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     ///
     /// One press answers one request the user has read: a held key does nothing (its repeats would allow
     /// the next rows, or open a tab once the selection reaches a row with no request), a request that
-    /// showed up a moment ago isn't allowed yet, and one already allowed isn't sent twice.
+    /// came under the selection a moment ago isn't allowed yet (the one the selection moves on to here
+    /// too: a double tap allows one), and one already allowed isn't sent twice.
     func allowOrNewTab() {
         guard !isKeyRepeat() else { return }
         guard !isCommandMode, picking == nil, let entry = selectedEntry else { return }
@@ -996,12 +999,12 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         render()
     }
 
-    /// Until when ⌥↩ leaves `request` alone: it just showed up or came under the selection
+    /// Until when ⌥↩ leaves `request` alone: it came under the selection a moment ago
     /// (`AskBar.settleDelay`), or was just allowed here (`AskBar.retryDelay`). Nil when a press allows it.
     private func allowRefusedUntil(_ request: String, now: Date = Date()) -> Date? {
-        let until = [arrived[request]?.addingTimeInterval(AskBar.settleDelay), allowed[request]?.addingTimeInterval(AskBar.retryDelay)]
-            .compactMap { $0 }.max()
-        return until.flatMap { $0 > now ? $0 : nil }
+        let since = target.flatMap { $0.id == request ? $0.since : nil } ?? now
+        let until = max(since.addingTimeInterval(AskBar.settleDelay), allowed[request]?.addingTimeInterval(AskBar.retryDelay) ?? .distantPast)
+        return until > now ? until : nil
     }
 
     /// The footer's hints. "⌥↩ Allow" dims while a press would be refused, the way the pane's ask bar
@@ -1011,15 +1014,20 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             : picking != nil ? "↑↓ move    → expand    ↩ move here    esc cancel"
             : selectedEntry?.request != nil ? Self.allowHints : Self.openHints
         allowHintDimmed = false
+        footerRefresh?.cancel()
+        footerRefresh = nil
         guard !isCommandMode, picking == nil, let request = selectedEntry?.request, let until = allowRefusedUntil(request.id) else { return }
         allowHintDimmed = true
         let text = NSMutableAttributedString(string: Self.allowHints, attributes: [.font: footer.font as Any, .foregroundColor: Theme.faintText])
         text.addAttribute(.foregroundColor, value: Theme.faintText.withAlphaComponent(0.35), range: (Self.allowHints as NSString).range(of: Self.allowHint))
         footer.attributedStringValue = text
-        DispatchQueue.main.asyncAfter(deadline: .now() + until.timeIntervalSinceNow + 0.01) { [weak self] in
+        // One timer, however often the rows are drawn while it's dimmed.
+        let refresh = DispatchWorkItem { [weak self] in
             guard let self, superview != nil else { return }
             updateFooter()
         }
+        footerRefresh = refresh
+        DispatchQueue.main.asyncAfter(deadline: .now() + until.timeIntervalSinceNow + 0.01, execute: refresh)
     }
 
     /// ⌘↩: the selected tab's panes beside the current pane (the app checks it can).
@@ -1097,6 +1105,10 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         headings = []
         // Command mode and picking keep their own lines; otherwise three hints, and "esc" at the far side.
         let ownLine = isCommandMode || picking != nil
+        // Every change of the selection, the rows or the model is drawn here: the one place the request
+        // under the selection can change.
+        let request = selectedEntry?.request?.id
+        if request != target?.id { target = request.map { ($0, Date()) } }
         updateFooter()
         footerEsc.isHidden = ownLine
         let rows = rows
