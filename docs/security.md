@@ -253,8 +253,33 @@ All of it goes through one runner (`crate::gitrun`). Nothing else in the daemon 
   system attributes (`GIT_ATTR_NOSYSTEM=1`), no prompts (`GIT_TERMINAL_PROMPT=0`,
   `GIT_ASKPASS=/bin/false`, `GIT_EDITOR=:`), no optional locks (`GIT_OPTIONAL_LOCKS=0`), no
   lazy fetch (`GIT_NO_LAZY_FETCH=1`), no replace objects, literal pathspecs, `GIT_PAGER=cat`.
-  The user's global ignore file is the one thing taken from the global config: its path is
-  read once, from `/`, and passed back as `core.excludesFile`.
+- **What is taken from the user's global config.** The global config is the user's own and
+  trusted, but it is not handed to git whole: it may name programs (a pager, an fsmonitor,
+  filters, aliases), and those must not run on a repository the daemon merely looks at. It is
+  read once per git binary, from `/` (away from any repository, so an `includeIf` on a
+  repository's path doesn't match), with `git config --global --includes`, and only these are
+  passed back, as config overrides:
+  - `core.excludesFile`: the path of the user's global ignore file. Git only reads patterns
+    from it.
+  - `safe.directory`, every value in order (an empty one forgets those before it, as in git):
+    `*`, or a path that is absolute or under `~/`; at most 256 of them. It only says which
+    repositories owned by another user git may open, which is the user's decision to make, and
+    it is the one place git honours it from (never a repository's own config). Without it a
+    repository the user marked safe would always read as `unsafe`. Everything in this section
+    still applies in such a repository.
+  - `core.autocrlf` (a boolean or `input`), `core.eol` (`lf`, `crlf`, `native`),
+    `core.safecrlf` (a boolean or `warn`): how line endings are compared. Without them a
+    work tree checked out with CRLF reads as changed on every line.
+  - `core.fileMode`, `core.ignoreCase`, `core.precomposeUnicode` (booleans): whether the
+    executable bit, the case of a name and the Unicode form of a name count as a difference.
+
+  Each of the last six takes a boolean or one of a few fixed words and nothing else: none can
+  hold a command, a path or a host. The daemon checks the value against exactly those words
+  and passes on its own spelling (`true`, `false`, `input`, …), never the text from the file; a
+  value that is anything else is not carried, and no other key is ever looked at. A
+  repository's own setting still wins, as it does in git: a setting the repository's config
+  sets is not overridden with the global one. (`core.quotePath` is not carried: the daemon
+  sets it itself.)
 - Config overrides, which win over the repository's config and anything it includes:
   `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.pager=cat`,
   `core.untrackedCache=false`, `diff.external=`, `diff.autoRefreshIndex=false`,

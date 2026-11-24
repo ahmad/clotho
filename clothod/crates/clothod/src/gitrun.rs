@@ -262,19 +262,22 @@ fn os(s: &str) -> OsString {
 
 /// The environment of the runner's own calls outside any repository.
 fn probe_env() -> Env {
+    probe_env_in(std::env::var_os("HOME"), std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+fn probe_env_in(home: Option<OsString>, xdg: Option<OsString>) -> Env {
     let mut env = vec![(os("PATH"), os("/usr/bin:/bin")), (os("LC_ALL"), os("C")), (os("GIT_CONFIG_NOSYSTEM"), os("1")), (os("GIT_TERMINAL_PROMPT"), os("0"))];
-    for name in ["HOME", "XDG_CONFIG_HOME"] {
-        if let Some(v) = std::env::var_os(name) {
-            env.push((os(name), v));
-        }
-    }
+    env.extend([("HOME", home), ("XDG_CONFIG_HOME", xdg)].into_iter().filter_map(|(name, v)| Some((os(name), v?))));
     env
 }
 
 /// The environment of every call in a repository: nothing of the daemon's own but HOME, no system
 /// or global config, and overrides (which win over the repository's config and anything it
 /// includes) for every setting that could run a program, reach the network or write to the repo.
-fn repo_env(excludes: Option<&Path>, scan: &Scan) -> Env {
+/// What the user's global config is handed back ([`Global`]) goes the same way. `scan` is `None`
+/// for the one call that reads the repository's config: it gets the user's `safe.directory`, and
+/// none of the settings a repository may set itself (they would read as the repository's own).
+fn repo_env(excludes: Option<&Path>, global: &Global, scan: Option<&Scan>) -> Env {
     let mut env: Env = [
         ("PATH", "/usr/bin:/bin"),
         ("LC_ALL", "C"),
@@ -323,6 +326,12 @@ fn repo_env(excludes: Option<&Path>, scan: &Scan) -> Env {
     if let Some(excludes) = excludes {
         config.push((os("core.excludesFile"), excludes.into()));
     }
+    config.extend(global.safe.iter().map(|dir| (os("safe.directory"), dir.clone())));
+    let none = Scan::default();
+    // A command-line setting wins over the repository's own, which a global one must not: one
+    // the repository sets is left to it.
+    config.extend(global.settings.iter().filter(|(k, _)| scan.is_some_and(|s| !s.sets.contains(k))).map(|(k, v)| (os(k), os(v))));
+    let scan = scan.unwrap_or(&none);
     let key = |section: &str, name: &[u8], var: &str| OsString::from_vec([section.as_bytes(), b".", name, b".", var.as_bytes()].concat());
     for name in &scan.filters {
         for (var, value) in [("clean", ""), ("smudge", ""), ("process", ""), ("required", "false")] {
@@ -349,6 +358,80 @@ struct Scan {
     /// Every `<name>` with a `protocol.<name>.allow` entry.
     protocols: BTreeSet<Vec<u8>>,
     partial_clone: bool,
+    /// Which of the [`CARRIED`] settings the repository sets itself.
+    sets: BTreeSet<&'static str>,
+}
+
+/// A value git reads as a boolean, as `true` or `false`. `None` is a key with no `= value`.
+fn plain_bool(value: Option<&[u8]>) -> Option<&'static str> {
+    let Some(value) = value else { return Some("true") };
+    match value.to_ascii_lowercase().as_slice() {
+        b"true" | b"yes" | b"on" | b"1" => Some("true"),
+        b"false" | b"no" | b"off" | b"0" | b"" => Some("false"),
+        _ => None,
+    }
+}
+
+/// `value` when it is one of `words`, whatever its case.
+fn plain_word(value: Option<&[u8]>, words: &[&'static str]) -> Option<&'static str> {
+    let value = value?.to_ascii_lowercase();
+    words.iter().copied().find(|w| w.as_bytes() == value)
+}
+
+/// One global setting that is carried over: the value as it is passed on, or `None` for a value
+/// that is not one of git's plain ones.
+type Plain = fn(Option<&[u8]>) -> Option<&'static str>;
+
+/// The settings of the user's global config that calls in a repository get back (keys as
+/// `git config --list` spells them). Each takes a boolean or one of a few words and only says how
+/// file contents, modes and names are compared: none can name a program, a file or a host. A
+/// value that is none of those words is not passed on.
+const CARRIED: [(&str, Plain); 6] = [
+    ("core.autocrlf", |v| plain_bool(v).or_else(|| plain_word(v, &["input"]))),
+    ("core.eol", |v| plain_word(v, &["lf", "crlf", "native"])),
+    ("core.safecrlf", |v| plain_bool(v).or_else(|| plain_word(v, &["warn"]))),
+    ("core.filemode", plain_bool),
+    ("core.ignorecase", plain_bool),
+    ("core.precomposeunicode", plain_bool),
+];
+
+/// The most `safe.directory` entries carried over, and the longest one.
+const MAX_SAFE: usize = 256;
+const MAX_SAFE_LEN: usize = 4096;
+
+/// What the user's own global config is handed back by calls in a repository, which otherwise
+/// run without it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Global {
+    /// Every `safe.directory`, in order: `*`, or a path (absolute, or under `~/`).
+    safe: Vec<OsString>,
+    /// The [`CARRIED`] settings that are set, each with its plain value.
+    settings: Vec<(&'static str, &'static str)>,
+}
+
+/// Read `git config --global --includes --list -z` output (the format [`scan_config`] reads) for
+/// what is carried over. As in git, the last value of a setting counts, and an empty
+/// `safe.directory` forgets the ones before it.
+fn scan_global(list: &[u8]) -> Global {
+    let mut global = Global::default();
+    for entry in list.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let mut parts = entry.splitn(2, |b| *b == b'\n');
+        let (key, value) = (parts.next().unwrap_or_default(), parts.next());
+        if key == b"safe.directory" {
+            match value {
+                Some(b"") => global.safe.clear(),
+                Some(v) if v.len() <= MAX_SAFE_LEN && (v == b"*" || v.starts_with(b"/") || v.starts_with(b"~/")) => global.safe.push(OsString::from_vec(v.to_vec())),
+                _ => {}
+            }
+        } else if let Some((name, plain)) = CARRIED.iter().find(|(name, _)| name.as_bytes() == key) {
+            global.settings.retain(|(k, _)| k != name);
+            if let Some(v) = plain(value) {
+                global.settings.push((name, v));
+            }
+        }
+    }
+    global.safe.truncate(MAX_SAFE);
+    global
 }
 
 /// Read `git config --list -z` output: entries end in NUL and are `key\nvalue` (a key holds no
@@ -373,6 +456,8 @@ fn scan_config(list: &[u8]) -> Scan {
             scan.partial_clone = true;
         } else if let Some((_, var)) = name(key, b"remote.") {
             scan.partial_clone |= var == b"promisor" || var == b"partialclonefilter";
+        } else if let Some((carried, _)) = CARRIED.iter().find(|(carried, _)| carried.as_bytes() == key) {
+            scan.sets.insert(carried);
         }
     }
     scan
@@ -392,6 +477,8 @@ struct GitInfo {
     /// The user's own global `core.excludesFile`. Calls in a repository run without the global
     /// config, and this hands the user's global ignore file back to them.
     excludes: Option<PathBuf>,
+    /// What else of the user's global config those calls get back.
+    global: Global,
 }
 
 /// One entry per binary and modification time: an upgraded git is asked again.
@@ -403,13 +490,27 @@ async fn git_info(git: &Path) -> Result<Arc<GitInfo>, Error> {
     if let Some(info) = INFO.lock().unwrap().get(&key) {
         return Ok(info.clone());
     }
-    let env = probe_env();
-    let out = exec(git, &["version".as_ref()], &env, PROBE).await?;
-    let version = parse_version(&out.stdout).filter(|_| out.code == Some(0)).ok_or_else(|| Error::Unsupported("git did not report its version".into()))?;
-    let excludes = if version >= MIN_VERSION { global_excludes(git, &env).await? } else { None };
-    let info = Arc::new(GitInfo { version, excludes });
+    let info = Arc::new(read_info(git, &probe_env()).await?);
     INFO.lock().unwrap().insert(key, info.clone());
     Ok(info)
+}
+
+/// Ask `git` its version and, with `env` (which says where the user's global config is), what
+/// the global config holds for repository calls.
+async fn read_info(git: &Path, env: &Env) -> Result<GitInfo, Error> {
+    let out = exec(git, &["version".as_ref()], env, PROBE).await?;
+    let version = parse_version(&out.stdout).filter(|_| out.code == Some(0)).ok_or_else(|| Error::Unsupported("git did not report its version".into()))?;
+    if version < MIN_VERSION {
+        return Ok(GitInfo { version, excludes: None, global: Global::default() });
+    }
+    Ok(GitInfo { version, excludes: global_excludes(git, env).await?, global: global_settings(git, env).await? })
+}
+
+/// The settings carried over from the user's global config (and what it includes), read from
+/// `/` like the ignore file's path. No global config: nothing is carried.
+async fn global_settings(git: &Path, env: &Env) -> Result<Global, Error> {
+    let out = exec(git, &["config", "--global", "--includes", "--list", "-z"].map(OsStr::new), env, SCAN).await?;
+    Ok(if out.code == Some(0) && !out.truncated { scan_global(&out.stdout) } else { Global::default() })
 }
 
 /// The user's global ignore file, when it isn't where git looks without any config. The global
@@ -451,11 +552,15 @@ impl Repo {
             return Err(Error::Unsupported("the repository path is not absolute".into()));
         }
         let info = git_info(&git).await?;
+        Repo::open_as(git, root, &info).await
+    }
+
+    async fn open_as(git: PathBuf, root: &Path, info: &GitInfo) -> Result<Repo, Error> {
         if info.version < MIN_VERSION {
             let (major, minor) = info.version;
             return Err(Error::Unsupported(format!("git {major}.{minor} is older than {}.{}", MIN_VERSION.0, MIN_VERSION.1)));
         }
-        let mut repo = Repo { root: root.to_path_buf(), partial_clone: false, git, env: Arc::new(repo_env(info.excludes.as_deref(), &Scan::default())) };
+        let mut repo = Repo { root: root.to_path_buf(), partial_clone: false, git, env: Arc::new(repo_env(info.excludes.as_deref(), &info.global, None)) };
         // Listing the config only reads files (the repo's, and what it includes): it runs nothing.
         let out = repo.run(&["config", "--list", "-z"].map(OsStr::new), SCAN).await.map_err(|e| match e {
             Error::Timeout => Error::Config("reading it timed out".into()),
@@ -472,7 +577,7 @@ impl Repo {
             return Err(Error::Config("it names too many filters".into()));
         }
         repo.partial_clone = scan.partial_clone;
-        repo.env = Arc::new(repo_env(info.excludes.as_deref(), &scan));
+        repo.env = Arc::new(repo_env(info.excludes.as_deref(), &info.global, Some(&scan)));
         Ok(repo)
     }
 
@@ -988,7 +1093,7 @@ mod tests {
 
         // Each name is overridden through its own KEY/VALUE pair, so no byte in it can be read
         // as the end of the key, and the count matches the pairs.
-        let env = repo_env(Some(Path::new("/home/u/.gitignore")), &scan);
+        let env = repo_env(Some(Path::new("/home/u/.gitignore")), &Global::default(), Some(&scan));
         let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.to_string_lossy().into_owned());
         let count: usize = get("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
         let pairs: Vec<(String, String)> = (0..count).map(|n| (get(&format!("GIT_CONFIG_KEY_{n}")).unwrap(), get(&format!("GIT_CONFIG_VALUE_{n}")).unwrap())).collect();
@@ -998,6 +1103,134 @@ mod tests {
         }
         assert_eq!(get("GIT_CONFIG_GLOBAL").as_deref(), Some("/dev/null"));
         assert_eq!(get("PATH").as_deref(), Some("/usr/bin:/bin"));
-        assert!(!repo_env(None, &Scan::default()).iter().any(|(_, v)| v == "core.excludesFile"));
+        assert!(!repo_env(None, &Global::default(), Some(&Scan::default())).iter().any(|(_, v)| v == "core.excludesFile"));
+    }
+
+    /// The `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` pairs of an environment.
+    fn pairs(env: &Env) -> Vec<(String, String)> {
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        let count: usize = get("GIT_CONFIG_COUNT").unwrap().parse().unwrap();
+        (0..count).map(|n| (get(&format!("GIT_CONFIG_KEY_{n}")).unwrap(), get(&format!("GIT_CONFIG_VALUE_{n}")).unwrap())).collect()
+    }
+
+    #[test]
+    fn the_global_scan_carries_plain_values_only() {
+        let list = b"user.name\nSomeone\0core.autocrlf\nInput\0core.eol\nCRLF\0core.safecrlf\nwarn\0core.filemode\nNo\0core.ignorecase\0core.precomposeunicode\non\0\
+            core.fsmonitor\n/tmp/evil\0core.pager\n/tmp/evil\0core.sshcommand\n/tmp/evil\0core.hookspath\n/tmp/hooks\0diff.external\n/tmp/evil\0filter.x.clean\n/tmp/evil\0\
+            safe.directory\n/gone\0safe.directory\n\0safe.directory\n/srv/repo\0safe.directory\n*\0safe.directory\n~/work/*\0safe.directory\nrelative\0safe.directory\n.\0safe.directory\0";
+        let global = scan_global(list);
+        assert_eq!(global.settings, [("core.autocrlf", "input"), ("core.eol", "crlf"), ("core.safecrlf", "warn"), ("core.filemode", "false"), ("core.ignorecase", "true"), ("core.precomposeunicode", "true")]);
+        assert_eq!(global.safe, ["/srv/repo", "*", "~/work/*"]);
+
+        // The last value counts; one that is not a plain value is not carried at all (and never
+        // an earlier one in its place). A value is never passed on as it was written.
+        for (list, want) in [
+            (&b"core.autocrlf\ntrue\0core.autocrlf\nfalse\0"[..], vec![("core.autocrlf", "false")]),
+            (b"core.autocrlf\ntrue\0core.autocrlf\n/tmp/evil\0", vec![]),
+            (b"core.autocrlf\ninput; /tmp/evil\0core.eol\nlf\n/tmp/evil\0core.safecrlf\n2\0core.filemode\n!/tmp/evil\0", vec![]),
+            (b"core.eol\ntrue\0core.filemode\ninput\0core.autocrlf\nwarn\0", vec![]),
+            (b"core.autocrlf\n1\0core.filemode\n\0", vec![("core.autocrlf", "true"), ("core.filemode", "false")]),
+            (b"", vec![]),
+        ] {
+            assert_eq!(scan_global(list), Global { safe: vec![], settings: want }, "{}", String::from_utf8_lossy(list));
+        }
+        let many: Vec<u8> = (0..MAX_SAFE + 10).flat_map(|n| format!("safe.directory\n/d/{n}\0").into_bytes()).collect();
+        assert_eq!(scan_global(&many).safe.len(), MAX_SAFE);
+        assert!(scan_global(&[b"safe.directory\n/".to_vec(), vec![b'a'; MAX_SAFE_LEN], vec![0]].concat()).safe.is_empty());
+
+        // In the environment: safe.directory always, the rest only once the repository's config
+        // was read, and only where the repository doesn't set it.
+        let first = pairs(&repo_env(None, &global, None));
+        assert!(first.contains(&("safe.directory".into(), "/srv/repo".into())) && first.contains(&("safe.directory".into(), "*".into())), "{first:?}");
+        assert!(!first.iter().any(|(k, _)| k.starts_with("core.auto") || k == "core.eol" || k == "core.filemode"), "{first:?}");
+        let scan = scan_config(b"core.filemode\ntrue\0core.autocrlf\nfalse\0core.bare\nfalse\0");
+        assert_eq!(scan.sets.iter().copied().collect::<Vec<_>>(), ["core.autocrlf", "core.filemode"]);
+        let then = pairs(&repo_env(None, &global, Some(&scan)));
+        let carried: Vec<_> = then.iter().filter(|(k, _)| CARRIED.iter().any(|(c, _)| c == k)).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(carried, [("core.eol", "crlf"), ("core.safecrlf", "warn"), ("core.ignorecase", "true"), ("core.precomposeunicode", "true")]);
+        assert_eq!(then.iter().filter(|(k, _)| k == "safe.directory").count(), 3);
+    }
+
+    /// What `read_info` finds with `home` as the user's home.
+    async fn info_at(home: &Path) -> GitInfo {
+        read_info(&real_git(), &probe_env_in(Some(home.into()), None)).await.unwrap()
+    }
+
+    /// A repository with `f.txt` committed under `core.autocrlf=true` (LF in the repository,
+    /// CRLF in the work tree), and then one of its three lines changed.
+    fn crlf_repo(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        git_ok(root, &["init", "-q"]);
+        write(&root.join("f.txt"), "one\r\ntwo\r\nthree\r\n");
+        git_ok(root, &["-c", "core.autocrlf=true", "add", "-A"]);
+        git_ok(root, &["-c", "core.autocrlf=true", "commit", "-q", "-m", "one"]);
+        assert_eq!(git_ok(root, &["cat-file", "blob", "HEAD:f.txt"]), "one\ntwo\nthree\n");
+        write(&root.join("f.txt"), "one\r\nTWO\r\nthree\r\n");
+    }
+
+    #[tokio::test]
+    async fn the_users_global_line_endings_apply_in_a_repository() {
+        let tmp = tmp();
+        let (home, root) = (tmp.path().join("home"), tmp.path().join("repo"));
+        write(&home.join(".gitconfig"), "[core]\n\tautocrlf = true\n");
+        crlf_repo(&root);
+        let numstat = with_flags(&["diff-index", "--numstat"], &["HEAD", "--"]);
+
+        // Without the user's setting every line of the file reads as changed.
+        let bare = GitInfo { version: MIN_VERSION, excludes: None, global: Global::default() };
+        let repo = Repo::open_as(real_git(), &root, &bare).await.unwrap();
+        assert_eq!(run_ok(&repo, &numstat).await, "3\t3\tf.txt\n");
+        // With it, the one line that was.
+        let info = info_at(&home).await;
+        assert_eq!(info.global, Global { safe: vec![], settings: vec![("core.autocrlf", "true")] });
+        let repo = Repo::open_as(real_git(), &root, &info).await.unwrap();
+        assert_eq!(run_ok(&repo, &numstat).await, "1\t1\tf.txt\n");
+        assert_eq!(run_ok(&repo, &["config", "--get", "core.autocrlf"]).await, "true\n");
+
+        // The repository's own setting still wins over the user's global one, as in git.
+        git_ok(&root, &["config", "core.autocrlf", "false"]);
+        let repo = Repo::open_as(real_git(), &root, &info).await.unwrap();
+        assert_eq!(run_ok(&repo, &numstat).await, "3\t3\tf.txt\n");
+        assert_eq!(run_ok(&repo, &["config", "--get", "core.autocrlf"]).await, "false\n");
+
+        // No global config at all: nothing is carried, nothing fails.
+        assert_eq!(info_at(&tmp.path().join("nobody")).await.global, Global::default());
+    }
+
+    #[tokio::test]
+    async fn a_global_setting_that_names_a_program_is_not_carried() {
+        let tmp = tmp();
+        let (home, root) = (tmp.path().join("home"), tmp.path().join("repo"));
+        let (evil, marker) = evil(tmp.path());
+        let run_evil = format!("sh {}", evil.display());
+        let safe = tmp.path().join("marked safe");
+        write(
+            &home.join(".gitconfig"),
+            &format!(
+                "[core]\n\tfsmonitor = {run_evil}\n\tpager = {run_evil}\n\tsshCommand = {run_evil}\n\thooksPath = {hooks}\n\tautocrlf = {run_evil}\n\teol = \"lf; {run_evil}\"\n\tfileMode = \"!{run_evil}\"\n\
+                 [diff]\n\texternal = {run_evil}\n[filter \"evil\"]\n\tclean = {run_evil}\n\tsmudge = {run_evil}\n\trequired = true\n[alias]\n\tstatus = !{run_evil}\n\
+                 [safe]\n\tdirectory = {safe}\n\tdirectory = relative/dir\n\tdirectory = *\n",
+                hooks = tmp.path().join("hooks").display(),
+                safe = safe.display(),
+            ),
+        );
+        crlf_repo(&root);
+        write(&root.join(".gitattributes"), "*.txt filter=evil\n");
+
+        let info = info_at(&home).await;
+        // Only the two safe.directory values: every other setting here names the program.
+        assert_eq!(info.global, Global { safe: vec![safe.clone().into(), "*".into()], settings: vec![] });
+        let repo = Repo::open_as(real_git(), &root, &info).await.unwrap();
+        let name = evil.to_string_lossy().into_owned();
+        assert!(!repo.env.iter().any(|(k, v)| k.to_string_lossy().contains(&name) || v.to_string_lossy().contains(&name)), "{:?}", repo.env);
+        // The values reach git (whether git then trusts another user's repository needs a second
+        // user to see, which no test here has).
+        assert_eq!(run_ok(&repo, &["config", "--get-all", "safe.directory"]).await, format!("{}\n*\n", safe.display()));
+        assert_eq!(run(&repo, &["config", "--get", "core.autocrlf"]).await.code, Some(1));
+
+        assert_eq!(run_ok(&repo, &with_flags(&["diff-index", "--numstat"], &["HEAD", "--"])).await, "3\t3\tf.txt\n");
+        run_ok(&repo, &["status", "--porcelain=v2", "-z", "--ignore-submodules=all"]).await;
+        run_ok(&repo, &with_flags(&["diff-files", "-p"], &["--"])).await;
+        assert!(!marker.exists(), "{}", std::fs::read_to_string(&marker).unwrap_or_default());
     }
 }
