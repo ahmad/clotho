@@ -133,12 +133,20 @@ final class QuickOpenTreeUITests: XCTestCase {
         app.buttons["Close tab"].tapWhenSettled()
     }
 
-    /// Scrolls the list (not the keyboard) up until `element` is on screen.
+    /// Scrolls the list (not the keyboard) up until `element` is on screen, above the keyboard.
     private func scroll(_ app: XCUIApplication, to element: XCUIElement) {
         let list = app.collectionViews.firstMatch
-        for _ in 0..<10 where !(element.exists && element.isHittable) {
+        for _ in 0..<10 where !canTap(app, element) {
             list.swipeUp(velocity: .slow)
         }
+    }
+
+    /// Whether a tap on `element` reaches it. The list runs on under the keyboard, and `isHittable` is true for a
+    /// row there (after enough earlier tests' workspaces, ours starts out there): a tap on it lands on the keyboard.
+    private func canTap(_ app: XCUIApplication, _ element: XCUIElement) -> Bool {
+        guard element.exists, element.isHittable else { return false }
+        let keyboard = app.keyboards.firstMatch
+        return !keyboard.exists || element.frame.maxY <= keyboard.frame.minY
     }
 
     private func row(_ app: XCUIApplication, _ label: String) -> XCUIElement {
