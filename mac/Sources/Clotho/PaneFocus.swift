@@ -12,7 +12,8 @@ import ClothoKit
 // The keyboard also follows the daemon's focus when the user did nothing (another device focused a pane,
 // a pane exited). That isn't the user's focus, and clothod reads `pane.focus` as the user being at the
 // Mac (0.1.31 holds phone pushes back for it), so such a change is made `quietly`: no note. The pane is
-// owed its `pane.focus` until the user next does something in the window.
+// owed its `pane.focus` until the user next does something in the window. Its terminal's focus-in report
+// was held back the same way, and is paid with it.
 
 /// Coalesces "a pane may have the user's focus now" into one `focusPane` per action.
 @MainActor
@@ -30,6 +31,8 @@ final class PaneFocusReporter {
     private var quiet = false
     /// A pane took the keyboard quietly and hasn't had its `pane.focus`.
     private(set) var owed = false
+    /// What else that pane is owed, paid with its `pane.focus`: the terminal's focus-in report.
+    private var owedExtra: (() -> Void)?
     private var last: (key: PaneKey, at: Date)?
     private(set) var sent = 0
 
@@ -42,6 +45,11 @@ final class PaneFocusReporter {
     func note(_ reason: String) {
         guard !quiet else { return }
         owed = false
+        // The terminal checks it still has the focus: the note may be for another pane the user went to.
+        if let pay = owedExtra {
+            owedExtra = nil
+            pay()
+        }
         guard scheduled == nil else { return }
         scheduled = reason
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.flush() } }
@@ -64,19 +72,23 @@ final class PaneFocusReporter {
     func forget() {
         last = nil
         owed = false
+        // The terminal reported focus-out as the window left, and reports focus-in itself on the way back.
+        owedExtra = nil
     }
 
     /// Runs a focus change the user didn't ask for: the notes it sets off are dropped, and the pane is
-    /// owed one.
-    func quietly(_ body: () -> Void) {
+    /// owed one. `pay` runs with the owed note, for what else was held back.
+    func quietly(_ body: () -> Void, pay: (() -> Void)? = nil) {
         let was = quiet
         quiet = true
         body()
         quiet = was
         owed = true
+        owedExtra = pay
     }
 
-    /// The user typed in the window: a pane that took the keyboard quietly gets its `pane.focus` now.
+    /// The user typed in the window: a pane that took the keyboard quietly gets its `pane.focus` now, and
+    /// its app the focus-in report.
     func userActed() {
         if owed { note("the user is back at the pane") }
     }

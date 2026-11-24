@@ -44,8 +44,47 @@ final class PaneTerminalView: TerminalView {
     }
 
     nonisolated override func send(source: Terminal, data: ArraySlice<UInt8>) {
-        if isFeeding { return }
+        // A focus report: CSI I (in) or CSI O (out), with CSI as ESC [ or the 8-bit 0x9b.
+        let last = data.last
+        let isFocusReport = (last == 0x49 || last == 0x4f)
+            && (data.count == 3 && data.first == 0x1b && data.dropFirst().first == 0x5b || data.count == 2 && data.first == 0x9b)
+        if isFeeding {
+            if takingKeyboardQuietly, isFocusReport, last == 0x49 {
+                owesFocusIn = true
+                emulator = source
+            }
+            return
+        }
+        // Whatever the terminal says about its focus now is newer than the report it owed.
+        if isFocusReport { owesFocusIn = false }
         super.send(source: source, data: data)
+    }
+
+    /// Inside `takeKeyboardQuietly`.
+    private nonisolated(unsafe) var takingKeyboardQuietly = false
+    /// The terminal took the keyboard quietly and its focus-in report was dropped: the pane's app (vim,
+    /// tmux, an agent, with mode 1004 on) still thinks the terminal is unfocused. SwiftTerm counts the
+    /// report as made, so it won't send it again by itself.
+    private(set) nonisolated(unsafe) var owesFocusIn = false
+    /// The emulator whose report was dropped (SwiftTerm keeps the view's own reference to itself).
+    private nonisolated(unsafe) weak var emulator: Terminal?
+
+    /// Takes the keyboard for a focus change the user didn't make (see `sync`): the focus-in report isn't
+    /// sent as input, it is owed until `payFocusIn`.
+    func takeKeyboardQuietly(in window: NSWindow) {
+        takingKeyboardQuietly = true
+        withoutReplies { _ = window.makeFirstResponder(self) }
+        takingKeyboardQuietly = false
+    }
+
+    /// The user is at this pane after all: sends the focus-in report that was dropped, if the terminal
+    /// still has the focus (and the app still wants reports: SwiftTerm checks mode 1004).
+    func payFocusIn() {
+        guard owesFocusIn else { return }
+        owesFocusIn = false
+        guard window?.firstResponder === self, hasFocus, let emulator else { return }
+        // As SwiftTerm reports focus itself: under the terminal's lock.
+        emulator.terminalLock.withLock { emulator.setTerminalFocus(true) }
     }
 
     func feedFromBackend(_ bytes: Data) {

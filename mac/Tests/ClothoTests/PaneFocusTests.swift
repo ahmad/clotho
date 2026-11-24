@@ -279,10 +279,36 @@ final class QuietFocusTests: XCTestCase {
         // (The shell in the first pane would say it lost the focus, if the user's shell asks for reports.)
         XCTAssertEqual(PaneHostView.unattributedInputCount, unattributed + input.count, "nothing sent with no user event behind it")
         XCTAssertTrue(reporter.owed)
+        XCTAssertTrue(hostB.terminal.owesFocusIn, "the pane's app hasn't heard it has the focus")
+        XCTAssertEqual(sent(Self.focusIn, from: b), 0, "\(input)")
 
-        // The user's next key in the window gives the pane its pane.focus (and this Mac's size).
+        // The user's next key in the window gives the pane its pane.focus (and this Mac's size), and its
+        // app the focus-in report that was held back: once.
         reporter.userActed()
         try await wait("the owed pane.focus") { fake.focusedPanes.count > focused.count }
+        try await wait("the owed focus-in") { sent(Self.focusIn, from: b) > 0 }
         XCTAssertEqual(fake.focusedPanes, focused + [b])
+        XCTAssertFalse(hostB.terminal.owesFocusIn)
+        reporter.userActed()
+        reporter.note("click")
+        try await pause(0.4)
+        XCTAssertEqual(sent(Self.focusIn, from: b), 1, "exactly one focus-in: \(input)")
+        XCTAssertEqual(sent(Self.focusOut, from: b), 0, "\(input)")
+
+        // Owed again, but the user goes to the other pane instead: the first one's report is dropped (it
+        // hears focus-out, as any terminal losing the keyboard), not sent late.
+        try await fake.focus(.pane(a))
+        try await wait("the keyboard back on the first pane") { app.window.firstResponder === hostA.terminal }
+        try await pause(0.4)
+        input = []
+        try await fake.focus(.pane(b))
+        try await wait("the keyboard on the second pane again") { app.window.firstResponder === hostB.terminal }
+        XCTAssertTrue(hostB.terminal.owesFocusIn)
+        UserAction.recentOverride = true
+        XCTAssertTrue(app.window.makeFirstResponder(hostA.terminal))
+        try await pause(0.4)
+        XCTAssertFalse(hostB.terminal.owesFocusIn)
+        XCTAssertFalse(reporter.owed)
+        XCTAssertEqual(sent(Self.focusIn, from: b), 0, "\(input)")
     }
 }

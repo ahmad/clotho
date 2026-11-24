@@ -144,12 +144,18 @@ extension AppDelegate {
                 // Nothing the user did moved the focus here (another device focused the pane, a pane exited):
                 // the pane takes the keyboard, but the daemon must not hear the user is at it. So no
                 // `pane.focus` (PaneFocus.swift), and the terminal's focus-in report (ESC [ I, when the
-                // pane's app has mode 1004 on) is dropped rather than sent as input.
+                // pane's app has mode 1004 on) is held back rather than sent as input. Both are owed until the
+                // user next does something in the window, and paid together then.
                 if UserDefaults.standard.bool(forKey: "LogModel") || UserDefaults.standard.bool(forKey: "TraceFocus") {
                     log("pane \(focusedPane) on \(focusedMachine) takes the keyboard with no user action behind it: no pane.focus, no focus report")
                 }
-                let take = { host.terminal.withoutReplies { _ = self.window.makeFirstResponder(host.terminal) } }
-                if let reporter = paneFocusReporter { reporter.quietly(take) } else { take() }
+                let terminal = host.terminal
+                let take = { terminal.takeKeyboardQuietly(in: self.window) }
+                if let reporter = paneFocusReporter {
+                    reporter.quietly(take) { [weak terminal] in terminal?.payFocusIn() }
+                } else {
+                    take()
+                }
             }
         }
     }
