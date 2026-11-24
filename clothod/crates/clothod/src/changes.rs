@@ -49,6 +49,8 @@ const MAX_LINE_CHARS: usize = 2000;
 /// The longest path `git.diff` takes (bytes), and the longest name passed on (characters).
 const PATH_MAX: usize = 4096;
 const NAME_MAX: usize = 255;
+/// The most changed paths whose size and time go into the change token.
+const TOKEN_PATHS: usize = 2000;
 
 /// The branch a pane's branch is compared with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +64,7 @@ pub struct Base {
 /// The `changes` field of a pane's `git` object, with its `changes_reason`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
-    /// `{uncommitted, branch, reason}`, or `None` with `reason` saying why.
+    /// `{uncommitted, branch, reason, token}`, or `None` with `reason` saying why.
     pub changes: Option<Value>,
     pub reason: Option<&'static str>,
 }
@@ -676,6 +678,69 @@ fn count_untracked(root: &Path, entries: &mut [Entry], deadline: Instant) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The change token
+// ---------------------------------------------------------------------------------------------
+
+/// What the change token is made from: it is the same while nothing a client shows of the
+/// changes (the lists, the counts, any file's diff) can have changed, and differs after an edit
+/// that leaves every count as it was. Built from what a run reads anyway, and from file stamps:
+/// no git call of its own.
+struct Token(sha2::Sha256);
+
+impl Token {
+    /// Starts with HEAD's commit and the base (its commit and name).
+    fn new(head: Option<&str>, base: Option<&Base>) -> Token {
+        let mut token = Token(Default::default());
+        token.field(head.map(str::as_bytes));
+        token.field(base.map(|b| b.sha.as_bytes()));
+        token.field(base.map(|b| b.name.as_bytes()));
+        token
+    }
+
+    /// One input, with its length, so that two inputs never read as one.
+    fn field(&mut self, bytes: Option<&[u8]>) {
+        use sha2::Digest;
+        match bytes {
+            None => self.0.update([0]),
+            Some(bytes) => {
+                self.0.update([1]);
+                self.0.update((bytes.len() as u64).to_le_bytes());
+                self.0.update(bytes);
+            }
+        }
+    }
+
+    /// A file's size and modification time (in nanoseconds), or that it isn't there. A link is
+    /// not followed.
+    fn stamp(&mut self, path: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let stamp = std::fs::symlink_metadata(path).ok().map(|m| [m.size().to_le_bytes(), m.mtime().to_le_bytes(), m.mtime_nsec().to_le_bytes()].concat());
+        self.field(stamp.as_deref());
+    }
+
+    /// The index (restaging the same content changes neither a count nor a status letter), and
+    /// each changed path of the work tree, in path order, up to [`TOKEN_PATHS`] of them.
+    fn stamps(&mut self, root: &Path, entries: &[Entry]) {
+        match crate::git::locate(root).filter(|loc| loc.root == root) {
+            Some(loc) => self.stamp(&loc.gitdir.join("index")),
+            None => self.field(None),
+        }
+        let mut paths: Vec<&[u8]> = entries.iter().map(|e| e.path.as_slice()).collect();
+        paths.sort_unstable();
+        for path in paths.into_iter().take(TOKEN_PATHS) {
+            self.field(Some(path));
+            self.stamp(&root.join(OsStr::from_bytes(path)));
+        }
+    }
+
+    /// 16 hex digits.
+    fn finish(self) -> String {
+        use sha2::Digest;
+        self.0.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The two groups
 // ---------------------------------------------------------------------------------------------
 
@@ -683,27 +748,35 @@ fn os_args<'a>(head: &[&'a str], tail: &[&'a [u8]]) -> Vec<&'a OsStr> {
     head.iter().map(|s| OsStr::new(*s)).chain(tail.iter().map(|b| OsStr::from_bytes(b))).collect()
 }
 
-/// `status` for the whole work tree, or for `paths` only.
-async fn status(run: &Run<'_>, paths: &[&[u8]]) -> Result<Vec<Entry>, Fail> {
+/// `status` for the whole work tree, or for `paths` only: the entries, and git's output as it
+/// came (every path with its status letters and blob ids).
+async fn status(run: &Run<'_>, paths: &[&[u8]]) -> Result<(Vec<Entry>, Vec<u8>), Fail> {
     let mut tail: Vec<&[u8]> = Vec::new();
     if !paths.is_empty() {
         tail.push(b"--");
         tail.extend_from_slice(paths);
     }
     let args = os_args(&["status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=all"], &tail);
-    let mut entries = parse_status(&run.ok(&args, run.opts.status_cap).await?);
+    let raw = run.ok(&args, run.opts.status_cap).await?;
+    let mut entries = parse_status(&raw);
     // A path removed from the index with a new file in its place is listed twice: the file that
     // is there now is the one to show.
     let untracked: HashSet<Vec<u8>> = entries.iter().filter(|e| e.status == "untracked").map(|e| e.path.clone()).collect();
     if !untracked.is_empty() {
         entries.retain(|e| e.status == "untracked" || !untracked.contains(&e.path));
     }
-    Ok(entries)
+    Ok((entries, raw))
 }
 
-/// The uncommitted files, and whether the tracked ones' lines were counted.
-async fn uncommitted(run: &Run<'_>, head: Option<&str>) -> Result<(Vec<Entry>, bool), Fail> {
-    let mut entries = status(run, &[]).await?;
+/// The uncommitted files, whether the tracked ones' lines were counted, and the change token
+/// (`base` only goes into the token).
+async fn uncommitted(run: &Run<'_>, head: Option<&str>, base: Option<&Base>) -> Result<(Vec<Entry>, bool, String), Fail> {
+    let mut token = Token::new(head, base);
+    let (mut entries, raw) = status(run, &[]).await?;
+    token.field(Some(&raw));
+    drop(raw);
+    // The count's output, or that there was none.
+    let mut numstat = None;
     let paths: Vec<&[u8]> = entries.iter().filter(|e| e.status != "untracked").flat_map(|e| std::iter::once(e.path.as_slice()).chain(e.old_path.as_deref())).collect();
     let tracked = entries.iter().filter(|e| e.status != "untracked").count();
     let mut counted = tracked <= MAX_COUNTED && paths.iter().map(|p| p.len() + 1).sum::<usize>() <= MAX_ARG_BYTES;
@@ -717,20 +790,25 @@ async fn uncommitted(run: &Run<'_>, head: Option<&str>) -> Result<(Vec<Entry>, b
             Err(Fail::Run(gitrun::Error::Timeout)) => counted = false,
             Ok(out) if out.truncated => counted = false,
             out => {
-                let rows = parse_numstat(&run.whole(out?)?);
+                let out = run.whole(out?)?;
+                let rows = parse_numstat(&out);
                 drop(paths);
                 apply_counts(&mut entries, rows);
+                numstat = Some(out);
             }
         }
     }
+    token.field(numstat.as_deref());
+    drop(numstat);
     let (root, deadline) = (run.repo.root().to_path_buf(), run.deadline);
-    let entries = tokio::task::spawn_blocking(move || {
+    let (entries, token) = tokio::task::spawn_blocking(move || {
         count_untracked(&root, &mut entries, deadline);
-        entries
+        token.stamps(&root, &entries);
+        (entries, token.finish())
     })
     .await
     .map_err(|e| Fail::Run(gitrun::Error::Spawn(e.to_string())))?;
-    Ok((entries, counted))
+    Ok((entries, counted, token))
 }
 
 /// The commits and files on HEAD since it left the base.
@@ -782,13 +860,14 @@ fn totals(entries: &[Entry], counted: bool) -> (Value, Value) {
 
 /// The `changes` summary for a pane's `git` object. `head` is HEAD's commit (`None` while it is
 /// unborn) and `base` the branch to compare with (`None` on the default branch, or with none).
+/// Its `token` is the one [`list`] gives for the same tree.
 pub async fn summary(repo: &Repo, head: Option<&str>, base: Option<&Base>) -> Summary {
     summary_with(repo, head, base, Opts::default()).await
 }
 
 async fn summary_with(repo: &Repo, head: Option<&str>, base: Option<&Base>, opts: Opts) -> Summary {
     let run = Run::new(repo, opts);
-    let (entries, counted) = match uncommitted(&run, head).await {
+    let (entries, counted, token) = match uncommitted(&run, head, base).await {
         Ok(found) => found,
         Err(fail) => return Summary::none(fail.reason()),
     };
@@ -803,7 +882,7 @@ async fn summary_with(repo: &Repo, head: Option<&str>, base: Option<&Base>, opts
         Ok(Err(_)) => (Value::Null, None),
         Err(fail) => (Value::Null, Some(fail.reason())),
     };
-    let changes = json!({"uncommitted": {"files": entries.len(), "added": added, "removed": removed}, "branch": branch, "reason": reason});
+    let changes = json!({"uncommitted": {"files": entries.len(), "added": added, "removed": removed}, "branch": branch, "reason": reason, "token": token});
     Summary { changes: Some(changes), reason: None }
 }
 
@@ -820,8 +899,9 @@ fn group_json(mut entries: Vec<Entry>, counted: bool, limit: usize) -> Map<Strin
     group
 }
 
-/// Both groups' files for `git.changes`: `{uncommitted, branch_changes, branch_reason}` (the
-/// caller adds `root`, `branch` and `head`). `limit` is the most files per group.
+/// Both groups' files for `git.changes`: `{uncommitted, branch_changes, branch_reason, token}`
+/// (the caller adds `root`, `branch` and `head`). `limit` is the most files per group. `token`
+/// (16 hex digits) is the summary's `changes.token` for the same tree, whatever the limit.
 /// `branch_changes` is null with `branch_reason` saying why: `no_base`, `no_merge_base`, or what
 /// went wrong (`timeout`, `too_large`, `partial_clone`, `error`).
 pub async fn list(repo: &Repo, head: Option<&str>, base: Option<&Base>, limit: usize) -> Result<Value, (&'static str, String)> {
@@ -831,7 +911,7 @@ pub async fn list(repo: &Repo, head: Option<&str>, base: Option<&Base>, limit: u
 async fn list_with(repo: &Repo, head: Option<&str>, base: Option<&Base>, limit: usize, opts: Opts) -> Result<Value, (&'static str, String)> {
     let limit = limit.clamp(1, MAX_LIMIT);
     let run = Run::new(repo, opts);
-    let (entries, counted) = uncommitted(&run, head).await.map_err(Fail::error)?;
+    let (entries, counted, token) = uncommitted(&run, head, base).await.map_err(Fail::error)?;
     let (branch_changes, branch_reason) = match branch(&run, head, base).await {
         Ok(Ok(b)) => {
             let mut group = group_json(b.entries, true, limit);
@@ -844,7 +924,7 @@ async fn list_with(repo: &Repo, head: Option<&str>, base: Option<&Base>, limit: 
         Ok(Err(why)) => (Value::Null, Some(why)),
         Err(fail) => (Value::Null, Some(fail.reason())),
     };
-    Ok(json!({"uncommitted": group_json(entries, counted, limit), "branch_changes": branch_changes, "branch_reason": branch_reason}))
+    Ok(json!({"uncommitted": group_json(entries, counted, limit), "branch_changes": branch_changes, "branch_reason": branch_reason, "token": token}))
 }
 
 /// An untracked file as a diff: every line added.
@@ -911,7 +991,7 @@ async fn diff_with(repo: &Repo, head: Option<&str>, base: Option<&Base>, group: 
 
     let (patch, was) = if group == "uncommitted" {
         // What status says about it decides how it is read, and whether it changed at all.
-        let entries = status(&run, &paths).await.map_err(Fail::error)?;
+        let (entries, _) = status(&run, &paths).await.map_err(Fail::error)?;
         let entry = entries.into_iter().find(|e| e.path == path.as_bytes()).ok_or_else(not_changed)?;
         if entry.status == "untracked" {
             let (root, rel) = (repo.root().to_path_buf(), entry.path.clone());
@@ -1277,6 +1357,104 @@ index 1111111..2222222 100644\n\
         diff["hunks"].as_array().unwrap().iter().flat_map(|h| h["lines"].as_array().unwrap()).map(|l| format!("{}{}", l["t"].as_str().unwrap(), l["text"].as_str().unwrap())).collect()
     }
 
+    /// A summary's `changes` without its token, which has to be there: 16 hex digits.
+    fn counts(s: &Summary) -> Option<Value> {
+        let mut changes = s.changes.clone()?;
+        let token = changes.as_object_mut().unwrap().remove("token").expect("a summary has a token");
+        assert!(is_token(&token), "{token}");
+        Some(changes)
+    }
+
+    fn is_token(v: &Value) -> bool {
+        v.as_str().is_some_and(|t| t.len() == 16 && t.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    }
+
+    /// The summary's token and the list's, which have to be the same one.
+    async fn token(repo: &Repo, head: Option<&str>, base: Option<&Base>) -> String {
+        let s = summary_with(repo, head, base, OPTS).await;
+        let l = list_with(repo, head, base, 1, OPTS).await.unwrap();
+        let token = &s.changes.as_ref().unwrap()["token"];
+        assert!(is_token(token), "{token}");
+        assert_eq!(token, &l["token"]);
+        token.as_str().unwrap().to_string()
+    }
+
+    /// Give `path` the modification time `secs` after 2026-01-01, so two writes in one test
+    /// never share a time by accident and a rewrite can be given its old one back.
+    fn set_mtime(path: &Path, secs: u64) {
+        let at = std::time::UNIX_EPOCH + Duration::from_secs(1_767_225_600 + secs);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_token_follows_what_the_counts_do_not_show() {
+        let tmp = tmp();
+        let (root, head) = fixture(tmp.path());
+        let repo = open(&root).await;
+        let index = root.join(".git/index");
+
+        // A clean tree has one too, and an untouched tree keeps its token from run to run.
+        let clean = token(&repo, Some(&head), None).await;
+        assert_eq!(token(&repo, Some(&head), None).await, clean);
+
+        write(&root.join("a.txt"), "one\nTWO\nthree\n");
+        write(&root.join("new.txt"), "n\n");
+        set_mtime(&root.join("a.txt"), 100);
+        set_mtime(&root.join("new.txt"), 100);
+        let dirty = token(&repo, Some(&head), None).await;
+        assert_ne!(dirty, clean);
+        assert_eq!(token(&repo, Some(&head), None).await, dirty);
+        let counts_before = counts(&summary_with(&repo, Some(&head), None, OPTS).await);
+        assert_eq!(counts_before, Some(json!({"uncommitted": {"files": 2, "added": 2, "removed": 1}, "branch": null, "reason": null})));
+
+        // Another line changed in place of the first: git's output, every count and the file's
+        // size are as they were, and the token is not, by the file's time alone.
+        write(&root.join("a.txt"), "one\ntwo\nTHREE\n");
+        set_mtime(&root.join("a.txt"), 200);
+        assert_eq!(counts(&summary_with(&repo, Some(&head), None, OPTS).await), counts_before);
+        let swapped = token(&repo, Some(&head), None).await;
+        assert_ne!(swapped, dirty);
+        // The same for an untracked file, which git only names.
+        write(&root.join("new.txt"), "m\n");
+        set_mtime(&root.join("new.txt"), 200);
+        let renewed = token(&repo, Some(&head), None).await;
+        assert_ne!(renewed, swapped);
+        assert_eq!(counts(&summary_with(&repo, Some(&head), None, OPTS).await), counts_before);
+
+        // Staging a change without touching the file: no count moves, the token does (the
+        // status letters and the index both changed).
+        git(&root, &["add", "a.txt"]);
+        let staged = token(&repo, Some(&head), None).await;
+        assert_ne!(staged, renewed);
+        assert_eq!(counts(&summary_with(&repo, Some(&head), None, OPTS).await), counts_before);
+        // Nothing these runs do writes the index, so the token holds still after staging too.
+        let before = std::fs::read(&index).unwrap();
+        assert_eq!(token(&repo, Some(&head), None).await, staged);
+        assert_untouched(&root, &before);
+
+        // The base is part of it (its name and its commit), and so is HEAD.
+        let on_base = token(&repo, Some(&head), Some(&base(&head))).await;
+        assert_ne!(on_base, staged);
+        assert_ne!(token(&repo, Some(&head), Some(&Base { name: "main".into(), sha: head.clone() })).await, on_base);
+        let head2 = commit(&root, "two");
+        assert_ne!(token(&repo, Some(&head2), None).await, clean);
+    }
+
+    /// The token is the same for every limit: the list is cut after it is made.
+    #[tokio::test]
+    async fn the_token_does_not_depend_on_the_limit() {
+        let tmp = tmp();
+        let (root, head) = fixture(tmp.path());
+        for n in 0..5 {
+            write(&root.join(format!("u{n}.txt")), "x\n");
+        }
+        let repo = open(&root).await;
+        let all = list_with(&repo, Some(&head), None, DEFAULT_LIMIT, OPTS).await.unwrap();
+        let two = list_with(&repo, Some(&head), None, 2, OPTS).await.unwrap();
+        assert_eq!((two["uncommitted"]["truncated"].clone(), &two["token"]), (json!(true), &all["token"]));
+        assert_eq!(all["token"].as_str().unwrap(), token(&repo, Some(&head), None).await);
+    }
+
     /// Nothing these calls do may write to the repository.
     fn assert_untouched(root: &Path, index_before: &[u8]) {
         assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), index_before, "the index was written");
@@ -1303,7 +1481,7 @@ index 1111111..2222222 100644\n\
 
         let s = summary_with(&repo, Some(&head), None, OPTS).await;
         assert_eq!(s.reason, None);
-        assert_eq!(s.changes, Some(json!({"uncommitted": {"files": 8, "added": 8, "removed": 3}, "branch": null, "reason": null})));
+        assert_eq!(counts(&s), Some(json!({"uncommitted": {"files": 8, "added": 8, "removed": 3}, "branch": null, "reason": null})));
 
         let l = list_with(&repo, Some(&head), None, DEFAULT_LIMIT, OPTS).await.unwrap();
         assert_eq!((&l["branch_changes"], &l["branch_reason"]), (&Value::Null, &json!("no_base")));
@@ -1392,7 +1570,7 @@ index 1111111..2222222 100644\n\
 
         let s = summary_with(&repo, Some(&head), Some(&base), OPTS).await;
         assert_eq!(
-            s.changes,
+            counts(&s),
             Some(json!({"uncommitted": {"files": 1, "added": 1, "removed": 0}, "branch": {"base": "origin/main", "commits": 2, "files": 5, "added": 3, "removed": 2}, "reason": null}))
         );
 
@@ -1446,9 +1624,10 @@ index 1111111..2222222 100644\n\
         let repo = open(&root).await;
         // The default branch, clean: nothing uncommitted, no branch group.
         let s = summary_with(&repo, Some(&main), None, OPTS).await;
-        assert_eq!(s, Summary { changes: Some(json!({"uncommitted": {"files": 0, "added": 0, "removed": 0}, "branch": null, "reason": null})), reason: None });
+        assert_eq!((counts(&s), s.reason), (Some(json!({"uncommitted": {"files": 0, "added": 0, "removed": 0}, "branch": null, "reason": null})), None));
         let l = list_with(&repo, Some(&main), None, DEFAULT_LIMIT, OPTS).await.unwrap();
-        assert_eq!(l, json!({"uncommitted": {"files": [], "total": 0, "added": 0, "removed": 0, "truncated": false}, "branch_changes": null, "branch_reason": "no_base"}));
+        let token = s.changes.as_ref().unwrap()["token"].clone();
+        assert_eq!(l, json!({"uncommitted": {"files": [], "total": 0, "added": 0, "removed": 0, "truncated": false}, "branch_changes": null, "branch_reason": "no_base", "token": token}));
         // The base at HEAD itself: a branch group with nothing in it.
         let s = summary_with(&repo, Some(&main), Some(&base(&main)), OPTS).await;
         assert_eq!(s.changes.unwrap()["branch"], json!({"base": "origin/main", "commits": 0, "files": 0, "added": 0, "removed": 0}));
@@ -1461,7 +1640,7 @@ index 1111111..2222222 100644\n\
         write(&root.join("b.txt"), "b\nmore\n");
         let s = summary_with(&repo, Some(&ahead), Some(&base(&main)), OPTS).await;
         assert_eq!(
-            s.changes,
+            counts(&s),
             Some(json!({"uncommitted": {"files": 1, "added": 1, "removed": 0}, "branch": {"base": "origin/main", "commits": 1, "files": 1, "added": 0, "removed": 2}, "reason": null}))
         );
         let d = diff_with(&repo, Some(&ahead), Some(&base(&main)), "branch", "a.txt", None, 3, OPTS).await.unwrap();
@@ -1569,7 +1748,7 @@ index 1111111..2222222 100644\n\
 
         let s = summary_with(&repo, Some(&head), Some(&base(&main)), OPTS).await;
         assert_eq!(
-            s.changes,
+            counts(&s),
             Some(json!({"uncommitted": {"files": 2, "added": 2, "removed": 0}, "branch": {"base": "origin/main", "commits": 1, "files": 1, "added": 1, "removed": 0}, "reason": null}))
         );
         let l = list_with(&repo, Some(&head), Some(&base(&main)), DEFAULT_LIMIT, OPTS).await.unwrap();
@@ -1596,14 +1775,14 @@ index 1111111..2222222 100644\n\
         let repo = open(&root).await;
         // Empty: nothing at all.
         let s = summary_with(&repo, None, None, OPTS).await;
-        assert_eq!(s.changes, Some(json!({"uncommitted": {"files": 0, "added": 0, "removed": 0}, "branch": null, "reason": null})));
+        assert_eq!(counts(&s), Some(json!({"uncommitted": {"files": 0, "added": 0, "removed": 0}, "branch": null, "reason": null})));
 
         write(&root.join("staged.txt"), "one\ntwo\n");
         git(&root, &["add", "staged.txt"]);
         write(&root.join("staged.txt"), "one\ntwo\nthree\n");
         write(&root.join("loose.txt"), "loose\n");
         let s = summary_with(&repo, None, Some(&base(A)), OPTS).await;
-        assert_eq!(s.changes, Some(json!({"uncommitted": {"files": 2, "added": 4, "removed": 0}, "branch": null, "reason": null})));
+        assert_eq!(counts(&s), Some(json!({"uncommitted": {"files": 2, "added": 4, "removed": 0}, "branch": null, "reason": null})));
         let l = list_with(&repo, None, None, DEFAULT_LIMIT, OPTS).await.unwrap();
         assert_eq!(file(&l["uncommitted"], "staged.txt"), &json!({"path": "staged.txt", "status": "added", "added": 3, "removed": 0, "binary": false, "diffable": true}));
         assert_eq!(file(&l["uncommitted"], "loose.txt")["status"], "untracked");
@@ -1687,7 +1866,7 @@ index 1111111..2222222 100644\n\
         write(&root.join("fresh.txt"), "fresh\n");
         let repo = open(&root).await;
         let s = summary_with(&repo, Some(&head), None, OPTS).await;
-        assert_eq!(s, Summary { changes: Some(json!({"uncommitted": {"files": n + 1, "added": null, "removed": null}, "branch": null, "reason": null})), reason: None });
+        assert_eq!((counts(&s), s.reason), (Some(json!({"uncommitted": {"files": n + 1, "added": null, "removed": null}, "branch": null, "reason": null})), None));
         let l = list_with(&repo, Some(&head), None, MAX_LIMIT + 50, OPTS).await.unwrap();
         let u = &l["uncommitted"];
         assert_eq!((&u["total"], &u["added"], &u["removed"], &u["truncated"]), (&json!(n + 1), &Value::Null, &Value::Null, &json!(false)));

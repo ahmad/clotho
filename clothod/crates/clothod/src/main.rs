@@ -35,10 +35,18 @@ with no clients and no panes, or when its last client disconnects (exit).
              --print-path: only print the path    --prune: also delete versions no daemon runs
   bridge     start the daemon if needed, then relay stdin/stdout to its socket (for
              `ssh host clothod bridge`). Exit codes as for `start`.
-  report <state> [--agent K] [--message M] [--session S] | --claude-hook | --codex-notify JSON
-             tell the daemon what the agent in this pane does (for agent hooks; silent, exit 0)
-  hooks print|install|uninstall claude|codex, hooks status
-             agent status hooks in ~/.claude/settings.json / ~/.codex/config.toml
+  report --state starting|running|waiting|done|error|clear [--message M] [--kind NAME]
+         [--needs-user yes|no] [--session S]
+             tell the daemon what the program in this pane does: an agent, or any script.
+             NAME is the agent's kind (claude, codex, ..., or your own name); --needs-user says
+             whether a finished step (done) needs you. Errors are printed: exit 2 for usage, 1
+             when the report did not reach the pane's daemon.
+  report <state> [--agent K] ... | --claude-hook | --gemini-hook | --codex-notify JSON
+             the same, from an agent's own hook (always silent, exit 0): a state word, Claude
+             Code's or Gemini CLI's hook JSON on stdin, or Codex's notify JSON as the argument
+  hooks print|install|uninstall claude|codex|gemini|copilot, hooks status
+             agent status hooks in ~/.claude/settings.json, ~/.codex/config.toml,
+             ~/.gemini/settings.json and ~/.copilot/hooks/clotho.json
   service install|uninstall|status
              start the daemon at login: a LaunchAgent (macOS) or systemd user unit (Linux) that
              runs `<install dir>/current/clothod start` once per login and never restarts it.
@@ -71,7 +79,8 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    // Agent hooks: no runtime, no argument checks, never an error (see agents::report).
+    // Agent hooks: no runtime, and in the hooks' forms no argument checks and never an error;
+    // only the by-hand `--state` form says what went wrong (see agents::report).
     let all: Vec<String> = std::env::args().skip(1).collect();
     if all.first().map(String::as_str) == Some("report") {
         std::process::exit(clothod::agents::report(&all[1..]));
@@ -290,35 +299,161 @@ async fn start(dir: PathBuf, quiet: bool) -> Result<()> {
     let via_systemd = platform::needs_systemd_unit();
     let mut child = cmd.spawn().context("starting clothod")?;
     let mut launcher_done = false;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
+    let mut wait = StartWait::new(&dir);
+    loop {
         if connect(&dir).await.is_ok() {
             if !quiet {
                 println!("clothod started ({})", clothod::daemon::socket_path(&dir).display());
             }
             return Ok(());
         }
-        if launcher_done {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            continue;
-        }
-        if let Some(status) = child.try_wait()? {
-            if via_systemd && status.success() {
+        if !launcher_done {
+            if let Some(status) = child.try_wait()? {
+                if via_systemd && status.success() {
+                    launcher_done = true;
+                    continue;
+                }
+                // It exited: show why (its error is the last thing it logged).
+                let log = std::fs::read(&log_path).unwrap_or_default();
+                let tail = String::from_utf8_lossy(&log[(log_start as usize).min(log.len())..]).trim().to_string();
+                if status.code() == Some(clothod::daemon::EXIT_INCOMPATIBLE) {
+                    eprintln!("{tail}");
+                    std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
+                }
+                // Ours lost the lock to a serve that is still starting (recovering its panes):
+                // that one is the daemon, so wait for it like for our own.
+                if starting_serve(&dir).is_none() {
+                    bail!("clothod exited ({status}):\n{tail}");
+                }
                 launcher_done = true;
                 continue;
             }
-            // It exited: show why (its error is the last thing it logged).
-            let log = std::fs::read(&log_path).unwrap_or_default();
-            let tail = String::from_utf8_lossy(&log[(log_start as usize).min(log.len())..]).trim().to_string();
-            if status.code() == Some(clothod::daemon::EXIT_INCOMPATIBLE) {
-                eprintln!("{tail}");
-                std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
-            }
-            bail!("clothod exited ({status}):\n{tail}");
+        }
+        if !wait.go_on(&dir, (!launcher_done).then(|| child.id())) {
+            return Err(wait.failure(&log_path));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    bail!("clothod did not start; see {}", log_path.display())
+}
+
+/// A `serve` of this runtime dir that runs but may not answer yet: it holds `clothod.lock`
+/// while it recovers its panes, and binds the socket only after that.
+struct StartingServe {
+    pid: u32,
+    /// The build of its executable (`unknown` if that can't be read).
+    build: String,
+    /// The pid is the one written in `clothod.lock`. Builds before the lock carried a pid are
+    /// found by the process scan only, and are never signalled.
+    from_lock: bool,
+}
+
+/// The serve of `dir`, reachable or not: the pid in `clothod.lock` if that is a live clothod
+/// serve, else (older builds write no pid) a `serve` for this dir among this user's clothod
+/// processes, as `ps` finds them. Never the holder, and never by probing the lock.
+fn starting_serve(dir: &std::path::Path) -> Option<StartingServe> {
+    let me = std::process::id();
+    let holder: Option<u32> = std::fs::read_to_string(dir.join("holder.pid")).ok().and_then(|p| p.trim().parse().ok());
+    let serves: Vec<(platform::ProcInfo, Option<PathBuf>)> = clothod_processes()
+        .into_iter()
+        .filter(|p| p.pid != me && Some(p.pid) != holder && p.args.get(1).is_some_and(|a| a == "serve"))
+        .map(|p| {
+            let runtime = process_runtime_dir(&p);
+            (p, runtime)
+        })
+        .collect();
+    let here = |d: &Option<PathBuf>| d.as_deref().is_some_and(|d| d == dir || same_file(d, dir));
+    let found = |p: &platform::ProcInfo, from_lock: bool| {
+        let build = p.exe.as_ref().and_then(|e| build_id(&e.canonicalize().unwrap_or_else(|_| e.clone())).ok());
+        StartingServe { pid: p.pid, build: build.unwrap_or_else(|| "unknown".into()), from_lock }
+    };
+    // The lock file is in this dir, so a serve whose dir can't be read (macOS, another
+    // environment) still counts; one known to serve another dir is a reused pid.
+    if let Some(pid) = clotho_proto::listen::lock_pid(&dir.join("clothod.lock")) {
+        if let Some((p, runtime)) = serves.iter().find(|(p, _)| p.pid == pid) {
+            if runtime.is_none() || here(runtime) {
+                return Some(found(p, true));
+            }
+        }
+    }
+    serves.iter().find(|(_, runtime)| here(runtime)).map(|(p, _)| found(p, false))
+}
+
+/// How long to wait for a serve that is alive but not answering: 600 s for an upgrade (a
+/// daemon with many panes takes a while to recover them on a loaded machine), 60 s otherwise.
+/// Tests set it in milliseconds in `<dir>/CLOTHOD_TEST_UPGRADE_WAIT_MS`.
+fn wait_ceiling(dir: &std::path::Path, upgrading: bool) -> Duration {
+    match std::fs::read_to_string(dir.join("CLOTHOD_TEST_UPGRADE_WAIT_MS")).ok().and_then(|v| v.trim().parse().ok()) {
+        Some(ms) => Duration::from_millis(ms),
+        None => Duration::from_secs(if upgrading { 600 } else { 60 }),
+    }
+}
+
+/// The last lines of the log written since `start` (a byte offset), for an error message.
+fn log_tail(log_path: &std::path::Path, start: u64) -> String {
+    let log = std::fs::read(log_path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&log[(start as usize).min(log.len())..]).trim().to_string();
+    if text.is_empty() {
+        return format!("(nothing logged in {})", log_path.display());
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(5)..].join("\n")
+}
+
+/// `start`'s wait for the serve it started: 10 s for one to appear, then for as long as one is
+/// alive (ours, or the one that holds the lock), up to the ceiling, saying so every 10 s.
+struct StartWait {
+    began: Instant,
+    appear: Duration,
+    ceiling: Duration,
+    checked: Option<Instant>,
+    seen: Option<StartingServe>,
+    noted: u64,
+}
+
+impl StartWait {
+    fn new(dir: &std::path::Path) -> StartWait {
+        let ceiling = wait_ceiling(dir, std::env::var_os(UPGRADING_ENV).is_some());
+        StartWait { began: Instant::now(), appear: Duration::from_secs(10).min(ceiling), ceiling, checked: None, seen: None, noted: 0 }
+    }
+
+    /// Whether to wait on. `ours` is the serve this `start` spawned, while it runs.
+    fn go_on(&mut self, dir: &std::path::Path, ours: Option<u32>) -> bool {
+        let waited = self.began.elapsed();
+        if waited < self.appear {
+            return true;
+        }
+        // The process scan is not free: a few times a second is enough.
+        if waited >= self.ceiling || self.checked.is_none_or(|c| c.elapsed() >= Duration::from_millis(250)) {
+            self.seen = starting_serve(dir);
+            self.checked = Some(Instant::now());
+        }
+        if waited >= self.ceiling {
+            return false;
+        }
+        let Some(pid) = self.seen.as_ref().map(|s| s.pid).or(ours) else {
+            return false;
+        };
+        let secs = waited.as_secs();
+        if secs >= self.noted + 10 {
+            self.noted = secs - secs % 10;
+            eprintln!("clothod: waiting for clothod {pid} to recover its panes ({secs} s)");
+        }
+        true
+    }
+
+    /// Why the wait ended without a daemon.
+    fn failure(&self, log_path: &std::path::Path) -> anyhow::Error {
+        match &self.seen {
+            Some(s) => anyhow::anyhow!(
+                "clothod (pid {}, build {}) was still starting after {} s; see {}",
+                s.pid,
+                s.build,
+                self.began.elapsed().as_secs(),
+                log_path.display()
+            ),
+            None => anyhow::anyhow!("clothod did not start; see {}", log_path.display()),
+        }
+    }
 }
 
 /// `clothod serve --runtime-dir dir`, detached (own session, output to the log).
@@ -341,14 +476,18 @@ fn spawn_serve(dir: &std::path::Path) -> Result<std::process::Child> {
 /// usual; the job and its plist go whatever happens.
 async fn start_via_launchd(dir: &std::path::Path, log_path: &std::path::Path, log_start: u64, quiet: bool) -> Result<()> {
     let job = clothod::launchd::Job::launch(&std::env::current_exe()?, dir, log_path).context("starting clothod through launchd")?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
+    let mut wait = StartWait::new(dir);
+    loop {
         if connect(dir).await.is_ok() {
             drop(job);
             if !quiet {
                 println!("clothod started ({})", clothod::daemon::socket_path(dir).display());
             }
             return Ok(());
+        }
+        // The serve is the job's grandchild: only the lock and the process list show it.
+        if !wait.go_on(dir, None) {
+            break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -358,6 +497,9 @@ async fn start_via_launchd(dir: &std::path::Path, log_path: &std::path::Path, lo
     if tail.contains(clothod::daemon::INCOMPATIBLE) {
         eprintln!("{tail}");
         std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
+    }
+    if wait.seen.is_some() {
+        return Err(wait.failure(log_path));
     }
     bail!("clothod did not start through launchd; see {}:\n{tail}", log_path.display())
 }
@@ -725,15 +867,27 @@ fn upgrade_running(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Make `exe` the running logic process (its start upgrades a capable holder to it), retrying
-/// if something else revives another build. Returns whether the holder runs `exe` too.
+/// How often `switch_to` stops another build that came up before it gives up.
+const MAX_STOPS: u32 = 5;
+
+/// Make `exe` the running logic process (its start upgrades a capable holder to it), following
+/// a serve that is still starting instead of starting a second one, and stopping another build
+/// that something else revives. Returns whether the holder runs `exe` too.
 async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool> {
     let want = build_id(exe)?;
-    // Count only stops of another build: a daemon that holds the lock but is still starting
-    // (slow on a loaded machine) isn't reachable yet, so wait for it rather than give up.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut attempt = 0;
-    while attempt < 5 && std::time::Instant::now() < deadline {
+    let began = Instant::now();
+    let ceiling = wait_ceiling(dir, true);
+    let log_path = platform::log_dir(dir).join("clothod.log");
+    let log_len = || std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    let mut log_start = log_len();
+    // Only stops of another build count. A daemon that holds the lock but is still starting
+    // (slow with many panes, or on a loaded machine) isn't reachable yet: that is waited for.
+    let mut stops = 0;
+    // The serve just told to stop: on its way out, not starting.
+    let mut stopped: Option<u32> = None;
+    let mut failed_starts = 0;
+    let mut noted = 0;
+    loop {
         match running_builds(dir).await {
             // By build, not path: a serve started through `current` reports that symlink as its
             // executable on macOS, and `current` may already point at `exe` while the old build
@@ -742,27 +896,98 @@ async fn switch_to(dir: &std::path::Path, exe: &std::path::Path) -> Result<bool>
                 // Started by us (or already right): the holder followed unless it can't.
                 return Ok(holder == want);
             }
-            Some((cur, ..)) => {
-                attempt += 1;
-                eprintln!("clothod: switching from {} (attempt {attempt})", cur.display());
+            Some((cur, serve, ..)) => {
+                let pid = starting_serve(dir).map(|s| s.pid);
+                if stops >= MAX_STOPS {
+                    bail!(
+                        "another clothod keeps getting started: another build ({serve}, pid {}) was started {stops} times during the switch; \
+                         {} is installed but not running",
+                        pid.map_or_else(|| "?".to_string(), |p| p.to_string()),
+                        exe.display()
+                    );
+                }
+                stops += 1;
+                eprintln!("clothod: switching from {} (attempt {stops})", cur.display());
                 call(dir.to_path_buf(), "daemon.stop", json!({})).await?;
+                stopped = pid;
             }
             None => {}
         }
-        // Start the new build right away to keep the window for a racing old `start` small.
-        let status = std::process::Command::new(exe)
-            .arg("start")
-            .arg("--runtime-dir")
-            .arg(dir)
-            .env(UPGRADING_ENV, std::process::id().to_string())
-            .stdout(std::process::Stdio::null())
-            .status()?;
-        if status.code() == Some(clothod::daemon::EXIT_INCOMPATIBLE) {
-            std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
+        let starting = starting_serve(dir);
+        let waited = began.elapsed();
+        if waited >= ceiling {
+            return Err(switch_gave_up(starting, &want, waited, &log_path, log_start).await);
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        match starting {
+            // Alive but not answering yet: never start a second one next to it. The wanted
+            // build is waited for; another build too, and stopped above once it answers.
+            Some(s) if Some(s.pid) != stopped => {
+                let secs = waited.as_secs();
+                if secs >= noted + 10 {
+                    noted = secs - secs % 10;
+                    eprintln!("clothod: waiting for clothod {} to recover its panes ({secs} s)", s.pid);
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            // No serve (or only the one just stopped, which `start` waits out): start the new
+            // build right away to keep the window for a racing old `start` small. It returns
+            // once the daemon answers, or with what it saw.
+            _ => {
+                log_start = log_len();
+                let status = std::process::Command::new(exe)
+                    .arg("start")
+                    .arg("--runtime-dir")
+                    .arg(dir)
+                    .env(UPGRADING_ENV, std::process::id().to_string())
+                    .stdout(std::process::Stdio::null())
+                    .status()?;
+                if status.code() == Some(clothod::daemon::EXIT_INCOMPATIBLE) {
+                    std::process::exit(clothod::daemon::EXIT_INCOMPATIBLE);
+                }
+                if status.success() || starting_serve(dir).is_some() {
+                    failed_starts = 0;
+                } else {
+                    // It failed and left no serve behind: the serve itself gave up.
+                    failed_starts += 1;
+                    if failed_starts >= 3 {
+                        bail!("the new clothod exited while starting: {}", log_tail(&log_path, log_start));
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
-    bail!("another clothod keeps getting started; {} is installed but not running", exe.display())
+}
+
+/// `switch_to` at its ceiling: say what was seen. A wanted build that is still starting is
+/// ended (SIGTERM), so that a rollback can take the lock, but only when its pid is the one in
+/// the lock file: a pid found by the process scan is never signalled. The holder, where the
+/// shells live, is never signalled either.
+async fn switch_gave_up(starting: Option<StartingServe>, want: &str, waited: Duration, log_path: &std::path::Path, log_start: u64) -> anyhow::Error {
+    let secs = waited.as_secs();
+    match starting {
+        Some(s) if s.build == want => {
+            let mut note = "";
+            if s.from_lock {
+                unsafe {
+                    libc::kill(s.pid as libc::pid_t, libc::SIGTERM);
+                }
+                // Its lock goes with it.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline && platform::process_alive(s.pid) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                if platform::process_alive(s.pid) {
+                    note = "; it was told to end (SIGTERM) and has not yet";
+                }
+            } else {
+                note = "; it was left running";
+            }
+            anyhow::anyhow!("the new clothod (pid {}, build {}) was still starting after {secs} s{note}", s.pid, s.build)
+        }
+        Some(s) => anyhow::anyhow!("another build ({}, pid {}) was still starting after {secs} s", s.build, s.pid),
+        None => anyhow::anyhow!("the new clothod exited while starting: {}", log_tail(log_path, log_start)),
+    }
 }
 
 /// `clothod upgrade`: move this machine to this build, all or nothing. Install it next to the
@@ -841,10 +1066,28 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
         Err(e) => {
             // Roll back: the old serve again (its start moves a capable holder back), old
             // `current`, and the new build gone unless it was there before.
+            let mut back = String::new();
             if let Some(old_exe) = &before {
                 if old_exe.exists() && !same_file(old_exe, &target) {
-                    let _ = switch_to(&dir, old_exe).await;
+                    // The same switch: it follows the old build's start, however long.
+                    if let Err(be) = switch_to(&dir, old_exe).await {
+                        back = format!("; going back to {} failed: {be:#}", old_exe.display());
+                    }
                 }
+            }
+            // What really runs now, whatever was intended.
+            let running = running_builds(&dir).await;
+            let starting = if running.is_none() { starting_serve(&dir) } else { None };
+            let now = match (&running, &starting) {
+                (Some((_, serve, holder, _)), _) => format!("serve runs {serve}, holder runs {holder}"),
+                (None, Some(s)) => format!("serve {} (pid {}) is still starting, holder not known until it answers", s.build, s.pid),
+                (None, None) => "no serve is running".to_string(),
+            };
+            // The new build's serve woke late and is the daemon after all: taking its files and
+            // `current` from under it would break the next start and every hook.
+            let new_serve = running.as_ref().is_some_and(|r| r.1 == id) || starting.as_ref().is_some_and(|s| s.build == id);
+            if new_serve {
+                bail!("upgrade to {id} failed, not rolled back ({id} stays installed and current: its serve is running or still starting): {e:#}{back}; now: {now}");
             }
             if let Some(old) = &old_current {
                 let _ = point_current_at(&base, &old.to_string_lossy());
@@ -852,7 +1095,7 @@ async fn upgrade(dir: PathBuf) -> Result<()> {
             if !had.contains(&id) {
                 let _ = std::fs::remove_dir_all(base.join(&id));
             }
-            bail!("upgrade to {id} failed, rolled back: {e:#}")
+            bail!("upgrade to {id} failed, rolled back: {e:#}{back}; now: {now}")
         }
     }
 }
@@ -863,6 +1106,20 @@ fn clothod_processes() -> Vec<platform::ProcInfo> {
         .into_iter()
         .filter(|p| p.exe.as_ref().and_then(|e| e.file_name()).is_some_and(|n| n.to_string_lossy().starts_with("clothod")))
         .collect()
+}
+
+/// The runtime dir a clothod process actually uses: `--runtime-dir`, else $CLOTHOD_RUNTIME_DIR
+/// from the environment it started with, else the default. `None` when that environment can't
+/// be read: unknown, never taken for the default.
+fn process_runtime_dir(p: &platform::ProcInfo) -> Option<PathBuf> {
+    match p.args.iter().position(|a| a == "--runtime-dir").and_then(|i| p.args.get(i + 1)) {
+        Some(d) => Some(PathBuf::from(d)),
+        None => match platform::process_env_var(p.pid, "CLOTHOD_RUNTIME_DIR") {
+            Ok(Some(d)) if !d.is_empty() => Some(PathBuf::from(d)),
+            Ok(_) => Some(platform::default_runtime_dir()),
+            Err(()) => None,
+        },
+    }
 }
 
 /// What an instance's daemon says about its own processes: pid -> build, from `hello`
@@ -910,17 +1167,7 @@ fn ps() {
         if role == "ps" || role.is_empty() {
             continue;
         }
-        // The dir it actually uses: `--runtime-dir`, else $CLOTHOD_RUNTIME_DIR from the
-        // environment it started with, else the default. Unknown (an environment we can't
-        // read) shows as "?", never as the default.
-        let runtime: Option<PathBuf> = match p.args.iter().position(|a| a == "--runtime-dir").and_then(|i| p.args.get(i + 1)) {
-            Some(d) => Some(PathBuf::from(d)),
-            None => match platform::process_env_var(p.pid, "CLOTHOD_RUNTIME_DIR") {
-                Ok(Some(d)) if !d.is_empty() => Some(PathBuf::from(d)),
-                Ok(_) => Some(default.clone()),
-                Err(()) => None,
-            },
-        };
+        let runtime = process_runtime_dir(&p);
         let exe = p.exe.clone().unwrap_or_default();
         let empty = HashMap::new();
         let known = match &runtime {

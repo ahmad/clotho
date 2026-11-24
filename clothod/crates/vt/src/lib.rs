@@ -60,6 +60,18 @@ pub enum VtEvent {
     /// targets (primary selection) and false for `c` (or none given). OSC 52 reads (`?`) never
     /// produce anything: the terminal is copy-only, so an application can't read the clipboard.
     Clipboard { selection: bool, text: String },
+    /// The application asked for a desktop notification: OSC 9 (`ESC ] 9 ; body`), OSC 777
+    /// (`ESC ] 777 ; notify ; title ; body`) or OSC 99 (kitty's, once its last piece arrived).
+    /// Both texts are free of control characters, trimmed and bounded ([`MAX_NOTIFY_TITLE`],
+    /// [`MAX_NOTIFY_BODY`]), and at least one is there. Nothing is ever answered: no OSC 99
+    /// query reply, no activation or close report.
+    Notify { title: Option<String>, body: Option<String> },
+    /// Progress set with `ESC ] 9 ; 4 ; state [; percent]` (`None` = cleared, state 0).
+    Progress(Option<Progress>),
+    /// An OSC 7501 report (Program Status Protocol). With `query` set the application asked
+    /// whether the terminal speaks the protocol: the terminal never replies itself, the daemon
+    /// decides.
+    Status(Psp),
 }
 
 #[derive(Clone, Default)]
@@ -101,6 +113,8 @@ struct Tracker {
     /// Zero-based `start..end` (end exclusive); `None` is the full screen.
     region: Option<(usize, usize)>,
     cwd: Option<String>,
+    /// OSC 99 notifications whose last piece hasn't arrived yet.
+    notes: notify::Pending,
     /// Mode 2031 (color palette update notifications): the application wants `CSI ? 997 ; 1|2 n`
     /// when the colors switch between dark and light.
     palette_updates: bool,
@@ -115,6 +129,20 @@ struct Tracker {
 /// notification mode 2031 asks for.
 fn color_scheme_report(dark: bool) -> Vec<u8> {
     format!("\x1b[?997;{}n", if dark { 1 } else { 2 }).into_bytes()
+}
+
+impl Tracker {
+    /// The event a whole raw OSC stands for, if it is a notification, progress or status
+    /// sequence (see [`notify::parse`]). Read here rather than in `osc_dispatch`, which gets at
+    /// most 16 parameters.
+    fn osc_event(&mut self, raw_osc: &[u8]) -> Option<VtEvent> {
+        match notify::parse(raw_osc)? {
+            notify::Osc::Notify { title, body } => Some(VtEvent::Notify { title, body }),
+            notify::Osc::Progress(p) => Some(VtEvent::Progress(p)),
+            notify::Osc::Status(s) => Some(VtEvent::Status(s)),
+            notify::Osc::Kitty(chunk) => self.notes.add(chunk).map(|(title, body)| VtEvent::Notify { title, body }),
+        }
+    }
 }
 
 impl vte::Perform for Tracker {
@@ -198,6 +226,7 @@ impl vte::Perform for Tracker {
             self.kitty = [Vec::new(), Vec::new()];
             self.alt = false;
             self.palette_updates = false;
+            self.notes.clear();
         }
     }
 
@@ -456,7 +485,7 @@ impl Vt {
         Vt {
             term,
             processor: Processor::new(),
-            tracker: Tracker { kitty: [Vec::new(), Vec::new()], alt: false, rows, region: None, cwd: None, palette_updates: false, dark: true, listener: listener.clone() },
+            tracker: Tracker { kitty: [Vec::new(), Vec::new()], alt: false, rows, region: None, cwd: None, notes: notify::Pending::default(), palette_updates: false, dark: true, listener: listener.clone() },
             listener,
             palette: None,
             parser: vte::Parser::new(),
@@ -610,10 +639,14 @@ impl Vt {
     /// Feed PTY output. Returns replies for the application and other notable events.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<VtEvent> {
         let cwd_before = self.tracker.cwd.clone();
+        let mut noted = Vec::new();
         for piece in self.guard.filter(bytes) {
             let b = match &piece {
                 Piece::Input(b) => b,
-                Piece::Owned(b) => &b[..],
+                Piece::Owned(b) => {
+                    noted.extend(self.tracker.osc_event(b));
+                    &b[..]
+                }
             };
             // Mode 2031 lives in the tracker, which sees each chunk before the terminal does:
             // where it matters, the two go a sequence at a time, so its answers and its state
@@ -633,6 +666,7 @@ impl Vt {
             }
         }
         let mut events = self.drain_events();
+        events.extend(noted);
         if self.tracker.cwd != cwd_before {
             if let Some(cwd) = &self.tracker.cwd {
                 events.push(VtEvent::Cwd(cwd.clone()));
@@ -1332,6 +1366,8 @@ fn is_blank(cell: &Cell) -> bool {
 }
 
 pub mod keys;
+pub mod notify;
+pub use notify::{Progress, ProgressState, Psp, PspState, MAX_NOTIFY_BODY, MAX_NOTIFY_TITLE};
 pub use keys::{encode_key, encode_text, InputModes};
 
 #[cfg(test)]

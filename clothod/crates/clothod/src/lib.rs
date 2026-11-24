@@ -12,6 +12,7 @@ pub mod service;
 pub mod summary;
 pub mod git;
 pub mod gitrun;
+pub mod kinds;
 pub mod launchd;
 pub mod layout;
 pub mod log;

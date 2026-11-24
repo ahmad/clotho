@@ -8,7 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::io::AsyncReadExt;
 
@@ -260,9 +260,25 @@ fn os(s: &str) -> OsString {
     OsString::from(s)
 }
 
+/// The user's `HOME` and `XDG_CONFIG_HOME`, which say where the global config is.
+#[cfg(not(test))]
+fn user_dirs() -> (Option<OsString>, Option<OsString>) {
+    (std::env::var_os("HOME"), std::env::var_os("XDG_CONFIG_HOME"))
+}
+
+/// In unit tests: a home that holds nothing (it is never created), so no test in this crate
+/// reads the config of whoever runs it. A test that wants a global config passes its own home
+/// to [`probe_env_in`].
+#[cfg(test)]
+fn user_dirs() -> (Option<OsString>, Option<OsString>) {
+    let home = PathBuf::from(format!("/tmp/clt-no-home-{}", std::process::id()));
+    (Some(home.join("home").into()), Some(home.join("xdg").into()))
+}
+
 /// The environment of the runner's own calls outside any repository.
 fn probe_env() -> Env {
-    probe_env_in(std::env::var_os("HOME"), std::env::var_os("XDG_CONFIG_HOME"))
+    let (home, xdg) = user_dirs();
+    probe_env_in(home, xdg)
 }
 
 fn probe_env_in(home: Option<OsString>, xdg: Option<OsString>) -> Env {
@@ -296,7 +312,7 @@ fn repo_env(excludes: Option<&Path>, global: &Global, scan: Option<&Scan>) -> En
     .into_iter()
     .map(|(k, v)| (os(k), os(v)))
     .collect();
-    if let Some(home) = std::env::var_os("HOME") {
+    if let Some(home) = user_dirs().0 {
         env.push((os("HOME"), home));
     }
 
@@ -409,9 +425,10 @@ struct Global {
     settings: Vec<(&'static str, &'static str)>,
 }
 
-/// Read `git config --global --includes --list -z` output (the format [`scan_config`] reads) for
-/// what is carried over. As in git, the last value of a setting counts, and an empty
-/// `safe.directory` forgets the ones before it.
+/// Read `git config --file <path> --includes --list -z` output (the format [`scan_config`]
+/// reads) for what is carried over; the output of several files goes in one after the other, in
+/// the order git reads them. As in git, the last value of a setting counts, every
+/// `safe.directory` is kept, and an empty one forgets those before it.
 fn scan_global(list: &[u8]) -> Global {
     let mut global = Global::default();
     for entry in list.split(|b| *b == 0).filter(|e| !e.is_empty()) {
@@ -481,17 +498,61 @@ struct GitInfo {
     global: Global,
 }
 
-/// One entry per binary and modification time: an upgraded git is asked again.
-type InfoCache = HashMap<(PathBuf, Option<SystemTime>), Arc<GitInfo>>;
-static INFO: LazyLock<Mutex<InfoCache>> = LazyLock::new(Default::default);
+/// A non-empty variable of `env`.
+fn env_var<'a>(env: &'a Env, name: &str) -> Option<&'a OsStr> {
+    env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_os_str()).filter(|v| !v.is_empty())
+}
+
+/// The user's two global config files, in the order git reads them (so the second wins):
+/// `$XDG_CONFIG_HOME/git/config` (`~/.config/git/config` when that is unset), then `~/.gitconfig`.
+/// `env` says where they are.
+fn global_files(env: &Env) -> [Option<PathBuf>; 2] {
+    let home = env_var(env, "HOME").map(PathBuf::from);
+    let xdg = env_var(env, "XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".config")));
+    [xdg.map(|x| x.join("git/config")), home.map(|h| h.join(".gitconfig"))]
+}
+
+/// A file's modification time and size, or `None` when it isn't there.
+type Stamp = Option<(Option<SystemTime>, u64)>;
+
+fn stamp(path: Option<&Path>) -> Stamp {
+    let meta = std::fs::metadata(path?).ok()?;
+    Some((meta.modified().ok(), meta.len()))
+}
+
+/// What was read for one git binary, and what it was read from.
+struct Cached {
+    /// The binary's modification time: an upgraded git is asked again.
+    git: Option<SystemTime>,
+    /// The stamps of the [`global_files`]: an edited config is read again.
+    files: [Stamp; 2],
+    at: Instant,
+    info: Arc<GitInfo>,
+}
+
+/// A cached answer is used for this long at most. The stamps don't see a change in a file the
+/// config includes (`include.path`); this does, a little later.
+const INFO_TTL: Duration = Duration::from_secs(60);
+
+/// One entry per git binary, replaced when it is read again.
+type InfoCache = Mutex<HashMap<PathBuf, Cached>>;
+static INFO: LazyLock<InfoCache> = LazyLock::new(Default::default);
 
 async fn git_info(git: &Path) -> Result<Arc<GitInfo>, Error> {
-    let key = (git.to_path_buf(), std::fs::metadata(git).and_then(|m| m.modified()).ok());
-    if let Some(info) = INFO.lock().unwrap().get(&key) {
-        return Ok(info.clone());
+    git_info_in(&INFO, git, &probe_env(), INFO_TTL).await
+}
+
+async fn git_info_in(cache: &InfoCache, git: &Path, env: &Env, ttl: Duration) -> Result<Arc<GitInfo>, Error> {
+    // Stamped before the read: a file written while git reads it is read again next time.
+    let binary = std::fs::metadata(git).and_then(|m| m.modified()).ok();
+    let files = global_files(env).map(|p| stamp(p.as_deref()));
+    if let Some(c) = cache.lock().unwrap().get(git) {
+        if c.git == binary && c.files == files && c.at.elapsed() < ttl {
+            return Ok(c.info.clone());
+        }
     }
-    let info = Arc::new(read_info(git, &probe_env()).await?);
-    INFO.lock().unwrap().insert(key, info.clone());
+    let info = Arc::new(read_info(git, env).await?);
+    cache.lock().unwrap().insert(git.to_path_buf(), Cached { git: binary, files, at: Instant::now(), info: info.clone() });
     Ok(info)
 }
 
@@ -503,26 +564,44 @@ async fn read_info(git: &Path, env: &Env) -> Result<GitInfo, Error> {
     if version < MIN_VERSION {
         return Ok(GitInfo { version, excludes: None, global: Global::default() });
     }
-    Ok(GitInfo { version, excludes: global_excludes(git, env).await?, global: global_settings(git, env).await? })
+    // Each file is read by name: `--global` reads only one of the two. A file that isn't there
+    // costs no call.
+    let files: Vec<PathBuf> = global_files(env).into_iter().flatten().filter(|p| p.is_file()).collect();
+    Ok(GitInfo { version, excludes: global_excludes(git, env, &files).await?, global: global_settings(git, env, &files).await? })
 }
 
-/// The settings carried over from the user's global config (and what it includes), read from
-/// `/` like the ignore file's path. No global config: nothing is carried.
-async fn global_settings(git: &Path, env: &Env) -> Result<Global, Error> {
-    let out = exec(git, &["config", "--global", "--includes", "--list", "-z"].map(OsStr::new), env, SCAN).await?;
-    Ok(if out.code == Some(0) && !out.truncated { scan_global(&out.stdout) } else { Global::default() })
+/// The settings carried over from the user's global config `files` (and what they include), read
+/// from `/` like the ignore file's path. No global config: nothing is carried. A file git can't
+/// read, or one too large, adds nothing.
+async fn global_settings(git: &Path, env: &Env, files: &[PathBuf]) -> Result<Global, Error> {
+    let mut list = Vec::new();
+    for file in files {
+        let args = [OsStr::new("config"), "--file".as_ref(), file.as_os_str(), "--includes".as_ref(), "--list".as_ref(), "-z".as_ref()];
+        let out = exec(git, &args, env, SCAN).await?;
+        if out.code == Some(0) && !out.truncated {
+            list.extend_from_slice(&out.stdout);
+        }
+    }
+    Ok(scan_global(&list))
 }
 
 /// The user's global ignore file, when it isn't where git looks without any config. The global
-/// config is the user's own and trusted; it is read from `/`, away from any repository.
-async fn global_excludes(git: &Path, env: &Env) -> Result<Option<PathBuf>, Error> {
-    let args = ["config", "--global", "--includes", "--type=path", "-z", "--get", "core.excludesFile"].map(OsStr::new);
-    let out = exec(git, &args, env, PROBE).await?;
-    let value = out.stdout.split(|b| *b == 0).next().unwrap_or_default();
-    let set = (out.code == Some(0) && !value.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(value)));
+/// config is the user's own and trusted; it is read from `/`, away from any repository. Of the
+/// `files` (in git's order) the last that sets it wins.
+async fn global_excludes(git: &Path, env: &Env, files: &[PathBuf]) -> Result<Option<PathBuf>, Error> {
+    let mut set = None;
+    for file in files.iter().rev() {
+        let args = [OsStr::new("config"), "--file".as_ref(), file.as_os_str(), "--includes".as_ref(), "--type=path".as_ref(), "-z".as_ref(), "--get".as_ref(), "core.excludesFile".as_ref()];
+        let out = exec(git, &args, env, PROBE).await?;
+        if out.code == Some(0) {
+            let value = out.stdout.split(|b| *b == 0).next().unwrap_or_default();
+            set = (!value.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(value)));
+            break;
+        }
+    }
     // Unset: git falls back to `$XDG_CONFIG_HOME/git/ignore`, and repository calls don't get
     // XDG_CONFIG_HOME (with only HOME git already finds `~/.config/git/ignore` by itself).
-    let fallback = || std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty()).map(|x| PathBuf::from(x).join("git/ignore"));
+    let fallback = || env_var(env, "XDG_CONFIG_HOME").map(|x| PathBuf::from(x).join("git/ignore"));
     Ok(set.or_else(fallback).filter(|p| p.is_absolute()))
 }
 
@@ -1149,6 +1228,102 @@ mod tests {
         let carried: Vec<_> = then.iter().filter(|(k, _)| CARRIED.iter().any(|(c, _)| c == k)).map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(carried, [("core.eol", "crlf"), ("core.safecrlf", "warn"), ("core.ignorecase", "true"), ("core.precomposeunicode", "true")]);
         assert_eq!(then.iter().filter(|(k, _)| k == "safe.directory").count(), 3);
+    }
+
+    /// The real git behind a script that logs every call it gets, one line each. Returns the
+    /// script and its log.
+    fn counting_git(dir: &Path) -> (PathBuf, PathBuf) {
+        let (stub, log) = (dir.join("counting/git"), dir.join("counting/calls"));
+        script(&stub, &format!("#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n", log.display(), real_git().display()));
+        (stub, log)
+    }
+
+    fn calls(log: &Path) -> usize {
+        std::fs::read_to_string(log).unwrap_or_default().lines().count()
+    }
+
+    #[tokio::test]
+    async fn a_changed_global_config_is_read_again_and_an_unchanged_one_is_cached() {
+        let tmp = tmp();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let (git, log) = counting_git(tmp.path());
+        let (cache, env) = (InfoCache::default(), probe_env_in(Some(home.clone().into()), None));
+
+        // No config file at all: only the version is asked.
+        let info = git_info_in(&cache, &git, &env, INFO_TTL).await.unwrap();
+        assert_eq!((info.global.clone(), info.excludes.clone(), calls(&log)), (Global::default(), None, 1));
+        // Nothing changed: served from the cache, and git isn't run.
+        let again = git_info_in(&cache, &git, &env, INFO_TTL).await.unwrap();
+        assert!(Arc::ptr_eq(&info, &again));
+        assert_eq!(calls(&log), 1);
+
+        // The user marks a directory safe: the next call sees it, with no restart.
+        write(&home.join(".gitconfig"), "[safe]\n\tdirectory = /srv/shared\n");
+        let info = git_info_in(&cache, &git, &env, INFO_TTL).await.unwrap();
+        assert_eq!(info.global, Global { safe: vec!["/srv/shared".into()], settings: vec![] });
+        // The version, and the file's settings and ignore file.
+        assert_eq!(calls(&log), 4);
+        let again = git_info_in(&cache, &git, &env, INFO_TTL).await.unwrap();
+        assert!(Arc::ptr_eq(&info, &again));
+        assert_eq!(calls(&log), 4);
+        // One entry per binary: the old answer was replaced.
+        assert_eq!(cache.lock().unwrap().len(), 1);
+
+        // Past its time an untouched file is read again too (an included file may have changed).
+        let later = git_info_in(&cache, &git, &env, Duration::ZERO).await.unwrap();
+        assert_eq!((later.global.clone(), calls(&log)), (info.global.clone(), 7));
+
+        // Removed again: nothing is carried.
+        std::fs::remove_file(home.join(".gitconfig")).unwrap();
+        assert_eq!(git_info_in(&cache, &git, &env, INFO_TTL).await.unwrap().global, Global::default());
+        assert_eq!(cache.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn both_global_config_files_are_read_and_gitconfig_wins() {
+        let tmp = tmp();
+        let (home, xdg) = (tmp.path().join("home"), tmp.path().join("xdg"));
+        std::fs::create_dir_all(&home).unwrap();
+        let read = |xdg: Option<&Path>| {
+            let env = probe_env_in(Some(home.clone().into()), xdg.map(Into::into));
+            async move { read_info(&real_git(), &env).await.unwrap() }
+        };
+
+        // Only the XDG file, where XDG_CONFIG_HOME says...
+        write(&xdg.join("git/config"), "[core]\n\tautocrlf = true\n\teol = lf\n\texcludesFile = /x/ignore\n[safe]\n\tdirectory = /srv/x\n");
+        let info = read(Some(&xdg)).await;
+        assert_eq!(info.global, Global { safe: vec!["/srv/x".into()], settings: vec![("core.autocrlf", "true"), ("core.eol", "lf")] });
+        assert_eq!(info.excludes, Some("/x/ignore".into()));
+        // ...and without it, under ~/.config.
+        assert_eq!(read(None).await.global, Global::default());
+        write(&home.join(".config/git/config"), "[core]\n\tfileMode = false\n");
+        assert_eq!(read(None).await.global, Global { safe: vec![], settings: vec![("core.filemode", "false")] });
+
+        // Both: every safe.directory, and ~/.gitconfig's value where both set one.
+        write(&home.join(".gitconfig"), "[core]\n\tautocrlf = input\n\texcludesFile = /h/ignore\n[safe]\n\tdirectory = /srv/h\n");
+        let info = read(Some(&xdg)).await;
+        assert_eq!(info.global, Global { safe: vec!["/srv/x".into(), "/srv/h".into()], settings: vec![("core.eol", "lf"), ("core.autocrlf", "input")] });
+        assert_eq!(info.excludes, Some("/h/ignore".into()));
+        // What only the XDG file sets still counts.
+        write(&home.join(".gitconfig"), "[safe]\n\tdirectory = /srv/h\n");
+        assert_eq!(read(Some(&xdg)).await.excludes, Some("/x/ignore".into()));
+
+        // What a config includes is read with it.
+        write(&home.join("more.inc"), "[safe]\n\tdirectory = /srv/included\n");
+        write(&home.join(".gitconfig"), "[include]\n\tpath = more.inc\n");
+        assert_eq!(read(Some(&xdg)).await.global.safe, ["/srv/x", "/srv/included"].map(OsString::from));
+    }
+
+    /// The home every other test in the crate gets holds no config, whoever runs the tests.
+    #[tokio::test]
+    async fn tests_never_read_the_developers_config() {
+        let env = probe_env();
+        let home = PathBuf::from(env_var(&env, "HOME").unwrap());
+        assert!(home.starts_with("/tmp") && !home.exists(), "{home:?}");
+        assert!(global_files(&env).iter().all(|f| f.as_ref().is_some_and(|f| f.starts_with("/tmp") && !f.exists())));
+        let info = git_info(&real_git()).await.unwrap();
+        assert_eq!((&info.global, &info.excludes), (&Global::default(), &Some(PathBuf::from(env_var(&env, "XDG_CONFIG_HOME").unwrap()).join("git/ignore"))));
     }
 
     /// What `read_info` finds with `home` as the user's home.

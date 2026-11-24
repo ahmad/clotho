@@ -561,3 +561,288 @@ fn peek_lines_read_the_active_screen() {
     vt.feed(b"\x1b[?1049l");
     assert_eq!(vt.peek_lines(2, 200), ["shell one", "shell two"]);
 }
+
+fn note(title: Option<&str>, body: Option<&str>) -> VtEvent {
+    VtEvent::Notify { title: title.map(Into::into), body: body.map(Into::into) }
+}
+
+/// Each notification, progress and status sequence, ended with BEL and with ST, whole and
+/// split at every byte across two feeds. Nothing reaches the screen.
+#[test]
+fn notify_progress_and_status_sequences_with_bel_and_st_and_split() {
+    let cases: Vec<(&str, VtEvent)> = vec![
+        ("9;build finished", note(None, Some("build finished"))),
+        ("777;notify;Build;all green", note(Some("Build"), Some("all green"))),
+        ("99;;Hello world", note(Some("Hello world"), None)),
+        ("99;i=1:p=body;This is cool", note(None, Some("This is cool"))),
+        ("9;4;1;42", VtEvent::Progress(Some(Progress { state: ProgressState::Running, percent: Some(42) }))),
+        ("9;4;0", VtEvent::Progress(None)),
+        ("7501;state=working:app=demo", VtEvent::Status(Psp { state: Some(PspState::Working), app: Some("demo".into()), ..Psp::default() })),
+        ("7501;?", VtEvent::Status(Psp { query: true, ..Psp::default() })),
+    ];
+    for (osc, want) in cases {
+        for end in ["\x07", "\x1b\\"] {
+            let input = format!("a\x1b]{osc}{end}b");
+            let input = input.as_bytes();
+            for split in 0..=input.len() {
+                let mut vt = Vt::new(40, 3);
+                let mut ev = vt.feed(&input[..split]);
+                ev.extend(vt.feed(&input[split..]));
+                assert_eq!(ev, vec![want.clone()], "{osc:?} ended {end:?} split at {split}");
+                assert_eq!(vt.screen_text()[0].trim_end(), "ab");
+            }
+        }
+    }
+    // Ended another way (CAN, SUB): not a notification.
+    let mut vt = Vt::new(40, 3);
+    assert!(vt.feed(b"\x1b]9;cut\x18\x1b]777;notify;a;b\x1a").is_empty());
+}
+
+/// vte keeps 16 OSC parameters: a 777 body is read from the raw sequence, so it stays whole.
+#[test]
+fn a_777_body_with_many_semicolons_is_kept_whole() {
+    let body = (0..=30).map(|i| format!("p{i}")).collect::<Vec<_>>().join(";");
+    assert_eq!(body.matches(';').count(), 30);
+    let mut vt = Vt::new(40, 3);
+    assert_eq!(vt.feed(format!("\x1b]777;notify;T;{body}\x07").as_bytes()), vec![note(Some("T"), Some(&body))]);
+    // A title alone, a body alone, and nothing at all.
+    assert_eq!(vt.feed(b"\x1b]777;notify;only title\x07"), vec![note(Some("only title"), None)]);
+    assert_eq!(vt.feed(b"\x1b]777;notify;;only body\x07"), vec![note(None, Some("only body"))]);
+    assert!(vt.feed(b"\x1b]777;notify;;\x07\x1b]777;notify\x07\x1b]777;notify;\x07").is_empty());
+    // Other 777 subcommands are ignored.
+    assert!(vt.feed(b"\x1b]777;precmd\x07\x1b]777;preexec;x;y\x07\x1b]777;notifyx;a;b\x07").is_empty());
+}
+
+#[test]
+fn osc9_progress_forms_and_conemu_commands() {
+    use ProgressState::*;
+    let mut vt = Vt::new(40, 3);
+    let mut progress = |s: &str| match &vt.feed(format!("\x1b]9;{s}\x07").as_bytes())[..] {
+        [] => None,
+        [VtEvent::Progress(p)] => Some(p.map(|p| (p.state, p.percent))),
+        other => panic!("{s}: {other:?}"),
+    };
+    assert_eq!(progress("4;0"), Some(None));
+    assert_eq!(progress("4;0;50"), Some(None));
+    assert_eq!(progress("4;1;0"), Some(Some((Running, Some(0)))));
+    assert_eq!(progress("4;1;100"), Some(Some((Running, Some(100)))));
+    assert_eq!(progress("4;1;250"), Some(Some((Running, Some(100)))), "clamped");
+    assert_eq!(progress("4;1;99999999999999999999"), Some(Some((Running, Some(100)))));
+    assert_eq!(progress("4;1"), Some(Some((Running, None))));
+    assert_eq!(progress("4;1;"), Some(Some((Running, None))));
+    assert_eq!(progress("4;1;x"), Some(Some((Running, None))));
+    assert_eq!(progress("4;2;30"), Some(Some((Error, Some(30)))));
+    assert_eq!(progress("4;2"), Some(Some((Error, None))));
+    assert_eq!(progress("4;3"), Some(Some((Indeterminate, None))));
+    assert_eq!(progress("4;3;70"), Some(Some((Indeterminate, None))));
+    assert_eq!(progress("4;4;55"), Some(Some((Paused, Some(55)))));
+    // Not a progress state, or no state: nothing (and not a notification either).
+    for bad in ["4", "4;", "4;5", "4;9;10", "4;x", "4;-1"] {
+        assert_eq!(progress(bad), None, "{bad}");
+    }
+    // The other ConEmu commands, 9;1 to 9;12, with and without arguments.
+    for n in (1..=12).filter(|&n| n != 4) {
+        for form in [format!("{n}"), format!("{n};"), format!("{n};some;args"), format!("{n:02};x")] {
+            assert_eq!(progress(&form), None, "{form}");
+        }
+    }
+    // Text that only starts like one is a notification.
+    assert_eq!(vt.feed(b"\x1b]9;13;lucky\x07"), vec![note(None, Some("13;lucky"))]);
+    assert_eq!(vt.feed(b"\x1b]9;0;zero\x07"), vec![note(None, Some("0;zero"))]);
+    assert_eq!(vt.feed(b"\x1b]9;5 minutes left\x07"), vec![note(None, Some("5 minutes left"))]);
+    assert_eq!(vt.feed(b"\x1b]9;123\x07"), vec![note(None, Some("123"))]);
+    assert!(vt.feed(b"\x1b]9;\x07\x1b]9\x07\x1b]9;   \x07").is_empty());
+}
+
+#[test]
+fn osc99_chunks_base64_and_payload_types() {
+    let mut vt = Vt::new(40, 3);
+    // kitty's own example: a title held back with d=0, then the body completes it.
+    assert!(vt.feed(b"\x1b]99;i=1:d=0;Hello world\x1b\\").is_empty());
+    assert_eq!(vt.feed(b"\x1b]99;i=1:p=body;This is cool\x1b\\"), vec![note(Some("Hello world"), Some("This is cool"))]);
+    assert_eq!(vt.tracker.notes.held(), (0, 0));
+    // Title and body each in pieces, and two ids interleaved.
+    assert!(vt.feed(b"\x1b]99;i=a:d=0;Hel\x07\x1b]99;i=b:d=0;other\x07\x1b]99;i=a:d=0:p=title;lo\x07").is_empty());
+    assert!(vt.feed(b"\x1b]99;i=a:d=0:p=body;one \x07").is_empty());
+    assert_eq!(vt.feed(b"\x1b]99;i=a:d=1:p=body;two\x07"), vec![note(Some("Hello"), Some("one two"))]);
+    assert_eq!(vt.feed(b"\x1b]99;i=b:p=body;\x07"), vec![note(Some("other"), None)]);
+    // Base64, each piece encoded on its own (a character may be split between two), with and
+    // without padding. "héllo" = 68 c3 | a9 6c 6c 6f.
+    assert!(vt.feed(b"\x1b]99;i=c:d=0:e=1;aMM=\x07").is_empty());
+    assert!(vt.feed(b"\x1b]99;i=c:d=0:e=1;qWxsbw\x07").is_empty());
+    assert_eq!(vt.feed(b"\x1b]99;i=c:e=1:p=body;d29ybGQ=\x07"), vec![note(Some("héllo"), Some("world"))]);
+    // Bad base64 discards that notification, pieces before and after it included.
+    assert!(vt.feed(b"\x1b]99;i=d:d=0;good title\x07\x1b]99;i=d:d=0:e=1:p=body;!!!\x07\x1b]99;i=d:d=0:p=body;more\x07").is_empty());
+    assert!(vt.feed(b"\x1b]99;i=d:p=body;end\x07").is_empty());
+    assert_eq!(vt.tracker.notes.held(), (0, 0));
+    for bad in ["a", "aGVsbG8=x", "aGk===", "aGk=aGk=", "aG k"] {
+        assert!(vt.feed(format!("\x1b]99;e=1;{bad}\x07").as_bytes()).is_empty(), "{bad}");
+    }
+    // The id is free again afterwards.
+    assert_eq!(vt.feed(b"\x1b]99;i=d;again\x07"), vec![note(Some("again"), None)]);
+    // Payload types without text: icon and buttons may complete a notification, close forgets
+    // it, and a query or an unknown type does nothing. None is ever answered.
+    assert!(vt.feed(b"\x1b]99;i=e:d=0;with buttons\x07").is_empty());
+    assert!(vt.feed(b"\x1b]99;i=e:p=?;\x07\x1b]99;i=e:p=alive;\x07\x1b]99;i=e:p=future;x\x07").is_empty());
+    assert_eq!(vt.feed("\x1b]99;i=e:p=buttons;Yes\u{2028}No\x07".as_bytes()), vec![note(Some("with buttons"), None)]);
+    assert!(vt.feed(b"\x1b]99;i=f:d=0;closed\x07\x1b]99;i=f:p=close;\x07\x1b]99;i=f:p=icon:e=1;aWNvbg==\x07").is_empty());
+    assert!(vt.feed(b"\x1b]99;p=?;\x07\x1b]99;i=x:p=?;\x1b\\").is_empty());
+    // Other keys are ignored; an unknown `e` or a missing second `;` drops the code.
+    assert_eq!(vt.feed(b"\x1b]99;a=report:c=1:u=2:o=unfocused:f=YXBw:w=10;keys\x07"), vec![note(Some("keys"), None)]);
+    assert!(vt.feed(b"\x1b]99;e=7;x\x07\x1b]99;no payload\x07\x1b]99;;\x07").is_empty());
+    assert_eq!(vt.tracker.notes.held(), (0, 0));
+}
+
+#[test]
+fn osc99_pending_pieces_are_bounded() {
+    let mut vt = Vt::new(40, 3);
+    // At most 8 ids: the oldest go.
+    for i in 0..12 {
+        assert!(vt.feed(format!("\x1b]99;i=n{i}:d=0;t{i}\x07").as_bytes()).is_empty());
+    }
+    assert_eq!(vt.tracker.notes.held().0, 8);
+    assert!(vt.feed(b"\x1b]99;i=n3:p=body;\x07").is_empty(), "n3 was dropped");
+    assert_eq!(vt.feed(b"\x1b]99;i=n4:p=body;b\x07"), vec![note(Some("t4"), Some("b"))]);
+    // At most 4096 bytes in all.
+    let big = "x".repeat(1500);
+    for i in 0..5 {
+        assert!(vt.feed(format!("\x1b]99;i=big{i}:d=0:p=body;{big}\x07").as_bytes()).is_empty());
+        let (ids, bytes) = vt.tracker.notes.held();
+        assert!(ids <= 8 && bytes <= 4096, "{ids} ids, {bytes} bytes");
+    }
+    assert!(vt.feed(b"\x1b]99;i=big0;late\x07") == vec![note(Some("late"), None)], "big0's body was dropped");
+    assert_eq!(vt.feed(b"\x1b]99;i=big4;T\x07"), vec![note(Some("T"), Some(&"x".repeat(300)))]);
+    // One notification growing past the limit is dropped too.
+    for _ in 0..4 {
+        vt.feed(format!("\x1b]99;i=grow:d=0;{big}\x07").as_bytes());
+    }
+    assert!(vt.tracker.notes.held().1 <= 4096);
+    // A reset forgets them.
+    vt.feed(b"\x1b]99;i=r:d=0;held\x07\x1bc");
+    assert_eq!(vt.tracker.notes.held(), (0, 0));
+}
+
+#[test]
+fn osc7501_status_reports() {
+    use PspState::*;
+    let mut vt = Vt::new(40, 3);
+    let mut status = |s: &str| match &vt.feed(format!("\x1b]7501;{s}\x1b\\").as_bytes())[..] {
+        [] => None,
+        [VtEvent::Status(p)] => Some(p.clone()),
+        other => panic!("{s}: {other:?}"),
+    };
+    for (name, state) in [("idle", Idle), ("working", Working), ("done", Done), ("blocked", Blocked), ("error", Error), ("clear", Clear)] {
+        assert_eq!(status(&format!("state={name}")), Some(Psp { state: Some(state), ..Psp::default() }), "{name}");
+    }
+    // Every field: msg "Allow rm?" and title "Deploy" in base64.
+    assert_eq!(
+        status("state=blocked:kind=permission:app=Claude Code:msg=QWxsb3cgcm0/:title=RGVwbG95:progress=40:future=1"),
+        Some(Psp {
+            state: Some(Blocked),
+            kind: Some("permission".into()),
+            app: Some("Claude Code".into()),
+            msg: Some("Allow rm?".into()),
+            title: Some("Deploy".into()),
+            progress: Some(40),
+            query: false,
+        })
+    );
+    for kind in ["permission", "question", "auth"] {
+        assert_eq!(status(&format!("state=blocked:kind={kind}")).unwrap().kind.as_deref(), Some(kind));
+    }
+    // Progress alone, at its ends; one outside 0..=100, or an unknown kind, is left out.
+    assert_eq!(status("progress=0"), Some(Psp { progress: Some(0), ..Psp::default() }));
+    assert_eq!(status("progress=100").unwrap().progress, Some(100));
+    assert_eq!(status("state=working:progress=101"), Some(Psp { state: Some(Working), ..Psp::default() }));
+    assert_eq!(status("state=working:progress=-1:kind=whatever").unwrap(), Psp { state: Some(Working), ..Psp::default() });
+    // The query.
+    assert_eq!(status("?"), Some(Psp { query: true, ..Psp::default() }));
+    // Discarded whole: an unknown state, bad base64, base64 that isn't UTF-8, a control
+    // character after decoding ("a\nb" = YQpi, ESC = Gw==) or in a plain value, and a report
+    // with nothing in it.
+    for bad in [
+        "state=sleeping",
+        "state=Working",
+        "state=blocked:msg=!!!",
+        "state=blocked:msg=plain text",
+        "state=blocked:title=a",
+        "state=blocked:msg=/w==",
+        "state=blocked:msg=YQpi",
+        "state=done:title=Gw==",
+        "state=working:app=a\tb",
+        "state=working:app=a\u{9b}b",
+        "",
+        "future=1",
+        "state",
+        "??",
+    ] {
+        assert_eq!(status(bad), None, "{bad:?}");
+    }
+    // A sub-task's record (`id`) is not the program's: ignored whole, its `clear` too. An empty
+    // id is the root.
+    assert_eq!(status("state=blocked:id=eu-west"), None);
+    assert_eq!(status("id=a/b:state=clear"), None);
+    assert_eq!(status("state=done:id=").unwrap().state, Some(Done));
+    // Over-long text is cut, not dropped.
+    let long = "TG9uZyAh".repeat(100); // "Long !" x 100
+    let p = status(&format!("state=blocked:msg={long}:title={long}")).unwrap();
+    assert_eq!(p.msg.unwrap().chars().count(), MAX_NOTIFY_BODY);
+    assert_eq!(p.title.unwrap().chars().count(), MAX_NOTIFY_TITLE);
+}
+
+/// Over 4096 bytes is not a notification, whatever the sequence; the terminal carries on.
+#[test]
+fn over_long_notification_sequences_are_ignored() {
+    let mut vt = Vt::new(40, 3);
+    let pad = |prefix: &str, len: usize| format!("\x1b]{prefix}{}\x07", "x".repeat(len - prefix.len()));
+    for prefix in ["9;", "777;notify;t;", "99;;", "99;i=1:d=0;", "7501;state=working:app="] {
+        assert!(vt.feed(pad(prefix, notify::MAX_NOTIFY_OSC + 1).as_bytes()).is_empty(), "{prefix}");
+        assert_eq!(vt.feed(pad(prefix, notify::MAX_NOTIFY_OSC).as_bytes()).len(), (prefix != "99;i=1:d=0;") as usize, "{prefix}");
+    }
+    assert!(vt.feed(format!("\x1b]9;4;1;{}\x07", "5".repeat(5000)).as_bytes()).is_empty());
+    assert_eq!(vt.feed(b"\x1b]9;still works\x07ok"), vec![note(None, Some("still works"))]);
+    assert_eq!(vt.screen_text()[0].trim_end(), "ok");
+}
+
+/// Notification text keeps no control characters (C0, DEL, C1, an ESC smuggled in base64) and
+/// is cut to 100 (title) and 300 (body) chars; nothing left means no event.
+#[test]
+fn notification_text_is_printable_and_bounded() {
+    let mut vt = Vt::new(40, 3);
+    assert_eq!(vt.feed("\x1b]9;a\tb\r\nc\u{9b}2J\x7fd\u{9c}e\x07".as_bytes()), vec![note(None, Some("abc2Jde"))]);
+    assert_eq!(vt.feed("\x1b]777;notify; t\x01i\u{85}t ;b\x00o\x08d\x7fy\x07".as_bytes()), vec![note(Some("tit"), Some("body"))]);
+    // "\x1b[31mred\x07\n" as an OSC 99 base64 title, "\x1b]0;x\x07" as its body.
+    assert_eq!(vt.feed(b"\x1b]99;i=1:d=0:e=1;G1szMW1yZWQHCg==\x07\x1b]99;i=1:e=1:p=body;G10wO3gH\x07"), vec![note(Some("[31mred"), Some("]0;x"))]);
+    assert_eq!(vt.title(), None);
+    // Invalid UTF-8 doesn't get through as bytes.
+    let ev = vt.feed(b"\x1b]9;caf\xff\xfe!\x07");
+    assert_eq!(ev, vec![note(None, Some("caf\u{fffd}\u{fffd}!"))]);
+    // Only control characters or blanks: nothing.
+    assert!(vt.feed(b"\x1b]9;\x01\x02 \t\x07\x1b]777;notify;\x01;\x02\x07\x1b]99;e=1;Gwo=\x07").is_empty());
+    let long = "é".repeat(1000);
+    assert_eq!(vt.feed(format!("\x1b]9;{long}\x07").as_bytes()), vec![note(None, Some(&"é".repeat(300)))]);
+    assert_eq!(vt.feed(format!("\x1b]777;notify;{long};{long}\x07").as_bytes()), vec![note(Some(&"é".repeat(100)), Some(&"é".repeat(300)))]);
+    assert_eq!(vt.feed(format!("\x1b]99;i=1:d=0;{long}\x07\x1b]99;i=1:p=body;{long}\x07").as_bytes()), vec![note(Some(&"é".repeat(100)), Some(&"é".repeat(300)))]);
+}
+
+/// The new sequences leave the existing ones alone, in one stream.
+#[test]
+fn notifications_do_not_disturb_titles_cwd_or_clipboard() {
+    let mut vt = Vt::new(40, 3);
+    let ev = vt.feed(b"\x1b]2;title\x07\x1b]9;note\x07\x1b]52;c;eA==\x07\x1b]7;file://h/tmp\x1b\\\x1b]9;4;3\x1b\\\x07");
+    assert_eq!(vt.title(), Some("title"));
+    assert_eq!(vt.cwd(), Some("/tmp"));
+    for want in [
+        VtEvent::Title(Some("title".into())),
+        VtEvent::Clipboard { selection: false, text: "x".into() },
+        VtEvent::Cwd("/tmp".into()),
+        VtEvent::Bell,
+        note(None, Some("note")),
+        VtEvent::Progress(Some(Progress { state: ProgressState::Indeterminate, percent: None })),
+    ] {
+        assert_eq!(ev.iter().filter(|e| **e == want).count(), 1, "{want:?} in {ev:?}");
+    }
+    assert_eq!(ev.len(), 6);
+    // A notification's own BEL terminator is not a bell.
+    assert_eq!(vt.feed(b"\x1b]9;quiet\x07"), vec![note(None, Some("quiet"))]);
+}

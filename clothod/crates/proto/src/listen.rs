@@ -49,19 +49,33 @@ pub fn lock(path: &Path) -> io::Result<Lock> {
     nix_lock::try_lock(path).map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, format!("{} is held by another process ({e})", path.display())))
 }
 
+/// The pid written in a lock file by the process that last took it, if any. It only reads the
+/// file. It never probes with flock: a probe's lock, however short, could make a starting
+/// process's `LOCK_EX | LOCK_NB` fail. The pid may be stale (the file outlives its process), and
+/// builds before this one wrote none, so the caller checks what that process is.
+pub fn lock_pid(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok().filter(|pid| *pid != 0)
+}
+
 /// Exclusive non-blocking flock without pulling nix into this crate.
 mod nix_lock {
     use std::fs::File;
+    use std::io::Write;
     use std::os::fd::AsRawFd;
 
     /// An exclusive flock on a file, held until dropped.
     pub struct Lock(pub(super) File);
 
     pub fn try_lock(path: &std::path::Path) -> std::io::Result<Lock> {
-        let f = File::create(path)?;
+        // Never truncated on open: a process that fails to get the lock must leave the holder's
+        // pid readable (see `lock_pid`).
+        let mut f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
         if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
+        // Ours now: say who holds it. Best effort, the lock itself is what counts.
+        let _ = f.set_len(0);
+        let _ = f.write_all(format!("{}\n", std::process::id()).as_bytes());
         Ok(Lock(f))
     }
 }
@@ -261,5 +275,64 @@ pub fn live_instance(pid_file: &Path) -> Option<u32> {
 pub fn poke(pid: u32) {
     unsafe {
         libc::kill(pid as libc::pid_t, libc::SIGUSR1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::MetadataExt;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("clt-unit-listen-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_second_lock_fails_and_leaves_the_pid_readable() {
+        let dir = scratch("lock");
+        let path = dir.join("x.lock");
+        // A file from an older build (no pid), or from a process that is gone.
+        std::fs::write(&path, "4000000000 stale and longer than a pid\n").unwrap();
+        let ino = std::fs::metadata(&path).unwrap().ino();
+
+        let held = lock(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{}\n", std::process::id()), "only the holder's pid, nothing left of the old content");
+        assert_eq!(lock_pid(&path), Some(std::process::id()));
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino, "the same file, not a replacement");
+
+        // flock is per open file description, so a second open in this process is refused too.
+        let err = lock(&path).err().expect("the lock is held");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert_eq!(lock_pid(&path), Some(std::process::id()), "a failed attempt must not truncate the file");
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+
+        // Released: the pid stays in the file (stale), and the next holder rewrites it.
+        drop(held);
+        assert_eq!(lock_pid(&path), Some(std::process::id()));
+        let again = lock(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{}\n", std::process::id()));
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), ino);
+        drop(again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lock_pid_reads_only_a_pid() {
+        let dir = scratch("pid");
+        let path = dir.join("x.lock");
+        assert_eq!(lock_pid(&path), None, "no file");
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(lock_pid(&path), None, "an older build's lock file is empty");
+        for bad in ["\n", "abc\n", "-5\n", "0\n", "12 34\n"] {
+            std::fs::write(&path, bad).unwrap();
+            assert_eq!(lock_pid(&path), None, "{bad:?}");
+        }
+        std::fs::write(&path, "4321\n").unwrap();
+        assert_eq!(lock_pid(&path), Some(4321));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "4321\n", "reading changes nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

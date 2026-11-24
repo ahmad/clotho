@@ -6859,9 +6859,29 @@ fn script_file(p: &std::path::Path, body: &str) {
 /// (`vars` are set after these, and win).
 fn start_git(env: &mut Env, vars: &[(&str, &str)]) {
     let git = real_git();
-    let mut all = vec![("CLOTHOD_GIT", git.as_str()), ("CLOTHOD_TEST_GIT_REFRESH_MS", "300")];
+    // A home of the test's own (see `git_home`): the developer's global git config (an
+    // excludes file, line-ending settings) can't change what these tests count.
+    let home = git_home(env);
+    let xdg = home.join(".config");
+    let (home, xdg) = (dir(&home), dir(&xdg));
+    let mut all = vec![("CLOTHOD_GIT", git.as_str()), ("CLOTHOD_TEST_GIT_REFRESH_MS", "300"), ("HOME", home.as_str()), ("XDG_CONFIG_HOME", xdg.as_str())];
     all.extend_from_slice(vars);
     env.start_with(&test_bin(), &all);
+}
+
+/// The home directory `start_git` gives the daemon: empty unless the test puts a config there.
+fn git_home(env: &Env) -> PathBuf {
+    let home = env.dir.path().join("git-home");
+    std::fs::create_dir_all(&home).unwrap();
+    home
+}
+
+/// A `changes` summary without its token, which has to be there: 16 hex digits.
+fn counts(changes: &Value) -> Value {
+    let mut v = changes.clone();
+    let token = v.as_object_mut().expect("changes").remove("token").expect("a token");
+    assert!(token.as_str().is_some_and(|t| t.len() == 16 && t.bytes().all(|b| b.is_ascii_hexdigit())), "{token}");
+    v
 }
 
 /// A client subscribed to events: `changes` are only read while there is one.
@@ -6920,7 +6940,7 @@ async fn panes_show_change_counts() {
             }
         }
     };
-    assert_eq!(g["changes"], json!({"uncommitted": {"files": 2, "added": 3, "removed": 0}, "branch": null, "reason": null}));
+    assert_eq!(counts(&g["changes"]), json!({"uncommitted": {"files": 2, "added": 3, "removed": 0}, "branch": null, "reason": null}));
     assert_eq!((g["changes_reason"].clone(), g["branch"].clone()), (Value::Null, json!("main")));
 
     // An edit made in the pane.
@@ -6937,7 +6957,7 @@ async fn panes_show_change_counts() {
     git_commit(&root, "three");
     put(&root.join("src/b.txt"), "b\nB\n");
     let g = wait_git(&c, p, "the branch", |g| g["branch"] == "feat" && g["changes"]["branch"]["commits"] == 1 && g["changes"]["uncommitted"]["files"] == 1).await;
-    assert_eq!(g["changes"], json!({"uncommitted": {"files": 1, "added": 1, "removed": 0}, "branch": {"base": "main", "commits": 1, "files": 2, "added": 2, "removed": 10}, "reason": null}));
+    assert_eq!(counts(&g["changes"]), json!({"uncommitted": {"files": 1, "added": 1, "removed": 0}, "branch": {"base": "main", "commits": 1, "files": 2, "added": 2, "removed": 10}, "reason": null}));
 
     // The default branch has nothing to be compared with.
     git_do(&root, &["checkout", "-q", "main"]);
@@ -7043,7 +7063,8 @@ async fn git_changes_lists_both_groups() {
 
     // The panes' summary follows the request, without a run of its own.
     let g = wait_git(&c, p, "the summary", |g| g["changes"].is_object()).await;
-    assert_eq!(g["changes"], json!({"uncommitted": {"files": 4, "added": 4, "removed": 1}, "branch": {"base": "main", "commits": 1, "files": 1, "added": 1, "removed": 0}, "reason": null}));
+    assert_eq!(counts(&g["changes"]), json!({"uncommitted": {"files": 4, "added": 4, "removed": 1}, "branch": {"base": "main", "commits": 1, "files": 1, "added": 1, "removed": 0}, "reason": null}));
+    assert_eq!(g["changes"]["token"], r["token"], "the summary carries the list's token");
 
     // A linked worktree is its own work tree: its own root, branch and changes.
     let wt = root.parent().unwrap().join("proj-wt");
@@ -7613,4 +7634,599 @@ async fn no_git_gives_a_reason_not_an_error() {
     c.input(p, b"echo fine\r");
     wait_for_text(&c, p, T, |l| has_line(l, "fine")).await.unwrap();
     assert!(!r_log_has(&env, "panicked"));
+}
+
+// ---- generic agent status: notifications, progress and status from any program ------------
+
+/// Every event received so far: (name, data).
+fn events(c: &mut Client) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    while let Some(f) = c.try_recv() {
+        if let Frame::Json(v) = f {
+            if let Some(e) = v["event"].as_str() {
+                out.push((e.to_string(), v["data"].clone()));
+            }
+        }
+    }
+    out
+}
+
+fn named<'a>(ev: &'a [(String, Value)], name: &str, pane: u64) -> Vec<&'a Value> {
+    ev.iter().filter(|(e, d)| e == name && (d["pane"] == pane || d["id"] == pane)).map(|(_, d)| d).collect()
+}
+
+/// A daemon with these variables set, on top of the tests' defaults.
+fn env_with(vars: &[(&str, &str)]) -> Env {
+    let mut env = Env::empty();
+    env.start_with(&test_bin(), vars);
+    env
+}
+
+/// Runs a shell script in the pane (a file, so nothing of it is echoed as an escape sequence).
+fn run_script(env: &Env, c: &Client, pane: u64, name: &str, body: &str) {
+    let file = env.dir.path().join("scripts").join(name);
+    script_file(&file, &format!("#!/bin/sh\n{body}\n"));
+    c.input(pane, format!("{}\r", file.display()).as_bytes());
+}
+
+async fn ack(c: &Client, pane: u64) {
+    c.request("agent.ack", json!({"pane": pane})).await.unwrap();
+}
+
+/// A plain shell script asks for the user with each of the notification sequences: the pane
+/// gets an agent of kind `other` and source `osc` that needs them, with the text as it came,
+/// and one `agent` event per rise. Seen (`agent.ack`), nothing is left of it.
+#[tokio::test]
+async fn a_plain_script_raises_needs_you_with_osc_9_99_and_777() {
+    let mut env = Env::empty();
+    let fake = fake_summarizer(&env, "sum", "echo rewritten");
+    env.start_with(&test_bin(), &[("CLOTHOD_TEST_OSC_REFILL_MS", "50"), ("CLOTHOD_SUMMARIZER", fake.as_str())]);
+    let mut c = env.client().await;
+    for f in ["agent.osc", "agent.progress", "agent.kinds", "git.changes.token"] {
+        assert!(c.hello["features"].as_array().unwrap().contains(&json!(f)), "{f} in {}", c.hello["features"]);
+    }
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    let cases = [
+        ("osc9", r"printf '\033]9;Build finished\007'", "Build finished"),
+        ("osc9st", r"printf '\033]9;Tests <b>failed</b>\033\\'", "Tests <b>failed</b>"),
+        ("osc777", r"printf '\033]777;notify;Deploy;Needs approval; now\007'", "Deploy: Needs approval; now"),
+        ("osc99", r"printf '\033]99;;Single part\033\\'", "Single part"),
+        ("osc99chunks", r"printf '\033]99;i=7:d=0;Hello \033\\'; printf '\033]99;i=7:d=0;there\033\\'; printf '\033]99;i=7:d=1:p=body:e=1;V29ybGQ=\033\\'", "Hello there: World"),
+        // Control characters never reach the text: the BEL ends the sequence, the rest is cut.
+        ("clean", r"printf '\033]9;a\001b\033[31mc\007'", "ab"),
+    ];
+    for (name, body, text) in cases {
+        events(&mut c);
+        run_script(&env, &c, p, name, body);
+        let a = wait_agent(&c, p, name, |a| a["attention"] == true).await;
+        assert_eq!((a["kind"].clone(), a["source"].clone(), a["state"].clone(), a["needs_user"].clone()), (json!("other"), json!("osc"), json!("waiting"), json!(true)), "{name}: {a}");
+        if name != "clean" {
+            assert_eq!((a["message"].clone(), a["summary"].clone()), (json!(text), json!(text)), "{name}: {a}");
+        } else {
+            assert!(a["message"].as_str().unwrap().starts_with(text) && !a["message"].as_str().unwrap().contains('\u{1b}'), "{a}");
+        }
+        // Shown as it came: never rewritten by the model, never pending.
+        assert_eq!((a["summary_pending"].clone(), a["settling"].clone()), (json!(false), json!(false)), "{a}");
+        assert!(a.get("progress").is_none(), "{a}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let ev = events(&mut c);
+        let rises: Vec<_> = named(&ev, "agent", p).into_iter().filter(|e| e["agent"]["attention"] == true).collect();
+        assert_eq!(rises.len(), 1, "{name}: one agent event for the rise: {ev:?}");
+        // It stays after the script is long gone, until it is seen; then nothing is left.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(pane_agent(&c, p).await["attention"], true, "{name}: it outlives the script");
+        ack(&c, p).await;
+        assert!(pane_agent(&c, p).await.is_null(), "{name}: gone once seen");
+        let ev = events(&mut c);
+        assert!(named(&ev, "agent", p).iter().any(|e| e["agent"].is_null() && e["from"] == "waiting"), "{ev:?}");
+    }
+    // ConEmu's other OSC 9 commands and other OSC 777 subcommands are not notifications.
+    run_script(&env, &c, p, "notnotes", r"printf '\033]9;1;500\007\033]9;9;/tmp\007\033]777;preexec\007\033]99;i=1:p=close;\033\\'; echo not-notes");
+    wait_for_text(&c, p, T, |l| has_line(l, "not-notes")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(pane_agent(&c, p).await.is_null());
+    // The model was never run on any of it; on a hook's report it is.
+    assert_eq!(runs(&env, "sum"), 0, "a program's text went to the model");
+    c.request("agent.report", json!({"pane": p, "state": "waiting", "kind": "claude", "message": "May I run ls?"})).await.unwrap();
+    let deadline = Instant::now() + T;
+    while runs(&env, "sum") == 0 {
+        assert!(Instant::now() < deadline, "the fake summarizer never ran for a hook's report");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// OSC 9;4 progress shows on the pane's agent and never alerts: no `agent` event, no attention.
+/// It ends with `9;4;0`, and when the program that set it exits.
+#[tokio::test]
+async fn progress_shows_and_clears_without_alerting() {
+    let env = Env::new();
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    c.input(p, b"printf '\\033]9;4;1;40\\007'\r");
+    let a = wait_agent(&c, p, "progress", |a| a["progress"].is_object()).await;
+    assert_eq!(a["progress"], json!({"state": "running", "percent": 40}), "{a}");
+    assert_eq!((a["kind"].clone(), a["source"].clone(), a["state"].clone(), a["attention"].clone()), (json!("other"), json!("osc"), json!("running"), json!(false)), "{a}");
+    c.input(p, b"printf '\\033]9;4;2;150\\007'\r");
+    wait_agent(&c, p, "an error, clamped", |a| a["progress"] == json!({"state": "error", "percent": 100})).await;
+    c.input(p, b"printf '\\033]9;4;0\\007'\r");
+    wait_agent(&c, p, "cleared", |a| a.is_null()).await;
+    // A program that exits without clearing it.
+    run_script(&env, &c, p, "busy", r"printf '\033]9;4;3\007'; sleep 2");
+    wait_agent(&c, p, "indeterminate", |a| a["progress"] == json!({"state": "indeterminate", "percent": null})).await;
+    wait_agent(&c, p, "cleared at exit", |a| a.is_null()).await;
+    // Many updates: few `pane` events, and the last value arrives.
+    events(&mut c);
+    run_script(&env, &c, p, "many", r"i=0; while [ $i -lt 100 ]; do printf '\033]9;4;1;%s\007' $i; i=$((i+1)); done; sleep 3");
+    wait_agent(&c, p, "the last value", |a| a["progress"]["percent"] == 99).await;
+    wait_agent(&c, p, "cleared at exit", |a| a.is_null()).await;
+    let ev = events(&mut c);
+    assert!(named(&ev, "agent", p).is_empty(), "progress sends no agent event: {ev:?}");
+    let with_progress = named(&ev, "pane", p).into_iter().filter(|d| d["agent"]["progress"].is_object()).count();
+    assert!((1..=6).contains(&with_progress), "{with_progress} pane events for 100 updates");
+
+    // On a hook-reported agent it is only a field: state, attention and source stay.
+    c.request("agent.report", json!({"pane": p, "state": "running", "kind": "claude"})).await.unwrap();
+    c.input(p, b"printf '\\033]9;4;1;10\\007'\r");
+    let a = wait_agent(&c, p, "progress on a hooked agent", |a| a["progress"]["percent"] == 10).await;
+    assert_eq!((a["kind"].clone(), a["source"].clone(), a["state"].clone(), a["attention"].clone()), (json!("claude"), json!("hook"), json!("running"), json!(false)), "{a}");
+    c.input(p, b"printf '\\033]9;4;0\\007'\r");
+    let a = wait_agent(&c, p, "cleared, the agent stays", |a| a.get("progress").is_none()).await;
+    assert_eq!(a["kind"], "claude");
+}
+
+/// A loop of notifications can't flood: at most three rises in a row per pane, a few text
+/// updates while attention is up, one push, and the rest only counted.
+#[tokio::test]
+async fn a_flood_of_notifications_is_rate_limited() {
+    let relay = FakeRelay::start();
+    let env = Env::new();
+    let mut c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    let flood = r"i=0; while [ $i -lt 200 ]; do printf '\033]9;note %s\007' $i; i=$((i+1)); done; echo flooded-$1";
+    let file = env.dir.path().join("scripts/flood");
+    script_file(&file, &format!("#!/bin/sh\n{flood}\n"));
+    let mut rises = 0;
+    let mut pane_events = 0;
+    for round in 0..5 {
+        c.input(p, format!("{} {round}\r", file.display()).as_bytes());
+        let done = format!("flooded-{round}");
+        wait_for_text(&c, p, T, |l| has_line(l, &done)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        let ev = events(&mut c);
+        rises += named(&ev, "agent", p).into_iter().filter(|e| e["agent"]["attention"] == true).count();
+        pane_events += named(&ev, "pane", p).len();
+        ack(&c, p).await;
+    }
+    assert_eq!(rises, 3, "three rises, then the pane is out of them");
+    assert!(pane_events <= 40, "{pane_events} pane events for 1000 notifications");
+    assert_eq!(opened(&relay.next().1)["s"], "waiting");
+    relay.none_for(Duration::from_millis(1500));
+    assert!(pane_agent(&c, p).await.is_null());
+    // The log counts what was dropped, without any of its text.
+    assert_log_has_none_of(&env, &["note 1", "note 199"]);
+}
+
+/// A hook-reported agent speaks for itself: notification and status sequences from its pane
+/// change nothing and push nothing. A detected one takes a notification like a BEL.
+#[tokio::test]
+async fn a_hooked_agents_pane_ignores_notifications_and_a_detected_one_takes_them() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let mut c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    c.request("agent.report", json!({"pane": p, "state": "running", "kind": "claude", "session": "s1"})).await.unwrap();
+    events(&mut c);
+    run_script(&env, &c, p, "noise", r"printf '\033]9;Look at me\007\033]777;notify;A;B\007\033]7501;state=blocked:kind=permission\033\\\033]7501;state=done\033\\'; echo noise-done");
+    wait_for_text(&c, p, T, |l| has_line(l, "noise-done")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["source"].clone(), a["state"].clone(), a["attention"].clone(), a["message"].clone(), a["session"].clone()), (json!("hook"), json!("running"), json!(false), Value::Null, json!("s1")), "{a}");
+    assert!(named(&events(&mut c), "agent", p).is_empty());
+    relay.none_for(Duration::from_millis(300));
+    // Its own report still does everything, once.
+    c.request("agent.report", json!({"pane": p, "state": "waiting", "kind": "claude", "message": "May I?"})).await.unwrap();
+    assert_eq!(opened(&relay.next().1)["msg"], "May I?");
+    relay.none_for(Duration::from_millis(1300));
+
+    // A detected agent (no hooks): a notification makes it wait for the user, with the text.
+    let q = new_pane(&c, sh()).await;
+    let fake = env.dir.path().join("gemini");
+    script_file(&fake, "#!/bin/sh\nsleep 3; printf '\\033]9;Gemini needs you\\007'; sleep 60\n");
+    c.input(q, format!("{}\r", fake.display()).as_bytes());
+    let a = wait_agent(&c, q, "detected gemini", |a| a["kind"] == "gemini").await;
+    assert_eq!((a["source"].clone(), a["attention"].clone()), (json!("detected"), json!(false)), "{a}");
+    let a = wait_agent(&c, q, "attention", |a| a["attention"] == true).await;
+    assert_eq!((a["kind"].clone(), a["source"].clone(), a["message"].clone(), a["needs_user"].clone()), (json!("gemini"), json!("detected"), json!("Gemini needs you"), json!(true)), "{a}");
+    let a = wait_agent(&c, q, "waiting, with the text", |a| a["state"] == "waiting" && a["attention"] == true).await;
+    assert_eq!(a["message"], "Gemini needs you");
+    assert_eq!(opened(&relay.next().1)["k"], "gemini");
+    c.input(q, b"\x03");
+    wait_agent(&c, q, "cleared when it exits", |a| a.is_null()).await;
+}
+
+/// A hook that reports what a notification already raised takes the agent over without a
+/// second alert; and a restart replays the pane's output without alerting again.
+#[tokio::test]
+async fn a_takeover_and_a_restart_do_not_alert_twice() {
+    let relay = FakeRelay::start();
+    let mut env = push_env();
+    let mut c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let p = new_pane(&c, sh()).await;
+    c.input(p, b"printf '\\033]9;Agent wants you\\007'\r");
+    wait_agent(&c, p, "the rise", |a| a["attention"] == true && a["source"] == "osc").await;
+    assert_eq!(opened(&relay.next().1)["msg"], "Agent wants you");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    events(&mut c);
+    c.request("agent.report", json!({"pane": p, "state": "waiting", "kind": "claude", "message": "May I run ls?"})).await.unwrap();
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["source"].clone(), a["kind"].clone(), a["attention"].clone(), a["message"].clone()), (json!("hook"), json!("claude"), json!(true), json!("May I run ls?")), "{a}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(named(&events(&mut c), "agent", p).is_empty(), "no second rise");
+    relay.none_for(Duration::from_millis(1300));
+
+    // Another pane: a notification's agent, with attention up, across a restart of serve.
+    let q = new_pane(&c, sh()).await;
+    c.input(q, b"printf '\\033]9;Still here\\007'\r");
+    let before = wait_agent(&c, q, "the rise", |a| a["attention"] == true).await;
+    relay.next();
+    // Stored with the pane within a tick.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    drop(c);
+    env.kill();
+    env.start_with(&test_bin(), &[("CLOTHOD_TEST_PUSH_FAST", "1")]);
+    let mut c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    let a = pane_agent(&c, q).await;
+    assert_eq!((a["source"].clone(), a["kind"].clone(), a["attention"].clone(), a["message"].clone(), a["since"].clone()), (json!("osc"), json!("other"), json!(true), json!("Still here"), before["since"].clone()), "{a}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(named(&events(&mut c), "agent", q).is_empty(), "the replayed output alerts no one");
+    relay.none_for(Duration::from_millis(300));
+    ack(&c, q).await;
+    assert!(pane_agent(&c, q).await.is_null());
+}
+
+/// OSC 7501 (Program Status Protocol): each state, the settle of `done`, `idle` and `clear`,
+/// `blocked` ending with its program, and the query left unanswered.
+#[tokio::test]
+async fn osc_7501_states_drive_the_panes_agent() {
+    let env = env_with(&[("CLOTHOD_TEST_OSC_REFILL_MS", "50"), ("CLOTHOD_TEST_SETTLE_MS", "700")]);
+    let c = env.client().await;
+    let mut ev = watching(&env).await;
+    let p = new_pane(&c, sh()).await;
+    let send = |s: &str| c.input(p, format!("printf '\\033]7501;{s}\\033\\\\'\r").as_bytes());
+
+    send("state=working:app=MyTool:progress=30");
+    let a = wait_agent(&c, p, "working", |a| a["state"] == "running" && a["progress"].is_object()).await;
+    assert_eq!((a["kind"].clone(), a["source"].clone(), a["attention"].clone(), a["progress"].clone()), (json!("mytool"), json!("osc"), json!(false), json!({"state": "running", "percent": 30})), "{a}");
+    send("state=blocked:kind=permission:app=mytool");
+    let a = wait_agent(&c, p, "blocked", |a| a["state"] == "waiting").await;
+    assert_eq!((a["attention"].clone(), a["needs_user"].clone(), a["message"].clone()), (json!(true), json!(true), json!("Needs your permission")), "{a}");
+    // "Delete the cache?" in base64.
+    send("state=blocked:kind=question:app=mytool:msg=RGVsZXRlIHRoZSBjYWNoZT8=");
+    wait_agent(&c, p, "its own text", |a| a["message"] == "Delete the cache?" && a["attention"] == true).await;
+    send("state=working:app=mytool");
+    let a = wait_agent(&c, p, "working again", |a| a["state"] == "running").await;
+    assert_eq!(a["attention"], false, "working again clears attention");
+    // "All done." in base64: a finished turn settles first, then rises as a plain Done.
+    events(&mut ev);
+    send("state=done:app=mytool:msg=QWxsIGRvbmUu");
+    let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    assert_eq!((a["settling"].clone(), a["attention"].clone()), (json!(true), json!(false)), "{a}");
+    assert!(a.get("progress").is_none(), "done ends the progress: {a}");
+    let a = wait_agent(&c, p, "the rise", |a| a["attention"] == true).await;
+    assert_eq!((a["needs_user"].clone(), a["message"].clone(), a["summary_pending"].clone()), (json!(false), json!("All done."), json!(false)), "{a}");
+    ack(&c, p).await;
+    assert!(pane_agent(&c, p).await.is_null());
+
+    // Idle raises nothing; error does at once; clear removes it.
+    send("state=idle:app=mytool");
+    let a = wait_agent(&c, p, "idle", |a| a["state"] == "done").await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let b = pane_agent(&c, p).await;
+    assert_eq!((b["attention"].clone(), b["settling"].clone(), b["needs_user"].clone(), b["since"].clone()), (json!(false), json!(false), json!(false), a["since"].clone()), "{b}");
+    send("state=error:app=mytool:msg=SXQgYnJva2Uu");
+    let a = wait_agent(&c, p, "error", |a| a["state"] == "error").await;
+    assert_eq!((a["attention"].clone(), a["needs_user"].clone(), a["message"].clone()), (json!(true), json!(true), json!("It broke.")), "{a}");
+    send("state=clear");
+    wait_agent(&c, p, "clear", |a| a.is_null()).await;
+    // A sub-task's record, a report without a state and an unknown state are not the program's.
+    // The query is not answered: nothing is typed back into the pane.
+    run_script(&env, &c, p, "others", r"printf '\033]7501;state=blocked:id=sub/task\033\\\033]7501;progress=50\033\\\033]7501;state=sleeping\033\\\033]7501;?\033\\'; echo asked");
+    let lines = wait_for_text(&c, p, T, |l| has_line(l, "asked")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(pane_agent(&c, p).await.is_null());
+    assert!(!lines.iter().any(|l| l.contains("states=")) && !daemon_text(&c, p).await.0.iter().any(|l| l.contains("states=")), "{lines:?}");
+
+    // Blocked ends with its program, as the protocol says; so does working.
+    run_script(&env, &c, p, "blocked", r"printf '\033]7501;state=blocked:app=mytool\033\\'; sleep 2");
+    wait_agent(&c, p, "blocked", |a| a["state"] == "waiting" && a["attention"] == true).await;
+    wait_agent(&c, p, "gone with the program", |a| a.is_null()).await;
+    run_script(&env, &c, p, "working", r"printf '\033]7501;state=working:app=mytool\033\\'; sleep 2");
+    wait_agent(&c, p, "working", |a| a["state"] == "running").await;
+    wait_agent(&c, p, "gone with the program", |a| a.is_null()).await;
+}
+
+/// `clothod report` by hand, from a script or a prompt: what calls the user outlives the script
+/// and goes when seen, `--needs-user` decides a finished step's label, `--kind` names it,
+/// `running` ends with the script, and errors are said with an exit status.
+#[tokio::test]
+async fn report_by_hand_from_any_script() {
+    let env = env_with(&[("CLOTHOD_TEST_SETTLE_MS", "700")]);
+    let c = env.client().await;
+    let mut ev = watching(&env).await;
+    let p = new_pane(&c, sh()).await;
+    let b = test_bin();
+    let run = |args: &str| c.input(p, format!("sh -c '\"{b}\" report {args} || echo report-failed'\r").as_bytes());
+
+    // Done: it settles and rises after the script exited, and is a plain Done by its text.
+    run(r#"--state done --message "All done.""#);
+    let a = wait_agent(&c, p, "done", |a| a["state"] == "done").await;
+    assert_eq!((a["kind"].clone(), a["source"].clone(), a["settling"].clone(), a["attention"].clone()), (json!("other"), json!("hook"), json!(true), json!(false)), "{a}");
+    let a = wait_agent(&c, p, "the rise", |a| a["attention"] == true).await;
+    assert_eq!(a["needs_user"], false, "{a}");
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(pane_agent(&c, p).await["attention"], true, "it outlives the script");
+    events(&mut ev);
+    ack(&c, p).await;
+    assert!(pane_agent(&c, p).await.is_null(), "gone once seen");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(named(&events(&mut ev), "agent", p).iter().any(|e| e["agent"].is_null()), "an agent event says it went");
+
+    // The reporter's own label stands over what the text reads like.
+    run(r#"--state done --needs-user yes --message "All done.""#);
+    let a = wait_agent(&c, p, "needs the user", |a| a["attention"] == true).await;
+    assert_eq!((a["needs_user"].clone(), a["message"].clone()), (json!(true), json!("All done.")), "{a}");
+    ack(&c, p).await;
+    run(r#"--needs-user no --message "Should I push?" --state done"#);
+    let a = wait_agent(&c, p, "a plain done", |a| a["attention"] == true).await;
+    assert_eq!((a["needs_user"].clone(), a["message"].clone()), (json!(false), json!("Should I push?")), "{a}");
+    ack(&c, p).await;
+
+    // A kind of its own, in either order; waiting rises at once.
+    for args in ["--kind MyTool --state waiting --message Approve?", "--state waiting --message Approve? --kind mytool"] {
+        run(args);
+        let a = wait_agent(&c, p, "waiting", |a| a["state"] == "waiting").await;
+        assert_eq!((a["kind"].clone(), a["attention"].clone(), a["needs_user"].clone(), a["message"].clone()), (json!("mytool"), json!(true), json!(true), json!("Approve?")), "{a}");
+        ack(&c, p).await;
+        assert!(pane_agent(&c, p).await.is_null());
+    }
+    // A kind that is no name is `other`.
+    run(r#"--state error --kind "x y=z" --message Broke"#);
+    let a = wait_agent(&c, p, "error", |a| a["state"] == "error").await;
+    assert_eq!((a["kind"].clone(), a["attention"].clone()), (json!("other"), json!(true)), "{a}");
+    ack(&c, p).await;
+
+    // Running lasts as long as the script that said so.
+    c.input(p, format!("sh -c '\"{b}\" report --state running --kind build; sleep 2.5'\r").as_bytes());
+    let a = wait_agent(&c, p, "running", |a| a["state"] == "running").await;
+    assert_eq!((a["kind"].clone(), a["attention"].clone()), (json!("build"), json!(false)), "{a}");
+    wait_agent(&c, p, "cleared when the script exits", |a| a.is_null()).await;
+    // `clear` removes a report by hand.
+    run("--state waiting");
+    wait_agent(&c, p, "waiting", |a| a["state"] == "waiting").await;
+    run("--state clear");
+    wait_agent(&c, p, "cleared", |a| a.is_null()).await;
+    assert!(!daemon_text(&c, p).await.0.iter().any(|l| output(l) == "report-failed"));
+
+    // By hand, a mistake is said: usage is 2, a report that didn't arrive is 1. Everything
+    // points at this test's daemon or nowhere, never at another one on the machine.
+    let by_hand = |args: &[&str], pane: Option<&str>, socket: &str| {
+        let mut cmd = Command::new(&b);
+        cmd.arg("report").args(args).env("CLOTHOD_SOCKET", socket).env("CLOTHOD_RUNTIME_DIR", env.path()).env("CLOTHOD_REGISTRY_DIR", env.dir.path().join("registry")).env_remove("CLOTHO_PANE");
+        if let Some(pane) = pane {
+            cmd.env("CLOTHO_PANE", pane);
+        }
+        let out = cmd.stdin(Stdio::null()).output().unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let sock = env.path().join("clothod.sock").display().to_string();
+    let (code, err) = by_hand(&["--state", "done"], None, &sock);
+    assert!(code == Some(1) && err.contains("not in a Clotho pane"), "{code:?} {err}");
+    let (code, err) = by_hand(&["--state", "finished"], Some("1"), &sock);
+    assert!(code == Some(2) && !err.is_empty(), "{code:?} {err}");
+    let (code, err) = by_hand(&["--state", "done", "--needs-user", "maybe"], Some("1"), &sock);
+    assert!(code == Some(2) && !err.is_empty(), "{code:?} {err}");
+    let (code, err) = by_hand(&["--state", "done"], Some("99999"), &sock);
+    assert!(code == Some(1) && err.contains("99999"), "{code:?} {err}");
+    // The hooks' form stays silent whatever happens.
+    let (code, err) = by_hand(&["finished"], Some("1"), &sock);
+    assert!(code == Some(0) && err.is_empty(), "{code:?} {err}");    // A kind is a name before it is logged anywhere.
+    assert_log_has_none_of(&env, &["y=z"]);
+}
+
+/// Each agent clothod knows by name is found in the foreground without hooks, and something
+/// that only has such a name among its arguments is not.
+#[tokio::test]
+async fn each_known_agent_kind_is_detected_by_its_name() {
+    let env = Env::new();
+    let c = env.client().await;
+    let p = new_pane(&c, sh()).await;
+    let bin = env.dir.path().join("agents");
+    for (name, kind) in [("opencode", "opencode"), ("gemini", "gemini"), ("copilot", "copilot"), ("aider", "aider"), ("amp", "amp"), ("cursor-agent", "cursor"), ("codex", "codex")] {
+        // A wrapper script, as many installs have: a shell runs the file of that name.
+        let fake = bin.join(name);
+        script_file(&fake, "#!/bin/sh\nsleep 60\n");
+        c.input(p, format!("{}\r", fake.display()).as_bytes());
+        let a = wait_agent(&c, p, name, |a| !a.is_null()).await;
+        assert_eq!((a["kind"].clone(), a["source"].clone(), a["attention"].clone()), (json!(kind), json!("detected"), json!(false)), "{name}: {a}");
+        c.input(p, b"\x03");
+        wait_agent(&c, p, "cleared when it exits", |a| a.is_null()).await;
+    }
+    // An editor opening a file called gemini, and a tool given `amp` as an argument.
+    let other = bin.join("viewer");
+    script_file(&other, "#!/bin/sh\nsleep 3\n");
+    c.input(p, format!("{} gemini amp; echo viewed\r", other.display()).as_bytes());
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(pane_agent(&c, p).await.is_null());
+    wait_for_text(&c, p, T, |l| has_line(l, "viewed")).await.unwrap();
+}
+
+/// A push names the Tab as the apps show it: its pane's title, else the folder, when the user
+/// gave the Tab no name.
+#[tokio::test]
+async fn a_push_names_the_tab_by_its_shown_title() {
+    let relay = FakeRelay::start();
+    let env = push_env();
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let proj = env.dir.path().join("my-project");
+    std::fs::create_dir_all(&proj).unwrap();
+    let r = c.request("workspace.create", with(sh(), json!({"cwd": dir(&proj), "name": "Work"}))).await.unwrap();
+    let (p, tab) = (r["pane"].as_u64().unwrap(), r["tab"].as_u64().unwrap());
+    let report = |state: &str| c.request("agent.report", json!({"pane": p, "state": state, "kind": "claude"}));
+    // No name, no title: the folder.
+    report("waiting").await.unwrap();
+    let r = opened(&relay.next().1);
+    assert_eq!((r["w"].clone(), r["tb"].clone()), (json!("Work"), json!("my-project")), "{r}");
+    // The pane's title, without a status glyph in front.
+    c.input(p, "printf '\\033]2;\u{2733} build api\\007'\r".as_bytes());
+    let deadline = Instant::now() + T;
+    while pane_of(&c.request("state.get", json!({})).await.unwrap(), p)["title"].as_str().is_none_or(|t| !t.contains("build api")) {
+        assert!(Instant::now() < deadline, "no title");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    report("running").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    report("waiting").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["tb"], "build api");
+    // The user's name for the Tab wins.
+    c.request("tab.rename", json!({"tab": tab, "title": "api"})).await.unwrap();
+    report("running").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    report("waiting").await.unwrap();
+    assert_eq!(opened(&relay.next().1)["tb"], "api");
+}
+
+/// The change token: an edit that keeps every count changes `changes.token` and sends a `pane`
+/// event, and `git.changes` gives the same token for the same tree.
+#[tokio::test]
+async fn the_change_token_follows_edits_the_counts_do_not_show() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    put(&root.join("a.txt"), "one\ntwo\nTHREE\n");
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    let mut ev = watching(&env).await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+    let one_line = json!({"files": 1, "added": 1, "removed": 1});
+    let g = wait_git(&c, p, "the summary", |g| g["changes"]["uncommitted"] == one_line).await;
+    let first = g["changes"]["token"].as_str().unwrap().to_string();
+    let listed = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!(listed["token"], first, "the list's token is the summary's");
+    // Nothing changed: the token stays, through refreshes.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(pane_git(&c, p).await["changes"]["token"], first);
+    events(&mut ev);
+
+    // Another line changed instead: the same counts, another token, and a `pane` event.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    c.input(p, b"printf 'one\\nTWO\\nthree\\n' > a.txt\r");
+    let g = wait_git(&c, p, "another token", |g| g["changes"]["token"].as_str().is_some_and(|t| t != first)).await;
+    assert_eq!(g["changes"]["uncommitted"], one_line, "{g}");
+    let second = g["changes"]["token"].clone();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen = events(&mut ev);
+    assert!(named(&seen, "pane", p).iter().any(|d| d["git"]["changes"]["token"] == second), "a pane event carries the new token");
+    let listed = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!(listed["token"], second);
+    assert_eq!(pane_git(&c, p).await["changes"]["token"], second, "the summary keeps the token after a list");
+}
+
+/// What a hostile global git config in the daemon's home asks for is not followed: the counts
+/// are what they are without it.
+#[tokio::test]
+async fn a_hostile_global_git_config_does_not_change_the_counts() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    put(&root.join("a.txt"), "one\ntwo\nthree\nfour\n");
+    put(&root.join("new.txt"), "x\ny\n");
+    let marker = env.dir.path().join("ran");
+    let tool = env.dir.path().join("tool");
+    script_file(&tool, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+    let config = format!(
+        "[status]\n\tshowUntrackedFiles = no\n[diff]\n\texternal = {tool}\n\tnoprefix = true\n\trenames = false\n[core]\n\tfsmonitor = {tool}\n\tpager = {tool}\n\tquotePath = false\n[alias]\n\tstatus = !{tool}\n",
+        tool = tool.display()
+    );
+    put(&git_home(&env).join(".gitconfig"), &config);
+    put(&git_home(&env).join(".config/git/config"), &config);
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    let _ev = watching(&env).await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+    let g = wait_git(&c, p, "the summary", |g| g["changes"].is_object()).await;
+    assert_eq!(counts(&g["changes"]), json!({"uncommitted": {"files": 2, "added": 3, "removed": 0}, "branch": null, "reason": null}));
+    let r = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["uncommitted"]["total"].clone(), r["uncommitted"]["added"].clone()), (json!(2), json!(3)), "{r}");
+    c.request("git.diff", json!({"pane": p, "path": "a.txt", "group": "uncommitted"})).await.unwrap();
+    assert!(!marker.exists(), "something from the global config ran");
+}
+
+/// An upgrade whose new serve takes long to come up (many panes to recover on a loaded machine)
+/// waits for it instead of starting another one or rolling back.
+#[tokio::test]
+async fn upgrade_waits_for_a_serve_that_recovers_slowly() {
+    let mut env = Env::new();
+    let c = env.client().await;
+    let (p, shell) = live_shell(&c).await;
+    let holder = holder_pid(&env);
+    drop(c);
+    env.daemon.take();
+    let (v2, id2) = other_build(&env, "v2");
+    // The next serve to start (the new build's) sleeps this long before it recovers.
+    std::fs::write(env.path().join("CLOTHOD_TEST_START_DELAY_MS"), "12000").unwrap();
+    let t = Instant::now();
+    let out = clothod_cmd(&env, &v2, &["upgrade"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(t.elapsed() >= Duration::from_secs(11), "the delay was not taken: {:?}", t.elapsed());
+    assert!(stderr.contains("to recover its panes"), "it says what it waits for: {stderr}");
+    assert!(!stderr.contains("attempt 2") && !stderr.contains("rolled back"), "{stderr}");
+    let serves = clotho_proto::platform::own_processes().into_iter().filter(|q| q.args.iter().any(|a| a == "serve") && q.args.iter().any(|a| *a == env.path().to_string_lossy())).count();
+    assert_eq!(serves, 1, "one serve, never a second one started beside it");
+    let c = env.client().await;
+    assert_eq!((c.hello["build"].clone(), c.hello["holder"]["build"].clone()), (json!(id2), json!(id2)));
+    assert_eq!(holder_pid(&env), holder, "same holder");
+    assert_shell_alive(&c, p, &shell).await;
+}
+
+/// Past the ceiling the upgrade gives up, says what it saw, and rolls back with every shell
+/// kept: the holder is never signalled.
+#[tokio::test]
+async fn upgrade_gives_up_on_a_serve_that_never_comes_up_and_rolls_back() {
+    let mut env = Env::empty();
+    let (v1, id1) = other_build(&env, "v1");
+    let out = clothod_cmd(&env, &v1, &["install"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v1_installed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    env.start_with(&v1_installed, &[]);
+    let c = env.client().await;
+    let (p, shell) = live_shell(&c).await;
+    let holder = holder_pid(&env);
+    drop(c);
+    env.daemon.take();
+
+    let (v2, id2) = other_build(&env, "v2");
+    std::fs::write(env.path().join("CLOTHOD_TEST_START_DELAY_MS"), "60000").unwrap();
+    std::fs::write(env.path().join("CLOTHOD_TEST_UPGRADE_WAIT_MS"), "4000").unwrap();
+    let out = clothod_cmd(&env, &v2, &["upgrade"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("was still starting after") && stderr.contains(&id2), "what was seen: {stderr}");
+    assert!(stderr.contains("rolled back") && !stderr.contains("keeps getting started"), "{stderr}");
+    let _ = std::fs::remove_file(env.path().join("CLOTHOD_TEST_UPGRADE_WAIT_MS"));
+
+    assert_eq!(versions(&env), vec![id1.clone(), "current".to_string()], "only the old version left");
+    assert_eq!(std::fs::read_link(env.dir.path().join("bin/current")).unwrap().to_string_lossy(), id1);
+    let c = env.client().await;
+    assert_eq!((c.hello["build"].clone(), c.hello["holder"]["build"].clone()), (json!(id1), json!(id1)), "the old build runs again: {stderr}");
+    assert_eq!(holder_pid(&env), holder, "same holder: shells were never at risk");
+    assert_shell_alive(&c, p, &shell).await;
 }

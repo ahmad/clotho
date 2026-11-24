@@ -127,9 +127,29 @@ remote`, in isolated dirs on the host.
 ## Agent status
 
 The daemon tracks Claude Code, Codex and similar agents per pane. Hooks call `clothod report`, and
-detection covers agents without hooks (spec: `../docs/protocol.md`, "Agents").
-`clothod hooks print|install|uninstall claude|codex` manages the hooks. `install` edits the
-user's agent configuration, so apps run it only after the user confirms.
+detection covers agents without hooks: OpenCode, Aider, Amp and Cursor Agent are known by name,
+as are Gemini CLI and Copilot CLI before their hooks are installed (spec: `../docs/protocol.md`, "Agents", which has the table of who has
+hooks). `clothod hooks print|install|uninstall claude|codex|gemini|copilot` manages the hooks,
+and `clothod hooks status` says what is installed. `install` edits the user's agent configuration, so apps
+run it only after the user confirms.
+
+Any other program can mark its pane too, with nothing installed:
+
+```sh
+clothod report --state waiting --message "Deploy needs approval"         # "Needs you", pushed to the phone
+clothod report --state done --message "Backup finished" --needs-user no  # a plain, silent "Done"
+clothod report --state running --kind deploy                             # named in the Agents list
+clothod report --state clear
+printf '\033]9;Build finished\007'                                       # or just print a notification
+```
+
+With `--state`, `report` says what went wrong and exits non-zero (2 for a usage error, 1 when
+it isn't in a Clotho pane or reached no daemon); in the forms hooks use (a bare state word,
+`--claude-hook`, `--gemini-hook`, `--codex-notify`) it stays silent and exits 0. A waiting, done or error status stays on the pane after the script exits,
+until it is acknowledged in an app; a running one goes when the script does. OSC 9, 99, 777 and
+7501 are read from every pane, rate-limited and as plain text (spec: `../docs/protocol.md`,
+"Notifications from any program" and "Reporting from your own scripts"; `../docs/security.md`
+for what pane output can and can't do with it).
 
 ## Start at login
 

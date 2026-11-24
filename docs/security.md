@@ -28,7 +28,8 @@ model is about who can get to the socket, and what can reach the daemon without 
 
 - **Pane output.** Any program's output, `cat` of any file, a shell on a hostile machine. It
   reaches the daemon's VT parser, titles, cwd, the clipboard (OSC 52), agent detection and
-  snapshots.
+  snapshots, and (after 0.1.32) agent status and notifications: see
+  [Notifications and status from pane output](#notifications-and-status-from-pane-output).
 - **Other local users.** They must not reach the sockets, read state, plant files where clothod
   writes, or read files while clothod writes them.
 - **The network.** The push relay and Apple see only what push sends them.
@@ -223,6 +224,132 @@ unchanged.
 - **Remote commands** quote every environment value (`sq`), and the bridge passes only
   protocol bytes to stdout.
 
+## Notifications and status from pane output
+
+Features `agent.osc`, `agent.progress` and `agent.kinds` (after 0.1.32). Pane output can now
+make a pane show as an agent that needs the user, and so reach the Agents list, a notification
+and the phone: OSC 9, 99, 777 and 7501 (docs/protocol.md, "Notifications from any program").
+Pane output is untrusted: `cat` of a hostile file, a shell on another machine, a program an
+agent just built. What that text can and can't do:
+
+- **It is bounded.** A sequence over 4,096 bytes is ignored whole (far under the OSC limit of
+  finding 1). A title, an OSC 7501 `title` or `app` keeps at most 100 characters, a body or
+  `msg` 300, the message made of them 300, a kind 32, a percent is 0 to 100. Unfinished OSC 99
+  notifications (pieces sent with `d=0`) are held per pane up to 8 identifiers and 4,096 bytes
+  together, oldest dropped first, so a pane can't make the daemon hold more than that.
+- **Control characters are stripped** (C0, DEL, C1), by the same `printable` that cleans
+  titles, in the parser, before the text is stored, sent to a client or pushed. It can't carry
+  an escape sequence onward. Base64 payloads (OSC 99 with `e=1`, OSC 7501's `msg` and `title`)
+  are decoded first and cleaned after; an OSC 7501 report whose decoded text holds a control
+  character, or isn't UTF-8, is discarded whole.
+- **It is never markup.** The daemon doesn't read Markdown, links or HTML in it, and
+  `summary` is the text itself. Clients draw it as plain text (see For client authors): no
+  link is made from it, and nothing in it is a button or an action. OSC 99's action, button
+  and icon keys are ignored.
+- **It is never sent to the model.** The rewrite that turns an agent's reply into a
+  notification (docs/protocol.md, "Notification text") is skipped for source `osc`. Text any
+  program can print never becomes a prompt for the user's Claude login, so it can't be used
+  for prompt injection or to spend the user's quota.
+- **It is rate-limited per pane:** three alerts, then one every 20 s; the same text again
+  while the alert is up does nothing; other text changes the message at most 3 times in 30 s;
+  OSC 7501 state flips at most 10 in 10 s; progress events one a second. A file full of
+  notifications costs the user three alerts, and the daemon a counter. What was dropped is
+  logged as a count per pane (`osc dropped pane=<id> count=<n>`), never as text.
+- **It is replay-gated.** Output the daemon reads again after a restart or an upgrade (the
+  holder's buffer) raises nothing, like OSC 52 copies and terminal replies. An alert can't be
+  fired a second time by restarting serve.
+- **No replies are sent.** The OSC 99 query (`p=?`) and its activation and close reports are
+  never answered, and neither is the OSC 7501 query (`7501;?`). So nothing a pane prints here
+  makes the daemon write into that pane's input, where a shell would read it as typed.
+  (`CLOTHOD_TEST_PSP_ANSWER=1` turns the 7501 answer on, for ephemeral test instances; the
+  variable is the user's own, as under Trusted.)
+- **It can't speak for a hooked agent.** In a pane whose agent reports through hooks (Claude
+  Code, Codex), notifications and OSC 7501 states are ignored whole (an OSC 7501 report with an
+  `id`, a sub-task's, is ignored everywhere). Output that such an agent
+  prints while it works (a file it shows, a tool's output, a web page) can't change the
+  agent's state, replace its message, fake "Claude needs your permission" or raise an alert in
+  its name. Only `progress` is taken there, which draws a bar and alerts nobody. For a
+  detected agent (no hooks) a notification can raise an alert with its own text, as a BEL
+  already could without text; the kind shown stays the detected one.
+- **It can't answer anything.** An `osc` agent never has `requests`: there is no permission to
+  allow or deny from the phone, only an alert to acknowledge.
+- What it *can* do: show up to 300 characters of its choosing as an alert on the user's
+  devices, a few times a minute, under the pane's Workspace and Tab. That is what the feature
+  is. The user mutes a pane's agent with `agent.mute`. A muted pane-bound agent is not
+  removed by `agent.ack`, so the mute holds for the notifications that follow; it ends with
+  an unmute, a `clear`, another agent in the pane, or the pane.
+
+Tests: `vt` `notification_text_is_printable_and_bounded`,
+`over_long_notification_sequences_are_ignored`, `osc99_pending_pieces_are_bounded`,
+`osc99_chunks_base64_and_payload_types`, `osc9_progress_forms_and_conemu_commands`,
+`osc7501_status_reports`, `a_777_body_with_many_semicolons_is_kept_whole`,
+`notifications_do_not_disturb_titles_cwd_or_clipboard`; e2e `a_plain_script_raises_needs_you_with_osc_9_99_and_777`
+(the text, and no model run), `a_flood_of_notifications_is_rate_limited`,
+`a_takeover_and_a_restart_do_not_alert_twice` (replay),
+`a_hooked_agents_pane_ignores_notifications_and_a_detected_one_takes_them`,
+`osc_7501_states_drive_the_panes_agent` (no reply to the query).
+
+**`kind` is normalised before it is used.** A reporter chooses the kind (`clothod report
+--kind`, `agent.report`'s `kind`, OSC 7501's `app`), and the kind is printed in the push
+decision log (`agent=<kind>`), in `clothod.log`, in agent history and in the push record. It
+is lowercased and kept only when it is 1 to 32 characters of `a-z 0-9 . _ -`; anything else is
+`other`. A kind with a space, `=` or a newline can therefore not add a field to a log line
+(`agent=x state=done reason=…`) or start a line of its own. The check is where the report
+enters the daemon, so every later use gets the normalised value. Test:
+`kinds::tests::normalise_keeps_a_plain_name_and_nothing_else` (a space, `x state=waiting`, a
+newline, `=`, `/`, an escape sequence and a non-ASCII letter all become `other`); e2e
+`report_by_hand_from_any_script` (a kind of `x y=z` shows as `other`, and the log has none of it).
+
+**The global git config is re-read, by stamp and TTL, from both files.** What is taken from
+the user's global config (below, "What is taken from the user's global config") was read once
+per git binary, so a `safe.directory` or a `core.autocrlf` the user set later did nothing
+until the daemon restarted, and upgrades in place keep a daemon's knowledge for weeks. And it
+was read with `git config --global`, which reads only one of the two files git itself treats
+as global. Now:
+
+- Both files are read, each by name (`git config --file <path> --includes --list -z`), in
+  git's order: `$XDG_CONFIG_HOME/git/config` (`~/.config/git/config` when that is unset), then
+  `~/.gitconfig`, so `~/.gitconfig` wins as it does in git. A file that isn't there costs no
+  call; one git can't read, or one too large, adds nothing.
+- The answer is cached per git binary with a stamp: the binary's modification time, and each
+  file's modification time and size (or that it is missing). The stamps are taken before the
+  read, so a file written while git reads it is read again next time. A changed stamp reads
+  the config again before the next job.
+- After 60 s the answer is read again whatever the stamps say. That covers what a stamp can't
+  see: a file the config includes (`include.path`).
+- What is read, from where (`/`, away from any repository), and which keys are carried is
+  unchanged. Re-reading widens nothing: a value is still checked against its few fixed words
+  each time, and no other key is looked at.
+
+Tests: `gitrun::tests::a_changed_global_config_is_read_again_and_an_unchanged_one_is_cached`,
+`both_global_config_files_are_read_and_gitconfig_wins`,
+`tests_never_read_the_developers_config`.
+
+**The upgrade only ever signals the serve pid from `clothod.lock`.** `start` and `upgrade` now
+wait for a serve that is still starting (docs/protocol.md, "Starting and upgrading the
+daemon"), and at its ceiling the upgrade ends a new build's serve that never answered, so the
+rollback can take the lock. That is the one signal the upgrade sends, and what it may hit is
+narrow:
+
+- A serve writes its pid into `clothod.lock` once it holds the lock (the file is never
+  truncated by a process that failed to get it). The runtime dir is 0700 and owner-checked, so
+  the number is the user's own daemon's to write.
+- The pid is read from the file only. The lock is never probed: a probe's own lock, however
+  short, could make a starting serve fail to take it.
+- The file outlives its process, so the pid may be stale. It is signalled (SIGTERM, nothing
+  stronger) only when that pid is, right now, one of the user's clothod processes running
+  `serve`, not the holder, and not known to serve another runtime dir: a reused pid is not
+  hit.
+- A serve found only through the process list (a build from before the lock carried a pid) is
+  waited for like any other and never signalled; the message says it was left running. The
+  holder, where the shells live, is never signalled. Stopping a serve that answers still goes
+  through the socket, as before.
+
+Tests: `clotho_proto` `listen::tests::a_second_lock_fails_and_leaves_the_pid_readable`,
+`lock_pid_reads_only_a_pid`; e2e `upgrade_waits_for_a_serve_that_recovers_slowly` and
+`upgrade_gives_up_on_a_serve_that_never_comes_up_and_rolls_back` (the signal, the same holder
+and a live shell after it).
+
 ## Running git in a repo the user didn't write
 
 Since 0.1.32 (features `git.changes` and `worktree`) the daemon runs git: for the `changes`
@@ -256,9 +383,10 @@ All of it goes through one runner (`crate::gitrun`). Nothing else in the daemon 
 - **What is taken from the user's global config.** The global config is the user's own and
   trusted, but it is not handed to git whole: it may name programs (a pager, an fsmonitor,
   filters, aliases), and those must not run on a repository the daemon merely looks at. It is
-  read once per git binary, from `/` (away from any repository, so an `includeIf` on a
-  repository's path doesn't match), with `git config --global --includes`, and only these are
-  passed back, as config overrides:
+  read from `/` (away from any repository, so an `includeIf` on a repository's path doesn't
+  match), from both of the user's global files, each with `git config --file <path>
+  --includes`, and read again when either file changes and every 60 s (see "The global git
+  config is re-read" above). Only these are passed back, as config overrides:
   - `core.excludesFile`: the path of the user's global ignore file. Git only reads patterns
     from it.
   - `safe.directory`, every value in order (an empty one forgets those before it, as in git):
@@ -414,6 +542,11 @@ regular files only, non-blocking (a FIFO can't hang it), at most 1 MiB each.
 
 - Treat everything from a pane as untrusted: OUTPUT bytes, titles, cwd, clipboard copies, agent
   messages. On a remote machine, so is the daemon's whole stream.
+- An agent's `message`, `summary` and `kind` can be any program's words (source `osc`, a
+  reported kind). Show them as plain text: no Markdown, no links made from them, no HTML. Show
+  an unknown `kind` by its name, and don't use it to build a file name, an image name or a
+  selector without checking it against the names you know. Don't answer OSC 99 or OSC 7501
+  queries from your own terminal emulator.
 - Diff text and paths (`git.changes`, `git.diff`) are untrusted too: they are a repository's
   contents. Draw them as text, never as markup or as terminal output, and never build a shell
   command or a URL from a path without quoting it. The same goes for `peek` lines, which are

@@ -178,7 +178,7 @@ pub fn safe_session(s: &str) -> bool {
 /// The line that resumes `agent` in a shell, if it is one we know how to resume.
 pub fn resume_line(agent: &SavedAgent) -> Option<String> {
     let session = agent.session.as_deref().filter(|s| safe_session(s))?;
-    match agent.kind.as_str() {
+    match Some(agent.kind.as_str()).filter(|k| crate::kinds::resumable(k))? {
         // Bound to its flag (`--resume` takes an optional value), and after `--` for Codex: the
         // id is never parsed as anything but the session.
         "claude" => Some(format!("claude --resume={session}\r")),
@@ -191,7 +191,7 @@ pub fn resume_line(agent: &SavedAgent) -> Option<String> {
 /// for an agent whose session wasn't known. Only used where that is unambiguous (the daemon's
 /// restore decides).
 pub fn continue_line(kind: &str) -> Option<&'static str> {
-    match kind {
+    match Some(kind).filter(|k| crate::kinds::resumable(k))? {
         "claude" => Some("claude --continue\r"),
         "codex" => Some("codex resume --last\r"),
         _ => None,
@@ -305,6 +305,11 @@ mod tests {
         assert_eq!(resume_line(&a("claude", "24e0052b-aa")).as_deref(), Some("claude --resume=24e0052b-aa\r"));
         assert_eq!(resume_line(&a("codex", "0199a-b")).as_deref(), Some("codex resume -- 0199a-b\r"));
         assert_eq!(resume_line(&a("other", "x")), None);
+        // Only the kinds `kinds::resumable` names have a line; the newer kinds have none.
+        for kind in ["claude", "codex", "opencode", "gemini", "copilot", "aider", "amp", "cursor", "other", "mytool"] {
+            assert_eq!(resume_line(&a(kind, "24e0052b-aa")).is_some(), crate::kinds::resumable(kind), "{kind}");
+            assert_eq!(continue_line(kind).is_some(), crate::kinds::resumable(kind), "{kind}");
+        }
         for bad in ["", "a b", "x;rm -rf ~", "$(id)", "a\rb", &"x".repeat(129), "--dangerously-skip-permissions", "-c", "-", "_x", "--"] {
             assert_eq!(resume_line(&a("claude", bad)), None, "{bad:?}");
         }

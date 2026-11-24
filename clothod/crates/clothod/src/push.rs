@@ -342,13 +342,7 @@ pub fn open(private_b64: &str, ciphertext_b64: &str, aad: &[u8]) -> Option<Vec<u
 /// it fits: the result (`msg`), the prompt (`q`), the tool input (`cmd`), the summary (`sm`),
 /// the project, tab and workspace names, and last the label.
 fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
-    let cut = |m: &str, max: usize| {
-        let mut end = m.len().min(max);
-        while !m.is_char_boundary(end) {
-            end -= 1;
-        }
-        m[..end].to_string()
-    };
+    let cut = cut_to;
     let capped = |t: &Option<String>, max: usize| t.as_deref().map(|t| cut(t, max));
     // In cutting order; the label (`m`) goes last.
     let mut texts: Vec<(&str, Option<String>)> = vec![
@@ -403,6 +397,90 @@ fn plaintext(label: &str, pane: u64, a: &Alert) -> Vec<u8> {
     let len = serde_json::to_vec(&v).unwrap().len() + pad_key;
     v["pad"] = json!(" ".repeat(len.div_ceil(PAD_TO) * PAD_TO - len));
     serde_json::to_vec(&v).unwrap()
+}
+
+/// `m` cut to at most `max` bytes, on a char boundary.
+fn cut_to(m: &str, max: usize) -> String {
+    let mut end = m.len().min(max);
+    while !m.is_char_boundary(end) {
+        end -= 1;
+    }
+    m[..end].to_string()
+}
+
+/// A single symbol a program puts before its title: Claude Code's ✳ ✶ ✻ ✽ ✢, braille spinners,
+/// · * • and other symbol characters. Never a letter, digit or ordinary punctuation like "(" or
+/// "#". The apps' rule (ClothoKit, Pane.isStatusGlyph): the first three ranges and `·*•` are
+/// theirs exactly; they then take every non-ASCII character of the Unicode categories So and Sm,
+/// which is given here by the blocks that hold those (std has no category table).
+fn is_status_glyph(c: char) -> bool {
+    match c as u32 {
+        0x2800..=0x28FF => true,                   // braille (spinners)
+        0x2600..=0x27BF => true, // dingbats, misc symbols (✳ ✶ ✻ ✽ ✢, ★)
+        0x25A0..=0x25FF => true,                   // geometric shapes (● ◐ ▶)
+        0xB7 | 0x2A | 0x2022 => true,              // · * •
+        // So and Sm in Latin-1: ¦ © ¬ ® ° ± × ÷
+        0xA6 | 0xA9 | 0xAC | 0xAE | 0xB0 | 0xB1 | 0xD7 | 0xF7 => true,
+        // Brackets (Ps, Pe) inside the symbol blocks below.
+        0x2308..=0x230B | 0x2329..=0x232A | 0x27C5..=0x27C6 | 0x27E6..=0x27EF | 0x2983..=0x2998 | 0x29D8..=0x29DB | 0x29FC..=0x29FD => false,
+        0x2190..=0x23FF => true, // arrows, mathematical operators, miscellaneous technical
+        0x2400..=0x244A => true, // control pictures, OCR
+        0x2500..=0x259F => true, // box drawing, block elements
+        0x27C0..=0x27FF => true, // miscellaneous mathematical symbols A, supplemental arrows A
+        0x2900..=0x2BFF => true, // supplemental arrows B, mathematical symbols and operators, symbols and arrows
+        0x1F000..=0x1F3FA | 0x1F400..=0x1FAFF => true, // pictographs and emoji (not the skin tone modifiers)
+        _ => false,
+    }
+}
+
+/// A pane's title as people should see it (the apps' `Pane.displayTitle`): a leading status
+/// glyph and its space are dropped, and a bare "Claude Code" says less than the folder, so it
+/// becomes the cwd's name. None: no title at all.
+fn display_title(title: Option<&str>, cwd: Option<&str>) -> Option<String> {
+    // What Swift's `.whitespaces` trims: spaces of every kind and tabs, not line breaks.
+    let blank = |c: char| c.is_whitespace() && !matches!(c, '\n' | '\u{b}' | '\u{c}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
+    let mut text = title?.trim_matches(blank);
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    if is_status_glyph(first) {
+        // Nothing but a glyph is no title at all.
+        if chars.as_str().is_empty() {
+            return None;
+        }
+        if chars.clone().next().is_some_and(char::is_whitespace) {
+            text = chars.as_str().trim_matches(blank);
+        }
+    }
+    if text.is_empty() {
+        return None;
+    }
+    if text == "Claude Code" {
+        if let Some(cwd) = cwd.filter(|c| !c.is_empty() && *c != "/") {
+            return Some(basename(cwd).to_string());
+        }
+    }
+    Some(text.to_string())
+}
+
+/// The last component of a path ("/" for the root), as NSString's `lastPathComponent` gives it.
+fn basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() && !path.is_empty() {
+        return "/";
+    }
+    trimmed.rsplit('/').next().unwrap_or("")
+}
+
+/// A Tab's title as the apps show it (ClothoKit, `ModelStore.displayTitle(of:)`), for a push
+/// record's `tb`: the title the user gave the Tab; else its active pane's title, without a
+/// leading status glyph and with a bare "Claude Code" as the folder's name; else the cwd's
+/// name; else "Shell". Held to the record's cap for names.
+pub fn shown_title(tab_title: Option<&str>, pane_title: Option<&str>, cwd: Option<&str>) -> String {
+    let title = match tab_title.filter(|t| !t.is_empty()) {
+        Some(t) => t.to_string(),
+        None => display_title(pane_title, cwd).or_else(|| cwd.map(basename).filter(|b| !b.is_empty()).map(String::from)).unwrap_or_else(|| "Shell".into()),
+    };
+    cut_to(&title, MAX_NAME)
 }
 
 /// Caps per text in a push record, in bytes (before the record's own cap).
@@ -1120,6 +1198,11 @@ fn body(reg: &Reg, pane: u64, alert: &Alert) -> Option<Value> {
     let mut body = json!({"handle": reg.handle, "ciphertext": ciphertext, "collapse_id": collapse});
     // In the clear, so the relay can leave the sound out: it tells the relay and Apple that a
     // turn finished with nothing for the user to do, and no more.
+    //
+    // `silent` is either the JSON boolean `true` or not in the body at all. The relay answers
+    // 400 to anything that is not a boolean (a `null`), and a 400 blocks the registration until
+    // the phone registers again. So it is set here by hand and never goes through a struct
+    // field or an `Option`, which would serialise as `null` when absent.
     if silent(alert) {
         body["silent"] = json!(true);
     }
@@ -1246,6 +1329,125 @@ mod tests {
         // The test alert (`push.test`) has no label: it sounds.
         let test = body(&reg, 0, &Alert::basic("clotho", "done", Some("Test alert".into()), 1.0)).unwrap();
         assert!(test.get("silent").is_none());
+    }
+
+    /// `silent` is the JSON boolean `true`, or the body has no such key: the relay answers 400
+    /// to a `null`, which blocks the registration.
+    #[test]
+    fn silent_is_true_or_absent() {
+        let reg = Reg { device: "d".into(), handle: "h".into(), key: PK.into(), label: LABEL.into(), relay: "https://relay.example".into(), env: "production".into(), created: 0.0, last_error: None, blocked: false };
+        for state in ["starting", "running", "waiting", "done", "error", "idle", ""] {
+            for nu in [None, Some(true), Some(false)] {
+                let b = body(&reg, 7, &Alert { state: state.into(), needs_user: nu, ..full() }).unwrap();
+                let text = b.to_string();
+                let quiet = state == "done" && nu == Some(false);
+                assert_eq!(text.contains(r#""silent":true"#), quiet, "{state} {nu:?}: {text}");
+                assert_eq!(text.matches(r#""silent""#).count(), usize::from(quiet), "{state} {nu:?}: {text}");
+                assert!(!text.contains(r#""silent":null"#) && !text.contains(r#""silent":false"#), "{state} {nu:?}: {text}");
+                match b.get("silent") {
+                    Some(v) => assert!(quiet && *v == Value::Bool(true), "{state} {nu:?}: {v}"),
+                    None => assert!(!quiet, "{state} {nu:?}"),
+                }
+                // Nothing else in the body is null either.
+                assert!(b.as_object().unwrap().values().all(|v| !v.is_null()), "{state} {nu:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_shown_title_is_the_apps() {
+        let cwd = Some("/home/me/Projects/clotho");
+        // The Tab's own title wins, as it is.
+        assert_eq!(shown_title(Some("deploys"), Some("✳ Fixing tests"), cwd), "deploys");
+        assert_eq!(shown_title(Some(""), Some("vim"), cwd), "vim", "an empty Tab title is none");
+        // The pane's title, without its status glyph.
+        for (title, want) in [
+            ("✳ Fixing tests", "Fixing tests"),
+            ("⠋ Building", "Building"),
+            ("· Thinking", "Thinking"),
+            ("* Fixing tests", "Fixing tests"),
+            ("• one", "one"),
+            ("● ready", "ready"),
+            ("✢  two spaces ", "two spaces"),
+            ("\u{1F916} bot", "bot"),
+            ("→ next", "next"),
+            ("  vim main.rs  ", "vim main.rs"),
+            // A glyph that is part of a word, letters, digits and plain punctuation stay.
+            ("✳Fixing", "✳Fixing"),
+            ("*scratch*", "*scratch*"),
+            ("(main) zsh", "(main) zsh"),
+            ("# root", "# root"),
+            ("~ home", "~ home"),
+            ("+ plus", "+ plus"),
+            ("é accent", "é accent"),
+            ("✳ ✳ twice", "✳ twice"),
+        ] {
+            assert_eq!(shown_title(None, Some(title), cwd), want, "{title:?}");
+        }
+        // A bare Claude Code is the folder.
+        assert_eq!(shown_title(None, Some("Claude Code"), cwd), "clotho");
+        assert_eq!(shown_title(None, Some("✳ Claude Code"), cwd), "clotho");
+        assert_eq!(shown_title(None, Some("Claude Code"), Some("/home/me/Projects/clotho/")), "clotho");
+        assert_eq!(shown_title(None, Some("Claude Code"), None), "Claude Code");
+        assert_eq!(shown_title(None, Some("Claude Code"), Some("/")), "Claude Code");
+        assert_eq!(shown_title(None, Some("Claude Code review"), cwd), "Claude Code review");
+        // No title (none, blank, or only a glyph): the folder.
+        for title in [None, Some(""), Some("   "), Some("✳"), Some(" ✳ ")] {
+            assert_eq!(shown_title(None, title, cwd), "clotho", "{title:?}");
+        }
+        assert_eq!(shown_title(None, None, Some("/")), "/");
+        // Nothing at all.
+        assert_eq!(shown_title(None, None, None), "Shell");
+        assert_eq!(shown_title(None, Some("✳"), Some("")), "Shell");
+        // Held to the record's cap for names, on a char boundary.
+        for long in [shown_title(Some(&"é".repeat(200)), None, None), shown_title(None, Some(&"é".repeat(200)), None), shown_title(None, None, Some(&format!("/tmp/{}", "é".repeat(200))))] {
+            assert_eq!(long, "é".repeat(MAX_NAME / 2));
+        }
+    }
+
+    /// A done turn that asks something (`nu` true), and a plain done one (`nu` false).
+    fn nu_true() -> Alert {
+        Alert { message: Some("Both fixes are ready. Should I push them, or do you want to read the diff first?".into()), needs_user: Some(true), ..full() }
+    }
+
+    fn nu_false() -> Alert {
+        Alert { needs_user: Some(false), ..full() }
+    }
+
+    /// A done turn that asks something: `nu_true()`, padded to 1024 bytes.
+    const NU_TRUE: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"done","msg":"Both fixes are ready. Should I push them, or do you want to read the diff first?","t":1761512345.5,"q":"fix the flaky push test on macOS","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"d":254,"nu":true,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           "}"#;
+    /// NU_TRUE sealed to PK (by clothod, `print_vectors`), for iOS to open with SK.
+    const CT_NU_TRUE: &str = "Dx3qmBHkrYzps9SKQuYVYsuIBJhO11enqxWxSjXHS2DmafmsPY9YgzURuM6WdkLYzWtz9KS0iYIJSwPfmAsarSx25k0E1GmWHU+NYxnvaQnMONLhTWQ3lnGhOOa2+uZPKHCQkDmG8qohNP1wah+piyNtzWcJ4vwlntHF2H/urb03fYn1/9ToF5QVcSGc4m7xiAKok2XT1hlFG5t7o/kfIniekFHxJlIcSPgNrYlz0Xwd83k7e4FHkdTqBL0RQFUlEaa7SgbbMxPG4Sv+Z+RKi3H1ibrzU5bmsFL/BUscYQV3d4BK2Mql5iPhTduiB4HJaWgUU3pkn+p2unczy/p/cR1Ok7PLXsvyNUUUDaSFbVSOTOOz3QZnPNxbkvO95Rkw/kg7mZqcmE0M/yaHrBWA8K7tZn/ZpRTF4qYvhrT1xqtqaf+CVo49dbKncdPc8yNsZ6r11h2c6lXp8NsH38aYDBgJYGZYigkYuq4kxB0nM2XlqhE1FF+V7TThSxIoIct0I7S3x+JjbxiKMYO9VxBqUZ3znqsQ2Z9Bz7OIeax1SBocESoDhFSpPsGdRV2VKQdvPF7DfHxLkjaGhi9EB3wV8fl+9eL+ZYuj4OqFfbrw2NfkA9abpwVq75gzQiuVuRyZiV0j1zzs+AEbtWOIBQMeiQbEwyQ0w0117DBKcQAEbYALnvF+eWGs95mazzvI+tqrWS1JUZdkzqTdG7PDaWDLgAi9tTBVI3B1J8VBl7565t12/0R5oRwNEyJjcowmtM/Vo8IDFpPhFP1wlIelgBA4K1rgwfwzZqN3ZRfdxfpmg3jfwUi0XCwxyolOV/gZYAdHLmtd9I4Bk60so8C8Z1KOEZN3/H3YWeKuJQXfNJofPjOn5LLsH0zG6pVR49cj1RmaCW92ix17KSdhLQMX7gFL0wShadtEAe+4hhwRiRmmrXy6EUGAtc0do+tpY7V4IQgAxTGH8jKsh9gweBAcZ21ZaP/yqbcXjrlZH5YW1HHPzZyrbmLTxcyDRsbwNCh4/H2hWGyr57UCDB0yQdF5DS62xwzJJjOXVg8U+EJDvvLAwY+Wm3+Y36CXqqxScWFaCvrVpT+oZv0TfM0jJXRKTSmjs5sVs9JmPzjqwXFtpypKUlLpEOxYv6I2V4PmPvQZnX6XkrDXqGCS47vw3W4kXQ6hKFAFf+kvAxmfQKakzysgQ7qVyL00SmFVovdNp7JU9BTcFLb0hCsCl2HmYQSf26AbGkBg63IpkxjfMx4Y3g7sCe7w9IxQgNZbfOOdrBmaP6hEkYlq9luI2G84Rib67hi+65Qqv4r9gFHk5m21i5bY25+UgdTXwqsz9v68ZBR/0OVPrFi5zFd5W4oXnnGl0mPvkcbEGxyUaYv8fMb9ulVbZlbbUG+lpyvT6Pytbq0BlWmBk4lTf1cVySOlKkVLnqj3Dg==";
+    /// A plain done turn: `nu_false()`, padded to 1024 bytes.
+    const NU_FALSE: &str = r#"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"done","msg":"All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.","t":1761512345.5,"q":"fix the flaky push test on macOS","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"d":254,"nu":false,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              "}"#;
+    /// NU_FALSE sealed to PK (by clothod, `print_vectors`), for iOS to open with SK.
+    const CT_NU_FALSE: &str = "AYfkADlh+MiCzsIrrzGqBccHN5eNWxlsaDP6y8ygEH4KIXwNUO5M8Hlof0t+fm7mQwg80GPcId9ZJeo4DB1n22tNlG8xlWepFDLaqKrwsifcK32rkKul5dl9KhXj8FwfKM023+fcum9M2+zg2wFJpAmbbP9QeXSxCWrRPmIaFPL6WpHaWGyfshSRNJjOL4gEd6oRCIWcyR739iQaB0ZIfdC11Etlu3L60uIxvkTTlzDKHEr5aXZ9PDWOamOp7eaIWF877EcaF03ZTOXbWhWUBoXQsWpb6yjtxOD1cMkCJWZfZqBhc7WzE/vMTPCA4K9x+oInMsrvqku3l2CIQSMpAkTg80OrEYcrgI696XbbyUfbXu206ENIhUY6Wxm4x0SeL2p5ynbU6dA8x4NQQpEbs2yNQ2yFjCPD89V6FZ4FVuIXRzOEGbyshIGzGedU3xduvFmwp/AznJl5p+KQX9lN3EbDqy+RhSV/ntNN3jKQ7NyRMxQU/9iDnOThisUnuRy2iUN+fCjJNxYZG1xuKpmHe/GFVq+BlV8+5pZFwtW7Q2G777vhtsZ/F4v7URhrK/Tli3g8w2bRr8o/o8mrqyRLWkgt2QqdBEkipBnDIucKabZIKOPHnBHkVJnk5inXdFAMHtWG4eahFv2Dc9TXMiOHTHpQKeXBEZuy8OEr8dKtaYJzt2PQA/zv3PA8kt9XL3CcQYUVXR9YehVvzVDJGOPy+6jpZlWs7tNv4SRlcXisP2iY5SAS0MS+Bn3Y+M+iG+EQDMarfTNdvVYX56mUByLUPixcHMBGIjGDu8UBnghMRW/oQfdwySAb8bV3I/1yD+10uEFKesFtU3NtelDlatrxRT7oLQYBPR7dG4x5UbtqtYfwqaAn8x+MEBBxVmunQ5Ft1phRsVcX8HcSoJ0aYS6TuV+KrsHV7ZQng9IcuoYJKOSeF/PgrIaBHPCX5xC27i+gXL4QmFyl/EL/+ZucCT7gY8QWiTKopkELy5i+kshNK/ARCmbBBLtQA2bdjoebmxVAEXx+cl7pah9wCsQ6QAby7v84kuZlABUckRC0Epa9vp74sVVQu7IUvpeuWGOdCusOCavvAQKgaBoW9toQr0Q4jIzpPH5GhyekixlWdEc97rCOzdFqxphRDcB2Qx91lQZnU1CtRrbbsa2j9MeECgBsq/ZfJYeTcp8je0gV+RShJRaQdHLR4+StrF3IfyHFqyGXs54YO6WcfPbD5zng8sLsvZvssOiT0Sv46LrevWcyxYUwbS8XVHLJ92Rb89RjtGNQijf8jJAud511PkKbIJMbUkUgxatB+0h6pVBAx3D3IWXt2arqG3OgZfh7H1t+g8YPSxGHKlAXVf9MI7ppnxO8QurOJ4PLtjZaL9Wdw7IsvdkV8XUx3XsDe3YajCk/w2vG2b1aLebkx0tLT3u0us9TqQ==";
+
+    #[test]
+    fn the_nu_vectors_open() {
+        let aad = collapse_id(LABEL, 7);
+        for (name, alert, plain, ct, nu) in [("NU_TRUE", nu_true(), NU_TRUE, CT_NU_TRUE, true), ("NU_FALSE", nu_false(), NU_FALSE, CT_NU_FALSE, false)] {
+            assert_eq!(plain.len(), PAD_TO, "{name}");
+            assert_eq!(std::str::from_utf8(&plaintext(LABEL, 7, &alert)).unwrap(), plain, "{name}");
+            assert_eq!(open(SK, ct, aad.as_bytes()).unwrap(), plain.as_bytes(), "{name}");
+            assert!(open(SK, ct, b"another pane").is_none(), "{name}: aad binds the collapse id");
+            let v: Value = serde_json::from_str(plain).unwrap();
+            assert_eq!((v["s"].clone(), v["nu"].clone()), (json!("done"), json!(nu)), "{name}");
+        }
+    }
+
+    /// Seals the `nu` vectors anew, to paste in above: `cargo test -p clothod --lib
+    /// print_vectors -- --ignored --nocapture`. Every run seals anew (HPKE is randomised), so
+    /// new ciphertexts must be copied to the iOS side too (ClothoTests/PushTests).
+    #[test]
+    #[ignore]
+    fn print_vectors() {
+        let aad = collapse_id(LABEL, 7);
+        for (name, a) in [("NU_TRUE", nu_true()), ("NU_FALSE", nu_false())] {
+            let plain = plaintext(LABEL, 7, &a);
+            println!("{name}: {}", std::str::from_utf8(&plain).unwrap());
+            println!("CT_{name}: {}", seal(PK, &plain, aad.as_bytes()).unwrap());
+        }
     }
 
     #[test]
