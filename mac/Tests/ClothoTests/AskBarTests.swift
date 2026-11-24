@@ -474,6 +474,61 @@ final class AskBarTests: XCTestCase {
         try await waitFor("the last bar's buttons") { last.isEnabled }
     }
 
+    /// A request that shows again inside the delay (another took its place for an instant) waits the whole
+    /// delay from its last show: the timer of its first show doesn't switch the buttons on early.
+    func testARequestThatShowsAgainSettlesFromItsLastShow() async throws {
+        AskBar.settleDelay = 0.6
+        let second = PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")
+        let bar = AskBar(npmTest)
+        XCTAssertFalse(bar.isEnabled)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        bar.show(second, more: 0)
+        bar.show(npmTest, more: 0)
+        let shown = Date()
+        XCTAssertEqual(bar.settling, "r1")
+        // Past the first show's timer (0.6 s), before the last show's (0.9 s).
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertLessThan(Date().timeIntervalSince(shown), AskBar.settleDelay, "the check ran too late to mean anything")
+        XCTAssertFalse(bar.allow.isEnabled, "the first show's timer doesn't end the wait")
+        XCTAssertFalse(bar.deny.isEnabled)
+        XCTAssertEqual(bar.settling, "r1")
+        try await waitFor("the buttons") { bar.allow.isEnabled && bar.deny.isEnabled }
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(shown), AskBar.settleDelay - 0.01, "a full delay after the last show")
+        XCTAssertNil(bar.settling)
+    }
+
+    /// A request answered, gone and back with the same id, then answered again: the first press's retry
+    /// timer doesn't switch the buttons back on early.
+    func testAnOlderRetryTimerDoesNotReenableAfterALaterPress() async throws {
+        let delay = AskBar.retryDelay
+        AskBar.retryDelay = 0.6
+        defer { AskBar.retryDelay = delay }
+        let second = PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")
+        let bar = AskBar(npmTest)
+        var asked: [String] = []
+        bar.onDecide = { request, _ in asked.append(request.id) }
+        bar.decide(.allow)
+        XCTAssertFalse(bar.isEnabled)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        // It leaves and returns (no settle delay here), and is answered again.
+        bar.show(second, more: 0)
+        bar.show(npmTest, more: 0)
+        XCTAssertTrue(bar.isEnabled)
+        bar.decide(.allow)
+        let pressed = Date()
+        XCTAssertEqual(asked, ["r1", "r1"])
+        XCTAssertFalse(bar.isEnabled)
+        // Past the first press's timer (0.6 s), before the second's (0.9 s).
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertLessThan(Date().timeIntervalSince(pressed), AskBar.retryDelay, "the check ran too late to mean anything")
+        XCTAssertFalse(bar.allow.isEnabled, "the first press's timer doesn't re-enable")
+        XCTAssertFalse(bar.deny.isEnabled)
+        XCTAssertEqual(bar.sent, "r1")
+        try await waitFor("the buttons") { bar.allow.isEnabled && bar.deny.isEnabled }
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(pressed), AskBar.retryDelay - 0.01, "a full delay after the last press")
+        XCTAssertNil(bar.sent)
+    }
+
     /// ⌘↩ and ⌘. wait again when they come to mean a bar that already shows: its pane took the keyboard
     /// (the user's click, another device's focus, a pane that exited), or its window became key. The
     /// buttons stay on: a click's target is the request under it.

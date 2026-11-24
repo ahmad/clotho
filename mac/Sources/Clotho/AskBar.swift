@@ -40,6 +40,10 @@ final class AskBar: NSView {
     private(set) var sent: String?
     /// The request that just showed, until `settleDelay` passes.
     private(set) var settling: String?
+    /// Counts the settles and the presses: a timer acts only when none came after the one that set it, so
+    /// a request that shows (or is answered) again inside the delay isn't switched on early by the older timer.
+    private var settleGeneration: UInt = 0
+    private var sentGeneration: UInt = 0
     /// From when ⌘↩ and ⌘. answer: `settleDelay` after they came to mean this bar.
     private var keysFrom = Date.distantPast
 
@@ -115,11 +119,12 @@ final class AskBar: NSView {
 
     /// Turns the buttons and keys off for `settleDelay`: the user hasn't read the request shown yet.
     private func settle() {
-        let id = request.id
+        settleGeneration &+= 1
+        let generation = settleGeneration
         if Self.settleDelay > 0 {
-            settling = id
+            settling = request.id
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay) { [weak self] in
-                guard let self, settling == id else { return }
+                guard let self, settleGeneration == generation else { return }
                 settling = nil
                 updateEnabled()
             }
@@ -152,12 +157,13 @@ final class AskBar: NSView {
     /// `keysFrom`.
     func decide(_ decision: PermissionDecision, byKey: Bool = false) {
         guard isEnabled, !byKey || Date() >= keysFrom else { return }
-        let id = request.id
-        sent = id
+        sentGeneration &+= 1
+        let generation = sentGeneration
+        sent = request.id
         updateEnabled()
         onDecide?(request, decision)
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.retryDelay) { [weak self] in
-            guard let self, sent == id else { return }
+            guard let self, sentGeneration == generation, sent != nil else { return }
             sent = nil
             updateEnabled()
         }
