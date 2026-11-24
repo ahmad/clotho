@@ -1,5 +1,6 @@
 import AppKit
 import ClothoKit
+import ClothoFake
 import XCTest
 @testable import Clotho
 
@@ -85,22 +86,36 @@ final class FileSidebarTests: XCTestCase {
         XCTAssertEqual(files.title.stringValue, ComputerName.current)
 
         // Browsing away stops following, and the button offers the way back.
-        let away = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        // A small folder of the test's own: the temp folder itself can hold tens of thousands of entries
+        // (it does on the build Mac), and listing it outlasts the wait.
+        let awayURL = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("cmac-away-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: awayURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: awayURL) }
+        try Data("x".utf8).write(to: awayURL.appendingPathComponent("a.txt"))
+        let away = awayURL.path
         // As a breadcrumb click or a folder's double-click does.
         files.pane.onUserNavigate?()
         files.pane.load(away)
         try await wait("the other folder") { files.pane.path == away }
         XCTAssertFalse(files.following)
         XCTAssertFalse(files.followButton.isHidden, "↩ Follow Pane")
-        // While browsing, the pane's moves don't pull it back.
-        files.follow(machine: .local, folder: "/")
+        // While browsing, the focused pane's folder changing doesn't pull it back. The change is a real
+        // one (the focus moves to a pane in another folder): every sync tells the sidebar the focused
+        // pane's folder, so one only told to the sidebar is overwritten by the next sync.
+        let fake = try XCTUnwrap(app.store.backend as? FakeBackend)
+        let first = try XCTUnwrap(app.store.focusedPane?.id)
+        let elsewhere = try await fake.split(first, direction: .right, ratio: nil,
+                                             spawn: SpawnOptions(command: ["/bin/sh", "-c", "exec sleep 120"], cwd: "/")).pane
+        try await fake.focus(.pane(elsewhere))
+        try await wait("the focus on the pane in the other folder") { app.store.focusedPane?.id == elsewhere && app.store.focusedPane?.cwd == "/" }
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(files.pane.path, away)
+        XCTAssertFalse(files.following)
         files.followAgain()
         try await wait("back at the pane's folder") { files.pane.path == "/" }
         XCTAssertTrue(files.following)
         XCTAssertTrue(files.followButton.isHidden)
-        files.follow(machine: .local, folder: cwd)
+        try await fake.focus(.pane(first))
         try await wait("following the pane again") { files.pane.path == cwd }
 
         // Resizing: clamped, remembered at the end of the drag.
