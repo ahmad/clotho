@@ -19,6 +19,23 @@ final class SplitLayoutView: NSView {
 
     override var isFlipped: Bool { true }
 
+    /// While the centre diff covers the panes: nothing in them is in the accessibility tree, as nothing
+    /// in them takes a click or the keyboard.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
+
     /// Shows `layout` with these pane views, which may be shared with other tabs' history.
     func show(_ layout: Layout?, hosts newHosts: [PaneID: PaneHostView], maximized: PaneID?) {
         layoutTree = layout

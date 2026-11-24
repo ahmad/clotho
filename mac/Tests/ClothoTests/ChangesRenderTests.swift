@@ -109,6 +109,9 @@ final class ChangesRenderTests: XCTestCase {
                 saveSnapshot(of: app.container, to: "\(folder)/diff-\(name).png")
                 app.closeChangesDiff()
                 model.select(nil, group: .uncommitted)
+                // Nothing selected again: the list has the whole inspector, with no line where the diff began.
+                try await settle()
+                saveSnapshot(of: files, to: "\(folder)/inspector-no-selection-\(name).png")
 
                 // The list's states: no repository, still reading, a reason, nothing changed, an error.
                 fake.setGit(pane, nil)

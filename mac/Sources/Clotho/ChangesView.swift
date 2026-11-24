@@ -442,6 +442,17 @@ final class DiffAreaView: NSView {
     }
 }
 
+/// The list over the selected file's diff. With the diff hidden there is one part and no divider. A plain
+/// NSSplitView keeps its divider on screen where it last was, a line across the list that outlives
+/// `needsDisplay`; one whose `drawDivider` is overridden draws its dividers through it, and this draws
+/// none while a part is hidden (not at the bottom edge either).
+final class ChangesSplitView: NSSplitView {
+    override func drawDivider(in rect: NSRect) {
+        if arrangedSubviews.contains(where: \.isHidden) { return }
+        super.drawDivider(in: rect)
+    }
+}
+
 /// The inspector's Changes view.
 final class ChangesView: NSView, NSSplitViewDelegate {
     let model: ChangesModel
@@ -454,7 +465,7 @@ final class ChangesView: NSView, NSSplitViewDelegate {
     private(set) var openButton: QuietButton!
     let diffArea = DiffAreaView(mode: .unified)
     let message = ChangesMessageView()
-    private let split = NSSplitView()
+    private let split = ChangesSplitView()
     private let diffBox = NSView()
     private let followRow = NSView()
     private var bodyTop: NSLayoutConstraint!
@@ -650,6 +661,7 @@ final class ChangesView: NSView, NSSplitViewDelegate {
         if diffBox.isHidden == showsDiff {
             diffBox.isHidden = !showsDiff
             split.adjustSubviews()
+            split.needsDisplay = true
             placedDivider = false
             needsLayout = true
         }

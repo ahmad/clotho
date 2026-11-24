@@ -484,10 +484,11 @@ extension AppDelegate {
     }
 
     /// Opens a file from the sidebar: in place on this Mac; from another machine, through a copy
-    /// whose saves go back. `app` is Open With's choice.
-    func openFile(_ location: Location, size: UInt64?, with app: URL? = nil) {
+    /// whose saves go back. `app` is Open With's choice. `revealIfItRuns` (Open in Editor): a file its
+    /// default app would run is shown in Finder instead.
+    func openFile(_ location: Location, size: UInt64?, with app: URL? = nil, revealIfItRuns: Bool = false) {
         if location.machine.isLocal {
-            return launch(URL(fileURLWithPath: location.path), with: app)
+            return launch(URL(fileURLWithPath: location.path), with: app, revealIfItRuns: revealIfItRuns)
         }
         if let size, size > Self.largeFileBytes {
             let alert = NSAlert()
@@ -498,14 +499,14 @@ extension AppDelegate {
             alert.addButton(withTitle: "Cancel")
             alert.beginSheetModal(for: window) { [weak self] response in
                 guard response == .alertFirstButtonReturn else { return }
-                self?.downloadAndOpen(location, with: app)
+                self?.downloadAndOpen(location, with: app, revealIfItRuns: revealIfItRuns)
             }
             return
         }
-        downloadAndOpen(location, with: app)
+        downloadAndOpen(location, with: app, revealIfItRuns: revealIfItRuns)
     }
 
-    private func downloadAndOpen(_ location: Location, with app: URL?) {
+    private func downloadAndOpen(_ location: Location, with app: URL?, revealIfItRuns: Bool) {
         let key = "\(location.machine.key)\n\(location.path)"
         openingFiles.insert(key)
         fileSidebar?.pane.refreshRows()
@@ -520,7 +521,7 @@ extension AppDelegate {
                 let edit = try await remoteEdits.open(machine: location.machine.key, machineName: location.machine.label,
                                                       path: location.path, backend: files)
                 log("open files: \(location.machine.key):\(location.path) → \(edit.localPath)")
-                launch(edit.localURL, with: app)
+                launch(edit.localURL, with: app, revealIfItRuns: revealIfItRuns)
             } catch {
                 showNotice("Couldn't open “\(location.name)” from \(location.machine.label)", detail: error.localizedDescription,
                            action: nil, then: nil)
@@ -528,10 +529,19 @@ extension AppDelegate {
         }
     }
 
-    private func launch(_ url: URL, with app: URL?) {
+    /// What the last `launch` did, for the tests.
+    static var lastLaunch: (url: URL, revealed: Bool)?
+
+    private func launch(_ url: URL, with app: URL?, revealIfItRuns: Bool = false) {
+        let reveal = revealIfItRuns && app == nil && OpenSafety.runsWhenOpened(url)
+        Self.lastLaunch = (url, reveal)
         // Tests (OpenFilesInApps=NO) stop here, so nothing opens on the machine running them.
         if UserDefaults.standard.object(forKey: "OpenFilesInApps") != nil, !UserDefaults.standard.bool(forKey: "OpenFilesInApps") {
-            return log("open files: would open \(url.path)")
+            return log("open files: would \(reveal ? "show in Finder" : "open") \(url.path)")
+        }
+        if reveal {
+            log("open files: \(url.path) would run if opened; shown in Finder")
+            return NSWorkspace.shared.activateFileViewerSelecting([url])
         }
         if let app {
             NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())

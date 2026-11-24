@@ -511,4 +511,215 @@ final class InspectorTests: XCTestCase {
         files.changesView.list.table.deselectAll(nil)
         XCTAssertNil(app.changesModel.selection)
     }
+
+    // MARK: Gate round 4
+
+    /// The views reachable through the accessibility tree from `root`.
+    private func accessibilityViews(from root: Any) -> [NSView] {
+        var found: [NSView] = []
+        var queue: [Any] = [root]
+        var seen = Set<ObjectIdentifier>()
+        while let next = queue.popLast(), seen.count < 20000 {
+            let object = next as AnyObject
+            guard seen.insert(ObjectIdentifier(object)).inserted else { continue }
+            if let view = object as? NSView { found.append(view) } else if let view = (object as? NSCell)?.controlView { found.append(view) }
+            if let children = (object as? NSAccessibilityProtocol)?.accessibilityChildren() { queue.append(contentsOf: children) }
+        }
+        return found
+    }
+
+    /// VoiceOver can't reach what the diff covers: a pane's ask bar (Allow, Deny), its close button, its
+    /// terminal. They are back with the panes.
+    func testThePanesUnderTheCentreDiffAreOutOfTheAccessibilityTree() async throws {
+        let (app, host) = try await launchWithTheDiffUp()
+        defer { ChangesFixture.quit(app) }
+        app.window.contentView?.layoutSubtreeIfNeeded()
+        func inThePanes() -> [NSView] { accessibilityViews(from: app.window!).filter { $0 !== app.splitView && $0.isDescendant(of: app.splitView) } }
+        XCTAssertTrue(app.splitView.isCoveredForAccessibility)
+        XCTAssertEqual(app.splitView.accessibilityChildren()?.count, 0)
+        XCTAssertTrue(app.splitView.isAccessibilityHidden())
+        XCTAssertEqual(inThePanes().map { "\(type(of: $0))" }, [], "nothing of a covered pane")
+        XCTAssertTrue(accessibilityViews(from: app.window!).contains { $0.isDescendant(of: app.changesDiff) }, "the diff is there")
+
+        app.closeChangesDiff()
+        XCTAssertFalse(app.splitView.isCoveredForAccessibility)
+        XCTAssertFalse(app.splitView.isAccessibilityHidden())
+        XCTAssertTrue(inThePanes().contains { $0.isDescendant(of: host) }, "the pane is back")
+        app.openChangesDiff()
+        XCTAssertTrue(app.splitView.isCoveredForAccessibility)
+        // The focus moving closes the diff by itself: the panes are back then too.
+        app.changesDiff.cancelOperation(nil)
+        XCTAssertFalse(app.splitView.isCoveredForAccessibility)
+    }
+
+    /// A program that asked for every pointer motion (mode 1003) hears nothing of the pointer moving over
+    /// the diff that covers its pane.
+    func testACoveredTerminalReportsNoMouse() async throws {
+        let (app, host) = try await launchWithTheDiffUp()
+        var input: [Data] = []
+        PaneHostView.inputTap = { _, bytes in input.append(bytes) }
+        defer {
+            PaneHostView.inputTap = nil
+            ChangesFixture.quit(app)
+        }
+        app.window.contentView?.layoutSubtreeIfNeeded()
+        let terminal = host.terminal
+        var step: CGFloat = 0
+        /// The pointer moves to another cell of the terminal.
+        func move() throws {
+            step = step >= 5 ? 0 : step + 1
+            let point = terminal.convert(NSPoint(x: terminal.bounds.midX + step * 24, y: terminal.bounds.midY + step * 18), to: nil)
+            terminal.mouseMoved(with: try XCTUnwrap(NSEvent.mouseEvent(
+                with: .mouseMoved, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: app.window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)))
+        }
+        func isReports() -> Bool { input.allSatisfy { PaneTerminalView.isMouseReport(ArraySlice($0)) } }
+
+        // In view, with the mode on, the pointer is reported.
+        app.closeChangesDiff()
+        terminal.feedFromBackend(Data("\u{1b}[?1003h\u{1b}[?1006h".utf8))
+        try await ChangesFixture.wait("a report from the pane in view") {
+            try? move()
+            return !input.isEmpty
+        }
+        XCTAssertTrue(isReports(), "\(input.map { String(decoding: $0, as: UTF8.self).debugDescription })")
+
+        // Covered: the same motion reaches nobody.
+        app.openChangesDiff()
+        XCTAssertTrue(app.isChangesDiffShown)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        input = []
+        for _ in 0..<6 { try move() }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(input, [], "nothing while the diff covers the pane")
+
+        // And in view again.
+        app.closeChangesDiff()
+        try await ChangesFixture.wait("a report again") {
+            try? move()
+            return !input.isEmpty
+        }
+        XCTAssertTrue(isReports())
+    }
+
+    /// Open in Editor never runs a file: one its default app would run (a .command, an executable with no
+    /// editor) is shown in Finder, and the button says so. Files' own Open is as it was.
+    func testOpenInEditorShowsAFileThatWouldRunInFinder() async throws {
+        let (app, host) = try await launchWithTheDiffUp()
+        defer { ChangesFixture.quit(app) }
+        let fake = try XCTUnwrap(app.store.backend as? FakeBackend)
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory()).resolvingSymlinksInPath().appendingPathComponent("cmac-open-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for (name, mode) in [("deploy.command", 0o755), ("notes.txt", 0o644)] {
+            try Data("#!/bin/sh\necho hi\n".utf8).write(to: folder.appendingPathComponent(name))
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: folder.appendingPathComponent(name).path)
+        }
+        let script = GitChangedFile(path: "deploy.command", status: .untracked, added: 2, removed: 0)
+        let notes = GitChangedFile(path: "notes.txt", status: .untracked, added: 2, removed: 0)
+        XCTAssertEqual(app.changesDiff.openButton.toolTip, ChangesDiffView.openTip)
+        fake.setChanges(host.paneID, .success(GitChanges(root: folder.path, branch: "fix", head: "a1b2c3d",
+                                                         uncommitted: .init(files: [script, notes], added: 4, removed: 0), branchChanges: nil)))
+        app.changesModel.refresh()
+        try await ChangesFixture.wait("the new list") { app.changesModel.selectedFile == nil }
+        try await ChangesFixture.wait("the script listed") {
+            app.changesModel.select(script, group: .uncommitted)
+            return app.changesModel.selectedFile?.path == script.path
+        }
+
+        XCTAssertTrue(app.changesDiff.openButton.isEnabled)
+        XCTAssertEqual(app.changesDiff.openButton.toolTip, ChangesDiffView.revealTip)
+        XCTAssertEqual(app.changesDiff.openButton.accessibilityHelp(), ChangesDiffView.revealTip)
+        AppDelegate.lastLaunch = nil
+        app.changesDiff.openButton.performClick(nil)
+        XCTAssertEqual(AppDelegate.lastLaunch?.url.path, folder.appendingPathComponent("deploy.command").path)
+        XCTAssertEqual(AppDelegate.lastLaunch?.revealed, true, "shown in Finder, not opened")
+
+        app.changesModel.select(notes, group: .uncommitted)
+        XCTAssertEqual(app.changesDiff.openButton.toolTip, ChangesDiffView.openTip)
+        app.changesDiff.openButton.performClick(nil)
+        XCTAssertEqual(AppDelegate.lastLaunch?.url.path, folder.appendingPathComponent("notes.txt").path)
+        XCTAssertEqual(AppDelegate.lastLaunch?.revealed, false)
+
+        // Files' Open and double-click are not this button: unchanged.
+        let machine = try XCTUnwrap(app.connections[AppDelegate.localKey]?.machine)
+        app.openFile(Location(machine: machine, path: folder.appendingPathComponent("deploy.command").path), size: nil)
+        XCTAssertEqual(AppDelegate.lastLaunch?.revealed, false)
+    }
+
+    /// The number of horizontal lines in the Changes view under its header: pixel rows of one colour, at
+    /// the list's leading margin (where no row draws anything), that differ from the row above.
+    private func lines(in view: ChangesView) throws -> Int {
+        let path = NSTemporaryDirectory() + "cmac-lines-\(UUID().uuidString).png"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        saveSnapshot(of: view, to: path)
+        let rep = try XCTUnwrap(NSBitmapImageRep(data: try Data(contentsOf: URL(fileURLWithPath: path))))
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        let columns = Int(3 * scale)..<Int(9 * scale)
+        let top = Int((ChangesView.headerHeight + 4) * scale), bottom = rep.pixelsHigh
+        XCTAssertGreaterThan(bottom - top, 100)
+        func colour(_ x: Int, _ y: Int) -> [Int] {
+            var pixel = [Int](repeating: 0, count: 4)
+            rep.getPixel(&pixel, atX: x, y: y)
+            return pixel
+        }
+        var count = 0
+        var above: [Int]?
+        for y in top..<bottom {
+            let first = colour(columns.lowerBound, y)
+            guard columns.allSatisfy({ colour($0, y) == first }) else {
+                above = nil
+                continue
+            }
+            if let above, above != first { count += 1 }
+            above = first
+        }
+        return count
+    }
+
+    /// With no file selected the list has the whole view, and nothing is drawn across it or under it: not
+    /// after a file was selected either, when a plain NSSplitView leaves its divider where the diff began.
+    /// In the narrow window (760×520, the inspector at 220), light and dark.
+    func testNoLineCrossesTheListOnceTheSelectionIsEmptied() async throws {
+        let (app, fake, pane) = try await launch("git.changes,worktree")
+        let savedAppearance = NSApp.appearance
+        defer {
+            ChangesFixture.quit(app)
+            NSApp.appearance = savedAppearance
+            Theme.followAppAppearance()
+        }
+        let view = try XCTUnwrap(app.fileSidebar).changesView
+        let model = app.changesModel
+        ChangesFixture.fill(fake, pane)
+        try await ChangesFixture.wait("the summary on the pane") { app.store.focusedPane?.git?.changes != nil }
+        app.showInspector(.changes, takeKeyboard: false)
+        try await ChangesFixture.wait("the list") { view.list.rows.count > 2 }
+        func settle() async throws {
+            try await Task.sleep(nanoseconds: 150_000_000)
+            app.window.contentView?.layoutSubtreeIfNeeded()
+            app.window.displayIfNeeded()
+        }
+        app.window.setContentSize(NSSize(width: 760, height: 520))
+        app.sidebarWidth.constant = 150
+        for mode in [Theme.Mode.light, .dark] {
+            app.setAppearance(mode)
+            try await settle()
+            app.appearanceChanged()
+            app.fileSidebar?.onResize?(220)
+            try await settle()
+            XCTAssertNil(model.selection)
+            XCTAssertEqual(try lines(in: view), 0, "the list alone, \(mode.rawValue)")
+
+            model.select(ChangesFixture.daemon, group: .uncommitted)
+            try await ChangesFixture.wait("the diff, \(mode.rawValue)") { view.diffArea.table.items.count > 5 }
+            try await settle()
+            XCTAssertGreaterThan(try lines(in: view), 0, "the divider and the diff are seen, \(mode.rawValue)")
+
+            model.select(nil, group: .uncommitted)
+            try await settle()
+            XCTAssertNil(model.selection)
+            XCTAssertTrue(view.diffArea.isHiddenOrHasHiddenAncestor)
+            XCTAssertEqual(try lines(in: view), 0, "no line where the diff began, \(mode.rawValue)")
+        }
+    }
 }

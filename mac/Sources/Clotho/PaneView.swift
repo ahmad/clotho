@@ -59,7 +59,30 @@ final class PaneTerminalView: TerminalView {
         }
         // Whatever the terminal says about its focus now is newer than the report it owed.
         if isFocusReport { owesFocusIn = false }
+        // A covered pane reports no mouse. With any-motion reporting on (mode 1003) SwiftTerm reports the
+        // pointer wherever it is within the terminal's bounds, whatever is over it; its `mouseMoved` isn't
+        // open to override, so the report stops here, on its way out.
+        if Self.isMouseReport(data), Thread.isMainThread, MainActor.assumeIsolated({ isCovered?() == true }) { return }
         super.send(source: source, data: data)
+    }
+
+    /// Whether `data` is one mouse report, in any of the encodings a program can ask for: X10 and UTF-8
+    /// (CSI M and three values), SGR and SGR pixels (CSI < b;x;y M or m), urxvt (CSI b;x;y M).
+    nonisolated static func isMouseReport(_ data: ArraySlice<UInt8>) -> Bool {
+        var body = data
+        if body.first == 0x9b {
+            body = body.dropFirst()
+        } else if body.count >= 2, body.first == 0x1b, body.dropFirst().first == 0x5b {
+            body = body.dropFirst(2)
+        } else {
+            return false
+        }
+        if body.first == 0x4d { return (4...7).contains(body.count) }
+        guard let last = body.last, last == 0x4d || last == 0x6d else { return false }
+        var numbers = body.dropLast()
+        if numbers.first == 0x3c { numbers = numbers.dropFirst() } else if last == 0x6d { return false }
+        let fields = numbers.split(separator: 0x3b, omittingEmptySubsequences: false)
+        return fields.count == 3 && fields.allSatisfy { !$0.isEmpty && $0.allSatisfy { (0x30...0x39).contains($0) } }
     }
 
     /// Inside `takeKeyboardQuietly`.

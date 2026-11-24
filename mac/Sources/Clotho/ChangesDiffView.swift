@@ -31,6 +31,11 @@ final class ChangesDiffView: NSView {
     var onClose: (() -> Void)?
     /// Open in Editor: the file's machine and full path.
     var onOpenInEditor: ((MachineKey, String) -> Void)?
+    /// Whether Open in Editor shows this file in Finder instead: its default app would run it (OpenSafety.swift).
+    var revealsInsteadOfOpening: ((MachineKey, String) -> Bool)?
+    private var revealChecked: (path: String, reveals: Bool)?
+    static let openTip = "Open the file in its default app"
+    static let revealTip = "Show the file in Finder. Opening it would run it."
     /// What the pasteboard gets (tests replace it).
     var copy: (String) -> Void = { text in
         NSPasteboard.general.clearContents()
@@ -82,7 +87,7 @@ final class ChangesDiffView: NSView {
             button.action = action
             button.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
-        openButton.toolTip = "Open the file in its default app"
+        openButton.toolTip = Self.openTip
         openButton.setAccessibilityLabel("Open in Editor")
         copyButton.toolTip = "Copy the file's full path"
         copyButton.setAccessibilityLabel("Copy Path")
@@ -216,6 +221,13 @@ final class ChangesDiffView: NSView {
         }
         let canOpen = fullPath != nil && model.selectedFile?.status != .deleted
         openButton.isEnabled = canOpen
+        var reveals = false
+        if canOpen, let fullPath, let machine = model.target?.machine {
+            if revealChecked?.path != fullPath { revealChecked = (fullPath, revealsInsteadOfOpening?(machine, fullPath) ?? false) }
+            reveals = revealChecked?.reveals ?? false
+        }
+        openButton.toolTip = reveals ? Self.revealTip : Self.openTip
+        openButton.setAccessibilityHelp(openButton.toolTip)
         copyButton.isEnabled = fullPath != nil
         // The file left the list (committed, reverted): say so where its diff was.
         diffArea.show(model.selection == nil ? .failed("This file has no changes any more.") : model.diff)
@@ -331,7 +343,10 @@ extension AppDelegate {
     // - The keyboard: the window gives the diff whatever a view in the pane area asks for
     //   (`keyboardRedirect`), so no terminal or find field under the diff can have it. The keys that need
     //   a terminal with the keyboard (typing, paste, ⌘↩ and ⌘. for the ask bar) then reach no pane.
-    // - The mouse and drops: the diff is over the panes and takes both.
+    // - The mouse and drops: the diff is over the panes and takes both. A covered terminal reports no
+    //   mouse to its program either (`PaneTerminalView.send`): with any-motion reporting on (mode 1003)
+    //   SwiftTerm reports the pointer moving over its bounds, whatever is on top.
+    // - Accessibility: the pane area has no elements while covered (`isCoveredForAccessibility`).
 
     /// Closes the centre diff: what follows acts on a pane, which must be the one in view.
     func uncoverPanes() { closeChangesDiff() }
@@ -392,13 +407,24 @@ extension AppDelegate {
         diff.onOpenInEditor = { [weak self] key, path in
             guard let self, let machine = connections[key]?.machine else { return NSSound.beep() }
             // This Mac: the file itself, in its default app. Another machine: a copy whose saves go back,
-            // as a double-click in Files does.
-            openFile(Location(machine: machine, path: path), size: nil)
+            // as a double-click in Files does. Never run: a file its default app would run (a .command, an
+            // app, an executable with no editor) is shown in Finder instead.
+            openFile(Location(machine: machine, path: path), size: nil, revealIfItRuns: true)
         }
+        diff.revealsInsteadOfOpening = { [weak self] key, path in self?.openInEditorReveals(machine: key, path: path) ?? false }
         container.addSubview(diff)
         changesDiff = diff
         window.keyboardRedirect = { [weak self] in self?.keyboardRedirect(for: $0) }
         return diff
+    }
+
+    /// Whether Open in Editor would show this file in Finder. On this Mac the file itself is asked (its
+    /// name, its exec bit, its default app); on another machine only the name is known until its copy is
+    /// here, and the copy is asked again before it opens.
+    func openInEditorReveals(machine key: MachineKey, path: String) -> Bool {
+        guard let machine = connections[key]?.machine else { return false }
+        if machine.isLocal { return OpenSafety.runsWhenOpened(URL(fileURLWithPath: path)) }
+        return OpenSafety.runsWhenOpened(name: path, isExecutable: false, defaultApp: nil)
     }
 
     /// Shows the selected file's side-by-side diff over the panes. Nothing is created on the daemon:
@@ -408,6 +434,9 @@ extension AppDelegate {
         changesDiffOpened = (focusedMachine, store.state.focus, changesModel.target?.pane)
         diff.tabTitle = store.focusedTab.map { store.displayTitle(of: $0) } ?? ""
         diff.isHidden = false
+        // The panes under it leave the accessibility tree too: VoiceOver must not reach a covered pane's
+        // ask bar (Allow, Deny) or its close button.
+        splitView.isCoveredForAccessibility = true
         inspectorVisibilityChanged()
         diff.update()
         window.makeFirstResponder(diff)
@@ -419,6 +448,7 @@ extension AppDelegate {
         guard isChangesDiffShown else { return }
         let hadKeyboard = changesDiff.hasKeyboard
         changesDiff.isHidden = true
+        splitView.isCoveredForAccessibility = false
         changesDiffOpened = nil
         inspectorVisibilityChanged()
         if hadKeyboard { window.makeFirstResponder(activeTerminal) }
