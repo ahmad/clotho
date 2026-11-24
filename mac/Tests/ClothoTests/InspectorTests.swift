@@ -334,4 +334,181 @@ final class InspectorTests: XCTestCase {
         XCTAssertEqual(files.changesView.message.label.stringValue, "This pane isn't in a git repository.")
         XCTAssertTrue(files.changesView.followButton.isHiddenOrHasHiddenAncestor)
     }
+
+    // MARK: Nothing acts on the pane under the centre diff
+
+    /// The app with the centre diff up over the focused pane, on the fixture's first file.
+    private func launchWithTheDiffUp() async throws -> (AppDelegate, PaneHostView) {
+        let (app, fake, pane) = try await launch("git.changes,worktree")
+        let list = try XCTUnwrap(app.fileSidebar).changesView.list
+        ChangesFixture.fill(fake, pane)
+        try await ChangesFixture.wait("the summary on the pane") { app.store.focusedPane?.git?.changes != nil }
+        app.showInspector(.changes, takeKeyboard: true)
+        try await ChangesFixture.wait("the list") { list.rows.count > 2 }
+        list.takeKeyboard()
+        XCTAssertEqual(app.changesModel.selection?.path, ChangesFixture.daemon.path)
+        app.openChangesDiff()
+        XCTAssertTrue(app.isChangesDiffShown)
+        return (app, try XCTUnwrap(app.paneHosts[PaneKey(machine: AppDelegate.localKey, pane: pane)]))
+    }
+
+    private func assertTheDiffHasTheKeyboard(_ app: AppDelegate, _ after: String, line: UInt = #line) {
+        XCTAssertTrue(app.isChangesDiffShown, "the diff stays up after \(after)", line: line)
+        XCTAssertTrue(app.window.firstResponder === app.changesDiff, "the diff has the keyboard after \(after)", line: line)
+        XCTAssertFalse(app.window.firstResponder is PaneTerminalView, "not a covered terminal, after \(after)", line: line)
+    }
+
+    /// The menu commands that act on the focused pane. With the centre diff up each one closes it first,
+    /// so it runs in a pane in view (⌘W closes the diff and nothing else).
+    private static let paneCommands: Set<Selector> = [
+        #selector(AppDelegate.findInPane(_:)), #selector(AppDelegate.findNextInPane(_:)), #selector(AppDelegate.findPreviousInPane(_:)),
+        #selector(AppDelegate.clearActivePane(_:)), #selector(AppDelegate.splitPane(_:)), #selector(AppDelegate.closePane(_:)),
+        #selector(AppDelegate.maximizePane(_:)), #selector(AppDelegate.focusPane(_:)), #selector(AppDelegate.resizePane(_:)),
+    ]
+
+    /// Every other menu command: none acts on a pane. Copy, Paste and Select All go to whatever has the
+    /// keyboard, which under the diff is never a terminal; New Tab, New Tab in a Worktree and Upload Files
+    /// only read the focused pane's folder; the rest are for the app, the window, a Workspace or a Tab.
+    private static let otherCommands: Set<Selector> = [
+        #selector(AppDelegate.checkForUpdates(_:)), #selector(AppDelegate.showSettings(_:)), #selector(NSApplication.hide(_:)),
+        #selector(NSApplication.terminate(_:)), #selector(AppDelegate.newWorktreeTab(_:)), #selector(AppDelegate.chooseFilesToUpload(_:)),
+        #selector(AppDelegate.showMachineManager(_:)), #selector(AppDelegate.addMachine(_:)),
+        #selector(NSText.copy(_:)), #selector(NSText.paste(_:)), #selector(NSText.selectAll(_:)),
+        #selector(AppDelegate.resetZoom(_:)), #selector(AppDelegate.zoomIn(_:)), #selector(AppDelegate.zoomOut(_:)),
+        #selector(AppDelegate.terminalZoomIn(_:)), #selector(AppDelegate.terminalZoomOut(_:)), #selector(AppDelegate.terminalActualSize(_:)),
+        #selector(AppDelegate.showOrHideSidebar(_:)), #selector(AppDelegate.showOrHideFileSidebar(_:)),
+        #selector(AppDelegate.showInspectorChanges(_:)), #selector(AppDelegate.showInspectorFiles(_:)),
+        #selector(AppDelegate.showInspectorActivity(_:)), #selector(AppDelegate.focusSidebar(_:)),
+        #selector(AppDelegate.newWorkspace(_:)), #selector(AppDelegate.closeActiveWorkspace(_:)), #selector(AppDelegate.renameActiveWorkspace(_:)),
+        #selector(AppDelegate.previousWorkspace(_:)), #selector(AppDelegate.nextWorkspace(_:)),
+        #selector(AppDelegate.newTab(_:)), #selector(AppDelegate.closeActiveTab(_:)), #selector(AppDelegate.renameTab(_:)),
+        #selector(AppDelegate.previousTab(_:)), #selector(AppDelegate.nextTab(_:)), #selector(AppDelegate.goToTab(_:)),
+        #selector(AppDelegate.minimizeWindow(_:)), #selector(AppDelegate.zoomWindow(_:)), #selector(AppDelegate.toggleFullScreen(_:)),
+        #selector(AppDelegate.showQuickOpen(_:)), #selector(AppDelegate.showFileBrowser(_:)),
+        #selector(AppDelegate.showOnboarding(_:)), #selector(AppDelegate.showShortcuts(_:)),
+    ]
+
+    /// Every command in the menus is one or the other, so a new one has to be put in its place here; and
+    /// each pane command, run with the diff up, has closed the diff by the time it returns.
+    func testEveryPaneCommandClosesTheCentreDiffFirst() async throws {
+        for shortcut in AppDelegate.shortcuts {
+            XCTAssertTrue(Self.paneCommands.contains(shortcut.action) != Self.otherCommands.contains(shortcut.action),
+                          "\(shortcut.menu) › \(shortcut.title) is a pane command or it isn't: say which")
+        }
+        let (app, host) = try await launchWithTheDiffUp()
+        defer { ChangesFixture.quit(app) }
+        // No await from here to the end of the loop: the model doesn't move between the commands.
+        for shortcut in AppDelegate.shortcuts where Self.paneCommands.contains(shortcut.action) {
+            let name = "\(shortcut.menu) › \(shortcut.title)"
+            app.openChangesDiff()
+            assertTheDiffHasTheKeyboard(app, "opening it for \(name)")
+            let item = NSMenuItem(title: shortcut.title, action: shortcut.action, keyEquivalent: "")
+            item.tag = shortcut.tag
+            _ = app.perform(shortcut.action, with: item)
+            XCTAssertFalse(app.isChangesDiffShown, "\(name) closes the diff first")
+            XCTAssertFalse(app.window.firstResponder === app.changesDiff)
+        }
+        XCTAssertNil(app.window.attachedSheet, "⌘W closed the diff, not the pane")
+        XCTAssertNotNil(host.search, "Find opened its bar, in the pane in view")
+
+        // The pane's own menu (a right-click can't reach a covered pane; the menu still uncovers it), and
+        // the command bar's Split.
+        app.openChangesDiff()
+        XCTAssertNotNil(app.paneMenu(for: PaneKey(machine: AppDelegate.localKey, pane: host.paneID)))
+        XCTAssertFalse(app.isChangesDiffShown, "the pane's menu is for a pane in view")
+        XCTAssertTrue(app.window.firstResponder === host.terminal)
+        app.openChangesDiff()
+        let tab = try XCTUnwrap(app.store.focusedTab?.id)
+        app.commandBarRun(CommandListItem(id: .splitRight, title: "", keywords: []), subject: .tab(machine: AppDelegate.localKey, tab),
+                          target: nil, origin: (machine: AppDelegate.localKey, pane: host.paneID, tab: tab))
+        XCTAssertFalse(app.isChangesDiffShown, "> Split Right closes the diff first")
+    }
+
+    /// The keyboard never goes under the diff: not to the covered terminal, not to its find field,
+    /// whoever asks the window. Esc in a find bar left open under the diff gives the keyboard to the diff.
+    func testNothingUnderTheCentreDiffTakesTheKeyboard() async throws {
+        let (app, host) = try await launchWithTheDiffUp()
+        defer { ChangesFixture.quit(app) }
+        assertTheDiffHasTheKeyboard(app, "opening it")
+
+        // ⌘F: the diff closes and the bar opens in the pane in view. The diff again, over the open bar.
+        app.findInPane(nil)
+        XCTAssertFalse(app.isChangesDiffShown, "⌘F closes the diff first")
+        let search = try XCTUnwrap(host.search)
+        app.openChangesDiff()
+        assertTheDiffHasTheKeyboard(app, "opening it over a find bar")
+        // The covered find field can't take the keyboard, and Esc there (the bar closing) gives it to the diff.
+        search.focusField()
+        assertTheDiffHasTheKeyboard(app, "the covered find field asking for the keyboard")
+        host.hideFind()
+        XCTAssertNil(host.search)
+        assertTheDiffHasTheKeyboard(app, "Esc in the covered pane's find bar")
+
+        // Anything that asks the window for the covered terminal gets the diff.
+        _ = app.window.makeFirstResponder(host.terminal)
+        assertTheDiffHasTheKeyboard(app, "makeFirstResponder(terminal)")
+        _ = app.window.makeFirstResponder(nil)
+        _ = app.window.makeFirstResponder(host)
+        XCTAssertFalse(app.window.firstResponder is PaneTerminalView)
+        _ = app.window.makeFirstResponder(app.changesDiff)
+
+        // Esc in the sidebar's list.
+        app.focusSidebar(nil)
+        XCTAssertTrue(app.sidebar.hasKeyboard)
+        app.sidebar.onFocusTerminal?()
+        assertTheDiffHasTheKeyboard(app, "Esc in the sidebar")
+        // The file browser, closed.
+        app.showFileBrowser(nil)
+        let browser = try XCTUnwrap(app.fileBrowser)
+        XCTAssertFalse(app.window.firstResponder === app.changesDiff, "the file browser has the keyboard")
+        browser.dismiss()
+        XCTAssertNil(app.fileBrowser)
+        assertTheDiffHasTheKeyboard(app, "closing the file browser")
+
+        // With the keyboard in the diff no terminal is in the responder chain: typing, Copy, Paste, Select
+        // All, ⌃V and the ask bar's ⌘↩ and ⌘. (all for the terminal that has the keyboard) reach no pane.
+        var responder: NSResponder? = app.window.firstResponder
+        while let next = responder {
+            XCTAssertFalse(next is PaneTerminalView || next is PaneHostView)
+            responder = next.nextResponder
+        }
+        // The mouse: the whole pane area is the diff's (the header, the ×, the ask bar, the strip, a
+        // right-click), and a covered terminal takes no dropped file.
+        let content = try XCTUnwrap(app.window.contentView)
+        content.layoutSubtreeIfNeeded()
+        for point in [NSPoint(x: host.bounds.midX, y: host.bounds.midY), NSPoint(x: host.bounds.maxX - 12, y: 12), NSPoint(x: 12, y: host.bounds.maxY - 12)] {
+            let inWindow = host.convert(point, to: nil)
+            let hit = try XCTUnwrap(content.hitTest(content.superview?.convert(inWindow, from: nil) ?? inWindow))
+            XCTAssertTrue(hit === app.changesDiff || hit.isDescendant(of: app.changesDiff), "a click at \(point) of the pane lands on the diff")
+        }
+        XCTAssertTrue(app.changesDiff.registeredDraggedTypes.contains(.fileURL), "the diff takes the drag, and refuses it")
+
+        // Back to the panes: the terminal takes the keyboard as before.
+        app.changesDiff.cancelOperation(nil)
+        XCTAssertTrue(app.window.firstResponder === host.terminal)
+        _ = app.window.makeFirstResponder(nil)
+        XCTAssertTrue(app.window.makeFirstResponder(host.terminal))
+        XCTAssertTrue(app.window.firstResponder === host.terminal)
+    }
+
+    /// A click on empty space in the Changes list empties the selection; not while the centre diff is of
+    /// that file, which would then say the file has no changes any more.
+    func testTheCentreDiffKeepsItsFileWhenTheListIsClickedOnEmptySpace() async throws {
+        let (app, _) = try await launchWithTheDiffUp()
+        defer { ChangesFixture.quit(app) }
+        let files = try XCTUnwrap(app.fileSidebar)
+        try await ChangesFixture.wait("the side-by-side rows") { app.changesDiff.diffArea.table.items.count > 5 }
+        for (name, list) in [("the inspector's list", files.changesView.list), ("the diff's own list", app.changesDiff.list)] {
+            list.table.deselectAll(nil)
+            XCTAssertEqual(app.changesModel.selection?.path, ChangesFixture.daemon.path, "the diff stays on its file, after a click on empty space in \(name)")
+            XCTAssertGreaterThanOrEqual(files.changesView.list.table.selectedRow, 0, "and the row stays marked")
+            XCTAssertGreaterThanOrEqual(app.changesDiff.list.table.selectedRow, 0)
+            XCTAssertNotEqual(app.changesDiff.diffArea.message.label.stringValue, "This file has no changes any more.")
+            XCTAssertGreaterThan(app.changesDiff.diffArea.table.items.count, 5)
+        }
+        // Without the centre diff the click empties the selection, as before.
+        app.closeChangesDiff()
+        files.changesView.list.table.deselectAll(nil)
+        XCTAssertNil(app.changesModel.selection)
+    }
 }

@@ -224,10 +224,15 @@ final class PaneTerminalView: TerminalView {
 
     func enableFileDrops() { registerForDraggedTypes([.fileURL]) }
 
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+    /// Whether something covers this pane (the centre diff): a pane nobody sees takes no drop.
+    var isCovered: (() -> Bool)?
+    private var dropOperation: NSDragOperation { isCovered?() == true ? [] : .copy }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard isCovered?() != true else { return false }
         let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
                                                          options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         guard !urls.isEmpty else { return false }
@@ -290,6 +295,8 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     var onDecide: ((String, PermissionDecision) -> Void)?
     /// The agent's menu, for the header's chip.
     var agentMenu: (() -> NSMenu?)?
+    /// Gives the keyboard back when the find bar closes (the app's `returnKeyboard(to:)`).
+    var onReturnKeyboard: (() -> Void)?
     /// The top constraints of what floats under the header (the restored note, the find bar), kept at
     /// `belowHeader` through a zoom.
     let belowHeaderConstraints = NSHashTable<NSLayoutConstraint>.weakObjects()

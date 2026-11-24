@@ -62,6 +62,9 @@ final class ChangesModel {
     private(set) var focused: Target?
     private(set) var list = ListState.none
     private(set) var selection: Selection?
+    /// While the centre diff shows: a click on empty space in a list doesn't empty the selection, which
+    /// is the file the diff is of. (A file that left the list still does: `gotList`.)
+    var keepsSelection = false
     private(set) var diff = DiffState.none
     /// False while the list stays on a work tree the focused pane isn't in.
     var following: Bool { target?.machine == focused?.machine && target?.pane == focused?.pane }
@@ -289,6 +292,8 @@ final class ChangesModel {
     func select(_ file: GitChangedFile?, group: GitChangeGroup) {
         guard let file else {
             guard selection != nil else { return }
+            // The centre diff is of this file: its row is marked again.
+            guard !keepsSelection else { return changed() }
             selection = nil
             diff = .none
             // Nothing holds the list on its work tree any more.

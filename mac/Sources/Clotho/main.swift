@@ -120,6 +120,15 @@ final class FramelessWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    /// Asked before anything takes the keyboard, however it was asked for (a click, the key loop, a
+    /// `makeFirstResponder` anywhere in the app): who gets it instead, or nil for no change. The centre
+    /// diff answers for the panes it covers (ChangesDiffView.swift).
+    var keyboardRedirect: ((NSResponder) -> NSResponder?)?
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        super.makeFirstResponder(responder.flatMap { keyboardRedirect?($0) } ?? responder)
+    }
+
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         fillsScreen ? frameRect : super.constrainFrameRect(frameRect, to: screen)
     }

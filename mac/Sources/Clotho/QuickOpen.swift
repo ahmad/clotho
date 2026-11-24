@@ -398,6 +398,7 @@ extension AppDelegate {
             move(.tab(tab, workspace: destination, index: index, focus: false), on: key)
         case .openBeside:
             guard let tab, let store, key == origin.machine, let pane = origin.pane else { return NSSound.beep() }
+            uncoverPanes()
             Task { @MainActor in
                 do {
                     try await store.move(.tabJoin(tab, beside: pane, direction: .right, ratio: nil, focus: true))

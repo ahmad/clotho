@@ -404,7 +404,8 @@ extension PaneHostView {
         controller.highlights.removeFromSuperview()
         terminal.clearSearch()
         showRestored(dismissedRestore ? nil : restored)
-        window?.makeFirstResponder(terminal)
+        // To the terminal, or to the centre diff while it covers this pane (`returnKeyboard(to:)`).
+        if let onReturnKeyboard { onReturnKeyboard() } else { window?.makeFirstResponder(terminal) }
     }
 
     /// Keeps the highlights over the terminal as it moves, scrolls or gets output.
@@ -421,16 +422,17 @@ extension AppDelegate {
         return paneHosts[PaneKey(machine: focusedMachine, pane: pane)]
     }
 
-    @objc func findInPane(_ sender: Any?) { focusedPaneHost?.showFind() }
+    // Find is for the pane in view: the centre diff closes first (`focusedPaneHostForAction`).
+    @objc func findInPane(_ sender: Any?) { focusedPaneHostForAction()?.showFind() }
 
     @objc func findNextInPane(_ sender: Any?) {
-        guard let host = focusedPaneHost else { return }
+        guard let host = focusedPaneHostForAction() else { return }
         guard let search = host.search else { return host.showFind() }
         search.step(older: true)
     }
 
     @objc func findPreviousInPane(_ sender: Any?) {
-        guard let host = focusedPaneHost else { return }
+        guard let host = focusedPaneHostForAction() else { return }
         guard let search = host.search else { return host.showFind() }
         search.step(older: false)
     }

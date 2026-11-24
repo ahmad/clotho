@@ -356,6 +356,8 @@ extension AppDelegate {
     // Menu tags index into Shortcut.arrows (left, right, up, down).
     static let directions: [Direction] = [.left, .right, .up, .down]
 
+    // The Pane menu's commands are for the panes in view: each closes the centre diff first (the rule
+    // is in ChangesDiffView.swift). ⌘W there closes only the diff.
     @objc func splitPane(_ sender: Any?) {
         guard let pane = store.focusedPane else { return }
         split(pane, Self.directions[(sender as? NSMenuItem)?.tag ?? 1])
@@ -363,6 +365,7 @@ extension AppDelegate {
 
     /// Splits a pane of the focused tab; the new pane opens in its folder.
     func split(_ pane: Pane, _ direction: Direction) {
+        uncoverPanes()
         // The new pane gets half of the current one.
         var size = splitView.paneFrames[pane.id]?.size ?? splitView.bounds.size
         if direction.axis == .horizontal { size.width /= 2 } else { size.height /= 2 }
@@ -391,6 +394,7 @@ extension AppDelegate {
     }
 
     func close(pane: PaneID) {
+        uncoverPanes()
         confirmClose("Pane", info: "This stops anything running in it. Closing a tab's last pane closes the tab.") { [weak self] in
             self?.run { try await $0.closePane(pane) }
         }
@@ -398,7 +402,7 @@ extension AppDelegate {
 
     // The neighbor is found from the panes' frames on screen.
     @objc func focusPane(_ sender: Any?) {
-        guard let pane = focusedPaneID, store.focusedTab.flatMap({ maximized[tabKey($0.id)] }) == nil else { return }
+        guard let pane = focusedPaneForAction(), store.focusedTab.flatMap({ maximized[tabKey($0.id)] }) == nil else { return }
         let direction = Self.directions[(sender as? NSMenuItem)?.tag ?? 0]
         guard let target = Layout.neighbor(of: pane, toward: direction, in: splitView.paneFrames) else { return }
         focusNow(.pane(target), on: focusedMachine, trace: "switch pane")
@@ -406,7 +410,7 @@ extension AppDelegate {
 
     // Moves the nearest divider on that axis toward the arrow.
     @objc func resizePane(_ sender: Any?) {
-        guard let pane = focusedPaneID, let tab = store.focusedTab else { return }
+        guard let pane = focusedPaneForAction(), let tab = store.focusedTab else { return }
         let direction = Self.directions[(sender as? NSMenuItem)?.tag ?? 0]
         guard let split = tab.layout.nearestSplit(of: pane, axis: direction.axis) else { return }
         let step = direction.newPaneIsSecond ? 0.05 : -0.05
@@ -415,11 +419,12 @@ extension AppDelegate {
     }
 
     @objc func maximizePane(_ sender: Any?) {
-        guard let pane = focusedPaneID else { return }
+        guard let pane = focusedPaneForAction() else { return }
         toggleMaximize(pane)
     }
 
     func toggleMaximize(_ pane: PaneID) {
+        uncoverPanes()
         guard let tab = store.focusedTab, tab.layout.panes.count > 1 else { return }
         maximized[tabKey(tab.id)] = maximized[tabKey(tab.id)] == nil ? pane : nil
         sync()
@@ -427,7 +432,13 @@ extension AppDelegate {
 
     // ⌘K sends Ctrl+L to the focused pane; shells treat it as clear-screen.
     @objc func clearActivePane(_ sender: Any?) {
-        guard let pane = focusedPaneID else { return }
+        guard let pane = focusedPaneForAction() else { return }
+        clear(pane: pane)
+    }
+
+    /// Clear, for a pane of the focused machine (⌘K, the pane's menu).
+    func clear(pane: PaneID) {
+        uncoverPanes()
         backend.sendInput(pane, Data([0x0c]))
     }
 }

@@ -95,8 +95,11 @@ final class ChangesDiffView: NSView {
         let headerRule = Self.rule(vertical: false)
 
         list.onSelect = { [weak self] file, group in
-            // The list here never empties the selection: the view is of one file.
-            guard let file else { return }
+            // The list here never empties the selection: the view is of one file, and its row stays marked.
+            guard let file else {
+                self?.update()
+                return
+            }
             self?.model.select(file, group: group)
         }
         list.onOpen = { [weak self] file, group in self?.model.select(file, group: group) }
@@ -269,6 +272,13 @@ final class ChangesDiffView: NSView {
 
     // Clicks stay here, not the panes underneath.
     override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self) }
+
+    /// Files dragged over the diff stop here too (a view that takes no part in a drag lets it through to
+    /// the terminal underneath, which would upload them or type their paths): refused, as NSView does.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes([.fileURL])
+    }
     override func scrollWheel(with event: NSEvent) {}
     override func resetCursorRects() { addCursorRect(bounds, cursor: .arrow) }
 
@@ -306,8 +316,42 @@ extension AppDelegate {
     /// focused pane's terminal. Whatever had the keyboard over the panes (the command bar, the shortcuts
     /// card, Files, a list, a name being edited) ends with this: given to the terminal under the diff, the
     /// typing went to a shell nobody sees, and the Esc meant to close the diff went to its program.
-    func returnKeyboardToPanes() {
-        window.makeFirstResponder(isChangesDiffShown ? changesDiff : activeTerminal)
+    func returnKeyboardToPanes() { returnKeyboard(to: activeTerminal) }
+
+    /// The same, for one pane's terminal (its find bar closing).
+    func returnKeyboard(to terminal: PaneTerminalView?) {
+        window.makeFirstResponder(isChangesDiffShown ? changesDiff : terminal)
+    }
+
+    // The rule for the panes under the centre diff: while it shows, nothing acts on a pane it covers and
+    // nothing there takes the keyboard.
+    // - A command for a pane (Find, Clear, a split, Maximize, Switch and Resize Pane, the pane's menu)
+    //   closes the diff first, then runs in the pane, in view: `focusedPaneForAction`,
+    //   `focusedPaneHostForAction`, or `uncoverPanes` where the pane is named.
+    // - The keyboard: the window gives the diff whatever a view in the pane area asks for
+    //   (`keyboardRedirect`), so no terminal or find field under the diff can have it. The keys that need
+    //   a terminal with the keyboard (typing, paste, ⌘↩ and ⌘. for the ask bar) then reach no pane.
+    // - The mouse and drops: the diff is over the panes and takes both.
+
+    /// Closes the centre diff: what follows acts on a pane, which must be the one in view.
+    func uncoverPanes() { closeChangesDiff() }
+
+    /// The focused pane, for a command that acts on it: in view first.
+    func focusedPaneForAction() -> PaneID? {
+        uncoverPanes()
+        return focusedPaneID
+    }
+
+    func focusedPaneHostForAction() -> PaneHostView? {
+        uncoverPanes()
+        return focusedPaneHost
+    }
+
+    /// Who takes the keyboard in place of `responder`: the centre diff, for anything in the pane area
+    /// while the diff covers it.
+    func keyboardRedirect(for responder: NSResponder) -> NSResponder? {
+        guard isChangesDiffShown, let view = responder as? NSView, view.isDescendant(of: splitView) else { return nil }
+        return changesDiff
     }
 
     /// Whether the keyboard is in the inspector's Changes or Activity list. (In Files it never held the
@@ -353,6 +397,7 @@ extension AppDelegate {
         }
         container.addSubview(diff)
         changesDiff = diff
+        window.keyboardRedirect = { [weak self] in self?.keyboardRedirect(for: $0) }
         return diff
     }
 

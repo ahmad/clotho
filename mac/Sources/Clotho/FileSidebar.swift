@@ -413,6 +413,7 @@ extension AppDelegate {
         guard let fileSidebar else { return }
         let shown = isFileSidebarShown ? fileSidebar.shown : nil
         changesModel.isVisible = shown == .changes || isChangesDiffShown
+        changesModel.keepsSelection = isChangesDiffShown
         fileSidebar.activityView.isVisible = shown == .activity
     }
 

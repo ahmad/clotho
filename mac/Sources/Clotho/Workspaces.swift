@@ -186,6 +186,8 @@ extension AppDelegate {
         host.terminal.onDropFiles = { [weak self] urls in self?.dropFiles(urls, on: key) }
         host.terminal.onPaste = { [weak self] terminal in self?.pasteImage(into: terminal, key: .command) ?? false }
         host.terminal.contextMenu = { [weak self] in self?.paneMenu(for: key) }
+        host.terminal.isCovered = { [weak self] in self?.isChangesDiffShown == true }
+        host.onReturnKeyboard = { [weak self, weak host] in self?.returnKeyboard(to: host?.terminal) }
         host.onDecide = { [weak self] request, decision in
             self?.decide(machine: key.machine, pane: key.pane, request: request, decision)
         }

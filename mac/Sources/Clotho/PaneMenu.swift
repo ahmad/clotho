@@ -8,7 +8,9 @@ extension AppDelegate {
     func paneMenu(for key: PaneKey) -> NSMenu? {
         guard let session = connections[key.machine], let pane = session.store.state.pane(key.pane),
               let host = paneHosts[key] else { return nil }
-        // The menu acts on this pane, so it becomes the focused one first.
+        // The menu acts on this pane, so it is in view (not under the centre diff) and becomes the
+        // focused one first.
+        uncoverPanes()
         window.makeFirstResponder(host.terminal)
         let menu = NSMenu()
         // Items are enabled as set here (Copy only with a selection).
@@ -40,10 +42,16 @@ extension AppDelegate {
         add("Copy", "c", [.command]) { terminal.copy(terminal) }
         // Copy with nothing selected would empty the clipboard.
         menu.items.last?.isEnabled = terminal.hasSelection
-        add("Paste", "v", [.command]) { terminal.paste(terminal) }
+        add("Paste", "v", [.command]) { [weak self] in
+            self?.uncoverPanes()
+            terminal.paste(terminal)
+        }
         add("Select All", "a", [.command]) { terminal.selectAll(nil) }
-        add("Clear", "k", [.command]) { [weak self] in self?.backend.sendInput(key.pane, Data([0x0c])) }
-        add("Find…", "f", [.command]) { [weak self] in self?.paneHosts[key]?.showFind() }
+        add("Clear", "k", [.command]) { [weak self] in self?.clear(pane: key.pane) }
+        add("Find…", "f", [.command]) { [weak self] in
+            self?.uncoverPanes()
+            self?.paneHosts[key]?.showFind()
+        }
 
         menu.addItem(.separator())
         let machine = session.machine
