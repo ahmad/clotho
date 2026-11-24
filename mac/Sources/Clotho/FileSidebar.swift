@@ -254,7 +254,8 @@ final class FileSidebarView: NSView {
         let changed = new?.0 != target?.machine || new?.1 != target?.folder
         target = new
         title.stringValue = machine.isLocal ? ComputerName.current : machine.label
-        if following, changed, let new { pane.show(machine: new.0, folder: new.1) }
+        // Listed only while Files shows; picking Files lists the folder then (`apply`).
+        if following, changed, let new, shown == .files { pane.show(machine: new.0, folder: new.1) }
         updateFollowButton()
     }
 

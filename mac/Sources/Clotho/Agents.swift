@@ -309,6 +309,8 @@ extension AppDelegate {
 
     func agentChanged(machine: MachineKey, pane: PaneID, from before: AgentInfo?, to after: AgentInfo?) {
         agentHistoryWindows[PaneKey(machine: machine, pane: pane)]?.refresh()
+        // The inspector's Activity, when it shows this pane's agent.
+        fileSidebar?.activityView.agentChanged(machine: machine, pane: pane)
         log("agent \(machine)/\(pane): \(before?.state.rawValue ?? "none") → \(after.map { "\($0.kind) \($0.state.rawValue) (\($0.source ?? "?"))\($0.message.map { ": " + $0 } ?? "")" } ?? "none")")
         if after?.isHookSourced == true { hookSourcedMachines.insert(machine) }
         // A notification held for its summary goes out once the summary lands (or the agent moved on).

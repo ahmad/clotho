@@ -1167,12 +1167,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         return openChangesDiff()
                     }
                     if arg == "back" { return closeChangesDiff() }
+                    // "inspector:log" logs what Changes shows.
+                    if arg == "log" {
+                        let files = changesModel.files.map { "\($0.group.rawValue) \($0.file.status.letter) \($0.file.path)" }.joined(separator: ", ")
+                        var diff = "\(changesModel.diff)"
+                        if case let .loaded(loaded) = changesModel.diff { diff = "\(loaded.hunks.count) hunks, +\(loaded.added) −\(loaded.removed)" }
+                        return log("inspector: \(fileSidebar.shown.rawValue), shown \(isFileSidebarShown), pane \(changesModel.target.map { "\($0.pane)" } ?? "none"), "
+                            + "summary \(changesModel.target?.git?.changes.map { ChangeCountText.strip($0) ?? "none" } ?? "nil"), files [\(files)], "
+                            + "selected \(changesModel.selection?.path ?? "none"), diff \(diff), full diff \(isChangesDiffShown)")
+                    }
                     return log("TypeText: no inspector view \(arg)")
                 }
-                // "worktree:<name>" opens the New Tab in a Worktree prompt with that name typed.
+                // "worktree:<name>" opens the New Tab in a Worktree prompt with that name typed, and
+                // "worktree:!" presses Return in it.
                 if step.hasPrefix("worktree:") {
+                    let arg = String(step.dropFirst("worktree:".count))
+                    if arg == "!" { return quickOpen?.submitWorktree() ?? () }
                     newWorktreeTab(nil)
-                    quickOpen?.setWorktreeName(String(step.dropFirst("worktree:".count)))
+                    quickOpen?.setWorktreeName(arg)
                     return
                 }
                 // "sidebarfiles:on" / "sidebarfiles:off" shows or hides the file sidebar; "sidebarfiles:<path>"
