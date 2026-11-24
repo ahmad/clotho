@@ -72,6 +72,43 @@ final class MenuShortcutTests: XCTestCase {
         }
     }
 
+    /// The Overview is ⇧⌘0, in the View menu; ⌘0 stays Actual Size and ⌥⌘0 the terminal's. A key press of
+    /// ⇧⌘0 reports ")", which is how AppKit finds the item.
+    func testTheOverviewKey() throws {
+        _ = NSApplication.shared
+        let overview = try XCTUnwrap(AppDelegate.shortcuts.first { $0.title == "Overview" })
+        XCTAssertEqual(overview.menu, "View")
+        XCTAssertEqual(overview.displayKeys, "⇧⌘0")
+        XCTAssertEqual(Shortcut.overviewKeys, "⇧⌘0")
+        XCTAssertEqual(overview.action, #selector(AppDelegate.toggleOverview(_:)))
+        XCTAssertEqual(overview.menuKey.0, ")")
+        XCTAssertEqual(overview.menuKey.1, .command)
+        XCTAssertEqual(AppDelegate.shortcuts.first { $0.displayKeys == "⌘0" }?.title, "Actual Size", "unchanged")
+        XCTAssertEqual(AppDelegate.shortcuts.first { $0.displayKeys == "⌥⌘0" }?.title, "Actual Terminal Text Size", "unchanged")
+        let keyed = AppDelegate.shortcuts.filter { !$0.key.isEmpty }.map { "\($0.modifiers.rawValue)|\($0.key)" }
+        XCTAssertEqual(Set(keyed).count, keyed.count, "no two items share a key")
+        let menuKeys = AppDelegate.shortcuts.filter { !$0.key.isEmpty }.map { "\($0.menuKey.1.rawValue)|\($0.menuKey.0)" }
+        XCTAssertEqual(Set(menuKeys).count, menuKeys.count, "nor a key equivalent")
+
+        let menu = AppDelegate.makeMainMenu()
+        let view = try XCTUnwrap(menu.items.compactMap(\.submenu).first { $0.title == "View" })
+        XCTAssertTrue(view.items.contains { $0.title == "Overview" && $0.action == #selector(AppDelegate.toggleOverview(_:)) })
+        let recorder = Recorder()
+        for item in menu.items.compactMap(\.submenu).flatMap(\.items) where item.action != nil {
+            item.action = #selector(Recorder.hit(_:))
+            item.target = recorder
+        }
+        func press(_ characters: String, _ flags: NSEvent.ModifierFlags) throws -> [String] {
+            recorder.fired = []
+            _ = menu.performKeyEquivalent(with: try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: 29)))
+            return recorder.fired
+        }
+        XCTAssertEqual(try press(")", [.command, .shift]), ["Overview"])
+        XCTAssertEqual(try press("0", .command), ["Actual Size"])
+    }
+
     func testSlashKeys() {
         let sidebar = AppDelegate.shortcuts.first { $0.title == "Toggle Sidebar" && !$0.hiddenInMenu }!
         XCTAssertEqual(sidebar.displayKeys, "⌘/")

@@ -55,6 +55,9 @@ public final class ModelStore: ObservableObject {
     public var onService: ((DaemonService) -> Void)?
     /// An agent changed state: the pane, its previous info and its new one.
     public var onAgentChange: ((PaneID, AgentInfo?, AgentInfo?) -> Void)?
+    /// The last lines of a pane's screen arrived (`SessionEvent.peek`, after `backend.peekSubscribe`).
+    /// Peeks aren't model: `state` doesn't change and `onChange` isn't called.
+    public var onPeek: ((PaneID, [String]) -> Void)?
 
     /// Whether `state` is the live model, or a saved one shown until the daemon sends its own.
     public enum Phase: Equatable, Sendable { case saved, live }
@@ -366,6 +369,8 @@ public final class ModelStore: ObservableObject {
             state.panes[index].agent = agent
             onAgentChange?(pane, before, agent)
             onChange?()
+        case .peek(let pane, let lines):
+            onPeek?(pane, lines)
         }
     }
 

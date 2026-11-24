@@ -34,6 +34,24 @@ final class FileSidebarView: NSView {
 
     /// The default that remembers the view.
     static let kindKey = "InspectorView"
+
+    /// While the Overview covers the window: nothing here is in the accessibility tree, as nothing here
+    /// takes a click or the keyboard (the rule is in ChangesDiffView.swift). Not `isHidden`: that is the
+    /// view's own shown or hidden state.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
     /// The row Files' machine name and Follow Pane sit in, under the band, when the band holds the control.
     static var filesRowHeight: CGFloat { s(26) }
 
@@ -362,6 +380,7 @@ extension AppDelegate {
 
     /// View ▸ Toggle Inspector (⌥⌘B): slides it in or out, and remembers which.
     @objc func showOrHideFileSidebar(_ sender: Any?) {
+        uncoverWindow()
         let show = !isFileSidebarShown
         log("file sidebar: \(show ? "show" : "hide") (\(Self.describeTrigger(sender)))")
         // Hidden with the keyboard in one of its lists: the terminal takes it back.
@@ -421,6 +440,7 @@ extension AppDelegate {
     /// On a machine with Files alone, that is what shows.
     func showInspector(_ kind: FileSidebarView.Kind, takeKeyboard: Bool) {
         guard let fileSidebar else { return }
+        uncoverWindow()
         fileSidebar.select(kind)
         if !isFileSidebarShown { showOrHideFileSidebar(nil) }
         inspectorVisibilityChanged()

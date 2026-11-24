@@ -14,6 +14,23 @@ final class EmptyStateView: NSView {
     private var onAction: (() -> Void)?
     private var buttonWidth: NSLayoutConstraint!
 
+    /// While the Overview covers the window: not in the accessibility tree, as it takes no click and no
+    /// keyboard there (the rule is in ChangesDiffView.swift). Not `isHidden`: that is the view's own state.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         icon.contentTintColor = Theme.faintText

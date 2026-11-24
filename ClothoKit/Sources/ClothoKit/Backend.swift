@@ -115,6 +115,9 @@ public struct Hello: Codable, Equatable, Sendable {
         /// `tab.create` and `workspace.create` take `worktree`: a new git worktree on a new branch,
         /// with the new Tab in it (0.1.32).
         case worktree
+        /// `peek.subscribe` / `peek.unsubscribe` and `peek` events: the last lines of panes' screens as
+        /// plain text, without subscribing to the panes (0.1.32).
+        case peek
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -309,6 +312,22 @@ public enum SessionEvent: Sendable {
 
     /// An agent in a pane changed state (nil: it went away). The pane in `state` carries it too.
     case agent(PaneID, AgentInfo?)
+
+    /// The last lines of a pane's screen (`peek`), oldest first: from a `peekSubscribe` reply, then
+    /// whenever they change. Not part of the model: no `rev`, nothing stored.
+    case peek(PaneID, lines: [String])
+}
+
+/// The last lines of one pane's screen, as a `peek.subscribe` reply has them: plain text, oldest first,
+/// control characters already removed by the daemon. There can be fewer lines than asked for, or none.
+public struct PanePeek: Sendable, Equatable, Decodable {
+    public var pane: PaneID
+    public var lines: [String]
+
+    public init(pane: PaneID, lines: [String]) {
+        self.pane = pane
+        self.lines = lines
+    }
 }
 
 /// A pane's visible screen as plain text (`pane.text`): one string per row, trailing blanks trimmed.
@@ -508,6 +527,17 @@ public protocol SessionBackend: AnyObject, Sendable {
     func pushActivityEnd(pane: PaneID, device: String) async throws
     /// The machine's live activity tokens, as `push.list` reports them (never the token).
     func pushActivities() async throws -> [PushActivity]
+
+    /// Sets this backend's one peek subscription (`peek.subscribe`), replacing any earlier one, when
+    /// hello's `features` contains `.peek` (`unknown_method` otherwise). `panes` nil is every pane, also
+    /// ones made later; ids that name no pane are skipped. `lines` is how many lines of each, 1 to 8
+    /// (other values are brought into that range). Returns each wanted pane's lines as they are now.
+    /// The same lines also arrive as `.peek` events, in stream order ahead of any later change: draw
+    /// from the events, never from this result, so a reply can't overwrite a newer event. The backend
+    /// sends the subscription again after every reconnect.
+    func peekSubscribe(panes: [PaneID]?, lines: Int) async throws -> [PanePeek]
+    /// Ends the peek subscription (`peek.unsubscribe`). Harmless without one.
+    func peekUnsubscribe() async throws
 }
 
 public extension SessionBackend {
@@ -556,6 +586,14 @@ public extension SessionBackend {
 
     func gitChanges(_ pane: PaneID, limit: Int?) async throws -> GitChanges {
         throw BackendError(code: "unknown_method", message: "this backend can't list changes")
+    }
+
+    func peekSubscribe(panes: [PaneID]?, lines: Int) async throws -> [PanePeek] {
+        throw BackendError(code: "unknown_method", message: "this backend can't peek at panes")
+    }
+
+    func peekUnsubscribe() async throws {
+        throw BackendError(code: "unknown_method", message: "this backend can't peek at panes")
     }
 
     func gitDiff(_ pane: PaneID, path: String, group: GitChangeGroup, oldPath: String?, context: Int?) async throws -> GitDiff {

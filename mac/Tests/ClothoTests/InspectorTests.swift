@@ -386,6 +386,42 @@ final class InspectorTests: XCTestCase {
         #selector(AppDelegate.minimizeWindow(_:)), #selector(AppDelegate.zoomWindow(_:)), #selector(AppDelegate.toggleFullScreen(_:)),
         #selector(AppDelegate.showQuickOpen(_:)), #selector(AppDelegate.showFileBrowser(_:)),
         #selector(AppDelegate.showOnboarding(_:)), #selector(AppDelegate.showShortcuts(_:)),
+        #selector(AppDelegate.toggleOverview(_:)),
+    ]
+
+    // The Overview covers the whole window, so every command that isn't a pane's is one of four kinds.
+    // (The pane commands all close it first, as they close the centre diff.)
+
+    /// Commands for a Workspace, a Tab, the sidebar or the inspector: each closes the Overview first, so
+    /// it acts, or takes the keyboard, in view.
+    private static let closeTheOverviewFirst: Set<Selector> = [
+        #selector(AppDelegate.newTab(_:)), #selector(AppDelegate.renameTab(_:)), #selector(AppDelegate.renameActiveWorkspace(_:)),
+        #selector(AppDelegate.previousTab(_:)), #selector(AppDelegate.nextTab(_:)), #selector(AppDelegate.goToTab(_:)),
+        #selector(AppDelegate.previousWorkspace(_:)), #selector(AppDelegate.nextWorkspace(_:)), #selector(AppDelegate.newWorkspace(_:)),
+        #selector(AppDelegate.focusSidebar(_:)), #selector(AppDelegate.showOrHideSidebar(_:)), #selector(AppDelegate.showOrHideFileSidebar(_:)),
+        #selector(AppDelegate.showInspectorChanges(_:)), #selector(AppDelegate.showInspectorFiles(_:)),
+        #selector(AppDelegate.showInspectorActivity(_:)),
+    ]
+    /// The same kind, not run here: Upload Files puts up an open panel, and New Tab in a Worktree the
+    /// command bar. Only their place in these sets is checked (each starts with `uncoverWindow()`).
+    private static let closeTheOverviewFirstNotRunHere: Set<Selector> = [
+        #selector(AppDelegate.chooseFilesToUpload(_:)), #selector(AppDelegate.newWorktreeTab(_:)),
+    ]
+    /// Closes that would close something nobody sees: with the Overview up they close only it, as ⌘W does.
+    private static let closeOnlyTheOverview: Set<Selector> = [
+        #selector(AppDelegate.closeActiveTab(_:)), #selector(AppDelegate.closeActiveWorkspace(_:)),
+    ]
+    /// The app's and the window's own: the Overview stays up.
+    private static let leaveTheOverviewUp: Set<Selector> = [
+        #selector(AppDelegate.checkForUpdates(_:)), #selector(AppDelegate.showSettings(_:)), #selector(NSApplication.hide(_:)),
+        #selector(NSApplication.terminate(_:)), #selector(AppDelegate.showMachineManager(_:)), #selector(AppDelegate.addMachine(_:)),
+        #selector(NSText.copy(_:)), #selector(NSText.paste(_:)), #selector(NSText.selectAll(_:)),
+        #selector(AppDelegate.resetZoom(_:)), #selector(AppDelegate.zoomIn(_:)), #selector(AppDelegate.zoomOut(_:)),
+        #selector(AppDelegate.terminalZoomIn(_:)), #selector(AppDelegate.terminalZoomOut(_:)), #selector(AppDelegate.terminalActualSize(_:)),
+        #selector(AppDelegate.minimizeWindow(_:)), #selector(AppDelegate.zoomWindow(_:)), #selector(AppDelegate.toggleFullScreen(_:)),
+        #selector(AppDelegate.showQuickOpen(_:)), #selector(AppDelegate.showFileBrowser(_:)),
+        #selector(AppDelegate.showOnboarding(_:)), #selector(AppDelegate.showShortcuts(_:)),
+        #selector(AppDelegate.toggleOverview(_:)),
     ]
 
     /// Every command in the menus is one or the other, so a new one has to be put in its place here; and
@@ -394,7 +430,13 @@ final class InspectorTests: XCTestCase {
         for shortcut in AppDelegate.shortcuts {
             XCTAssertTrue(Self.paneCommands.contains(shortcut.action) != Self.otherCommands.contains(shortcut.action),
                           "\(shortcut.menu) › \(shortcut.title) is a pane command or it isn't: say which")
+            // And, for the Overview, in exactly one of its sets.
+            let kinds = [Self.paneCommands, Self.closeTheOverviewFirst, Self.closeTheOverviewFirstNotRunHere, Self.closeOnlyTheOverview, Self.leaveTheOverviewUp]
+            XCTAssertEqual(kinds.filter { $0.contains(shortcut.action) }.count, 1,
+                           "\(shortcut.menu) › \(shortcut.title): say what it does with the Overview up")
         }
+        XCTAssertEqual(Self.closeTheOverviewFirst.union(Self.closeTheOverviewFirstNotRunHere).union(Self.closeOnlyTheOverview).union(Self.leaveTheOverviewUp),
+                       Self.otherCommands, "the same commands, sorted two ways")
         let (app, host) = try await launchWithTheDiffUp()
         defer { ChangesFixture.quit(app) }
         // No await from here to the end of the loop: the model doesn't move between the commands.
@@ -422,6 +464,64 @@ final class InspectorTests: XCTestCase {
         app.commandBarRun(CommandListItem(id: .splitRight, title: "", keywords: []), subject: .tab(machine: AppDelegate.localKey, tab),
                           target: nil, origin: (machine: AppDelegate.localKey, pane: host.paneID, tab: tab))
         XCTAssertFalse(app.isChangesDiffShown, "> Split Right closes the diff first")
+
+        // The Overview. Every pane command closes it first too (⌘W closes it and nothing else).
+        func run(_ shortcut: Shortcut) {
+            let item = NSMenuItem(title: shortcut.title, action: shortcut.action, keyEquivalent: "")
+            item.tag = shortcut.tag
+            _ = app.perform(shortcut.action, with: item)
+        }
+        func showTheOverview(for name: String, line: UInt = #line) {
+            app.showOverview()
+            XCTAssertTrue(app.isOverviewShown, "the Overview, for \(name)", line: line)
+            XCTAssertTrue(app.window.firstResponder === app.overview, "with the keyboard, for \(name)", line: line)
+        }
+        for shortcut in AppDelegate.shortcuts where Self.paneCommands.contains(shortcut.action) {
+            let name = "\(shortcut.menu) › \(shortcut.title)"
+            showTheOverview(for: name)
+            run(shortcut)
+            XCTAssertFalse(app.isOverviewShown, "\(name) closes the Overview first")
+            XCTAssertFalse(app.overview.hasKeyboard, "and it has no keyboard, after \(name)")
+        }
+        XCTAssertNil(app.window.attachedSheet, "⌘W closed the Overview, not the pane")
+        showTheOverview(for: "the pane's menu")
+        XCTAssertNotNil(app.paneMenu(for: PaneKey(machine: AppDelegate.localKey, pane: host.paneID)))
+        XCTAssertFalse(app.isOverviewShown, "the pane's menu is for a pane in view")
+        // A command for a Workspace, a Tab, the sidebar or the inspector closes it first.
+        for shortcut in AppDelegate.shortcuts where Self.closeTheOverviewFirst.contains(shortcut.action) {
+            let name = "\(shortcut.menu) › \(shortcut.title)"
+            showTheOverview(for: name)
+            run(shortcut)
+            XCTAssertFalse(app.isOverviewShown, "\(name) closes the Overview first")
+            XCTAssertFalse(app.overview.hasKeyboard, "and it has no keyboard, after \(name)")
+        }
+        // Close Tab and Close Workspace close only the Overview: no prompt to close what isn't in view.
+        for shortcut in AppDelegate.shortcuts where Self.closeOnlyTheOverview.contains(shortcut.action) {
+            showTheOverview(for: shortcut.title)
+            run(shortcut)
+            XCTAssertFalse(app.isOverviewShown, "\(shortcut.title) closes the Overview")
+            XCTAssertNil(app.window.attachedSheet, "\(shortcut.title) closes nothing else")
+        }
+        // The app's own leave it up: the command bar and the shortcuts card open over it.
+        showTheOverview(for: "the command bar")
+        app.showQuickOpen(nil)
+        XCTAssertTrue(app.isOverviewShown)
+        app.quickOpen?.cancel()
+        app.showShortcuts(nil)
+        XCTAssertTrue(app.isOverviewShown)
+        app.shortcutsOverlay?.dismiss()
+        XCTAssertTrue(app.isOverviewShown)
+        XCTAssertTrue(app.window.firstResponder === app.overview)
+        // The command bar's commands: one for a Tab closes the Overview first, the app's own don't.
+        app.commandBarRun(CommandListItem(id: .files, title: "", keywords: []), subject: nil, target: nil,
+                          origin: (machine: AppDelegate.localKey, pane: host.paneID, tab: tab))
+        XCTAssertNotNil(app.fileBrowser)
+        XCTAssertTrue(app.isOverviewShown, "> Files leaves it up")
+        app.fileBrowser?.dismiss()
+        XCTAssertTrue(app.window.firstResponder === app.overview)
+        app.commandBarRun(CommandListItem(id: .rename, title: "", keywords: []), subject: .tab(machine: AppDelegate.localKey, tab),
+                          target: nil, origin: (machine: AppDelegate.localKey, pane: host.paneID, tab: tab))
+        XCTAssertFalse(app.isOverviewShown, "> Rename Tab closes the Overview first")
     }
 
     /// The keyboard never goes under the diff: not to the covered terminal, not to its find field,

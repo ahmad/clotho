@@ -141,7 +141,7 @@ final class AgentHistoryWindowController: NSWindowController, NSWindowDelegate, 
             return (state.symbol, state.color, from + state.label, detail)
         case .attention:
             return entry.attention == true
-                ? ("bell.fill", Theme.caution, "Needs you", detail)
+                ? ("bell.fill", Theme.caution, AgentStatusGroup.needsYou.title, detail)
                 : ("checkmark", Theme.success, "Resolved", detail)
         case .update:
             return ("text.bubble", Theme.dimText, "Update", detail)

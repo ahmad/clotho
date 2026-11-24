@@ -63,6 +63,8 @@ extension AppDelegate {
 
     /// File › New Tab in a Worktree… (⌥⌘T): the command bar, straight at its prompt.
     @objc func newWorktreeTab(_ sender: Any?) {
+        // The new Tab is made where the focus is: in view, not under the Overview.
+        uncoverWindow()
         guard let subject = worktreeSubject(for: nil, origin: nil) else { return NSSound.beep() }
         promptForWorktree(subject, name: "", base: "")
     }

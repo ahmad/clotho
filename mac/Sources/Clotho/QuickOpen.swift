@@ -53,6 +53,8 @@ struct CommandBarEntry {
     /// How much changed in the work tree there (the same pane as `branch`), on a machine that counts
     /// it (`git.changes`): shown after the branch.
     var changes: PaneGit.Changes? = nil
+    /// A command's own key ("⇧⌘0"), shown at the trailing side before the row's ⌘ number.
+    var keys: String? = nil
 }
 
 /// A ">" command as the bar lists it: one of the shared ones (ClothoKit's CommandList, as on iOS), or
@@ -61,11 +63,14 @@ enum BarCommand: Equatable {
     case shared(CommandListItem)
     /// New Tab in a Worktree…: the bar asks for the branch's name.
     case newWorktreeTab
+    /// Show Overview: every agent's card, over the window (Overview.swift).
+    case showOverview
 
     var title: String {
         switch self {
         case let .shared(item): return item.title
         case .newWorktreeTab: return "New Tab in a Worktree…"
+        case .showOverview: return "Show Overview"
         }
     }
 
@@ -73,6 +78,7 @@ enum BarCommand: Equatable {
         switch self {
         case let .shared(item): return item.keywords
         case .newWorktreeTab: return ["git", "branch", "agent", "checkout"]
+        case .showOverview: return ["agents", "cards", "all"]
         }
     }
 
@@ -80,6 +86,7 @@ enum BarCommand: Equatable {
         switch self {
         case let .shared(item): return QuickOpenOverlay.symbol(for: item.id)
         case .newWorktreeTab: return "arrow.triangle.branch"
+        case .showOverview: return "square.grid.2x2"
         }
     }
 
@@ -88,6 +95,15 @@ enum BarCommand: Equatable {
         switch self {
         case let .shared(item): return "cmd|\(item.id.rawValue)"
         case .newWorktreeTab: return "cmd|newWorktreeTab"
+        case .showOverview: return "cmd|showOverview"
+        }
+    }
+
+    /// The command's own key, shown at the row's trailing side.
+    var keys: String? {
+        switch self {
+        case .showOverview: return Shortcut.overviewKeys
+        case .shared, .newWorktreeTab: return nil
         }
     }
 }
@@ -268,8 +284,15 @@ extension AppDelegate {
         overlay.onRestore = { originalAction?() }
         overlay.onOpen = { [weak self] entry in
             log("command bar: \(entry.item.kind) \(entry.item.title)")
+            // Opening is for real (a preview isn't): what opens is in view, not under the Overview.
+            self?.uncoverWindow()
             model.actions[entry.item.id]?()
             self?.quickOpen?.dismiss()
+        }
+        overlay.onShowOverview = { [weak self] in
+            originalAction?()
+            self?.quickOpen?.dismiss()
+            self?.showOverview()
         }
         overlay.onClose = { [weak self] entry in self?.commandBarClose(entry) }
         // "Beside the current pane" means the one focused when ⌘P opened, not a tab it previewed since.
@@ -288,12 +311,16 @@ extension AppDelegate {
             commandBarRun(CommandListItem(id: .openBeside, title: "", keywords: []), subject: node, target: nil, origin: origin)
         }
         overlay.onNewTab = { [weak self] entry in
+            self?.uncoverWindow()
             self?.commandBarNewTab(entry)
             self?.quickOpen?.dismiss()
         }
         overlay.onAllow = { [weak self] entry in self?.commandBarAllow(entry) }
         overlay.worktreeSubject = { [weak self] node in self?.worktreeSubject(for: node, origin: origin) }
-        overlay.onCreateWorktree = { [weak self] subject, name, base in self?.createWorktreeTab(subject, name: name, base: base) }
+        overlay.onCreateWorktree = { [weak self] subject, name, base in
+            self?.uncoverWindow()
+            self?.createWorktreeTab(subject, name: name, base: base)
+        }
         overlay.reload = { [weak self] in
             guard let self else { return nil }
             model = commandBarModel()
@@ -362,6 +389,12 @@ extension AppDelegate {
         let (workspace, tab) = commandBarPlace(subject)
         let machine = Machine.all().first { $0.key == key }
         log("command bar: run \(item.id.rawValue) on \(subject.map { "\($0)" } ?? "nothing")")
+        // A command for a Workspace or a Tab runs in view, not under the Overview. The app's own (Files,
+        // Settings, Machines, the appearance, a machine's switch) leave it up, as their menu items do.
+        switch item.id {
+        case .files, .settings, .machines, .appearanceSystem, .appearanceLight, .appearanceDark, .machineOn, .machineOff, .reconnect: break
+        default: uncoverWindow()
+        }
         switch item.id {
         case .newTab:
             if let workspace { newTab(in: workspace, on: key) } else { newWorkspace(on: key) }
@@ -398,15 +431,7 @@ extension AppDelegate {
             move(.tab(tab, workspace: destination, index: index, focus: false), on: key)
         case .openBeside:
             guard let tab, let store, key == origin.machine, let pane = origin.pane else { return NSSound.beep() }
-            uncoverPanes()
-            Task { @MainActor in
-                do {
-                    try await store.move(.tabJoin(tab, beside: pane, direction: .right, ratio: nil, focus: true))
-                } catch {
-                    log("command bar: open beside failed: \(error)")
-                    NSSound.beep()
-                }
-            }
+            openBeside(tab: tab, beside: pane, in: store)
         case .files: showFileBrowser(nil)
         case .settings: showSettings(nil)
         case .machines: showMachineManager(nil)
@@ -418,6 +443,20 @@ extension AppDelegate {
             if let machine { setMachineEnabled(machine, item.id == .machineOn) }
         case .reconnect:
             reconnect(key)
+        }
+    }
+
+    /// Open Beside, from the command bar and the Overview: moves the whole Tab `tab` beside `pane`, on the
+    /// one machine both are on (each daemon only knows its own Tabs). The panes come into view first.
+    func openBeside(tab: TabID, beside pane: PaneID, in store: ModelStore) {
+        uncoverPanes()
+        Task { @MainActor in
+            do {
+                try await store.move(.tabJoin(tab, beside: pane, direction: .right, ratio: nil, focus: true))
+            } catch {
+                log("open beside failed: \(error)")
+                NSSound.beep()
+            }
         }
     }
 
@@ -618,6 +657,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// Esc (or ⌘P) after a preview: back to where you were.
     var onRestore: (() -> Void)?
     var onDismiss: (() -> Void)?
+    /// "> Show Overview".
+    var onShowOverview: (() -> Void)?
     /// ⌘⌫ on a tab or workspace row.
     var onClose: ((CommandBarEntry) -> Void)?
     /// ⌥↩ on a row.
@@ -876,7 +917,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     var selected: Int { isCommandMode ? commandSelected : isSearching ? searchSelected : tree.selectedIndex ?? 0 }
 
     static func entry(for command: BarCommand) -> CommandBarEntry {
-        CommandBarEntry(item: QuickOpenItem(kind: .agent, title: command.title, id: command.entryID), tier: 2, symbol: command.symbol)
+        CommandBarEntry(item: QuickOpenItem(kind: .agent, title: command.title, id: command.entryID), tier: 2, symbol: command.symbol,
+                        keys: command.keys)
     }
 
     static func symbol(for id: CommandListItem.ID) -> String {
@@ -1017,6 +1059,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             guard commands.indices.contains(commandSelected) else { return }
             let subject = tree.selection
             guard case let .shared(command) = commands[commandSelected] else {
+                if commands[commandSelected] == .showOverview { return onShowOverview?() ?? () }
                 // New Tab in a Worktree…: the bar becomes its prompt.
                 guard let place = worktreeSubject?(subject) else { return NSSound.beep() }
                 return beginNaming(place, direct: false)
@@ -1205,6 +1248,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
                 let newTab = listed.firstIndex { if case let .shared(item) = $0 { item.id == .newTab } else { false } }
                 listed.insert(.newWorktreeTab, at: newTab.map { $0 + 1 } ?? 0)
             }
+            // The Mac's own, after the shared ones.
+            listed.append(.showOverview)
             commands = CommandList.matching(listed, query: text, title: \.title, keywords: \.keywords)
         } else {
             commands = []
@@ -1466,7 +1511,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         let text: String
         var hint: String?
         if section == .needsYou {
-            text = "Needs you"
+            text = AgentStatusGroup.needsYou.title
         } else if case let .machine(key) = tree.scope {
             text = byID["machine|\(key)"]?.item.title ?? key
             hint = "← all machines"
@@ -1529,6 +1574,8 @@ final class QuickOpenRow: NSView {
     private(set) var branchLabel: NSTextField?
     /// The change count after the branch ("+128 −32", or "6 files" when the lines weren't counted).
     private(set) var changesLabel: NSTextField?
+    /// A command's own key ("⇧⌘0") in the trailing group, when it has one.
+    private(set) var keysLabel: NSTextField?
     static var branchMaxWidth: CGFloat { s(160) }
     /// On a row with a permission request the branch gets less, so the request shows whole in the card.
     static var branchWidthBesideRequest: CGFloat { s(96) }
@@ -1632,6 +1679,14 @@ final class QuickOpenRow: NSView {
             count.toolTip = ChangeCountText.spoken(entry.changes)
             trailing.addArrangedSubview(count)
             changesLabel = count
+        }
+        // A command's own key, before the row's number.
+        if let keys = entry.keys {
+            let label = Self.dim(keys, compression: .required)
+            label.font = .monospacedSystemFont(ofSize: s(11), weight: .regular)
+            label.setAccessibilityLabel("Shortcut \(keys)")
+            trailing.addArrangedSubview(label)
+            keysLabel = label
         }
         // Rows past the ninth keep an empty slot, so every row is the same height.
         let key = Self.dim(shortcut.map { "⌘\($0)" } ?? "", compression: .required)

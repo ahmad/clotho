@@ -426,16 +426,8 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
     nonisolated static func rewriteCaption(health: DaemonSettings.RewriteHealth?, alerts: Bool) -> (text: String, failing: Bool) {
         let plain = "Claude Haiku writes one line for notifications; off shows the message itself"
         guard alerts, let health else { return (plain, false) }
-        switch health.state {
-        case .failing:
-            // On one line, whatever the daemon sent.
-            let reason = health.reason.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }.flatMap { $0.isEmpty ? nil : $0 }
-            return (reason.map { "Not working: \($0)" } ?? "Not working", true)
-        case .unavailable:
-            return ("Claude Code wasn't found on this machine", false)
-        case .ok, .unknown, .off:
-            return (plain, false)
-        }
+        // The wording is ClothoKit's, shared with iOS.
+        return health.problemCaption ?? (plain, false)
     }
 
     /// A number field and a stepper, within the daemon's limits; disabled without settings.

@@ -70,6 +70,11 @@ extension AppDelegate {
         session.store.onAgentChange = { [weak self] pane, before, after in
             self?.agentChanged(machine: key, pane: pane, from: before, to: after)
         }
+        // The last lines of a pane's screen, for its card in the Overview: only while it shows.
+        session.store.onPeek = { [weak self] pane, lines in
+            guard let self, isOverviewShown else { return }
+            overviewPeek(machine: key, pane: pane, lines: lines)
+        }
     }
 
     /// Connects to a remote machine's daemon (installing it as needed). `show` switches the window to it

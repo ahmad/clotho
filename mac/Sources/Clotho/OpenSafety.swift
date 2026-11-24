@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// Whether opening a file in its default app would run it. "Open in Editor" is for reading and editing a
 /// file an agent may have just written: one that would run is shown in Finder instead.
@@ -22,9 +23,13 @@ enum OpenSafety {
     /// - name: the file's name or path.
     /// - isExecutable: a regular file with the exec bit.
     /// - defaultApp: the bundle id of the app that opens it, nil when there is none (or it isn't known).
-    static func runsWhenOpened(name: String, isExecutable: Bool, defaultApp: String?) -> Bool {
+    /// - conformsToExecutable: the system types it as a program (`public.unix-executable`: a binary, or an
+    ///   executable file with no extension). Opening one runs it in Terminal, whatever app claims it. A
+    ///   script with an extension has its own type (`build.sh` is `public.shell-script`) and isn't one.
+    static func runsWhenOpened(name: String, isExecutable: Bool, defaultApp: String?, conformsToExecutable: Bool = false) -> Bool {
         let ext = (name as NSString).pathExtension.lowercased()
         if runExtensions.contains(ext) { return true }
+        if conformsToExecutable { return true }
         if let defaultApp { return runnerApps.contains(defaultApp.lowercased()) }
         // An executable nothing claims to edit.
         return isExecutable
@@ -33,10 +38,11 @@ enum OpenSafety {
     /// The same, for a file on this Mac.
     static func runsWhenOpened(_ url: URL) -> Bool {
         let file = url.resolvingSymlinksInPath()
-        let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey])
+        let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isExecutableKey, .contentTypeKey])
         let executable = values?.isRegularFile == true && values?.isExecutable == true
+        let program = values?.isRegularFile == true && values?.contentType?.conforms(to: .unixExecutable) == true
         let app = NSWorkspace.shared.urlForApplication(toOpen: file).flatMap { Bundle(url: $0)?.bundleIdentifier }
-        return runsWhenOpened(name: url.lastPathComponent, isExecutable: executable, defaultApp: app)
-            || runsWhenOpened(name: file.lastPathComponent, isExecutable: executable, defaultApp: app)
+        return runsWhenOpened(name: url.lastPathComponent, isExecutable: executable, defaultApp: app, conformsToExecutable: program)
+            || runsWhenOpened(name: file.lastPathComponent, isExecutable: executable, defaultApp: app, conformsToExecutable: program)
     }
 }

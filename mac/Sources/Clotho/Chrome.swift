@@ -425,6 +425,24 @@ struct HeldTitles<Key: Hashable> {
 final class TabBarView: NSView {
     static var height: CGFloat { s(40) }
 
+    /// While the Overview covers the window: nothing here is in the accessibility tree, as nothing here
+    /// takes a click or the keyboard (the rule is in ChangesDiffView.swift). Not `isHidden`: that is the
+    /// view's own shown or hidden state.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
+
     var onSelect: ((TabID) -> Void)?
     var onClose: ((TabID) -> Void)?
     /// A tab's title was edited in place (an empty title goes back to the pane's).
@@ -765,6 +783,24 @@ final class PassthroughLabel: NSTextField {
 
 final class SidebarView: NSView {
     static let width: CGFloat = 190
+
+    /// While the Overview covers the window: nothing here is in the accessibility tree, as nothing here
+    /// takes a click or the keyboard (the rule is in ChangesDiffView.swift). Not `isHidden`: that is the
+    /// view's own shown or hidden state.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
     /// Room at the top for the window buttons.
     static let topInset: CGFloat = 34
 
@@ -981,17 +1017,17 @@ final class SidebarView: NSView {
         // in it isn't there, and with no section at all the column is the workspace list alone.
         let inbox = AgentInbox.sections(agents)
         if !inbox.needsYou.isEmpty {
-            addSectionHeader("Needs you", count: inbox.needsYou.count, inbox: true)
+            addSectionHeader(AgentStatusGroup.needsYou.title, count: inbox.needsYou.count, inbox: true)
             inbox.needsYou.forEach { addAgent($0, actions: true) }
         }
         if !inbox.done.isEmpty {
-            addSectionHeader("Done", count: inbox.done.count, inbox: true)
+            addSectionHeader(AgentStatusGroup.done.title, count: inbox.done.count, inbox: true)
             inbox.done.forEach { addAgent($0, actions: true) }
         }
         if !inbox.working.isEmpty {
             // Closed unless opened: working agents don't need the user.
             let expanded = UserDefaults.standard.bool(forKey: Self.workingExpandedKey)
-            let section = DisclosureRow(title: "Working", count: inbox.working.count, expanded: expanded)
+            let section = DisclosureRow(title: AgentStatusGroup.working.title, count: inbox.working.count, expanded: expanded)
             section.toolTip = "Agents that are running"
             section.contextMenu = { [weak self] in self?.agentsMenu?() }
             section.onClick = { [weak self, weak section] in
@@ -1740,6 +1776,23 @@ final class WorkspaceRow: SidebarRow {
 /// such as an upgrade that needs clothod restarted.
 final class NoticeBar: NSView {
     private var appearanceColors: (() -> Void)?
+
+    /// While the Overview covers the window: not in the accessibility tree, as it takes no click and no
+    /// keyboard there (the rule is in ChangesDiffView.swift). Not `isHidden`: that is the view's own state.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()

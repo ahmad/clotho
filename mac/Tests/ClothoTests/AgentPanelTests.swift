@@ -103,9 +103,45 @@ final class ClearerAlertsTests: XCTestCase {
     }
 
     func testNoticeWords() {
-        XCTAssertEqual(AgentNotice(info: agent(.done, needsUser: true), machine: "Mac", workspace: "Platform").title, "Platform · Claude needs you")
-        XCTAssertEqual(AgentNotice(info: agent(.done, needsUser: false), machine: "Mac", workspace: "Platform").title, "Platform · Claude is done")
-        XCTAssertEqual(AgentNotice(info: agent(.done), machine: "Mac", workspace: "Platform").title, "Platform · Claude finished", "as before")
+        // As the Mac posts them: with the pane's tab.
+        func title(_ info: AgentInfo) -> String { AgentNotice(info: info, machine: "Mac", workspace: "Platform", tab: "cargo test").title }
+        XCTAssertEqual(title(agent(.done, needsUser: true)), "Needs you · Platform › cargo test")
+        XCTAssertEqual(title(agent(.done, needsUser: false)), "Done · Platform › cargo test")
+        XCTAssertEqual(title(agent(.done)), "Platform · Claude finished", "an older daemon's, as before")
+    }
+
+    /// The mark follows ClothoKit's `activeStatusGroup` (shared with iOS) and must stay what the Mac's own
+    /// rule gave, for every state, `needsUser`, attention, mute and settle; an older daemon's nil
+    /// `needsUser` included.
+    func testTheMarkAgreesWithTheMacRule() {
+        func macRule(_ info: AgentInfo) -> AgentMark? {
+            if info.needsAttention {
+                if info.state == .error { return .error }
+                return info.state != .done || info.asksUser ? .needsYou : .done
+            }
+            return info.state == .running || info.state == .starting ? .working : nil
+        }
+        var checked = 0
+        for state in [.waiting, .running, .starting, .done, .error, .unknown] as [AgentInfo.State] {
+            for needsUser in [true, false, nil] as [Bool?] {
+                for attention in [true, false, nil] as [Bool?] {
+                    for muted in [true, nil] as [Bool?] {
+                        for settling in [true, nil] as [Bool?] {
+                            let info = AgentInfo(kind: "claude", state: state, attention: attention, muted: muted,
+                                                 needsUser: needsUser, settling: settling)
+                            let name = "\(state) needsUser \(String(describing: needsUser)) attention \(String(describing: attention)) muted \(muted == true) settling \(settling == true)"
+                            XCTAssertEqual(info.mark, macRule(info), name)
+                            XCTAssertEqual(info.asksUser, info.state == .done && info.attentionGroup == .needsYou, name)
+                            checked += 1
+                        }
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(checked, 6 * 3 * 3 * 2 * 2)
+        XCTAssertEqual(AgentMark.needsYou.label, "Needs you")
+        XCTAssertEqual(AgentMark.done.label, "Done")
+        XCTAssertEqual(AgentMark.working.label, "Working")
     }
 }
 

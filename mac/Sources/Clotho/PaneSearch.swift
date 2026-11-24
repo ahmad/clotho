@@ -292,6 +292,14 @@ final class PaneFindBar: NSView {
     var onOptionsChanged: (() -> Void)?
 
     struct Options { var caseSensitive = false; var regex = false }
+
+    /// The field's width when the pane has room, and the least it shrinks to in a narrow one.
+    static let fieldWidth: CGFloat = 200
+    static let fieldMinWidth: CGFloat = 60
+    /// Room kept for the count ("12 of 340") while the pane has it.
+    static let statusWidth: CGFloat = 72
+    /// From the pane's right edge: clear of the pane's ×.
+    static var trailingInset: CGFloat { PaneHostView.padding + PaneCloseButton.size + 10 }
     var options: Options { Options(caseSensitive: caseButton.state == .on, regex: regexButton.state == .on) }
 
     init() {
@@ -304,11 +312,24 @@ final class PaneFindBar: NSView {
         field.sendsSearchStringImmediately = true
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 12)
-        field.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        // In a narrow pane the bar gives way in this order: the count truncates to nothing, then the field
+        // shrinks to its minimum. The buttons keep their sizes.
+        let fieldWidth = field.widthAnchor.constraint(equalToConstant: Self.fieldWidth)
+        fieldWidth.priority = .defaultLow
+        fieldWidth.isActive = true
+        field.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.fieldMinWidth).isActive = true
+        field.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        field.setContentHuggingPriority(.init(1), for: .horizontal)
         status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         status.textColor = Theme.dimText
-        status.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+        status.lineBreakMode = .byTruncatingTail
+        let statusWidth = status.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.statusWidth)
+        statusWidth.priority = .init(200)
+        statusWidth.isActive = true
+        status.setContentCompressionResistancePriority(.init(100), for: .horizontal)
+        status.setContentHuggingPriority(.init(150), for: .horizontal)
         for (button, tip) in [(caseButton, "Match Case"), (regexButton, "Regular Expression")] {
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
             button.setButtonType(.pushOnPushOff)
             button.bezelStyle = .texturedRounded
             button.controlSize = .small
@@ -323,6 +344,7 @@ final class PaneFindBar: NSView {
         let stack = NSStackView(views: [field, status, caseButton, regexButton, next, previous, close])
         stack.orientation = .horizontal
         stack.spacing = 4
+        stack.setHuggingPriority(.init(150), for: .horizontal)
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 6, bottom: 4, right: 4)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
@@ -342,6 +364,7 @@ final class PaneFindBar: NSView {
         button.contentTintColor = Theme.dimText
         button.toolTip = tip
         button.widthAnchor.constraint(equalToConstant: 20).isActive = true
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }
 
@@ -385,9 +408,14 @@ extension PaneHostView {
             // Under the header.
             let top = controller.bar.topAnchor.constraint(equalTo: topAnchor, constant: Self.belowHeader)
             belowHeaderConstraints.add(top)
+            // Inside the pane on the left too: the bar narrows (count, then field) rather than run off the edge.
+            // A pane narrower than the buttons themselves keeps them whole and at the right; the pane clips the rest.
+            let leading = controller.bar.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: Self.padding)
+            leading.priority = .init(999)
             NSLayoutConstraint.activate([
                 top,
-                controller.bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -(Self.padding + PaneCloseButton.size + 10)),
+                leading,
+                controller.bar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -PaneFindBar.trailingInset),
             ])
             if let selected = terminal.getSelection(), !selected.isEmpty, !selected.contains("\n") {
                 controller.bar.field.stringValue = selected

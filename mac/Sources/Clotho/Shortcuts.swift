@@ -24,6 +24,12 @@ struct Shortcut {
         ("Down", String(UnicodeScalar(NSDownArrowFunctionKey)!), "↓"),
     ]
 
+    /// The Overview's key, here only: ⇧⌘0. (⌘0 is View ▸ Actual Size.) To change it, change this, the
+    /// row in docs/usage.md and MenuShortcutTests.
+    static let overviewKey: (key: String, modifiers: NSEvent.ModifierFlags) = ("0", [.command, .shift])
+    /// "⇧⌘0", as the menu shows it.
+    static var overviewKeys: String { symbols(for: overviewKey.modifiers) + keySymbol(overviewKey.key) }
+
     var displayKeys: String {
         if let listKeys { return listKeys }
         return Self.symbols(for: modifiers) + Self.keySymbol(key)
@@ -53,7 +59,8 @@ struct Shortcut {
     /// "r" + ⇧⌘ fired on ⌘R (Rename Workspace took Rename Tab's key) and never on ⇧⌘R. The convention is
     /// the capital letter without Shift in the mask.
     var menuKey: (String, NSEvent.ModifierFlags) {
-        let shifted = ["[": "{", "]": "}"]
+        // ⇧⌘0 too: a key press reports ")", and "0" with Shift in the mask never matches it.
+        let shifted = ["[": "{", "]": "}", "0": ")"]
         if modifiers.contains(.shift), let char = shifted[key] {
             return (char, modifiers.subtracting(.shift))
         }
@@ -95,6 +102,9 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Bigger Terminal Text", key: "=", modifiers: [.command, .option], action: #selector(terminalZoomIn(_:))),
             Shortcut(menu: "View", title: "Smaller Terminal Text", key: "-", modifiers: [.command, .option], action: #selector(terminalZoomOut(_:))),
             Shortcut(menu: "View", title: "Actual Terminal Text Size", key: "0", modifiers: [.command, .option], action: #selector(terminalActualSize(_:))),
+            // Every agent's card, over the window (Overview.swift).
+            Shortcut(menu: "View", title: "Overview", key: Shortcut.overviewKey.key, modifiers: Shortcut.overviewKey.modifiers,
+                     action: #selector(toggleOverview(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "/", action: #selector(showOrHideSidebar(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(showOrHideSidebar(_:)),
                      hiddenInMenu: true, listed: false),
@@ -239,6 +249,7 @@ extension AppDelegate {
     /// (Return keeps what's typed, Esc the default), then the terminal takes the keyboard. Every way of
     /// making a workspace comes here. A hidden sidebar is shown for the rename.
     @objc func newWorkspace(_ sender: Any?) {
+        uncoverWindow()
         let name = "Workspace \(store.state.workspaces.count + 1)"
         let options = spawnOptions()
         let machine = focusedMachine
@@ -255,8 +266,10 @@ extension AppDelegate {
         newWorkspace(nil)
     }
 
-    // Closing a workspace stops every agent in it, so it asks first.
+    // Closing a workspace stops every agent in it, so it asks first. With the Overview up it closes only
+    // that, as ⌘W does: nothing is closed that isn't in view.
     @objc func closeActiveWorkspace(_ sender: Any?) {
+        if isOverviewShown { return closeOverview() }
         guard let workspace = store.focusedWorkspace else { return }
         closeWorkspace(workspace.id)
     }
@@ -289,6 +302,7 @@ extension AppDelegate {
     @objc func nextWorkspace(_ sender: Any?) { stepWorkspace(by: 1) }
 
     func stepWorkspace(by step: Int) {
+        uncoverWindow()
         let all = sidebarGroups().flatMap { group in group.workspaces.map { (machine: group.key, workspace: $0.id) } }
         guard !all.isEmpty else { return }
         let index = all.firstIndex { $0.machine == focusedMachine && $0.workspace == store.focusedWorkspace?.id } ?? 0
@@ -298,6 +312,7 @@ extension AppDelegate {
 
     // A new tab opens in the focused pane's folder.
     @objc func newTab(_ sender: Any?) {
+        uncoverWindow()
         guard let workspace = store.focusedWorkspace else { return newWorkspace(sender) }
         let options = spawnOptions(cwd: store.focusedPane?.cwd)
         run { _ = try await $0.createTab(in: workspace.id, spawn: options) }
@@ -307,6 +322,7 @@ extension AppDelegate {
     /// its focused pane's folder), as ⌘T would there.
     func newTab(in workspace: WorkspaceID, on key: MachineKey) {
         guard let store = connections[key]?.store, store.state.workspaces.contains(where: { $0.id == workspace }) else { return }
+        uncoverWindow()
         focusNow(.workspace(workspace), on: key, trace: "new tab button")
         let shown = store.state.focusing(.workspace(workspace))
         let cwd = shown.flatMap { $0.pane($0.focus.pane)?.cwd }
@@ -322,16 +338,19 @@ extension AppDelegate {
     }
 
     @objc func closeActiveTab(_ sender: Any?) {
+        if isOverviewShown { return closeOverview() }
         guard let tab = store.focusedTab else { return }
         closeTab(tab.id)
     }
 
     @objc func renameTab(_ sender: Any?) {
+        uncoverWindow()
         guard let tab = store.focusedTab else { return }
         renameTab(withID: tab.id)
     }
 
     @objc func renameActiveWorkspace(_ sender: Any?) {
+        uncoverWindow()
         guard let workspace = store.focusedWorkspace else { return }
         renameWorkspace(workspace.id)
     }
@@ -340,6 +359,7 @@ extension AppDelegate {
     @objc func nextTab(_ sender: Any?) { stepTab(by: 1) }
 
     func stepTab(by step: Int) {
+        uncoverWindow()
         guard let tabs = store.focusedWorkspace?.tabs, !tabs.isEmpty else { return }
         let index = tabs.firstIndex { $0.id == store.focusedTab?.id } ?? 0
         let target = tabs[(index + step + tabs.count) % tabs.count].id
@@ -347,6 +367,7 @@ extension AppDelegate {
     }
 
     @objc func goToTab(_ sender: Any?) {
+        uncoverWindow()
         let n = (sender as? NSMenuItem)?.tag ?? 1
         guard let tabs = store.focusedWorkspace?.tabs, n <= tabs.count else { return }
         let target = tabs[n - 1].id
@@ -374,9 +395,13 @@ extension AppDelegate {
         run { _ = try await $0.split(pane.id, direction: direction, ratio: nil, spawn: options) }
     }
 
-    // ⌘W hides the shortcuts card, the file browser or the centre diff when one is showing; otherwise it
-    // closes the focused pane (and its tab, if it was the last pane).
+    // ⌘W hides the shortcuts card, the file browser, the Overview or the centre diff when one is showing
+    // (the topmost of them); otherwise it closes the focused pane (and its tab, if it was the last pane).
     @objc func closePane(_ sender: Any?) {
+        if isOverviewShown, shortcutsOverlay == nil, fileBrowser == nil {
+            closeOverview()
+            return
+        }
         if isChangesDiffShown, shortcutsOverlay == nil, fileBrowser == nil {
             closeChangesDiff()
             return

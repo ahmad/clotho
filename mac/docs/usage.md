@@ -95,6 +95,40 @@ You can answer an agent that's asking you something without opening its pane. It
 
 Clotho sends a notification when an agent needs you: when it starts waiting for you, finishes, or fails, as reported by its hooks, or when it rings the terminal bell. The notification says whether you're needed: a finished turn that asks you something reads **Needs you**, and one that only finished reads **Done** and makes no sound. Clotho waits until the agent has really stopped before it alerts, so a turn that carries straight on doesn't interrupt you. While you're using Clotho on the Mac, your phone is left alone. An agent detected only from the terminal that has gone quiet shows as idle and doesn't alert, since that may just be a slow reply or a long build. Opening the pane, or typing in it, marks it seen on every device. You don't get a notification for the pane you're looking at. Click it to open the pane. The **Agents** menu in the menu bar turns each kind of notification on or off (so does a right-click on an inbox section's header); a finished turn that asks you something follows **Notify When Waiting for You**, not **Notify When Done**. Right-click a machine and turn off **Monitor Agents** to leave its agents out of the inbox, the marks, the notifications and the dock count. A machine that can't be reached says so on its own row in the sidebar (**Can't reach**, with **Reconnect**), so its agents are never silently missing.
 
+### Overview
+
+**View → Overview** (**⇧⌘0**), or **> Show Overview** in the command bar, shows every agent on every connected machine as a card, over the whole window. It shows the agents of every machine, also one with **Monitor Agents** turned off. The same key, **Esc** or **Back** goes back to where you were; nothing under the Overview moves while it's up.
+
+The cards are in three lanes, as in the inbox: **Needs you** (with an amber outline, the longest wait first), **Working** and **Done** (the most recent first). A lane with no agent isn't shown, and an agent that is idle, resolved or muted with nothing running has no card. A Done card leaves when you resolve it or the agent starts again.
+
+A card shows:
+
+- the agent's mark, where it runs (Workspace › Tab) and for how long (**2 min**; **23 min ago** for a finished one);
+- what it asks or last said, on at most two lines (hover for all of it). A permission request reads as the request itself (**Allow Bash: cargo test**);
+- the machine and the agent (**devbox · Claude**), how long a finished turn took, and **muted**;
+- a live peek: the last two lines of its pane's screen, without the input box an agent's screen ends with. (This needs clothod 0.1.32 or later on that machine; without it the card has no peek.)
+- its branch and the lines added and removed in the work tree, or **no repo**.
+
+With the keyboard in the cards:
+
+| Action | Key |
+| --- | --- |
+| Move between cards | ← → ↑ ↓ |
+| Open the agent's pane | Return (or a double-click) |
+| Open the agent's Tab beside the current pane | ⌘↩ |
+| Resolve | R |
+| Mute or unmute | M |
+| Filter | / |
+| Back | Esc |
+
+A card has no **Allow** or **Deny**: open the pane and answer there, where you can read what it asks. Right-click a card for **Open**, **Open Beside**, **Resolve** and **Mute** or **Unmute**.
+
+**Open Beside** moves the agent's whole Tab next to the pane you were in. It works within one machine, for a Tab other than the one you were in; otherwise the Overview stays and says why.
+
+The filter takes words from the machine's, Workspace's or Tab's name, the branch or the agent's name, and the state words **needs**, **working** and **done**, as the command bar does. **Esc** in the filter clears it; the down arrow or **Return** goes back to the cards.
+
+While the Overview is up, a command for a Workspace, a Tab, a pane, the sidebar or the inspector closes it first and then runs. **⌘W**, **Close Tab** and **Close Workspace** close only the Overview. The command bar, the file browser, the shortcuts overlay and Settings open over it.
+
 ## Shells survive quitting
 
 Quitting Clotho (**⌘Q**) or closing its window only disconnects. The daemon keeps every shell running, and reopening Clotho brings back each workspace, tab, pane and screen as it was, including full-screen programs such as vim or Claude Code.
@@ -135,7 +169,7 @@ Closing a pane, tab or workspace ends the programs in it. Shells don't survive a
 | Resize pane in a direction | ⌃⌘ plus an arrow key |
 | Toggle pane maximize | ⇧⌘Return |
 
-Resizing moves the nearest divider toward the arrow. A maximized pane fills its tab, and its tab shows ⤢; the other panes keep running. When a full diff, the file browser or the shortcuts overlay is open, **⌘W** closes it instead of the pane. Hovering near a pane's top-right corner shows a **×** that closes that pane, as ⌘W does.
+Resizing moves the nearest divider toward the arrow. A maximized pane fills its tab, and its tab shows ⤢; the other panes keep running. When a full diff, the Overview, the file browser or the shortcuts overlay is open, **⌘W** closes it instead of the pane. Hovering near a pane's top-right corner shows a **×** that closes that pane, as ⌘W does.
 
 ### Editing, files, and the window
 
@@ -151,6 +185,7 @@ Resizing moves the nearest divider toward the arrow. A maximized pane fills its 
 | Command bar: go to a tab, workspace or agent | ⌘P |
 | Toggle sidebar | ⌘/ (or ⌃⌘S) |
 | Toggle inspector (Changes, Files, Activity) | ⌥⌘B |
+| Overview: every agent's card | ⇧⌘0 |
 | Minimize window | ⌘M |
 | Toggle full screen | ⌃⌘F |
 | Hide Clotho | ⌘H |

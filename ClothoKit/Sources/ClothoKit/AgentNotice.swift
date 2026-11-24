@@ -29,9 +29,13 @@ public struct AgentNotice: Equatable, Sendable {
     ///
     /// `needsUser` is the agent's `needs_user` (a push record's `nu`): true reads "Claude needs you",
     /// false on a done turn "Claude is done", and nil (older daemons) words it by the state as before.
+    ///
+    /// With a `tab` (the tab's display name) the title is the place's, when `placeTitle` has one: "Needs
+    /// you · Platform › cargo test". Without a tab the title is as above.
     public init(kind: String, state: String, machine: String, workspace: String?, project: String?, duration: TimeInterval?,
                 result: String?, tool: String?, toolInput: String?, fallback: String? = nil, summary: String? = nil,
-                needsUser: Bool? = nil) {
+                needsUser: Bool? = nil, tab: String? = nil) {
+        let rawState = state
         let state = AgentInfo.State(rawValue: state) ?? .unknown
         let what = "\(AgentInfo.shortName(ofKind: kind)) \(state.alertVerb(needsUser: needsUser))"
         let machine = machine.nonEmpty
@@ -41,6 +45,9 @@ public struct AgentNotice: Equatable, Sendable {
         } else {
             title = machine.map { "\(what) on \($0)" } ?? what
             subtitle = [project?.nonEmpty, duration.flatMap(Self.duration)].compactMap { $0 }.joined(separator: " · ")
+        }
+        if let tab, let placed = Self.placeTitle(state: rawState, needsUser: needsUser, workspace: workspace, tab: tab) {
+            title = placed
         }
         let summary = summary.map(PlainText.oneLine)?.nonEmpty
         if let ask = Self.permissionAsk(state: state, message: result, tool: tool, toolInput: toolInput) {
@@ -55,12 +62,32 @@ public struct AgentNotice: Equatable, Sendable {
 
     /// From a pane's agent. `cwd` is the pane's; its last part names the project. With no result the body
     /// is the turn's prompt. A pending permission request (the oldest) names the tool it asks about.
-    public init(info: AgentInfo, machine: String, workspace: String? = nil, cwd: String? = nil) {
+    /// `tab` is the tab's display name (see the other init).
+    public init(info: AgentInfo, machine: String, workspace: String? = nil, cwd: String? = nil, tab: String? = nil) {
         self.init(kind: info.kind, state: info.state.rawValue, machine: machine, workspace: workspace,
                   project: cwd.flatMap(Self.project), duration: info.turnDuration, result: info.message,
                   tool: info.pendingRequests.first?.tool ?? info.tool,
                   toolInput: info.pendingRequests.first.map(\.summary) ?? info.toolInput, fallback: info.prompt,
-                  summary: info.summary, needsUser: info.needsUser)
+                  summary: info.summary, needsUser: info.needsUser, tab: tab)
+    }
+
+    /// A title that leads with what the notification asks and says where: "Needs you · Platform › cargo
+    /// test" when the user has to act (`needsUser`, or a waiting or failed agent), "Done · Platform ›
+    /// cargo test" for a turn that just finished; without a tab, "Needs you · Platform". Nil when there
+    /// is no such title: `needsUser` isn't known (an older daemon), there is no workspace, or the state
+    /// is neither. `state` is the raw state name.
+    public static func placeTitle(state: String, needsUser: Bool?, workspace: String?, tab: String?) -> String? {
+        guard let needsUser, let workspace, !workspace.isEmpty else { return nil }
+        let lead: AgentStatusGroup
+        if needsUser || state == "waiting" || state == "error" {
+            lead = .needsYou
+        } else if state == "done" {
+            lead = .done
+        } else {
+            return nil
+        }
+        guard let tab, !tab.isEmpty else { return "\(lead.title) · \(workspace)" }
+        return "\(lead.title) · \(workspace) › \(tab)"
     }
 
     /// What the agent came to. A permission wait (waiting, with a tool, and a message that mentions

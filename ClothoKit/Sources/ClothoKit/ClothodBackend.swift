@@ -77,6 +77,10 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
     var lastHello: Hello?
     /// The colours this client shows panes in, sent after every hello (`setTerminalColors`).
     private var terminalColors: TerminalColors?
+    /// The peek subscription the app asked for (`peekSubscribe`), sent again after every hello.
+    private var peekSubscription: (panes: [PaneID]?, lines: Int)?
+    /// Counts every change to `peekSubscription`, so a reply to an older one is told apart.
+    private var peekGeneration = 0
 
     private let writeQueue = DispatchQueue(label: "clotho.clothod.write")
 
@@ -255,6 +259,15 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
                 configuration.log?("resubscribing pane \(pane) failed: \(error)")
             }
         }
+        // A new connection has no peek subscription: send the app's again. Its lines come as `peek` events.
+        if hello.features.contains(.peek),
+           let peek = locked({ peekSubscription.map { (panes: $0.panes, lines: $0.lines, generation: peekGeneration) } }) {
+            do {
+                _ = try await sendPeekSubscription(panes: peek.panes, lines: peek.lines, generation: peek.generation)
+            } catch {
+                configuration.log?("peek.subscribe after reconnecting failed: \(error)")
+            }
+        }
     }
 
     private func connectionClosed(_ closed: ByteStream, reason: String) {
@@ -388,6 +401,79 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         if let oldPath { params["old_path"] = oldPath }
         if let context { params["context"] = context }
         return try Self.decode(GitDiff.self, from: try await request("git.diff", params))
+    }
+
+    // MARK: Peek
+
+    /// Sets the one peek subscription. The reply's lines are yielded as `.peek` events as the reply is
+    /// read, so they sit in the event stream ahead of every later `peek` event, and are returned too:
+    /// apps draw from the events, so a reply can never overwrite a newer event. `lines` is brought into
+    /// 1...8 here. Without the feature in the last hello (or before any hello) it throws
+    /// `unknown_method`, and nothing is sent or kept. Otherwise the subscription is kept even when
+    /// sending fails, and goes out after the next hello.
+    public func peekSubscribe(panes: [PaneID]?, lines: Int) async throws -> [PanePeek] {
+        let lines = min(max(lines, 1), 8)
+        let generation: Int = try locked {
+            guard lastHello?.features.contains(.peek) == true else {
+                throw BackendError(code: "unknown_method", message: "this clothod can't peek at panes")
+            }
+            peekGeneration += 1
+            peekSubscription = (panes, lines)
+            return peekGeneration
+        }
+        return try await sendPeekSubscription(panes: panes, lines: lines, generation: generation)
+    }
+
+    /// Forgets the subscription first, so it isn't sent again whatever happens to the request, then
+    /// ends it on the daemon. `peek` events still on their way are dropped.
+    public func peekUnsubscribe() async throws {
+        let (generation, hasPeek): (Int, Bool) = locked {
+            peekGeneration += 1
+            peekSubscription = nil
+            return (peekGeneration, lastHello?.features.contains(.peek) == true)
+        }
+        guard hasPeek else { return }
+        _ = try await request("peek.unsubscribe", nil)
+        await settlePeek(after: generation)
+    }
+
+    private func sendPeekSubscription(panes: [PaneID]?, lines: Int, generation: Int) async throws -> [PanePeek] {
+        var params: [String: Any] = ["lines": lines]
+        if let panes { params["panes"] = panes }
+        let continuation = continuation
+        let reply = try await request("peek.subscribe", params, onReply: { [weak self] result in
+            // On the read thread, before any later frame is handled. A reply to a subscription that has
+            // been replaced or ended since says nothing the app still wants.
+            guard let self, let peeks = try? Self.peeks(in: result) else { return }
+            self.locked {
+                guard self.peekGeneration == generation else { return }
+                for peek in peeks { continuation.yield(.peek(peek.pane, lines: peek.lines)) }
+            }
+        })
+        await settlePeek(after: generation)
+        return try Self.peeks(in: reply)
+    }
+
+    /// Requests can pass each other on the way out (two callers, or a caller and a reconnect), so the
+    /// daemon's last one may not be the latest. After each reply: when the subscription changed since
+    /// that request was made, what is kept now is sent once more.
+    private func settlePeek(after generation: Int) async {
+        let (now, current) = locked { (peekGeneration, peekSubscription) }
+        guard now != generation else { return }
+        do {
+            if let current {
+                _ = try await sendPeekSubscription(panes: current.panes, lines: current.lines, generation: now)
+            } else {
+                _ = try await request("peek.unsubscribe", nil)
+                await settlePeek(after: now)
+            }
+        } catch {
+            configuration.log?("sending the peek subscription again failed: \(error)")
+        }
+    }
+
+    private static func peeks(in reply: Any) throws -> [PanePeek] {
+        try decode([PanePeek].self, from: (reply as? [String: Any])?["peeks"] ?? [Any]())
     }
 
     public func renameTab(_ tab: TabID, title: String?) async throws {
@@ -717,6 +803,10 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
             event = .resized(pane, cols: cols, rows: rows, seq: seq)
         case "pane.resync":
             event = pane.map { .resync($0) }
+        case "peek":
+            // One still on its way after `peekUnsubscribe` is dropped.
+            guard let pane, let lines = data["lines"] as? [String], locked({ peekSubscription != nil }) else { return }
+            event = .peek(pane, lines: lines)
         case "fs.ack", "fs.done", "fs.error":
             handleFileEvent(name, data)
             return

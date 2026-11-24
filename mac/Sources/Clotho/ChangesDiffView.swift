@@ -33,7 +33,8 @@ final class ChangesDiffView: NSView {
     var onOpenInEditor: ((MachineKey, String) -> Void)?
     /// Whether Open in Editor shows this file in Finder instead: its default app would run it (OpenSafety.swift).
     var revealsInsteadOfOpening: ((MachineKey, String) -> Bool)?
-    private var revealChecked: (path: String, reveals: Bool)?
+    /// The last answer, for the file it was about: the same path on another machine is another file.
+    private var revealChecked: (machine: MachineKey, path: String, reveals: Bool)?
     static let openTip = "Open the file in its default app"
     static let revealTip = "Show the file in Finder. Opening it would run it."
     /// What the pasteboard gets (tests replace it).
@@ -223,7 +224,9 @@ final class ChangesDiffView: NSView {
         openButton.isEnabled = canOpen
         var reveals = false
         if canOpen, let fullPath, let machine = model.target?.machine {
-            if revealChecked?.path != fullPath { revealChecked = (fullPath, revealsInsteadOfOpening?(machine, fullPath) ?? false) }
+            if revealChecked?.machine != machine || revealChecked?.path != fullPath {
+                revealChecked = (machine, fullPath, revealsInsteadOfOpening?(machine, fullPath) ?? false)
+            }
             reveals = revealChecked?.reveals ?? false
         }
         openButton.toolTip = reveals ? Self.revealTip : Self.openTip
@@ -294,6 +297,22 @@ final class ChangesDiffView: NSView {
     override func scrollWheel(with event: NSEvent) {}
     override func resetCursorRects() { addCursorRect(bounds, cursor: .arrow) }
 
+    /// Under the Overview the diff is covered like the rest of the window: out of the accessibility tree.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
+
     /// Whether the keyboard is in this view (the view itself, or its list).
     var hasKeyboard: Bool {
         guard !isHidden, let responder = window?.firstResponder as? NSView else { return false }
@@ -324,17 +343,35 @@ struct FocusPlace: Equatable {
 extension AppDelegate {
     var isChangesDiffShown: Bool { changesDiff?.isHidden == false }
 
-    /// Gives the keyboard back to what shows in the pane area: the centre diff while it's up, else the
-    /// focused pane's terminal. Whatever had the keyboard over the panes (the command bar, the shortcuts
-    /// card, Files, a list, a name being edited) ends with this: given to the terminal under the diff, the
-    /// typing went to a shell nobody sees, and the Esc meant to close the diff went to its program.
+    /// Whether something covers the panes: the Overview (all of the window under the title row's window
+    /// buttons) or the centre diff (the pane area).
+    var isPaneAreaCovered: Bool { isChangesDiffShown || isOverviewShown }
+
+    /// Gives the keyboard back to what shows in the pane area: the Overview while it's up, else the centre
+    /// diff while it's up, else the focused pane's terminal. Whatever had the keyboard over the panes (the
+    /// command bar, the shortcuts card, Files, a list, a name being edited) ends with this: given to the
+    /// terminal under the diff, the typing went to a shell nobody sees, and the Esc meant to close the
+    /// diff went to its program.
     func returnKeyboardToPanes() { returnKeyboard(to: activeTerminal) }
 
     /// The same, for one pane's terminal (its find bar closing).
     func returnKeyboard(to terminal: PaneTerminalView?) {
-        window.makeFirstResponder(isChangesDiffShown ? changesDiff : terminal)
+        window.makeFirstResponder(isOverviewShown ? overview : isChangesDiffShown ? changesDiff : terminal)
     }
 
+    // The rule for what a cover is over. Two views cover: the centre diff, over the pane area, and the
+    // Overview (OverviewView.swift), over everything in the window but the window buttons: the sidebar,
+    // the tab bar, the panes, the inspector, and the centre diff when that is up underneath. While a cover
+    // shows, nothing acts on what it covers and nothing there takes the keyboard. For the Overview:
+    // - A command for a Workspace, a Tab, the sidebar or the inspector closes the Overview first
+    //   (`uncoverWindow`); every pane command does too (`uncoverPanes` closes both covers). ⌘W, Close Tab
+    //   and Close Workspace close only the Overview. App and window commands leave it up.
+    // - The keyboard: whatever a view under the Overview asks for goes to the Overview (`keyboardRedirect`).
+    //   The command bar, the shortcuts card and the file browser sit above it and keep the keyboard.
+    // - Accessibility: the sidebar, the tab bar, the pane area, the inspector, the centre diff, the empty
+    //   state, a notice and the two toggles have no elements while it covers them
+    //   (`updateCoveredAccessibility`).
+    //
     // The rule for the panes under the centre diff: while it shows, nothing acts on a pane it covers and
     // nothing there takes the keyboard.
     // - A command for a pane (Find, Clear, a split, Maximize, Switch and Resize Pane, the pane's menu)
@@ -348,8 +385,29 @@ extension AppDelegate {
     //   SwiftTerm reports the pointer moving over its bounds, whatever is on top.
     // - Accessibility: the pane area has no elements while covered (`isCoveredForAccessibility`).
 
-    /// Closes the centre diff: what follows acts on a pane, which must be the one in view.
-    func uncoverPanes() { closeChangesDiff() }
+    /// Closes the Overview and the centre diff: what follows acts on a pane, which must be the one in view.
+    func uncoverPanes() {
+        closeOverview()
+        closeChangesDiff()
+    }
+
+    /// Closes the Overview only: what follows acts on a Workspace, a Tab, the sidebar or the inspector, or
+    /// gives one of them the keyboard, and must do it in view.
+    func uncoverWindow() { closeOverview() }
+
+    /// What is covered leaves the accessibility tree, and comes back uncovered. Both covers set it here.
+    func updateCoveredAccessibility() {
+        splitView.isCoveredForAccessibility = isPaneAreaCovered
+        let underOverview = isOverviewShown
+        sidebar.isCoveredForAccessibility = underOverview
+        tabBar.isCoveredForAccessibility = underOverview
+        fileSidebar?.isCoveredForAccessibility = underOverview
+        changesDiff?.isCoveredForAccessibility = underOverview
+        emptyState?.isCoveredForAccessibility = underOverview
+        noticeBar?.isCoveredForAccessibility = underOverview
+        sidebarToggle?.isCoveredForAccessibility = underOverview
+        fileSidebarToggle?.isCoveredForAccessibility = underOverview
+    }
 
     /// The focused pane, for a command that acts on it: in view first.
     func focusedPaneForAction() -> PaneID? {
@@ -362,10 +420,17 @@ extension AppDelegate {
         return focusedPaneHost
     }
 
-    /// Who takes the keyboard in place of `responder`: the centre diff, for anything in the pane area
-    /// while the diff covers it.
+    /// Who takes the keyboard in place of `responder`: the Overview, for anything it covers; else the
+    /// centre diff, for anything in the pane area while the diff covers it.
     func keyboardRedirect(for responder: NSResponder) -> NSResponder? {
-        guard isChangesDiffShown, let view = responder as? NSView, view.isDescendant(of: splitView) else { return nil }
+        guard let view = responder as? NSView else { return nil }
+        if isOverviewShown {
+            // By name: the command bar, the shortcuts card and the file browser are above the Overview
+            // and keep the keyboard.
+            let covered: [NSView?] = [sidebar, tabBar, splitView, fileSidebar, emptyState, changesDiff, noticeBar, sidebarToggle, fileSidebarToggle]
+            return covered.contains { $0.map { view === $0 || view.isDescendant(of: $0) } ?? false } ? overview : nil
+        }
+        guard isChangesDiffShown, view.isDescendant(of: splitView) else { return nil }
         return changesDiff
     }
 
@@ -436,7 +501,7 @@ extension AppDelegate {
         diff.isHidden = false
         // The panes under it leave the accessibility tree too: VoiceOver must not reach a covered pane's
         // ask bar (Allow, Deny) or its close button.
-        splitView.isCoveredForAccessibility = true
+        updateCoveredAccessibility()
         inspectorVisibilityChanged()
         diff.update()
         window.makeFirstResponder(diff)
@@ -448,7 +513,7 @@ extension AppDelegate {
         guard isChangesDiffShown else { return }
         let hadKeyboard = changesDiff.hasKeyboard
         changesDiff.isHidden = true
-        splitView.isCoveredForAccessibility = false
+        updateCoveredAccessibility()
         changesDiffOpened = nil
         inspectorVisibilityChanged()
         if hadKeyboard { window.makeFirstResponder(activeTerminal) }

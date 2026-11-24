@@ -72,6 +72,8 @@ extension AppDelegate {
             sidebar.update(agents: agents, groups: sidebarGroups())
         }
         updateDockBadge(agents)
+        // The Overview's cards, while it shows: every machine's agents, monitored or not.
+        if isOverviewShown { updateOverview(agents: agentEntries(monitoredOnly: false)) }
         let tabs = (workspace?.tabs ?? []).map {
             (id: $0.id, title: store.displayTitle(of: $0), custom: $0.title, maximized: maximized[tabKey($0.id)] != nil,
              mark: agentMark(machine: focusedMachine, panes: $0.layout.panes)?.mark)
@@ -142,8 +144,8 @@ extension AppDelegate {
         window.title = tab.map { "\(store.displayTitle(of: $0)) — \(place ?? "")" } ?? "Clotho"
 
         // Keyboard focus follows the daemon's focus, unless an overlay (the command bar previews tabs while
-        // keeping the keyboard), a sheet, the sidebar, the inspector's Changes or Activity list, the centre
-        // diff (every reply to `git.changes` comes with a `pane` event, so without this the arrow keys in
+        // keeping the keyboard), a sheet, the sidebar, the inspector's Changes or Activity list, the Overview
+        // or the centre diff (every reply to `git.changes` comes with a `pane` event, so without this the arrow keys in
         // the list lost the keyboard mid-use; the list keeps it only while the focus stays where it was, so
         // a new or another Tab still gets the keyboard), or a name being edited has it: in the sidebar (the
         // rename that follows New Workspace starts before the workspace's focus lands), in the tab bar, or
@@ -152,7 +154,7 @@ extension AppDelegate {
         let listKeepsKeyboard = inspectorKeepsKeyboard()
         if let focusedPane, let host = shown[focusedPane], shortcutsOverlay == nil, fileBrowser == nil, quickOpen == nil,
            window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard, !sidebar.isEditing,
-           !tabBar.isEditing, !Self.isTypingInAField(window), !listKeepsKeyboard, !isChangesDiffShown {
+           !tabBar.isEditing, !Self.isTypingInAField(window), !listKeepsKeyboard, !isPaneAreaCovered {
             if UserAction.isRecentOrCameForward(within: Self.userFocusWindow) {
                 window.makeFirstResponder(host.terminal)
             } else {
@@ -186,7 +188,7 @@ extension AppDelegate {
         host.terminal.onDropFiles = { [weak self] urls in self?.dropFiles(urls, on: key) }
         host.terminal.onPaste = { [weak self] terminal in self?.pasteImage(into: terminal, key: .command) ?? false }
         host.terminal.contextMenu = { [weak self] in self?.paneMenu(for: key) }
-        host.terminal.isCovered = { [weak self] in self?.isChangesDiffShown == true }
+        host.terminal.isCovered = { [weak self] in self?.isPaneAreaCovered == true }
         host.onReturnKeyboard = { [weak self, weak host] in self?.returnKeyboard(to: host?.terminal) }
         host.onDecide = { [weak self] request, decision in
             self?.decide(machine: key.machine, pane: key.pane, request: request, decision)
@@ -326,6 +328,8 @@ extension AppDelegate {
             bar.trailingAnchor.constraint(equalTo: splitView.trailingAnchor),
         ])
         noticeBar = bar
+        // One shown while the Overview is up is under it.
+        updateCoveredAccessibility()
         container.layoutSubtreeIfNeeded()
         splitTop.constant = bar.fittingSize.height
     }

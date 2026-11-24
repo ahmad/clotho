@@ -96,7 +96,7 @@ extension AgentInfo {
     /// shows as done.
     var shownState: (symbol: String, color: NSColor, label: String) {
         if isQuiet { return ("moon.zzz", Theme.dimText, "Idle") }
-        if asksUser { return (State.waiting.symbol, State.waiting.color, "Needs you") }
+        if asksUser { return (State.waiting.symbol, State.waiting.color, AgentStatusGroup.needsYou.title) }
         return (state.symbol, state.color, state.label)
     }
 
@@ -134,10 +134,11 @@ extension AppDelegate {
         sync()
     }
 
-    /// Every agent on every monitored machine, most urgent first.
-    func agentEntries() -> [AgentEntry] {
+    /// Every agent on every monitored machine, most urgent first. With `monitoredOnly` false, on every
+    /// connected machine: the Overview shows them all, whatever the machine's "monitor agents" switch says.
+    func agentEntries(monitoredOnly: Bool = true) -> [AgentEntry] {
         var entries: [AgentEntry] = []
-        for (key, session) in connections where monitorsAgents(key) {
+        for (key, session) in connections where !monitoredOnly || monitorsAgents(key) {
             let state = session.store.state
             for pane in state.panes where pane.exited == nil {
                 guard let info = pane.agent else { continue }
@@ -163,6 +164,8 @@ extension AppDelegate {
     /// Clotho already in front nothing comes forward either.
     func openAgent(machine: MachineKey, pane: PaneID) {
         guard connections[machine] != nil else { return }
+        // The pane comes into view: not under the Overview (a notification click, the command bar).
+        uncoverWindow()
         UserAction.acted()
         if Self.openingAgentBringsAppForward {
             if NSApp.isHidden || !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
@@ -354,9 +357,11 @@ extension AppDelegate {
         guard let session = connections[machine] else { return }
         guard notifies(after) else { return log("agent \(machine)/\(pane): notifications for \(after.notifySwitch.rawValue) are off") }
         let location = session.store.state.location(of: pane)
-        // "Platform · Claude finished" / "devbox · api-server · 4m" / the result: the same shape as on iOS.
+        // "Needs you · Platform › cargo test" / "devbox · api-server · 4m" / the result: the same shape as on
+        // iOS. An older daemon (no `needs_user`) keeps "Platform · Claude finished".
         let notice = AgentNotice(info: after, machine: session.title, workspace: location?.workspace.name,
-                                 cwd: session.store.state.pane(pane)?.cwd)
+                                 cwd: session.store.state.pane(pane)?.cwd,
+                                 tab: location.map { session.store.displayTitle(of: $0.tab) })
         // Answerable from the notification when the daemon can type for us.
         let canReply = session.store.hello?.features.contains(.paneKeys) == true
         // A permission request the daemon can answer: Allow and Deny for that request.

@@ -40,10 +40,10 @@ enum AgentMark: Equatable, CaseIterable {
 
     var label: String {
         switch self {
-        case .needsYou: return "Needs you"
+        case .needsYou: return AgentStatusGroup.needsYou.title
         case .error: return "Error"
-        case .done: return "Done"
-        case .working: return "Working"
+        case .done: return AgentStatusGroup.done.title
+        case .working: return AgentStatusGroup.working.title
         }
     }
 
@@ -100,13 +100,15 @@ extension AgentInfo {
     /// The agent's mark. Anything whose attention is raised shows, so nothing that wants the user
     /// disappears: a failed turn as Error, a finished turn that asks nothing as Done, and the rest (a
     /// wait, a finished turn that asks, a bell while it runs) as Needs you. With no attention only a
-    /// running or starting agent has one.
+    /// running or starting agent has one. The grouping is ClothoKit's (`activeStatusGroup`), shared with
+    /// iOS; Error is the Mac's own mark within Needs you.
     var mark: AgentMark? {
-        if needsAttention {
-            if state == .error { return .error }
-            return state != .done || asksUser ? .needsYou : .done
+        switch activeStatusGroup {
+        case .needsYou?: return state == .error ? .error : .needsYou
+        case .done?: return .done
+        case .working?: return .working
+        case nil: return nil
         }
-        return state == .running || state == .starting ? .working : nil
     }
 
     /// The agent's line in the inbox: the request it waits on ("Allow Bash: npm test"), else what it asks

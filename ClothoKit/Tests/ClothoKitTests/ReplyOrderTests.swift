@@ -120,7 +120,7 @@ final class ReplyOrderTests: XCTestCase {
         XCTAssertEqual([changes, diff, tab, workspace], ["unknown_method", "unknown_method", "unknown_method", "unknown_method"])
         XCTAssertEqual(Hello.Feature(rawValue: "git.changes"), .gitChanges)
         XCTAssertEqual(Hello.Feature(rawValue: "worktree"), .worktree)
-        XCTAssertNil(Hello.Feature(rawValue: "peek"), "not a feature this client uses")
+        XCTAssertEqual(Hello.Feature(rawValue: "peek"), .peek)
     }
 
     /// The least a SessionBackend can be: everything optional comes from the protocol's defaults.

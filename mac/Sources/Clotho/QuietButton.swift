@@ -6,6 +6,27 @@ final class QuietButton: NSButton, HoverRefreshing {
     private let handler: () -> Void
     private var hovering = false { didSet { updateTint() } }
 
+    /// While the Overview covers the window: not in the accessibility tree, as it takes no click and no
+    /// keyboard there (the rule is in ChangesDiffView.swift). Not `isHidden`: that is the view's own state.
+    var isCoveredForAccessibility = false {
+        didSet {
+            guard isCoveredForAccessibility != oldValue else { return }
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        isCoveredForAccessibility ? [] : super.accessibilityChildren()
+    }
+
+    override func isAccessibilityHidden() -> Bool {
+        isCoveredForAccessibility || super.isAccessibilityHidden()
+    }
+
+    override func isAccessibilityElement() -> Bool {
+        !isCoveredForAccessibility && super.isAccessibilityElement()
+    }
+
     init(symbol: String, label: String, pointSize: CGFloat, action handler: @escaping () -> Void) {
         self.handler = handler
         super.init(frame: .zero)

@@ -41,8 +41,8 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     public var clientActiveCalls: Int { locked { activeCalls } }
     private var activeCalls = 0
 
-    /// `extraFeatures`: more names for hello's `features` ("settings", "summary", "alerts"), for building
-    /// and testing what a client gates on them. Without any, hello is what it always was.
+    /// `extraFeatures`: more names for hello's `features` ("settings", "summary", "alerts", "peek"), for
+    /// building and testing what a client gates on them. Without any, hello is what it always was.
     public init(extraFeatures: [String] = []) {
         self.extraFeatures = extraFeatures
         (events, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
@@ -306,6 +306,70 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     /// Counted; the fake has no phone to hold pushes back from.
     public func clientActive() async throws {
         locked { activeCalls += 1 }
+    }
+
+    // MARK: Peek (canned: tests and demos set the lines with `setPeek`)
+
+    public enum PeekCall: Equatable, Sendable {
+        case subscribe(panes: [PaneID]?, lines: Int)
+        case unsubscribe
+    }
+    /// Every `peekSubscribe` (as asked, before `lines` is brought into 1...8) and `peekUnsubscribe`
+    /// call, in order, refused ones included.
+    public var peekCalls: [PeekCall] { locked { peekAsks } }
+    private var peekAsks: [PeekCall] = []
+    private var peekLines: [PaneID: [String]] = [:]
+    private var peekSubscription: (panes: Set<PaneID>?, lines: Int)?
+    /// What each pane's subscriber was last sent, so only a change is an event (as clothod does it).
+    private var peekSent: [PaneID: [String]] = [:]
+
+    /// With "peek" among `extraFeatures`, as the real backend: the reply's lines are also yielded as
+    /// `.peek` events, ids that name no pane are skipped, and `lines` is brought into 1...8. Without
+    /// it, `unknown_method`.
+    public func peekSubscribe(panes: [PaneID]?, lines: Int) async throws -> [PanePeek] {
+        try locked {
+            peekAsks.append(.subscribe(panes: panes, lines: lines))
+            guard extraFeatures.contains("peek") else {
+                throw BackendError(code: "unknown_method", message: "this fake wasn't made with the peek feature")
+            }
+            peekSubscription = (panes.map(Set.init), min(max(lines, 1), 8))
+            peekSent.removeAll()
+            let wanted = (panes ?? state.panes.map(\.id)).filter { id in state.panes.contains { $0.id == id } }
+            var seen = Set<PaneID>()
+            let peeks = wanted.filter { seen.insert($0).inserted }.map { PanePeek(pane: $0, lines: peekTail($0)) }
+            for peek in peeks {
+                peekSent[peek.pane] = peek.lines
+                continuation.yield(.peek(peek.pane, lines: peek.lines))
+            }
+            return peeks
+        }
+    }
+
+    public func peekUnsubscribe() async throws {
+        locked {
+            peekAsks.append(.unsubscribe)
+            peekSubscription = nil
+            peekSent.removeAll()
+        }
+    }
+
+    /// Sets the last lines of a pane's screen (oldest first). A `.peek` event follows when the peek
+    /// subscription wants the pane and the lines it gets differ from the ones it was last sent.
+    public func setPeek(_ pane: PaneID, lines: [String]) {
+        locked {
+            peekLines[pane] = lines
+            guard let subscription = peekSubscription, subscription.panes?.contains(pane) ?? true,
+                  state.panes.contains(where: { $0.id == pane }) else { return }
+            let tail = peekTail(pane)
+            guard peekSent[pane] != tail else { return }
+            peekSent[pane] = tail
+            continuation.yield(.peek(pane, lines: tail))
+        }
+    }
+
+    /// The pane's lines as its subscriber gets them (call with the lock held).
+    private func peekTail(_ pane: PaneID) -> [String] {
+        Array((peekLines[pane] ?? []).suffix(peekSubscription?.lines ?? 0))
     }
 
     // MARK: Settings

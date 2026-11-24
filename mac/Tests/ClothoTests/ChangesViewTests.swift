@@ -1,4 +1,5 @@
 import AppKit
+import ClothoFake
 import ClothoKit
 import XCTest
 @testable import Clotho
@@ -25,6 +26,59 @@ final class ChangesViewTests: XCTestCase {
         GitChanges(root: "/repo", branch: "fix", head: "a1b2c3d",
                    uncommitted: .init(files: [login, renamed], total: 14, added: 12, removed: 2, truncated: true),
                    branchChanges: .init(base: "origin/main", commits: 4, files: [image, odd]))
+    }
+
+    /// Open in Editor's tooltip is about one file on one machine: the same path on another machine is asked
+    /// about again, and gets its own answer.
+    func testTheSamePathOnTwoMachinesIsAskedAboutTwice() async throws {
+        let fake = FakeBackend(extraFeatures: ["git.changes"])
+        try await fake.start()
+        defer { fake.stop() }
+        let file = GitChangedFile(path: "deploy", status: .modified, added: 1, removed: 0)
+        let listed = GitChanges(root: "/srv/app", branch: "fix", head: "a1b2c3d", uncommitted: .init(files: [file], added: 1, removed: 0))
+        let git = PaneGit(repo: "app", root: "/srv/app", branch: "fix", head: "a1b2c3d", changes: listed.summary)
+        var panes: [PaneID] = []
+        for name in ["here", "there"] {
+            let created = try await fake.createWorkspace(name: name, spawn: SpawnOptions(command: ["/bin/sleep", "60"], cwd: "/tmp"))
+            fake.setChanges(created.pane, .success(listed))
+            panes.append(created.pane)
+        }
+        let model = ChangesModel()
+        model.backend = { _ in fake }
+        model.paneGit = { _, _ in (true, git) }
+        model.isAppActive = { true }
+        model.pollsByTimer = false
+        let diff = ChangesDiffView(model: model)
+        var asked: [String] = []
+        diff.revealsInsteadOfOpening = { machine, path in
+            asked.append("\(machine):\(path)")
+            return machine == "local"
+        }
+        model.isVisible = true
+
+        func show(machine: MachineKey, name: String, pane: PaneID) async throws {
+            model.select(nil, group: .uncommitted)
+            model.setFocused(ChangesModel.Target(machine: machine, machineName: name, pane: pane, git: git, featureOn: true, connected: true))
+            try await ChangesFixture.wait("the list on \(name)") {
+                guard model.target?.machine == machine, case .loaded = model.list else { return false }
+                return true
+            }
+            model.select(file, group: .uncommitted)
+            XCTAssertEqual(diff.fullPath, "/srv/app/deploy")
+        }
+        try await show(machine: "local", name: "this Mac", pane: panes[0])
+        XCTAssertEqual(diff.openButton.toolTip, ChangesDiffView.revealTip)
+        diff.update()
+        XCTAssertEqual(asked, ["local:/srv/app/deploy"], "asked once per file, not on every update")
+
+        try await show(machine: "devbox", name: "devbox", pane: panes[1])
+        XCTAssertEqual(asked, ["local:/srv/app/deploy", "devbox:/srv/app/deploy"], "the same path there is another file")
+        XCTAssertEqual(diff.openButton.toolTip, ChangesDiffView.openTip)
+        XCTAssertEqual(diff.openButton.accessibilityHelp(), ChangesDiffView.openTip)
+
+        try await show(machine: "local", name: "this Mac", pane: panes[0])
+        XCTAssertEqual(asked.count, 3)
+        XCTAssertEqual(diff.openButton.toolTip, ChangesDiffView.revealTip)
     }
 
     func testRowsGroupsAndTheMoreRow() {

@@ -385,6 +385,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var changesDiff: ChangesDiffView!
     /// Where the focus and the list were when the centre diff opened: it closes when either moves.
     var changesDiffOpened: (machine: MachineKey, focus: Focus, target: PaneID?)?
+    /// The Overview: every agent's card, over the window under the window buttons (OverviewView.swift,
+    /// Overview.swift). Hidden until View ▸ Overview.
+    var overview: OverviewView!
+    /// What each machine's peek subscription names while the Overview shows: the panes, and the daemon
+    /// instance it was sent to.
+    var overviewPeeks: [MachineKey: (panes: [PaneID], instance: String?)] = [:]
+    /// The last lines each pane's daemon sent while the Overview shows, as sent.
+    var overviewPeekLines: [PaneKey: [String]] = [:]
+    /// The peek requests, one after another: a subscription sent later is never overtaken by an earlier one.
+    var overviewPeekRequests: Task<Void, Never>?
     /// Where the focus was when the inspector's list took the keyboard: it keeps it only while the focus
     /// stays there (`inspectorKeepsKeyboard`).
     var inspectorHold: FocusPlace?
@@ -698,6 +708,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Centred on the tab bar, as a titled window centres its buttons in its title bar.
             corner.heightAnchor.constraint(equalTo: tabBar.heightAnchor),
         ] + Self.sidebarToggleConstraints(toggle, corner: corner, sidebar: sidebar) + makeFileSidebar(corner: corner))
+        // The Overview, hidden, over all of that: the sidebar, the tab bar, the panes, both toggles and
+        // the inspector. The window buttons go back on top of it, so they stay. Overlays added later (the
+        // command bar, the shortcuts card, the file browser, a notice's sheet) land above it as before.
+        let overview = makeOverview()
+        container.addSubview(corner, positioned: .above, relativeTo: overview)
+        NSLayoutConstraint.activate([
+            overview.topAnchor.constraint(equalTo: notchExtension.bottomAnchor),
+            overview.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            overview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            overview.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
         updateTabBarInset()
 
         window.contentView = container
@@ -1672,6 +1693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// View ▸ Move Focus to Sidebar: the arrow keys walk the workspace and tab rows (see SidebarView.keyDown).
     @objc func focusSidebar(_ sender: Any?) {
+        uncoverWindow()
         if isSidebarHidden { showOrHideSidebar(nil) }
         sidebar.takeKeyboard()
     }
@@ -1681,6 +1703,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// toggleSidebar(_:): macOS 26's NSWindow implements that (for split view sidebars) and comes before
     /// the app in the responder chain, so the menu item went to the window, greyed out (MenuTargetTests).
     @objc func showOrHideSidebar(_ sender: Any?) {
+        uncoverWindow()
         let hide = !isSidebarHidden
         log("sidebar: \(hide ? "hide" : "show") (\(Self.describeTrigger(sender)))")
         UserDefaults.standard.set(hide, forKey: "HideSidebar")
@@ -1771,6 +1794,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             quickOpen?.dismiss()
             sync()
             transferToast.refresh()
+            overview?.refreshColors()
         }
         settingsWindow?.reload()
         log("appearance is now \(NSApp.effectiveAppearance.isDark ? "dark" : "light")")
@@ -1786,6 +1810,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         tabBar.applyScale()
         sidebar.applyScale()
         if let noticeBar { splitTop.constant = noticeBar.fittingSize.height }
+        overview?.applyScale()
         sync()
         transferToast.refresh()
         settingsWindow?.reload()

@@ -707,6 +707,34 @@ final class CommandBarTests: XCTestCase {
         XCTAssertTrue(titles.contains("New Tab in a Worktree…"))
     }
 
+    /// Show Overview is the Mac's own command too: always listed, found by its name and by "agents" and
+    /// "cards", with its key at the row's trailing side, and Return runs it.
+    func testShowOverviewIsListedAndRuns() {
+        openWithCommands()
+        var shown = 0
+        bar.onShowOverview = { shown += 1 }
+        bar.setQuery(">")
+        XCTAssertTrue(titles.contains("Show Overview"))
+        XCTAssertEqual(titles.first, "New Tab in Platform", "after the shared ones")
+        for word in ["agents", "cards", "overview"] {
+            bar.setQuery(">\(word)")
+            XCTAssertTrue(titles.contains("Show Overview"), word)
+        }
+        bar.setQuery(">show overview")
+        XCTAssertEqual(titles.first, "Show Overview")
+        let entry = bar.rows[0].entry
+        XCTAssertEqual(entry.symbol, "square.grid.2x2")
+        XCTAssertEqual(entry.keys, "⇧⌘0")
+        let row = QuickOpenRow(entry: entry, indices: [], selected: true, shortcut: 1) {}
+        XCTAssertEqual(row.keysLabel?.stringValue, "⇧⌘0", "its key, at the trailing side")
+        XCTAssertEqual(row.trailing.arrangedSubviews.count, 2, "the key, then the row's ⌘ number")
+        XCTAssertNil(QuickOpenRow(entry: QuickOpenOverlay.entry(for: .newWorktreeTab), indices: [], selected: false, shortcut: 1) {}.keysLabel)
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(shown, 1)
+        XCTAssertTrue(ran.isEmpty, "no shared command ran")
+        XCTAssertNil(bar.naming)
+    }
+
     /// The second tap of a double ⌥↩ on the last request's row: the selection has moved on to a row with
     /// no request, where ⌥↩ would open a New Tab. It opens none for the settle delay after the allow.
     func testADoubleTapOnTheLastRequestOpensNoTab() {

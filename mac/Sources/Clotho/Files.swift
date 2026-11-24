@@ -541,6 +541,8 @@ extension AppDelegate {
     }
 
     @objc func chooseFilesToUpload(_ sender: Any?) {
+        // The sheet names the active pane: in view, not under the Overview.
+        uncoverWindow()
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = true
