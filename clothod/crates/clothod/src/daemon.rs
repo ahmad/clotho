@@ -496,6 +496,8 @@ struct Pane {
     vt_seq: u64,
     /// The output position the peek subscribers' lines were last read at (`send_peeks`).
     peek_seq: u64,
+    /// The screen was resized since then: other rows are on it now, without any output.
+    peek_resized: bool,
     ring: Ring,
     /// Resizes still to apply while replaying recovered output: (seq, cols, rows).
     replay_resizes: Vec<(u64, u16, u16)>,
@@ -659,6 +661,7 @@ impl Pane {
             own_scrollback,
             vt_seq: info.seq_start,
             peek_seq: info.seq_start,
+            peek_resized: false,
             ring: {
                 // Only for replays to clients, which are capped at REPLAY_LIMIT (the holder
                 // keeps the longer buffer for recovery).
@@ -2125,6 +2128,7 @@ impl Daemon {
         p.cols = cols;
         p.rows = rows;
         p.vt.resize(cols, rows);
+        p.peek_resized = true;
         let seq = p.vt_seq;
         self.to_holder(&ToHolder::Resize { pane: p.id, cols, rows, seq });
         let frame = Frame::Json(json!({"event": "pane.resized", "data": {"pane": p.id, "cols": cols, "rows": rows, "seq": seq}})).encode();
@@ -3148,15 +3152,17 @@ impl Daemon {
                 s.sent.retain(|id, _| ids.contains(id));
             }
         }
-        // Each wanted pane that got output since it was last read, read once for everyone.
+        // Each wanted pane that got output, or was resized, since it was last read, read once
+        // for everyone.
         let mut fresh: Vec<(u64, Vec<String>)> = Vec::new();
         for (id, p) in &panes {
             if !subs.iter().any(|c| c.peek.lock().unwrap().as_ref().is_some_and(|s| s.wants(*id))) {
                 continue;
             }
             let mut p = p.lock().unwrap();
-            if p.vt_seq != p.peek_seq {
+            if p.vt_seq != p.peek_seq || p.peek_resized {
                 p.peek_seq = p.vt_seq;
+                p.peek_resized = false;
                 fresh.push((*id, p.vt.peek_lines(PEEK_LINES, PEEK_CHARS)));
             }
         }

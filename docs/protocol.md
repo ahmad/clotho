@@ -812,7 +812,8 @@ it:
   docs/security.md.
 - Errors:
   - `bad_request`: no `cwd`, or `worktree` is not `{name, base?}` with strings.
-  - `not_found`: no such workspace (`tab.create`). Nothing is made.
+  - `not_found`: no such workspace (`tab.create`). Nothing is made when it is unknown as the
+    request arrives. When the workspace is closed while the checkout runs, see below.
   - `not_a_repo`: `cwd` is in no work tree.
   - `worktree_unsupported`: the repository has no main work tree to go beside (a bare
     repository's worktree).
@@ -822,9 +823,14 @@ it:
   - `bad_base`: `base` is not a commit in this repository (or the repository has no commit).
   - `no_git`, `git_unsupported`, `timeout`.
   - `git_failed`: git refused; the message is its first error line.
-  - `spawn_failed`: the worktree was made but the pane could not be started. **The worktree
-    and its branch stay**, and the message says where: nothing the daemon made is deleted
-    behind the user's back.
+  - `spawn_failed`: the worktree was made but the pane could not be started.
+
+  **Two errors leave the worktree and its branch behind**: `spawn_failed`, and a `tab.create`
+  `not_found` whose workspace was closed during the checkout (the worktree was made by then, and
+  there is no workspace left to put the Tab in). Nothing the daemon made is deleted behind the
+  user's back. In both, the message ends with `(the worktree <path> on the new branch <branch>
+  was created and is still there)`: show the message, since the code alone doesn't tell this
+  `not_found` from the one where nothing was made.
 
   After any other error the repository is as it was: no folder and no branch are left. If git
   fails or times out half way, the daemon takes back what it made through git
@@ -880,8 +886,9 @@ for showing what a pane is doing without subscribing to it (a sidebar row, an ov
   application uses it), oldest first, with leading and trailing spaces and all control
   characters removed, at most 200 characters each. There can be fewer than asked for, or none.
 - A `peek` event carries a pane's lines again when they differ from what this connection was
-  last sent. The daemon looks once a second, and only at wanted panes that got output since it
-  last looked: at most one event per pane per second, and none while the text stays the same.
+  last sent. The daemon looks once a second, and only at wanted panes that got output or were
+  resized since it last looked (a resize changes which rows are on the screen): at most one
+  event per pane per second, and none while the text stays the same.
 - `peek.unsubscribe` ends it, as does the end of the connection. It doesn't depend on
   `events.subscribe` or on `pane.subscribe`.
 - Peeks are not part of the model: a `peek` event has no `rev`, changes no `rev`, and nothing

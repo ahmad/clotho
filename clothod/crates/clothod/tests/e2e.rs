@@ -7393,6 +7393,34 @@ async fn worktree_tabs_open_beside_the_repo() {
     assert!(!r_log_has(&env, "panicked"));
 }
 
+/// The Workspace is closed while the checkout runs: `tab.create` fails with `not_found`, and
+/// like `spawn_failed` it leaves the worktree and its branch, and says where they are.
+#[tokio::test]
+async fn a_workspace_closed_during_the_checkout_leaves_the_worktree_and_says_so() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    let wrapper = env.dir.path().join("bin/git");
+    script_file(&wrapper, &format!("#!/bin/sh\ncase \" $* \" in *' worktree add '*) sleep 2;; esac\nexec '{}' \"$@\"\n", real_git()));
+    start_git(&mut env, &[("CLOTHOD_GIT", &dir(&wrapper))]);
+    let c = env.client().await;
+    let closer = env.client().await;
+    new_pane(&c, sh()).await;
+    let ws = c.request("workspace.create", sh()).await.unwrap()["workspace"].clone();
+    let params = with(sh(), json!({"workspace": ws, "cwd": dir(&root), "worktree": {"name": "late"}}));
+    let (made, closed) = tokio::join!(c.request("tab.create", params), async {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        closer.request("workspace.close", json!({"workspace": ws})).await
+    });
+    closed.unwrap();
+    let e = made.unwrap_err().to_string();
+    let late = root.parent().unwrap().join("proj-late");
+    assert!(e.ends_with("(not_found)") && e.contains(&dir(&late)) && e.contains("still there"), "{e}");
+    assert_eq!(git_do(&late, &["rev-parse", "--abbrev-ref", "HEAD"]), "late");
+    let s = c.request("state.get", json!({})).await.unwrap();
+    assert_eq!(s["workspaces"].as_array().unwrap().len(), 1, "{s}");
+    assert!(!r_log_has(&env, "panicked"));
+}
+
 /// Collect the `peek` events that come within `wait`.
 async fn peek_events(c: &mut Client, wait: Duration) -> Vec<Value> {
     let deadline = Instant::now() + wait;
@@ -7499,6 +7527,60 @@ async fn peek_follows_output_at_most_once_a_second() {
     for bad in [json!({"lines": 0}), json!({"lines": 9}), json!({"lines": "two"}), json!({"panes": "all"}), json!({"panes": ["a"]}), json!({"panes": [-1]})] {
         assert_eq!(err_code(&pk, "peek.subscribe", bad.clone()).await, "bad_request", "{bad}");
     }
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// A resize changes which rows are on the screen without any output: the subscriber's lines
+/// follow it.
+#[tokio::test]
+async fn peek_follows_a_resize_without_output() {
+    let env = Env::new();
+    let c = env.client().await;
+    let mut pk = env.client().await;
+    // Three lines, the cursor back at the top, and then silence (a resize prints nothing here).
+    let p = new_pane(&c, json!({"command": ["/bin/sh", "-c", r"printf 'top\r\nmid\r\nend\033[H'; exec sleep 600"], "cols": 80, "rows": 24})).await;
+    wait_for_text(&c, p, T, |l| has_line(l, "end")).await.unwrap();
+    let r = pk.request("peek.subscribe", json!({"panes": [p]})).await.unwrap();
+    assert_eq!(r, json!({"peeks": [{"pane": p, "lines": ["mid", "end"]}]}));
+    assert_eq!(peek_events(&mut pk, Duration::from_millis(1500)).await, Vec::<Value>::new());
+
+    // Two rows: the cursor's row stays, the rows below it go.
+    c.request("pane.resize", json!({"pane": p, "cols": 80, "rows": 2})).await.unwrap();
+    wait_for_text(&c, p, T, |l| !has_line(l, "end")).await.unwrap();
+    let events = peek_events(&mut pk, Duration::from_millis(2500)).await;
+    assert_eq!(events, vec![json!({"pane": p, "lines": ["top", "mid"]})]);
+
+    // A resize that leaves the lines as they are sends nothing.
+    c.request("pane.resize", json!({"pane": p, "cols": 60, "rows": 2})).await.unwrap();
+    assert_eq!(peek_events(&mut pk, Duration::from_millis(2500)).await, Vec::<Value>::new());
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// A branch that is a symbolic ref to another (`git symbolic-ref refs/heads/master
+/// refs/heads/main`), with the pane on it: HEAD is that commit, not an unborn branch, so the
+/// uncommitted counts are against it and not against the empty tree.
+#[tokio::test]
+async fn git_changes_follow_a_symbolic_branch() {
+    let mut env = Env::empty();
+    let (root, first) = git_repo(&env);
+    git_do(&root, &["symbolic-ref", "refs/heads/master", "refs/heads/main"]);
+    git_do(&root, &["symbolic-ref", "HEAD", "refs/heads/master"]);
+    put(&root.join("a.txt"), "one\nTWO\nthree\n");
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    let _ev = watching(&env).await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+    let g = wait_git(&c, p, "the summary", |g| !g["changes"].is_null()).await;
+    assert_eq!((g["branch"].clone(), g["head"].clone()), (json!("master"), json!(first[..7])), "{g}");
+    assert_eq!(g["changes"]["uncommitted"], json!({"files": 1, "added": 1, "removed": 1}), "{g}");
+
+    let r = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["branch"].clone(), r["head"].clone()), (json!("master"), json!(first[..7])));
+    let u = &r["uncommitted"];
+    assert_eq!((u["total"].clone(), u["added"].clone(), u["removed"].clone()), (json!(1), json!(1), json!(1)), "{u}");
+    assert_eq!(group_file(u, "a.txt"), &json!({"path": "a.txt", "status": "modified", "added": 1, "removed": 1, "binary": false, "diffable": true}));
+    let d = c.request("git.diff", json!({"pane": p, "path": "a.txt", "group": "uncommitted"})).await.unwrap();
+    assert_eq!((d["added"].clone(), d["removed"].clone()), (json!(1), json!(1)), "{d}");
     assert!(!r_log_has(&env, "panicked"));
 }
 

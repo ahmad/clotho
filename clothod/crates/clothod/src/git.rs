@@ -124,24 +124,41 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// How many symbolic refs are followed from one name (git's own limit).
+const MAX_SYMREF_DEPTH: usize = 5;
+
+/// A ref name never has an empty, `.` or `..` component (git refuses those); refuse them here
+/// too rather than read outside the refs dir.
+fn is_ref_name(full_ref: &str) -> bool {
+    full_ref.starts_with("refs/") && !full_ref.split('/').any(|c| c.is_empty() || c == "." || c == "..")
+}
+
 /// The commit a full ref name (`refs/heads/main`, `refs/remotes/origin/main`) points at: the
-/// loose ref, else packed-refs.
+/// loose ref, else packed-refs. A loose ref may be symbolic (`ref: refs/heads/main`, as after
+/// `git symbolic-ref refs/heads/master refs/heads/main`): it is followed, a few steps at most.
 pub fn ref_sha(commondir: &Path, full_ref: &str) -> Option<String> {
-    // A ref name never has an empty, `.` or `..` component (git refuses those); refuse them
-    // here too rather than read outside the refs dir.
-    if !full_ref.starts_with("refs/") || full_ref.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
-        return None;
-    }
-    if let Some(t) = read(&commondir.join(full_ref)) {
-        let t = t.trim();
-        if is_sha(t) {
-            return Some(t.to_string());
+    let mut name = full_ref.to_string();
+    for _ in 0..=MAX_SYMREF_DEPTH {
+        if !is_ref_name(&name) {
+            return None;
         }
+        if let Some(t) = read(&commondir.join(&name)) {
+            let t = t.lines().next().unwrap_or("").trim();
+            if is_sha(t) {
+                return Some(t.to_string());
+            }
+            if let Some(target) = t.strip_prefix("ref:") {
+                name = target.trim().to_string();
+                continue;
+            }
+        }
+        // Packed refs are never symbolic.
+        return read(&commondir.join("packed-refs"))?.lines().find_map(|l| {
+            let (sha, n) = l.split_once(' ')?;
+            (n.trim() == name && is_sha(sha)).then(|| sha.to_string())
+        });
     }
-    read(&commondir.join("packed-refs"))?.lines().find_map(|l| {
-        let (sha, name) = l.split_once(' ')?;
-        (name.trim() == full_ref && is_sha(sha)).then(|| sha.to_string())
-    })
+    None
 }
 
 /// The commit `refs/heads/<branch>` points at: the loose ref, else packed-refs.
@@ -557,6 +574,20 @@ mod tests {
         assert_eq!(head_sha(&git, OTHER).as_deref(), Some(OTHER));
         assert_eq!(head_sha(&git, "ref: refs/heads/unborn"), None);
         assert_eq!(head_sha(&git, "garbage"), None);
+
+        // A symbolic branch (`git symbolic-ref refs/heads/master refs/heads/main`) is followed,
+        // to a loose or a packed ref; a loop, a dangling one and one that leaves refs/ are not.
+        write(&git.join("refs/heads/alias"), "ref: refs/heads/feature\n");
+        write(&git.join("refs/heads/alias2"), "ref: refs/heads/alias\n");
+        write(&git.join("refs/heads/loop"), "ref: refs/heads/loop\n");
+        write(&git.join("refs/heads/dangling"), "ref: refs/heads/nowhere\n");
+        write(&git.join("refs/heads/out"), "ref: refs/../../secret\n");
+        write(&git.join("refs/heads/head"), "ref: HEAD\n");
+        assert_eq!(head_sha(&git, "ref: refs/heads/alias\n").as_deref(), Some(SHA));
+        assert_eq!(head_sha(&git, "ref: refs/heads/alias2\n").as_deref(), Some(SHA));
+        for bad in ["loop", "dangling", "out", "head"] {
+            assert_eq!(head_sha(&git, &format!("ref: refs/heads/{bad}\n")), None, "{bad}");
+        }
         // Nothing outside refs/ is read, however the name is spelled.
         for bad in ["HEAD", "config", "refs/../config", "refs/heads/../../config", "refs//heads/feature", "refs/heads/", "/etc/passwd", ""] {
             assert_eq!(ref_sha(&git, bad), None, "{bad:?}");
