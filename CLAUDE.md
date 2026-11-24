@@ -7,7 +7,7 @@ with native Mac and iOS clients. PLAN.md has the design and the decisions behind
 
 | Path | Owner agent |
 |---|---|
-| `clothod/`, `docs/protocol.md`, `docs/remote.md` | clothod |
+| `clothod/`, `docs/protocol.md`, `docs/remote.md`, `docs/security.md` | clothod |
 | `mac/`, `ClothoKit/` (shared Swift package) | mac |
 | `ios/` (includes the push relay `ios/relay`), `docs/push.md` | ios |
 | `PLAN.md`, `CLAUDE.md`, `STATUS.md`, `.claude/`, `scripts/`, root files | main session |
@@ -22,7 +22,7 @@ session passes it on.
 ## How work flows (user decision, 2026-11-06)
 
 - **The main session's default.** When the user asks for a change in `clothod/`, `docs/protocol.md`,
-  `docs/remote.md`, `mac/`, `ClothoKit/`, `ios/` or `docs/push.md`, don't edit those paths yourself.
+  `docs/remote.md`, `docs/security.md`, `mac/`, `ClothoKit/`, `ios/` or `docs/push.md`, don't edit those paths yourself.
   Run `/change <role> <task>` for each role involved. This is the user's standing go to run the
   `change` and `gate` workflows without asking. When you'd rather steer the work step by step, use the
   by-hand path below instead. Questions, read-only investigations, and the main session's own paths
