@@ -600,6 +600,18 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// A preview moved away from where you were.
     private var previewed = false
     private var reloadScheduled = false
+    /// Whether the key being handled is a held key's repeat. ⌥↩ never acts on one.
+    var isKeyRepeat: () -> Bool = {
+        guard let event = NSApp.currentEvent, event.type == .keyDown else { return false }
+        return event.isARepeat
+    }
+    /// Every permission request the rows have carried while the bar is open.
+    private var knownRequests: Set<String> = []
+    /// Requests that showed up after the bar opened, and when: the user hasn't read them yet, so ⌥↩
+    /// leaves them alone for `AskBar.settleDelay`.
+    private var arrived: [String: Date] = [:]
+    /// Requests ⌥↩ allowed here, and when: not sent again while the model catches up (`AskBar.retryDelay`).
+    private var allowed: [String: Date] = [:]
 
     init(all: [CommandBarEntry], tree: CommandTree) {
         self.all = all
@@ -607,6 +619,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         initialSelection = tree.selection
         super.init(frame: .zero)
         index()
+        knownRequests = Set(all.compactMap(\.request?.id))
 
         field.placeholderString = Self.placeholder
         field.font = .systemFont(ofSize: s(16))
@@ -828,6 +841,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         let selectedID = isSearching ? selectedEntry?.item.id : nil
         self.all = all
         index()
+        let now = Date()
+        for id in all.compactMap(\.request?.id) where knownRequests.insert(id).inserted { arrived[id] = now }
         tree.update(outline)
         if isSearching {
             rank()
@@ -950,9 +965,18 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     /// ⌥↩: on an agent's row that waits on a permission request, allows it; the bar stays open and the
     /// selection moves to the next row, ready for the next request. On any other row, a new tab there.
+    ///
+    /// One press answers one request the user has read: a held key does nothing (its repeats would allow
+    /// the next rows, or open a tab once the selection reaches a row with no request), a request that
+    /// showed up a moment ago isn't allowed yet, and one already allowed isn't sent twice.
     func allowOrNewTab() {
+        guard !isKeyRepeat() else { return }
         guard !isCommandMode, picking == nil, let entry = selectedEntry else { return }
-        guard entry.request != nil else { return newTab() }
+        guard let request = entry.request else { return newTab() }
+        let now = Date()
+        if let at = arrived[request.id], now.timeIntervalSince(at) < AskBar.settleDelay { return }
+        if let at = allowed[request.id], now.timeIntervalSince(at) < AskBar.retryDelay { return }
+        allowed[request.id] = now
         onAllow?(entry)
         if isSearching {
             // The row leaves when the model catches up; `apply` keeps the selection on this next one by id.

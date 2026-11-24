@@ -669,7 +669,18 @@ final class CommandBarTests: XCTestCase {
         command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
         XCTAssertEqual(allowed.count, 1)
         XCTAssertEqual(newTabs.count, 1)
-        // In the tree: the selection moves on without previewing the tab it lands on.
+        // The same request again, before the model caught up: not sent twice.
+        bar.setQuery("needs")
+        command(#selector(NSResponder.moveDown(_:)))
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+        XCTAssertEqual(newTabs.count, 1)
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "and the selection stays")
+        // In the tree (the bar opened again): the selection moves on without previewing the tab it lands on.
+        open(all: withAgents, outline: agentsOutline)
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
         bar.setQuery("")
         while bar.selectedEntry?.request == nil { command(#selector(NSResponder.moveUp(_:))) }
         let before = previewed.count
@@ -679,6 +690,73 @@ final class CommandBarTests: XCTestCase {
         XCTAssertEqual(bar.selected, index + 1)
         XCTAssertEqual(previewed.count, before, "no preview")
         XCTAssertNotNil(bar.superview)
+    }
+
+    /// A held ⌥↩ repeats like fresh presses: it must not allow the next rows, nor open a tab once the
+    /// selection reaches a row with no request.
+    func testAHeldOptionReturnAllowsOnceAndOpensNoTab() {
+        let second = PermissionRequest(id: "r9", tool: "Bash", summary: "npm test")
+        let entries = withAgents.map { $0.item.id == "agent|bb|9" ? agent("api review", pane: 9, mark: .needsYou, since: 200, request: second) : $0 }
+        open(all: entries, outline: agentsOutline)
+        var allowed: [String] = []
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        var held = false
+        bar.isKeyRepeat = { held }
+        bar.setQuery("needs")
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r9", "two agents wait, one under the other")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r9"])
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "on the next request")
+        held = true
+        for _ in 0..<5 { XCTAssertTrue(command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))), "swallowed") }
+        XCTAssertEqual(allowed, ["r9"], "the repeats allow nothing")
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "and move nothing")
+        held = false
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r9", "r7"], "a fresh press allows the next")
+        XCTAssertNil(bar.selectedEntry?.request, "now on a row with no request")
+        held = true
+        for _ in 0..<5 { command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))) }
+        XCTAssertEqual(allowed.count, 2)
+        XCTAssertTrue(newTabs.isEmpty, "no new tab from a held key")
+        XCTAssertEqual(dismissed, 0)
+        XCTAssertNotNil(bar.superview, "the bar stays open")
+        // A held key on a row with no request from the start opens nothing either.
+        open()
+        bar.isKeyRepeat = { true }
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertTrue(newTabs.isEmpty)
+    }
+
+    /// One agent with two requests on the last row: the selection stays on it, and its next request can't
+    /// be allowed until it has shown for the ask bar's settle delay.
+    func testARequestThatJustTookAnothersPlaceIsNotAllowedYet() {
+        let settleDelay = AskBar.settleDelay
+        AskBar.settleDelay = 0.3
+        defer { AskBar.settleDelay = settleDelay }
+        open(all: withAgents, outline: agentsOutline)
+        var allowed: [String] = []
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        bar.setQuery("deploy")
+        XCTAssertEqual(bar.results.count, 1)
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "the only row keeps the selection")
+        // The model catches up: the row carries the agent's next request.
+        let next = PermissionRequest(id: "r7b", tool: "Edit", summary: "src/main.rs")
+        let entries = withAgents.map { $0.item.id == "agent|bb|7" ? agent("deploy api", pane: 7, mark: .needsYou, since: 300, request: next) : $0 }
+        bar.apply(all: entries, outline: agentsOutline)
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7b")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"], "unread: not allowed")
+        XCTAssertTrue(newTabs.isEmpty)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7", "r7b"], "after the settle delay, one press allows it")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed.count, 2, "once")
     }
 
     func testTheCardFitsANarrowWindow() {
