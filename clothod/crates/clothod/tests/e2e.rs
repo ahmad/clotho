@@ -6348,3 +6348,237 @@ async fn the_log_never_carries_text() {
 
     assert_log_has_none_of(&env, &["MESSAGE-TEXT", "TAIL-TEXT", "SUMMARY-TEXT", "PROMPT-TEXT", "COMMAND-TEXT", "shall it go on", "wants an answer", "fix it", "--force"]);
 }
+
+/// A stand-in agent with a process of its own in pane `p` (what a restart keeps), asking for
+/// permission.
+fn asking_agent(c: &Client, p: u64, session: &str) {
+    let b = test_bin();
+    c.input(p, format!(r#"sh -c '"{b}" report running --agent claude --session {session}; "{b}" report waiting --agent claude --message "May it deploy?"; sleep 60'"#).as_bytes());
+    c.input(p, b"\r");
+}
+
+/// An upgrade (a restart of the logic process) during the hold at the Mac loses no push: the
+/// hold was stored when it began, and runs on for the time left.
+#[tokio::test]
+async fn a_restart_during_the_hold_still_pushes() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_AT_MAC_MS", "4000")];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    type_in(&mac, a).await;
+    asking_agent(&c, b, "h1");
+    wait_agent(&c, b, "the ask", |a| a["state"] == "waiting" && a["attention"] == true).await;
+    let t = Instant::now();
+    wait_push_log(&env, "held", 1).await;
+    // Killed well within the second the periodic store would take: the hold is stored at once.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop((c, mac));
+    env.kill();
+    relay.none_for(Duration::from_millis(500));
+    start_alerts(&mut env, &vars);
+    let c = env.client().await;
+    assert_eq!(pane_agent(&c, b).await["attention"], true, "restored as it was left");
+    let held = wait_push_log(&env, "held", 2).await;
+    assert!(held[1].contains(&format!("pane={b} ")) && held[1].ends_with("reason=restored"), "{held:?}");
+    let (at, body) = relay.next();
+    // Not at once when the daemon came back, and not a whole new hold: the rest of this one.
+    assert!(at - t >= Duration::from_millis(3300), "sent early: {:?}", at - t);
+    assert!(at - t < Duration::from_millis(5500), "a whole new hold: {:?}", at - t);
+    let r = opened(&body);
+    assert_eq!((r["s"].as_str(), r["p"].as_u64(), r["nu"].as_bool()), (Some("waiting"), Some(b), Some(true)), "{r}");
+    relay.none_for(Duration::from_millis(1200));
+    assert_eq!(wait_push_log(&env, "sent", 1).await.len(), 1, "{}", env.log());
+    assert_log_has_none_of(&env, &["May it deploy"]);
+}
+
+/// The hold ended while the daemon was down: the push goes as soon as it is back.
+#[tokio::test]
+async fn a_hold_that_ended_during_a_restart_pushes_at_once() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_AT_MAC_MS", "1500")];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    type_in(&mac, a).await;
+    asking_agent(&c, b, "h2");
+    wait_push_log(&env, "held", 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop((c, mac));
+    env.kill();
+    relay.none_for(Duration::from_millis(2000));
+    let t = Instant::now();
+    start_alerts(&mut env, &vars);
+    let (at, body) = relay.next();
+    assert!(at - t < Duration::from_millis(1200), "a whole new hold: {:?}", at - t);
+    assert_eq!(opened(&body)["s"], "waiting");
+    let held = wait_push_log(&env, "held", 2).await;
+    assert!(held[1].ends_with("reason=restored"), "{held:?}");
+    relay.none_for(Duration::from_millis(2000));
+    assert_eq!(wait_push_log(&env, "sent", 1).await.len(), 1, "{}", env.log());
+}
+
+/// A hold that ended before the daemon was killed (seen at the Mac, or sent) is not in what
+/// it stored: the daemon that comes back holds nothing and sends nothing more.
+#[tokio::test]
+async fn a_hold_that_ended_is_not_held_again_after_a_restart() {
+    let relay = FakeRelay::start();
+    let vars = [("CLOTHOD_TEST_AT_MAC_MS", "1500")];
+    let mut env = alerts_env(&vars);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let (seen, sent) = (new_pane(&c, sh()).await, new_pane(&c, sh()).await);
+    type_in(&mac, a).await;
+    asking_agent(&c, seen, "h3");
+    asking_agent(&c, sent, "h4");
+    wait_push_log(&env, "held", 2).await;
+    // Long enough for the periodic store to have both holds in it, whatever else stores.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    mac.request("pane.subscribe", json!({"pane": seen})).await.unwrap();
+    mac.request("pane.focus", json!({"pane": seen})).await.unwrap();
+    let (_, body) = relay.next();
+    assert_eq!(opened(&body)["p"], sent, "the other one, when its hold ended");
+    // Killed right after: both ends were stored at once.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    drop((c, mac));
+    env.kill();
+    start_alerts(&mut env, &vars);
+    let c = env.client().await;
+    for p in [seen, sent] {
+        assert_eq!(pane_agent(&c, p).await["attention"], true, "looking is not resolving");
+    }
+    relay.none_for(Duration::from_millis(2500));
+    assert_eq!(push_log(&env, "held").len(), 2, "nothing held again:\n{}", env.log());
+    assert_eq!(push_log(&env, "sent").len(), 1, "{}", env.log());
+    let dropped = push_log(&env, "dropped");
+    assert!(dropped.len() == 1 && dropped[0].ends_with("reason=seen at the Mac"), "{dropped:?}");
+}
+
+/// A second `done` with other text is labelled by that text, not by the first one's label:
+/// "All tests pass." followed by "Should I push?" is not a silent Done.
+#[tokio::test]
+async fn a_second_done_with_other_text_gets_its_own_label() {
+    let relay = FakeRelay::start();
+    let env = summary_env(&[("CLOTHOD_TEST_SETTLE_MS", "1500")], |e| {
+        let seen = e.dir.path().join("bytext.in");
+        let has = |t: &str| format!("grep -q '{t}' '{}'", seen.display());
+        fake_summarizer(
+            e,
+            "bytext",
+            &format!("if {}; then echo NEEDS_USER; echo 'Asks whether to push.'; elif {}; then echo NEEDS_USER; echo 'Wants a decision.'; else echo DONE; echo 'The tests pass.'; fi", has("Should I push"), has("Compared")),
+        )
+    });
+    let c = env.client().await;
+    register(&c, "phone", &relay.url).await;
+    let p = new_pane(&c, sh()).await;
+    report(&c, p, "running", "").await;
+    report(&c, p, "done", "All tests pass.").await;
+    // The model's label for the first text arrives while the turn settles.
+    let a = wait_agent(&c, p, "the first label", |a| a["needs_user"] == false).await;
+    assert_eq!(flags(&a), (Some("done"), Some(false), Some(true)), "{a}");
+    report(&c, p, "done", "Should I push?").await;
+    let a = pane_agent(&c, p).await;
+    assert!(a["needs_user"].is_null() && a["settling"] == true, "other text: not known again: {a}");
+    assert_eq!(a["summary"], "Should I push?", "{a}");
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["nu"].as_bool(), r["sm"].as_str()), (Some(true), Some("Asks whether to push.")), "{r}");
+    assert!(body.get("silent").is_none(), "an ask is never a silent Done: {body}");
+    let a = wait_agent(&c, p, "the rewrite", |a| a["attention"] == true && a["summary_pending"] == false).await;
+    assert_eq!(a["needs_user"], true, "{a}");
+
+    // After the rise too: other text gets a label of its own, here the heuristic's (no second
+    // rewrite, no second push), never the earlier text's.
+    report(&c, p, "done", "All tests pass again.").await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["attention"].as_bool(), a["needs_user"].as_bool(), a["summary"].as_str(), a["summary_pending"].as_bool()), (Some(true), Some(false), Some("All tests pass again."), Some(false)), "{a}");
+    c.request("agent.report", json!({"pane": p, "state": "done", "kind": "claude", "message": "All tests pass again.", "tail": "The tests pass. Should I also tag it?"})).await.unwrap();
+    assert_eq!(pane_agent(&c, p).await["needs_user"], true, "another end of the reply");
+    // That end belongs to its message: other text without one is judged alone.
+    report(&c, p, "done", "Everything is merged.").await;
+    assert_eq!(pane_agent(&c, p).await["needs_user"], false);
+
+    // The same text reported again keeps its label: the model's, where the words alone would
+    // say otherwise.
+    let q = new_pane(&c, sh()).await;
+    report(&c, q, "running", "").await;
+    report(&c, q, "done", "Compared both databases.").await;
+    assert_eq!(opened(&relay.next().1)["nu"], true);
+    wait_agent(&c, q, "the rewrite", |a| a["attention"] == true && a["summary_pending"] == false).await;
+    report(&c, q, "done", "Compared both databases.").await;
+    let a = pane_agent(&c, q).await;
+    assert_eq!((a["needs_user"].as_bool(), a["summary"].as_str()), (Some(true), Some("Wants a decision.")), "{a}");
+    relay.none_for(Duration::from_millis(500));
+    assert_eq!(runs(&env, "bytext"), 3, "one per text that rose");
+}
+
+/// The agent says something else while its push is held at the Mac: the push that goes out
+/// when the hold ends carries that text and its label.
+#[tokio::test]
+async fn a_held_push_carries_the_latest_message() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    let b = new_pane(&c, sh()).await;
+    report(&c, b, "running", "").await;
+    type_in(&mac, a).await;
+    report(&c, b, "done", "All tests pass.").await;
+    assert_eq!(pane_agent(&c, b).await["needs_user"], false);
+    wait_push_log(&env, "held", 1).await;
+    report(&c, b, "done", "Should I push?").await;
+    assert_eq!(pane_agent(&c, b).await["needs_user"], true);
+    let body = relay.next().1;
+    let r = opened(&body);
+    assert_eq!((r["msg"].as_str(), r["sm"].as_str(), r["nu"].as_bool()), (Some("Should I push?"), Some("Should I push?"), Some(true)), "{r}");
+    assert!(body.get("silent").is_none(), "{body}");
+    let sent = wait_push_log(&env, "sent", 1).await;
+    assert!(sent[0].contains("label=needs-you"), "{sent:?}");
+    relay.none_for(Duration::from_millis(800));
+}
+
+/// Only what the user does counts as being at the Mac: typing, or the app gaining focus (and
+/// `client.active`). A terminal's own reports don't: mouse motion from a pointer drifting over
+/// a pane with mouse reporting on, or the app losing focus.
+#[tokio::test]
+async fn only_typing_and_focus_count_as_at_the_mac() {
+    let relay = FakeRelay::start();
+    let env = alerts_env(&[AT_MAC]);
+    let c = env.client().await;
+    let mac = client_named(&env, "clotho-mac/test").await;
+    register(&c, "phone", &relay.url).await;
+    let a = mac_pane(&mac).await;
+    for data in ["\x1b[<35;10;5M", "\x1b[<0;10;5m", "\x1b[M@!!", "\x1b[O"] {
+        let b = new_pane(&c, sh()).await;
+        report(&c, b, "running", "").await;
+        mac.request("pane.input", json!({"pane": a, "data": data})).await.unwrap();
+        let t = Instant::now();
+        report(&c, b, "waiting", "May it deploy?").await;
+        let (at, body) = relay.next();
+        assert!(at - t < Duration::from_millis(1000), "{data:?} held it: {:?}", at - t);
+        assert_eq!(opened(&body)["p"], b, "{data:?}");
+    }
+    assert!(push_log(&env, "held").is_empty(), "{}", env.log());
+
+    // The app gaining focus is the user arriving.
+    let b = new_pane(&c, sh()).await;
+    report(&c, b, "running", "").await;
+    mac.request("pane.input", json!({"pane": a, "data": "\x1b[I"})).await.unwrap();
+    let t = Instant::now();
+    report(&c, b, "waiting", "May it deploy?").await;
+    relay.none_for(Duration::from_millis(1000));
+    assert_eq!(push_log(&env, "held").len(), 1, "{}", env.log());
+    let (at, body) = relay.next();
+    assert!(at - t >= Duration::from_millis(1500), "sent early: {:?}", at - t);
+    assert_eq!(opened(&body)["p"], b);
+}

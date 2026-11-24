@@ -525,7 +525,8 @@ fn settle() -> Duration {
     std::env::var("CLOTHOD_TEST_SETTLE_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(SETTLE)
 }
 
-/// The user used a Mac app (typed in a pane, or it said `client.active`) within this long: they
+/// The user used a Mac app (typed in a pane, the app gained focus there, or it said
+/// `client.active`) within this long: they
 /// are at the Mac, and a push to the phone is held that long (`at_mac_hold`). 0: never.
 const AT_MAC: Duration = Duration::from_secs(120);
 
@@ -1137,6 +1138,14 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         }),
     });
     let _ = d.me.set(Arc::downgrade(&d));
+    // A push held at the Mac is stored with its pane as the hold begins, and gone from the
+    // store as it ends: a restart holds it again for the time left, and never sends one twice.
+    let weak = Arc::downgrade(&d);
+    d.push.on_hold_change(move || {
+        if let Some(d) = weak.upgrade() {
+            d.persist_soon();
+        }
+    });
 
     // Recovery: panes with their snapshots and buffered output, up to `ready`.
     let started = Instant::now();
@@ -1435,6 +1444,8 @@ impl Daemon {
                     .or_else(|| p.muted_agent.as_ref().map(|(k, pid, s)| json!({"kind": k, "pid": pid, "session": s})));
                 (id.to_string(), json!({"title": p.title, "cwd": p.cwd, "scrollback_lines": p.vt.scrollback(), "scrollback_own": p.own_scrollback,
                     "agent_muted": muted, "agent_history": p.history, "restored": p.restored,
+                    // Its push is held at the Mac until then (unix seconds); see `restore_model`.
+                    "push_held_until": self.push.held_until(*id),
                     "agent": p.agent.as_ref().filter(|a| a.source == "hook" && a.pid.is_some()).map(|a| {
                         let mut j = a.json();
                         j["pid"] = json!(a.pid);
@@ -1601,6 +1612,9 @@ impl Daemon {
 
     fn restore_model(&self, state: Option<Value>) {
         let state = state.unwrap_or(Value::Null);
+        // Panes whose push was held at the Mac when the previous process stopped, and when
+        // each hold ends (unix seconds).
+        let mut held_pushes: Vec<(u64, f64)> = Vec::new();
         let mut model: Model = state.get("model").cloned().and_then(|m| serde_json::from_value(m).ok()).unwrap_or_default();
         if let Some(Value::Object(meta)) = state.get("meta") {
             for (id, m) in meta {
@@ -1626,6 +1640,10 @@ impl Daemon {
                         if a.settling {
                             let left = Duration::try_from_secs_f64(a.since + settle().as_secs_f64() - unix_now()).unwrap_or_default();
                             self.arm_settle(p.id, a.since, left, false);
+                        }
+                        // Its push was held at the Mac: held again below, for the time left.
+                        if let Some(until) = m.get("push_held_until").and_then(Value::as_f64).filter(|_| a.attention && !a.quiet && !a.muted) {
+                            held_pushes.push((p.id, until));
                         }
                         p.agent = Some(a);
                     }
@@ -1684,6 +1702,42 @@ impl Daemon {
         }
         *self.model.lock().unwrap() = model;
         self.persist();
+        // After `persist`, which tells where each pane is (the alert names its Workspace and
+        // Tab). A restart never loses a held push: the phone hears when the hold ends unless
+        // the pane is seen or stops asking first, and at once if it ended meanwhile. The hold
+        // never grows: at most `at_mac()` from now, whatever the clock did.
+        for (id, until) in held_pushes {
+            let Some(pp) = self.pane(id) else { continue };
+            let p = pp.lock().unwrap();
+            let Some(a) = p.agent.as_ref().filter(|a| a.attention) else { continue };
+            let left = Duration::try_from_secs_f64(until - unix_now()).unwrap_or_default().min(at_mac());
+            self.push.restore_held(id, self.alert_of(&p, a), left);
+        }
+    }
+
+    /// The push alert for the pane's agent as it is now.
+    fn alert_of(&self, p: &Pane, a: &Agent) -> crate::push::Alert {
+        let (workspace_id, workspace, tab) = self.places.lock().unwrap().get(&p.id).cloned().unwrap_or_default();
+        let dir = p.cwd.clone().or_else(|| a.pid.and_then(platform::process_cwd).map(|c| c.display().to_string()));
+        let dir = dir.and_then(|d| std::path::Path::new(&d).file_name().map(|n| n.to_string_lossy().into_owned()));
+        crate::push::Alert {
+            kind: a.kind.clone(),
+            state: a.state.clone(),
+            message: a.message.clone(),
+            since: a.since,
+            prompt: a.prompt.clone(),
+            // A permission request says exactly what it asks about, and can be answered.
+            tool: a.requests.last().map(|r| r.tool.clone()).or(a.tool.clone()).filter(|_| a.state == "waiting"),
+            tool_input: a.requests.last().map(|r| r.summary.clone()).unwrap_or(a.tool_input.clone()).filter(|_| a.state == "waiting"),
+            request: a.requests.last().map(|r| r.id.clone()).filter(|_| a.state == "waiting"),
+            duration: a.turn_started.filter(|_| a.state != "waiting").map(|t| (a.since - t).max(0.0).round() as u64),
+            workspace_id,
+            workspace,
+            tab,
+            project: dir,
+            summary: a.summary(),
+            needs_user: a.needs_user,
+        }
     }
 
     // ---- holder side -------------------------------------------------------------------
@@ -2015,8 +2069,10 @@ impl Daemon {
     fn input(&self, client: &Client, pane: u64, data: Vec<u8>) {
         let Some(p) = self.pane(pane) else { return };
         let mut p = p.lock().unwrap();
-        // Anything but the report of the app losing focus: the user is at that Mac.
-        if client.mac.load(Ordering::Relaxed) && data != b"\x1b[O" {
+        // Typing, or the app gaining focus: the user is at that Mac. Not the other reports a
+        // terminal sends by itself: losing focus, or mouse motion from a pointer drifting over
+        // a pane with mouse reporting on.
+        if client.mac.load(Ordering::Relaxed) && (typed(&data) || data == b"\x1b[I") {
             *self.desktop_seen.lock().unwrap() = Some((Instant::now(), client.id));
         }
         // Typing in the pane: they have seen what it wanted (a held push is dropped).
@@ -2244,31 +2300,19 @@ impl Daemon {
         }
         let attention = |a: &Option<Agent>| a.as_ref().is_some_and(|a| a.attention);
         if attention(&old) != attention(&p.agent) {
-            let (workspace_id, workspace, tab) = self.places.lock().unwrap().get(&p.id).cloned().unwrap_or_default();
-            let dir = p.cwd.clone().or_else(|| p.agent.as_ref().and_then(|a| a.pid).and_then(platform::process_cwd).map(|c| c.display().to_string()));
-            let dir = dir.and_then(|d| std::path::Path::new(&d).file_name().map(|n| n.to_string_lossy().into_owned()));
-            let alert = p.agent.as_ref().map(|a| crate::push::Alert {
-                kind: a.kind.clone(),
-                state: a.state.clone(),
-                message: a.message.clone(),
-                since: a.since,
-                prompt: a.prompt.clone(),
-                // A permission request says exactly what it asks about, and can be answered.
-                tool: a.requests.last().map(|r| r.tool.clone()).or(a.tool.clone()).filter(|_| a.state == "waiting"),
-                tool_input: a.requests.last().map(|r| r.summary.clone()).unwrap_or(a.tool_input.clone()).filter(|_| a.state == "waiting"),
-                request: a.requests.last().map(|r| r.id.clone()).filter(|_| a.state == "waiting"),
-                duration: a.turn_started.filter(|_| a.state != "waiting").map(|t| (a.since - t).max(0.0).round() as u64),
-                workspace_id,
-                workspace,
-                tab,
-                project: dir,
-                summary: a.summary(),
-                needs_user: a.needs_user,
-            });
+            let alert = p.agent.as_ref().map(|a| self.alert_of(p, a));
             let quiet = p.agent.as_ref().is_some_and(|a| a.quiet);
             // At a Mac, but not at this pane: the phone hears of it only if they don't look.
             let hold = if attention(&p.agent) { self.at_mac_hold(p) } else { None };
             self.push.attention(p.id, attention(&p.agent), alert, quiet, rewrite, hold);
+        } else if self.push.holding() {
+            // Attention stays up and the agent says something else (a second `done`): a push
+            // still held for it goes out with the new text and its label.
+            if let (Some(o), Some(a)) = (&old, &p.agent) {
+                if a.attention && o.message != a.message {
+                    self.push.refresh(p.id, self.alert_of(p, a));
+                }
+            }
         }
         // A state change, or attention newly raised in the same state (a hook taking over).
         let transition = from.as_deref() != p.agent.as_ref().map(|a| a.state.as_str()) || (!attention(&old) && attention(&p.agent));
@@ -2577,13 +2621,21 @@ impl Daemon {
             let skip = t.chars().count().saturating_sub(AGENT_TAIL_MAX);
             clotho_vt::printable(&t.chars().skip(skip).collect::<String>(), AGENT_TAIL_MAX)
         });
-        let tail = tail.filter(|t| !t.is_empty()).or_else(|| same.and_then(|a| a.tail.clone()));
-        let (needs_user, settling, present_at_done) = same.map(|a| (a.needs_user, a.settling, a.present_at_done)).unwrap_or_default();
+        let message: Option<String> = p.get("message").and_then(Value::as_str).filter(|m| !m.is_empty()).map(|m| m.chars().take(500).collect());
+        // A reply's end belongs to its message: a second report with another message and no
+        // `tail` has none.
+        let tail = tail.filter(|t| !t.is_empty()).or_else(|| same.filter(|a| a.message == message).and_then(|a| a.tail.clone()));
+        let (settling, present_at_done) = same.map(|a| (a.settling, a.present_at_done)).unwrap_or_default();
+        // A finished turn's label belongs to its text: kept only while the message and its end
+        // are the same. With other text it is unknown again, for the rewrite at the rise or the
+        // heuristic to decide (`set_agent`): "All tests pass." followed by "Should I push?" is
+        // not a plain Done. Waiting and errors always need the user.
+        let needs_user = same.filter(|a| state != "done" || (a.message == message && a.tail == tail)).and_then(|a| a.needs_user);
         let a = Agent {
             kind: kind.or(prev.as_ref().map(|a| a.kind.clone())).unwrap_or_else(|| "other".into()),
             state: state.into(),
             source: "hook",
-            message: p.get("message").and_then(Value::as_str).filter(|m| !m.is_empty()).map(|m| m.chars().take(500).collect()),
+            message,
             since: 0.0,
             attention: prev.as_ref().map(|a| a.attention).unwrap_or(false),
             // Only ids that are safe to type back as a resume line (layout::safe_session) are

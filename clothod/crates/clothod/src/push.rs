@@ -114,8 +114,12 @@ struct PaneState {
     quiet: bool,
     alert: Option<Alert>,
     /// The push for this rise waits because the user is at the Mac (see [`Push::attention`]):
-    /// the rise and when the hold began. Cleared when it is sent or dropped.
-    held: Option<(u64, Instant)>,
+    /// the rise and when the hold ends (unix seconds, so the daemon can store it:
+    /// [`Push::held_until`]). Cleared when it is sent or dropped.
+    held: Option<(u64, f64)>,
+    /// The held alert was replaced ([`Push::refresh`]): the rewrite the hold waits for is of
+    /// the earlier message, and is not put into it.
+    rewrite_stale: bool,
 }
 
 /// A Live Activity following one pane's agent on one phone (`push.activity`).
@@ -246,6 +250,9 @@ pub struct Push {
     /// How many panes are held, so [`Push::seen`] (called per keystroke) costs one load when
     /// none is.
     held: AtomicUsize,
+    /// Called whenever a hold begins or ends (the daemon stores its state then, so a restart
+    /// neither loses a held push nor sends one a second time).
+    hold_changed: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 /// A plain finished turn: delivered without a sound (`silent` on `/v1/push`).
@@ -460,7 +467,7 @@ impl Push {
         let path = dir.join("push.json");
         let regs = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let activities = std::fs::read(Self::activities_path(&path)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Arc::new(Push { path, inner: Mutex::new(Inner { regs, activities, ..Default::default() }), held: AtomicUsize::new(0) })
+        Arc::new(Push { path, inner: Mutex::new(Inner { regs, activities, ..Default::default() }), held: AtomicUsize::new(0), hold_changed: std::sync::OnceLock::new() })
     }
 
     fn activities_path(path: &Path) -> PathBuf {
@@ -612,6 +619,66 @@ impl Push {
         rewrite: Option<tokio::sync::watch::Receiver<Option<crate::summary::Rewrite>>>,
         hold: Option<Duration>,
     ) {
+        self.rise(pane, on, alert, quiet, rewrite, hold, None);
+    }
+
+    /// After a restart: the pane's push was held when the daemon stopped ([`Push::held_until`]),
+    /// and its attention is still up. Held again for the time `left` (none: sent at once), and
+    /// dropped as before if the pane is seen or stops asking first.
+    pub fn restore_held(self: &Arc<Self>, pane: u64, alert: Alert, left: Duration) {
+        self.rise(pane, true, Some(alert), false, None, Some(left), Some("restored"));
+    }
+
+    /// When the hold of the pane's push ends (unix seconds), if one is held: what the daemon
+    /// stores with the pane, to hold it again after a restart.
+    pub fn held_until(&self, pane: u64) -> Option<f64> {
+        if self.held.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        self.inner.lock().unwrap().panes.get(&pane).and_then(|ps| ps.held).map(|(_, until)| until)
+    }
+
+    /// `f` runs whenever a hold begins or ends. Set once, by the daemon.
+    pub fn on_hold_change(&self, f: impl Fn() + Send + Sync + 'static) {
+        let _ = self.hold_changed.set(Box::new(f));
+    }
+
+    fn hold_changed(&self) {
+        if let Some(f) = self.hold_changed.get() {
+            f();
+        }
+    }
+
+    /// Whether any pane's push is held (one atomic load).
+    pub fn holding(&self) -> bool {
+        self.held.load(Ordering::Relaxed) > 0
+    }
+
+    /// The agent's message changed while its attention stayed up: a push still held for it
+    /// goes out with this alert (the new text and its label), not the one from the rise.
+    /// Nothing changes for a push that already went, or was dropped.
+    pub fn refresh(&self, pane: u64, alert: Alert) {
+        if !self.holding() {
+            return;
+        }
+        let mut g = self.inner.lock().unwrap();
+        if let Some(ps) = g.panes.get_mut(&pane).filter(|ps| ps.held.is_some()) {
+            ps.alert = Some(alert);
+            ps.rewrite_stale = true;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rise(
+        self: &Arc<Self>,
+        pane: u64,
+        on: bool,
+        alert: Option<Alert>,
+        quiet: bool,
+        rewrite: Option<tokio::sync::watch::Receiver<Option<crate::summary::Rewrite>>>,
+        hold: Option<Duration>,
+        hold_reason: Option<&str>,
+    ) {
         let mut g = self.inner.lock().unwrap();
         if g.regs.is_empty() && !on {
             if let Some(mut ps) = g.panes.remove(&pane) {
@@ -635,17 +702,19 @@ impl Push {
         ps.rise += 1;
         ps.alert = alert;
         ps.quiet = quiet;
+        ps.rewrite_stale = false;
         if quiet {
             log_alert("dropped", pane, ps.alert.as_ref(), None, Some("quiet"));
             return;
         }
         // Held from the rise on (the wait for the rewrite included), so looking at the pane
         // right away drops it.
-        if hold.is_some() {
+        if let Some(hold) = hold {
             self.unhold(ps);
-            ps.held = Some((ps.rise, Instant::now()));
+            ps.held = Some((ps.rise, unix_now() + hold.as_secs_f64()));
             self.held.fetch_add(1, Ordering::Relaxed);
-            log_alert("held", pane, ps.alert.as_ref(), None, None);
+            self.hold_changed();
+            log_alert("held", pane, ps.alert.as_ref(), None, hold_reason);
         }
         if rewrite.is_none() && hold.is_none() {
             self.schedule(&mut g, pane);
@@ -677,8 +746,9 @@ impl Push {
                 }
                 me.unhold(ps);
             }
-            // The rewrite as it is now: the latest text and label go out.
-            let done = rewrite.and_then(|rx| rx.borrow().clone());
+            // The rewrite as it is now: the latest text and label go out (unless the message
+            // it was made from has been replaced since).
+            let done = rewrite.filter(|_| !ps.rewrite_stale).and_then(|rx| rx.borrow().clone());
             if let (Some(r), Some(a)) = (done, ps.alert.as_mut()) {
                 a.summary = Some(r.text);
                 if r.needs_user.is_some() {
@@ -694,6 +764,7 @@ impl Push {
         let had = ps.held.take().is_some();
         if had {
             self.held.fetch_sub(1, Ordering::Relaxed);
+            self.hold_changed();
         }
         had
     }
@@ -1202,6 +1273,81 @@ mod tests {
             settle().await;
             assert_eq!(held(), 0);
             assert!(!sent(4) && sent(5));
+        });
+    }
+
+    /// What the daemon stores of a hold, and takes back after a restart: when it ends. Every
+    /// begin and end of a hold is told, so it is stored then.
+    #[test]
+    fn a_hold_can_be_stored_and_held_again() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let push = Push::load(dir.path());
+            let reg = json!({"device": "d", "handle": "h", "key": PK, "label": LABEL, "relay": "http://127.0.0.1:1"});
+            assert!(push.request("push.register", &reg).await.is_ok());
+            let changes = Arc::new(AtomicUsize::new(0));
+            let n = changes.clone();
+            push.on_hold_change(move || {
+                n.fetch_add(1, Ordering::Relaxed);
+            });
+            let changed = || changes.swap(0, Ordering::Relaxed);
+            let sent = |pane: u64| push.inner.lock().unwrap().panes.get(&pane).is_some_and(|ps| ps.last_sent.is_some());
+
+            assert_eq!(push.held_until(1), None);
+            push.attention(1, true, Some(full()), false, None, Some(Duration::from_secs(60)));
+            let until = push.held_until(1).expect("held");
+            assert!((until - unix_now() - 60.0).abs() < 5.0, "{until}");
+            assert_eq!(changed(), 1, "the hold began");
+            push.seen(1);
+            assert_eq!((push.held_until(1), changed()), (None, 1), "the hold ended");
+
+            // After a restart: held for what was left, then sent.
+            push.restore_held(2, full(), Duration::from_millis(150));
+            assert!(push.held_until(2).is_some() && !sent(2));
+            assert_eq!(changed(), 1);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert!(sent(2) && push.held_until(2).is_none());
+            assert_eq!(changed(), 1, "sent: the hold ended");
+            // Nothing left of the hold: sent at once.
+            push.restore_held(3, full(), Duration::ZERO);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(sent(3) && push.held_until(3).is_none());
+            // Seen after the restart: dropped, as before it.
+            push.restore_held(4, full(), Duration::from_millis(150));
+            push.seen(4);
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert!(!sent(4));
+        });
+    }
+
+    /// The agent's message changed during the hold: the push that goes out is the new one, and
+    /// the rewrite of the earlier message is not put into it.
+    #[test]
+    fn a_held_push_goes_out_with_the_latest_message() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let push = Push::load(dir.path());
+            let reg = json!({"device": "d", "handle": "h", "key": PK, "label": LABEL, "relay": "http://127.0.0.1:1"});
+            assert!(push.request("push.register", &reg).await.is_ok());
+            let plain = Alert { message: Some("All tests pass.".into()), needs_user: Some(false), ..full() };
+            let asks = Alert { message: Some("Should I push?".into()), summary: Some("Should I push?".into()), needs_user: Some(true), ..full() };
+            let now = |pane: u64| push.inner.lock().unwrap().panes[&pane].alert.clone().unwrap();
+
+            // Not held: nothing to replace.
+            push.attention(1, true, Some(plain.clone()), false, None, None);
+            push.refresh(1, asks.clone());
+            assert_eq!(now(1).needs_user, Some(false));
+
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            push.attention(2, true, Some(plain), false, Some(rx), Some(Duration::from_millis(150)));
+            push.refresh(2, asks);
+            tx.send(Some(crate::summary::Rewrite { text: "The tests pass.".into(), needs_user: Some(false) })).unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            let a = now(2);
+            assert!(push.inner.lock().unwrap().panes[&2].last_sent.is_some());
+            assert_eq!((a.message.as_deref(), a.summary.as_deref(), a.needs_user), (Some("Should I push?"), Some("Should I push?"), Some(true)));
         });
     }
 

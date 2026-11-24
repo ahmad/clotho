@@ -676,6 +676,12 @@ them per machine, like "Start at login".
     /login"`), a fixed phrase when `claude` printed an error as its answer (`"claude said: not
     logged in"`, `api error`, `credit balance`, `invalid api key`, `rate limit`), or the time
     limit (`"no answer within 30s"`). An answer that may be notification text is never put there.
+    An answer counts as such an error only in claude's own shapes: its first line begins like
+    one (`API Error:`, `Invalid API key`, `Not logged in`, `Please run /login`, `Credit balance
+    is too low`, `Rate limit reached` or `exceeded`), or, where a label line was asked for (a
+    finished turn) and there is none, it is a single line of at most 200 characters with one
+    of those phrases in it. A label line followed by text is always a rewrite, whatever the
+    text says ("Added rate limit handling to the API client." is not a failed run).
   - `at`: when that run ended, in unix seconds (a float), for `ok` and `failing`; `null` for the
     other states.
   - When a rewrite changes it, every connection that called `events.subscribe` gets a `settings`
@@ -910,18 +916,41 @@ The rules:
   line, of a reply longer than the 300 that `message` keeps. The `clothod report` binary adds it
   from the payload the installed hooks already pass, so hooks need no reinstall. `tail` is only
   input for the label and the summary: it is not in the agent object.
+  The label belongs to the text. A second `done` report keeps it only when `message` and `tail`
+  are what they were (a `tail` that isn't sent again counts as unchanged while `message` is).
+  With other text the label is decided anew, and a `tail` from the earlier message is not used:
+  while the turn still settles `needs_user` is `null` again and the rise decides (the rewrite of
+  the new text, or the heuristic); once `attention` is up the heuristic labels the new text at
+  once (no second rewrite, no second push), in a `pane` event; with `attention` down and
+  nothing settling (after `agent.ack`) it stays `null`. So "All tests pass." followed by
+  "Should I push?" never stays a plain Done.
 - **At the Mac.** While the user is at the Mac app, the daemon holds pushes to the phone for up
   to 2 minutes, from the rise. This applies to every state, `waiting` and `error` included; the
   Mac app shows the alert itself. A held push is dropped when the pane's `attention` clears (the
   agent works again, `agent.ack`, the agent goes away) or when any client focuses that pane
   (`pane.focus`) or types in it. Otherwise it is sent when the 2 minutes end, with the latest
-  text and label: a rewrite that finishes at any time during the hold is in it. The one pane
+  text and label: a rewrite that finishes at any time during the hold is in it, and so is a
+  `message` the agent reported during the hold in place of the one that rose (then without the
+  earlier message's rewrite).
+  A hold survives a restart of the daemon (an in-place upgrade): when it ends is stored with
+  the pane as it begins, and removed as it ends (sent or dropped). The daemon that comes back
+  holds the push again for the time that was left, logged as `held` with `reason=restored`,
+  and sends it at once if the hold ended while it was down; seeing the pane or `attention`
+  clearing drops it as before. That push carries the cleaned original text and the stored
+  label (a rewrite is not stored). A push that was sent or dropped before the restart is not
+  sent again. The one pane
   that is not held is the one the user is at (see `quiet`: input from a client showing it within
   the last 60 s). There the earlier rule stands: a finished turn rises quietly and is never held
   or sent, and `waiting` and `error` push at once. After those 60 s the pane the user typed in
   last is held like every other pane, for as long as they count as at the Mac.
-  The daemon knows the user is at the Mac from input in its own panes, by a client whose hello
-  `client` starts with `clotho-mac`. For the other machines the Mac app says so with
+  The daemon knows the user is at the Mac from exactly three things, each from a client whose
+  hello `client` starts with `clotho-mac`: typed input in one of its panes (INPUT, `pane.input` or
+  `pane.keys` that is not a terminal report), the focus-in report (`ESC [ I`) sent as pane
+  input when the app gains focus, and `client.active`. Nothing else counts: not the focus-out
+  report (`ESC [ O`), and not mouse reports (`ESC [ <` …, `ESC [ M` …), which a pointer
+  drifting over a pane with mouse reporting on sends without the user being there. (Whether
+  the user is at one pane, `quiet`, is unchanged: any input there counts.)
+  For the other machines the Mac app says so with
   **`client.active`**: no params, result `{}`. It means "the user is at this app now" and counts
   for 2 minutes, while that connection stays open. A Mac app sends it to each connected machine
   whose panes the user isn't typing in, while the user is using the app (again at least every
@@ -934,7 +963,8 @@ The rules:
   sent as false. docs/push.md has the record and the relay's side.
 - **Decision log.** Every push decision is one line in `clothod.log`:
   `push <sent|held|dropped> pane=<id> agent=<kind> state=<state>
-  label=<needs-you|done|unknown> [silent] [devices=<n>] [reason=<why>]`. The reasons for
+  label=<needs-you|done|unknown> [silent] [devices=<n>] [reason=<why>]`. `held` has
+  `reason=restored` when it is a hold taken back after a restart. The reasons for
   `dropped` are `quiet` (the user was at the pane), `seen at the Mac`, `attention cleared`
   (while held), `settled away` (the agent worked again within the settle window),
   `acknowledged` (`agent.ack` within the settle window), `muted` (also `agent.mute` within the

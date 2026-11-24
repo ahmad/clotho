@@ -63,6 +63,8 @@ const MAX_STDERR: u64 = 4 << 10;
 const MAX_REASON: usize = 120;
 /// What `claude -p` prints as its answer, at exit 0, when it could not ask the model, and the
 /// fixed reason for each. Never the output itself: at exit 0 that may be message text.
+/// Looked for only in a line that has the shape of such an error ([`error_answer`]): a good
+/// rewrite may say any of these ("Added rate limit handling to the API client.").
 const ERROR_MARKERS: &[(&str, &str)] = &[
     ("/login", "claude said: not logged in"),
     ("api error", "claude said: api error"),
@@ -70,6 +72,47 @@ const ERROR_MARKERS: &[(&str, &str)] = &[
     ("invalid api key", "claude said: invalid api key"),
     ("rate limit", "claude said: rate limit"),
 ];
+/// How `claude -p`'s own errors begin (lower case), and the reason when the line has no marker.
+const ERROR_PREFIXES: &[(&str, &str)] = &[
+    ("api error", "claude said: api error"),
+    ("invalid api key", "claude said: invalid api key"),
+    ("not logged in", "claude said: not logged in"),
+    ("please run /login", "claude said: not logged in"),
+    ("credit balance is too low", "claude said: credit balance"),
+    ("rate limit reached", "claude said: rate limit"),
+    ("rate limit exceeded", "claude said: rate limit"),
+];
+/// An answer without its label that is one line of at most this many characters may be an error.
+const MAX_ERROR_LINE: usize = 200;
+
+/// Whether the helper's answer (at exit 0) is `claude`'s own error instead of a rewrite, and
+/// the fixed reason if so. Only claude's error shapes count:
+/// - a first line that begins like one of its errors ("API Error: …", "Invalid API key · …",
+///   "Not logged in · …"), for any answer;
+/// - when a label was asked for (`labelled`) and the answer has none: a single short line with
+///   one of the markers in it (the model would have put the label first).
+///
+/// An answer that is a label line followed by text is the model's, never an error, whatever
+/// the text says.
+fn error_answer(answer: &str, labelled: bool) -> Option<&'static str> {
+    if labelled {
+        let (label, body) = split_label(answer);
+        if label.is_some() && !body.trim().is_empty() {
+            return None;
+        }
+    }
+    let mut lines = answer.lines().map(str::trim).filter(|l| !l.is_empty());
+    let first = lines.next()?.to_lowercase();
+    let single = lines.next().is_none();
+    let marker = || ERROR_MARKERS.iter().find(|(m, _)| first.contains(m)).map(|(_, why)| *why);
+    if let Some((_, why)) = ERROR_PREFIXES.iter().find(|(p, _)| first.starts_with(p)) {
+        return Some(marker().unwrap_or(why));
+    }
+    if labelled && single && first.chars().count() <= MAX_ERROR_LINE {
+        return marker();
+    }
+    None
+}
 
 /// How long a push waits for the rewrite before it goes with the cleaned original.
 pub fn push_wait() -> Duration {
@@ -423,8 +466,7 @@ impl Summarizer {
             });
         }
         // `claude -p` prints its errors (not logged in, out of credit) as its answer.
-        let lower = text.to_lowercase();
-        if let Some((_, why)) = ERROR_MARKERS.iter().find(|(marker, _)| lower.contains(marker)) {
+        if let Some(why) = error_answer(&text, labelled) {
             return Err(why.to_string());
         }
         let (needs_user, body) = if labelled { split_label(&text) } else { (None, &*text) };
@@ -922,6 +964,68 @@ mod tests {
         }
         let why = s.rewrite(Path::new("/nonexistent/claude"), &input("x")).await.unwrap_err();
         assert!(why.starts_with("can't run /nonexistent/claude"), "{why}");
+    }
+
+    /// Only claude's own error shapes are errors: a rewrite may talk about rate limits, API
+    /// errors, logins, credit and keys.
+    #[test]
+    fn a_rewrite_that_mentions_an_error_is_not_one() {
+        // A label followed by text is the model's answer, whatever it says.
+        for answer in [
+            "DONE\nAdded rate limit handling to the API client.",
+            "NEEDS_USER\nIt hit an API error and asks whether to retry.",
+            "done\nThe /login page now rejects an invalid API key.",
+            "**DONE**\n\nRate limit reached is now shown as a banner.",
+            "DONE\nAPI Error: 500 is retried three times now.",
+            "NEEDS_USER\nYour credit balance check is ready for review.",
+        ] {
+            assert_eq!(error_answer(answer, true), None, "{answer:?}");
+        }
+        // No label was asked for (waiting, error): only claude's own beginnings count.
+        for answer in ["Asks permission to edit the rate limit config.", "It stopped on an API error in the upload step.", "Wants to open the /login route."] {
+            assert_eq!(error_answer(answer, false), None, "{answer:?}");
+        }
+        // Several lines without a label and without an error's beginning: text.
+        assert_eq!(error_answer("Added the retry.\nThe rate limit is handled too.", true), None);
+        let long = format!("{} rate limit", "word ".repeat(40));
+        assert_eq!(error_answer(&long, true), None, "not a short line");
+
+        // claude's errors, with and without a label asked for.
+        for labelled in [true, false] {
+            for (answer, why) in [
+                ("API Error: 529 overloaded", "claude said: api error"),
+                ("API Error: 429 rate limit exceeded", "claude said: api error"),
+                ("Invalid API key · Please run /login", "claude said: not logged in"),
+                ("Invalid API key", "claude said: invalid api key"),
+                ("Not logged in", "claude said: not logged in"),
+                ("  Credit balance is too low\n", "claude said: credit balance"),
+                ("Rate limit reached\nTry again later.", "claude said: rate limit"),
+            ] {
+                assert_eq!(error_answer(answer, labelled), Some(why), "{answer:?} labelled={labelled}");
+            }
+        }
+        // A label was asked for and there is none: one short line with a marker is an error.
+        assert_eq!(error_answer("Your credit balance is too low.", true), Some("claude said: credit balance"));
+        assert_eq!(error_answer("Your credit balance is too low.", false), None);
+        // A label alone has no text: not excused (it ends as an empty answer).
+        assert_eq!(error_answer("DONE", true), None);
+        assert_eq!(error_answer("", true), None);
+    }
+
+    /// The whole path: a labelled rewrite that mentions an error is the text, and the health is ok.
+    #[tokio::test]
+    async fn a_good_rewrite_is_not_a_failed_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Summarizer::new(tmp.path(), true);
+        let f = fake(tmp.path(), "ok", "cat > /dev/null; echo DONE; echo 'Added rate limit handling to the API client.'");
+        let r = s.rewrite(&f, &input("rate")).await.unwrap();
+        assert_eq!((r.text.as_str(), r.needs_user), ("Added rate limit handling to the API client.", Some(false)));
+        assert_eq!(s.health(), Health::Ok);
+        // Not labelled (it waits): the same.
+        let waits = Input { state: "waiting".into(), ..input("may it") };
+        let f = fake(tmp.path(), "waits", "cat > /dev/null; echo 'Asks to change the rate limit after an API error.'");
+        assert_eq!(s.rewrite(&f, &waits).await.unwrap().text, "Asks to change the rate limit after an API error.");
+        assert_eq!(s.health(), Health::Ok);
     }
 
     #[tokio::test]
