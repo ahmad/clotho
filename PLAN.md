@@ -650,3 +650,28 @@ The iPhone and iPad get the same model after the Mac ships.
     user's hooks. Every push decision is logged (never the message text).
 - Order: clothod first (protocol), then the Mac and the iPhone against it. After that: generic agent status
   (OSC 9/99/777/7501, more agents), then worktree panes with a changes view.
+
+## UI refresh (user, 2026-11-23)
+
+- The user approved all five proposals in the mockup page (`~/Projects/clotho-mockups/clotho-ui-refresh.html` on
+  the dev box, outside the repo): "I like the changes, implement them".
+- **A. Status everywhere (Mac).** A Needs you / Done / Working inbox at the top of the sidebar replaces the
+  separate Agents panel and its switch (this replaces the 2026-10-27 Agents panel layout). The same state mark
+  shows on the workspace row, the tab and a slim pane header. A permission ask shows as a bar at the bottom of
+  its pane with Deny and Allow (⌘↩). Agent rows stay one compact line with no buttons. The pane strip gains the
+  change count.
+- **B. Changes.** The right file sidebar becomes an inspector: Changes, Files, Activity (the agent history).
+  Changes follows the focused pane: uncommitted files, then the branch against its base, with a diff; a file
+  opens as a side-by-side diff in its own Tab. Read-only in the first version. With it: "New Tab in a
+  worktree". clothod first (changed files, diffs, worktree creation), then the Mac and the iPhone.
+- **C. Overview (Mac, ⌘0).** One card per agent on every machine: state, last message, a live two-line peek,
+  branch and lines changed. Needs you first, oldest wait first. Return opens, ⌘↩ opens beside, R resolves,
+  M mutes, / filters.
+- **D. Quick open.** ⌘P rows gain state, branch and change count; "needs", "working", "done" filter; ⌥↩ allows a
+  permission ask from the bar.
+- **E. Alerts.** The Needs you / Done wording on Mac notifications, the iPhone Agents tab (same groups, change
+  count in the caption) and the lock screen. Its rules shipped in clothod 0.1.31.
+- Unchanged: Workspace, Tab and Pane, inline renames, the palette, every existing shortcut.
+- Order: clothod (B's requests and the peek for C) while the Mac alert change finishes; then mac A + D, mac B,
+  mac C; then ios E and B. Generic agent status (OSC 9/99/777/7501, more agents) follows.
+- Main session's call, not asked: a new worktree goes beside the repo as `<repo>-<name>`.
