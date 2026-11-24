@@ -249,6 +249,42 @@ final class InspectorTests: XCTestCase {
         app.sync()
         XCTAssertTrue(app.window.firstResponder === app.changesDiff, "a sync leaves the keyboard there")
 
+        // Whatever takes the keyboard while the diff is up gives it back to the diff, never to the
+        // terminal under it: the next Esc must close the diff, not reach the pane's program.
+        let terminal = try XCTUnwrap(app.activeTerminal)
+        func assertTheDiffHasTheKeyboard(_ after: String, line: UInt = #line) {
+            XCTAssertTrue(app.isChangesDiffShown, "the diff stays up after \(after)", line: line)
+            XCTAssertTrue(app.window.firstResponder === app.changesDiff, "the diff has the keyboard after \(after)", line: line)
+            XCTAssertFalse(app.window.firstResponder === terminal, "not the covered terminal, after \(after)", line: line)
+        }
+        app.showQuickOpen(nil)
+        let bar = try XCTUnwrap(app.quickOpen)
+        XCTAssertFalse(app.window.firstResponder === app.changesDiff, "the command bar is typed in")
+        bar.cancel()
+        XCTAssertNil(app.quickOpen)
+        assertTheDiffHasTheKeyboard("⌘P then Esc")
+        app.showShortcuts(nil)
+        try XCTUnwrap(app.shortcutsOverlay).cancelOperation(nil)
+        XCTAssertNil(app.shortcutsOverlay)
+        assertTheDiffHasTheKeyboard("the shortcuts card then Esc")
+        // Esc in the inspector's list (in a narrow window it drives the diff).
+        list.takeKeyboard()
+        XCTAssertTrue(app.window.firstResponder === list.table)
+        list.table.cancelOperation(nil)
+        assertTheDiffHasTheKeyboard("Esc in the inspector's list")
+        // The inspector hidden with the keyboard in its list.
+        list.takeKeyboard()
+        app.showOrHideFileSidebar(nil)
+        XCTAssertFalse(app.isFileSidebarShown)
+        assertTheDiffHasTheKeyboard("hiding the inspector")
+        app.showOrHideFileSidebar(nil)
+        XCTAssertTrue(app.isFileSidebarShown)
+        // A name edited inline ends with the keyboard nowhere: the diff takes it.
+        app.window.makeFirstResponder(nil)
+        app.focusTerminalAfterEdit()
+        assertTheDiffHasTheKeyboard("a rename")
+        XCTAssertEqual(app.changesModel.selection?.path, ChangesFixture.daemon.path)
+
         // Copy Path and Open in Editor use the root and the path, joined.
         var copied: [String] = []
         app.changesDiff.copy = { copied.append($0) }

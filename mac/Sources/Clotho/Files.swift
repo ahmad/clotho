@@ -530,7 +530,7 @@ extension AppDelegate {
         browser.onDismiss = { [weak self] in
             guard let self else { return }
             fileBrowser = nil
-            window.makeFirstResponder(activeTerminal)
+            returnKeyboardToPanes()
         }
         browser.frame = container.bounds
         browser.autoresizingMask = [.width, .height]

@@ -268,7 +268,7 @@ extension AppDelegate {
     /// went to something else that takes typing.
     func focusTerminalAfterEdit() {
         guard window.firstResponder == nil || window.firstResponder === window else { return }
-        window.makeFirstResponder(activeTerminal)
+        returnKeyboardToPanes()
     }
 
     /// Keys the window handles before the terminal sees them. ⌘↩ and ⌘. answer a pane's permission

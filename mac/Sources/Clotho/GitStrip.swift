@@ -26,8 +26,13 @@ final class GitStrip: NSView {
     /// How much of the count the strip has room for.
     enum CountForm { case full, linesOnly, hidden }
     private(set) var countForm = CountForm.hidden
+    // Which of these hold depends on what shows: a hidden PR or count takes no room and no gap, so the
+    // branch is tied to whatever is next at its trailing side.
+    private var pullRequestAfterSummary: NSLayoutConstraint!
     private var pullRequestToEdge: NSLayoutConstraint!
     private var pullRequestToCount: NSLayoutConstraint!
+    private var summaryToEdge: NSLayoutConstraint!
+    private var summaryToCount: NSLayoutConstraint!
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -58,20 +63,35 @@ final class GitStrip: NSView {
         }
         pullRequestToEdge = pullRequest.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -s(10))
         pullRequestToCount = pullRequest.trailingAnchor.constraint(lessThanOrEqualTo: changeCount.leadingAnchor, constant: -s(10))
+        pullRequestAfterSummary = pullRequest.leadingAnchor.constraint(equalTo: summary.trailingAnchor, constant: s(10))
+        summaryToEdge = summary.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -s(10))
+        summaryToCount = summary.trailingAnchor.constraint(lessThanOrEqualTo: changeCount.leadingAnchor, constant: -s(10))
+        pullRequest.isHidden = true
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             summary.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: s(5)),
             summary.centerYAnchor.constraint(equalTo: centerYAnchor),
-            pullRequest.leadingAnchor.constraint(equalTo: summary.trailingAnchor, constant: s(10)),
             pullRequest.centerYAnchor.constraint(equalTo: centerYAnchor),
-            pullRequestToEdge,
             changeCount.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -s(10)),
             changeCount.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        tieTrailingSides()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Ties the branch, the PR and the count together for what shows now. A hidden PR is out of the
+    /// layout: left in, its width and gap would come out of the branch's room.
+    private func tieTrailingSides() {
+        let pr = !pullRequest.isHidden, count = !changeCount.isHidden
+        let wanted: [(NSLayoutConstraint, Bool)] = [
+            (pullRequestAfterSummary, pr), (pullRequestToEdge, pr && !count), (pullRequestToCount, pr && count),
+            (summaryToEdge, !pr && !count), (summaryToCount, !pr && count),
+        ]
+        NSLayoutConstraint.deactivate(wanted.filter { !$0.1 && $0.0.isActive }.map(\.0))
+        NSLayoutConstraint.activate(wanted.filter { $0.1 && !$0.0.isActive }.map(\.0))
+    }
 
     override var wantsUpdateLayer: Bool { true }
 
@@ -131,10 +151,9 @@ final class GitStrip: NSView {
         let hidden = form == .hidden
         if changeCount.isHidden != hidden {
             changeCount.isHidden = hidden
-            pullRequestToEdge.isActive = hidden
-            pullRequestToCount.isActive = !hidden
             window?.invalidateCursorRects(for: self)
         }
+        tieTrailingSides()
     }
 
     private let topLine = CALayer()

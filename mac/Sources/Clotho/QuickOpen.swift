@@ -302,7 +302,7 @@ extension AppDelegate {
         overlay.onDismiss = { [weak self] in
             guard let self else { return }
             quickOpen = nil
-            window.makeFirstResponder(activeTerminal)
+            returnKeyboardToPanes()
         }
         overlay.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(overlay)

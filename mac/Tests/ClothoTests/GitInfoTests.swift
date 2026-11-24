@@ -130,6 +130,73 @@ final class GitInfoTests: XCTestCase {
         XCTAssertEqual(forms, [.full, .linesOnly, .hidden])
     }
 
+    /// Without a pull request the count sits beside the branch: the hidden PR takes no room and no gap,
+    /// whether it never showed or showed and went.
+    func testWithoutAPullRequestTheCountLeavesTheBranchItsRoom() throws {
+        var counted = git
+        counted.branch = "clothod/clear-alerts"
+        counted.changes = PaneGit.Changes(uncommitted: .init(files: 6, added: 127, removed: 63))
+        var plain = counted
+        plain.pr = nil
+
+        // Auto Layout ties alignment rects: a label's frame is a little wider than its text.
+        func rect(_ view: NSView) -> NSRect { view.alignmentRect(forFrame: view.frame) }
+
+        func sweep(_ strip: GitStrip, _ what: String) {
+            var forms: [GitStrip.CountForm] = []
+            for width in stride(from: CGFloat(600), through: 60, by: -10) {
+                strip.setFrameSize(NSSize(width: width, height: GitStrip.height))
+                strip.layoutSubtreeIfNeeded()
+                if forms.last != strip.countForm { forms.append(strip.countForm) }
+                XCTAssertTrue(strip.pullRequest.isHidden, what)
+                let wanted = strip.summary.intrinsicContentSize.width
+                guard !strip.changeCount.isHidden else {
+                    // The count gone: the branch has the strip to its trailing edge, as before the count.
+                    let room = strip.bounds.maxX - s(10) - rect(strip.summary).minX
+                    XCTAssertGreaterThanOrEqual(rect(strip.summary).width, min(room, wanted) - 1, "\(what), width \(width)")
+                    continue
+                }
+                XCTAssertGreaterThanOrEqual(rect(strip.summary).width, min(s(44), wanted) - 1,
+                                            "the branch keeps its room, \(what), width \(width)")
+                // Nothing but the gap stands between the branch and the count.
+                let room = rect(strip.changeCount).minX - s(10) - rect(strip.summary).minX
+                XCTAssertGreaterThanOrEqual(rect(strip.summary).width, min(room, wanted) - 1,
+                                            "no blank gap where the PR would be, \(what), width \(width)")
+                XCTAssertLessThanOrEqual(rect(strip.summary).maxX, rect(strip.changeCount).minX - s(10) + 0.5, "\(what), width \(width)")
+            }
+            XCTAssertEqual(forms, [.full, .linesOnly, .hidden], what)
+        }
+
+        let fresh = GitStrip(frame: NSRect(x: 0, y: 0, width: 600, height: GitStrip.height))
+        window.contentView!.addSubview(fresh)
+        fresh.show(plain)
+        sweep(fresh, "no PR")
+
+        let used = GitStrip(frame: NSRect(x: 0, y: 0, width: 600, height: GitStrip.height))
+        window.contentView!.addSubview(used)
+        used.show(counted)
+        used.layoutSubtreeIfNeeded()
+        XCTAssertFalse(used.pullRequest.isHidden)
+        XCTAssertEqual(rect(used.pullRequest).minX, rect(used.summary).maxX + s(10), accuracy: 0.5, "the PR follows the branch")
+        used.show(plain)
+        sweep(used, "a PR shown, then gone")
+        // And back: the PR returns to its place, clear of the count.
+        used.setFrameSize(NSSize(width: 600, height: GitStrip.height))
+        used.show(counted)
+        used.layoutSubtreeIfNeeded()
+        XCTAssertEqual(rect(used.pullRequest).minX, rect(used.summary).maxX + s(10), accuracy: 0.5)
+        XCTAssertLessThanOrEqual(rect(used.pullRequest).maxX, rect(used.changeCount).minX - s(10) + 0.5)
+
+        // No count and no PR: the branch runs to the trailing edge.
+        var bare = plain
+        bare.changes = nil
+        bare.branch = String(repeating: "long-branch-name-", count: 20)
+        used.setFrameSize(NSSize(width: 300, height: GitStrip.height))
+        used.show(bare)
+        used.layoutSubtreeIfNeeded()
+        XCTAssertEqual(rect(used.summary).maxX, used.bounds.maxX - s(10), accuracy: 0.5)
+    }
+
     func testCommandBarFindsByBranchWorktreeAndPR() {
         let tab = CommandBarEntry(item: QuickOpenItem(kind: .tab, title: "zsh", subtitle: "MacBook · Platform · \(git.searchText)", id: "tab|local|1"), tier: 2)
         let other = CommandBarEntry(item: QuickOpenItem(kind: .tab, title: "vim", subtitle: "MacBook · Platform", id: "tab|local|2"), tier: 2)

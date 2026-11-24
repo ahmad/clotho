@@ -302,6 +302,14 @@ struct FocusPlace: Equatable {
 extension AppDelegate {
     var isChangesDiffShown: Bool { changesDiff?.isHidden == false }
 
+    /// Gives the keyboard back to what shows in the pane area: the centre diff while it's up, else the
+    /// focused pane's terminal. Whatever had the keyboard over the panes (the command bar, the shortcuts
+    /// card, Files, a list, a name being edited) ends with this: given to the terminal under the diff, the
+    /// typing went to a shell nobody sees, and the Esc meant to close the diff went to its program.
+    func returnKeyboardToPanes() {
+        window.makeFirstResponder(isChangesDiffShown ? changesDiff : activeTerminal)
+    }
+
     /// Whether the keyboard is in the inspector's Changes or Activity list. (In Files it never held the
     /// keyboard against the terminal, and still doesn't.)
     var inspectorHoldsKeyboard: Bool {

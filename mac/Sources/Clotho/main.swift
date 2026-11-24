@@ -555,7 +555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         sidebar.onEditingEnded = { [weak self] in self?.focusTerminalAfterEdit() }
         sidebar.onFocusTerminal = { [weak self] in
             guard let self else { return }
-            window.makeFirstResponder(activeTerminal)
+            returnKeyboardToPanes()
         }
         sidebar.onClose = { [weak self] key, id in
             self?.focus(machine: key)

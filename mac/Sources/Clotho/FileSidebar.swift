@@ -315,7 +315,7 @@ extension AppDelegate {
         files.changesView.onOpenFull = { [weak self] _, _ in self?.openChangesDiff() }
         files.changesView.onLeave = { [weak self] in
             guard let self else { return }
-            window.makeFirstResponder(activeTerminal)
+            returnKeyboardToPanes()
         }
         files.pane.onOpenFile = { [weak self] location, entry in self?.openFile(location, size: entry.size) }
         files.pane.badge = { [weak self] location in self?.fileBadge(location) }
@@ -365,7 +365,7 @@ extension AppDelegate {
         let show = !isFileSidebarShown
         log("file sidebar: \(show ? "show" : "hide") (\(Self.describeTrigger(sender)))")
         // Hidden with the keyboard in one of its lists: the terminal takes it back.
-        if !show, fileSidebar.hasKeyboard { window.makeFirstResponder(activeTerminal) }
+        if !show, fileSidebar.hasKeyboard { returnKeyboardToPanes() }
         defer { inspectorVisibilityChanged() }
         UserDefaults.standard.set(show, forKey: Self.showFileSidebarKey)
         let animate = sender != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
