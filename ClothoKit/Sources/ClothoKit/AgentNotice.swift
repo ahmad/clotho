@@ -26,10 +26,14 @@ public struct AgentNotice: Equatable, Sendable {
     ///
     /// The body: for a permission ask, "Allow Bash: npm test?" whole, then the summary in the room left.
     /// Otherwise the summary, else the message as plain text (`PlainText`), else the fallback.
+    ///
+    /// `needsUser` is the agent's `needs_user` (a push record's `nu`): true reads "Claude needs you",
+    /// false on a done turn "Claude is done", and nil (older daemons) words it by the state as before.
     public init(kind: String, state: String, machine: String, workspace: String?, project: String?, duration: TimeInterval?,
-                result: String?, tool: String?, toolInput: String?, fallback: String? = nil, summary: String? = nil) {
+                result: String?, tool: String?, toolInput: String?, fallback: String? = nil, summary: String? = nil,
+                needsUser: Bool? = nil) {
         let state = AgentInfo.State(rawValue: state) ?? .unknown
-        let what = "\(AgentInfo.shortName(ofKind: kind)) \(state.noticeVerb)"
+        let what = "\(AgentInfo.shortName(ofKind: kind)) \(state.alertVerb(needsUser: needsUser))"
         let machine = machine.nonEmpty
         if let workspace = workspace?.nonEmpty {
             title = "\(workspace) · \(what)"
@@ -56,7 +60,7 @@ public struct AgentNotice: Equatable, Sendable {
                   project: cwd.flatMap(Self.project), duration: info.turnDuration, result: info.message,
                   tool: info.pendingRequests.first?.tool ?? info.tool,
                   toolInput: info.pendingRequests.first.map(\.summary) ?? info.toolInput, fallback: info.prompt,
-                  summary: info.summary)
+                  summary: info.summary, needsUser: info.needsUser)
     }
 
     /// What the agent came to. A permission wait (waiting, with a tool, and a message that mentions
@@ -125,6 +129,11 @@ extension AgentInfo {
     /// else its message.
     public var result: String? { AgentNotice.result(state: state, message: message, tool: tool, toolInput: toolInput) }
 
+    /// Whether a notification about this agent plays its sound: not for a plain Done (done, with
+    /// `needsUser` false). Anything that needs the user keeps it, and so does everything from an older
+    /// daemon (`needsUser` nil).
+    public var playsSound: Bool { !(state == .done && needsUser == false) }
+
     /// What the agent is at, on one line, for rows and subtitles: a permission ask ("Allow Bash: npm
     /// test?") exactly, else the daemon's summary, else the message as plain text. Nil when there's none.
     public var headline: String? {
@@ -135,6 +144,16 @@ extension AgentInfo {
 }
 
 extension AgentInfo.State {
+    /// The verb with the daemon's `needs_user`: "needs you" when the user has to act (whatever the
+    /// state), "is done" for a turn that only finished, and `noticeVerb` when it isn't known.
+    public func alertVerb(needsUser: Bool?) -> String {
+        switch (needsUser, self) {
+        case (true?, _): return "needs you"
+        case (false?, .done): return "is done"
+        default: return noticeVerb
+        }
+    }
+
     /// What a notification says happened: "finished", "is waiting", "hit an error".
     public var noticeVerb: String {
         switch self {

@@ -388,8 +388,10 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
                 self?.setNotificationRewrite(on, on: key)
             }
             targets.append(target)
-            rewriteRow = FormRow("Summarize agent messages",
-                                 caption: "Claude Haiku writes one line for notifications; off shows the message itself", control: rewrite)
+            // Whether the rewrite works on that machine (clothod 0.1.31): said in the caption when it doesn't.
+            let caption = Self.rewriteCaption(health: settings.notificationRewriteHealth, alerts: hello?.features.contains(.alerts) == true)
+            rewriteRow = FormRow("Summarize agent messages", caption: caption.text,
+                                 captionColor: caption.failing ? .systemRed : .secondaryLabelColor, captionLines: 2, control: rewrite)
         }
 
         let loginRow: FormRow
@@ -415,6 +417,24 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
         } else {
             footnote.stringValue = "Drag to reorder. Switching a machine off or removing it leaves its clothod and shells running."
             footnote.textColor = .secondaryLabelColor
+        }
+    }
+
+    /// The caption under "Summarize agent messages": what the switch does, or, on a daemon that reports
+    /// the rewrite's health (feature `alerts`), that it isn't working and why, or that the machine has no
+    /// Claude Code to run it. Ok, off, not yet known and no health all read as the plain caption.
+    nonisolated static func rewriteCaption(health: DaemonSettings.RewriteHealth?, alerts: Bool) -> (text: String, failing: Bool) {
+        let plain = "Claude Haiku writes one line for notifications; off shows the message itself"
+        guard alerts, let health else { return (plain, false) }
+        switch health.state {
+        case .failing:
+            // On one line, whatever the daemon sent.
+            let reason = health.reason.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }.flatMap { $0.isEmpty ? nil : $0 }
+            return (reason.map { "Not working: \($0)" } ?? "Not working", true)
+        case .unavailable:
+            return ("Claude Code wasn't found on this machine", false)
+        case .ok, .unknown, .off:
+            return (plain, false)
         }
     }
 

@@ -213,7 +213,8 @@ Pass these after `--args`, for example `open -n ~/Applications/Clotho.app --args
 | `-ClothodRuntimeDir <dir>` | Use a separate daemon with its socket in `<dir>`, for a set of workspaces kept apart from the usual one. `CLOTHOD_RUNTIME_DIR` does the same. Keep the path short; socket paths are limited to about 100 bytes. |
 | `-ClothodPath <path>` | Run this clothod binary in place instead of installing the bundled one. `CLOTHOD_BIN` does the same. |
 | `-RemoteInstallDir <dir>` / `-RemoteRuntimeDir <dir>` | Install clothod into, and run it from, these directories on remote machines (the remote shell expands `$HOME` and `$(id -u)`). The dev build uses `$HOME/.local/share/clotho-dev/bin` and `/tmp/clothod-dev-$(id -u)`. |
-| `-FakeAgents YES` | With `-Backend fake`, put fake agents in panes and move them through their states. `-AgentNotifications NO` logs notifications instead of showing them. |
+| `-FakeAgents YES` | With `-Backend fake`, put fake agents in panes and move them through their states. `-AgentNotifications NO` logs notifications instead of showing them. Panes 3 to 5 (split the tab first) show a finished turn that asks something, a plain Done, and a settling one. |
+| `-FakeRewriteHealth failing` | With `-Backend fake`, what Settings › Machines shows under "Summarize agent messages": `failing`, `unavailable`, `ok`, `off` or `unknown`. |
 | `-PaneMenu "<item>"` | Log the focused pane's right-click menu and choose that item (for scripted testing). |
 | `-ConnectMachine <name>` | Connect to that saved machine and start a workspace there (for scripted testing). |
 | `-Backend fake` | Run shells inside the app with no daemon. Shells end when the app quits. For UI work. |

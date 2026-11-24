@@ -140,6 +140,16 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     /// True while the daemon's rewrite of `summary` is on its way (at most ~30 s); a `pane` event brings
     /// the new summary with this false. Absent means false. See `isSummaryPending`.
     public var summaryPending: Bool?
+    /// The wire's `needs_user` (clothod 0.1.31, feature `alerts`): true when the user has to do something
+    /// (always for waiting and error; for done, a reply that ends in a question or a blocked turn), false
+    /// when the agent only finished. Nil when not known: while it works, possibly while a done turn
+    /// settles, and on older daemons, where notifications are worded by `state` as before. It may change
+    /// once, together with `summary`, while `summaryPending` is true.
+    public var needsUser: Bool?
+    /// A hook reported done and the daemon's settle window (about 30 s) is running: `attention` hasn't
+    /// risen for this turn yet. Shown as done, with no badge or notification. Absent (older daemons)
+    /// means false. See `isSettling`.
+    public var settling: Bool?
 
     /// Whether a better summary is still coming.
     public var isSummaryPending: Bool { summaryPending == true }
@@ -147,6 +157,8 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case kind, state, source, message, since, attention, session, muted, prompt, tool, requests, summary
         case summaryPending = "summary_pending"
+        case needsUser = "needs_user"
+        case settling
         case quietRise = "quiet"
         case toolInput = "tool_input"
         case turnStarted = "turn_started"
@@ -155,7 +167,8 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     public init(kind: String, state: State, source: String? = nil, message: String? = nil, since: Double? = nil,
                 attention: Bool? = nil, session: String? = nil, muted: Bool? = nil, quietRise: Bool? = nil,
                 prompt: String? = nil, tool: String? = nil, toolInput: String? = nil, turnStarted: Double? = nil,
-                requests: [PermissionRequest]? = nil, summary: String? = nil, summaryPending: Bool? = nil) {
+                requests: [PermissionRequest]? = nil, summary: String? = nil, summaryPending: Bool? = nil,
+                needsUser: Bool? = nil, settling: Bool? = nil) {
         self.kind = kind
         self.state = state
         self.source = source
@@ -172,6 +185,8 @@ public struct AgentInfo: Codable, Equatable, Sendable {
         self.requests = requests
         self.summary = summary
         self.summaryPending = summaryPending
+        self.needsUser = needsUser
+        self.settling = settling
     }
 
     /// The permission requests waiting for an answer; empty when none.
@@ -186,6 +201,8 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     public var isMuted: Bool { muted == true }
     /// Whether this attention rise was quiet (see `quietRise`).
     public var isQuietRise: Bool { quietRise == true }
+    /// Whether a done turn is still in its settle window (see `settling`).
+    public var isSettling: Bool { settling == true }
 
     /// Whether going from `before` to this calls for a notification: attention rose (false to true) into
     /// waiting, done or error, the agent isn't muted, and the rise wasn't quiet. Banners, pushes and the
@@ -199,8 +216,9 @@ public struct AgentInfo: Codable, Equatable, Sendable {
     /// The daemon raises `attention` only on real signals (a hook-reported waiting, done or error, or a
     /// bell from a detected agent) and clears it on ack or input. A detected agent that has merely gone
     /// quiet can be "waiting" without it, and doesn't need the user.
-    /// A muted agent never needs the user, whatever its attention says.
-    public var needsAttention: Bool { attention == true && !isMuted }
+    /// A muted agent never needs the user, whatever its attention says. Nor does a settling one: the
+    /// daemon keeps `attention` false until the settle window ends, so that check is defence only.
+    public var needsAttention: Bool { attention == true && !isMuted && !isSettling }
 
     /// Waiting without attention: detected as quiet, which may only be a slow reply or a long build.
     public var isQuiet: Bool { state == .waiting && !needsAttention }

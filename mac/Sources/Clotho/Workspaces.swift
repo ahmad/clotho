@@ -138,9 +138,25 @@ extension AppDelegate {
         if let focusedPane, let host = shown[focusedPane], shortcutsOverlay == nil, fileBrowser == nil, quickOpen == nil,
            window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard, !sidebar.isEditing,
            !tabBar.isEditing, !Self.isTypingInAField(window) {
-            window.makeFirstResponder(host.terminal)
+            if UserAction.isRecentOrCameForward(within: Self.userFocusWindow) {
+                window.makeFirstResponder(host.terminal)
+            } else {
+                // Nothing the user did moved the focus here (another device focused the pane, a pane exited):
+                // the pane takes the keyboard, but the daemon must not hear the user is at it. So no
+                // `pane.focus` (PaneFocus.swift), and the terminal's focus-in report (ESC [ I, when the
+                // pane's app has mode 1004 on) is dropped rather than sent as input.
+                if UserDefaults.standard.bool(forKey: "LogModel") || UserDefaults.standard.bool(forKey: "TraceFocus") {
+                    log("pane \(focusedPane) on \(focusedMachine) takes the keyboard with no user action behind it: no pane.focus, no focus report")
+                }
+                let take = { host.terminal.withoutReplies { _ = self.window.makeFirstResponder(host.terminal) } }
+                if let reporter = paneFocusReporter { reporter.quietly(take) } else { take() }
+            }
         }
     }
+
+    /// A focus change this long after a key or mouse event (or after the app came forward) is the user's:
+    /// long enough for the round trip to a remote daemon after a tab click.
+    static let userFocusWindow: TimeInterval = 2
 
     private func makeHost(for pane: Pane, on session: MachineConnection) -> PaneHostView {
         let key = PaneKey(machine: session.key, pane: pane.id)
@@ -229,6 +245,8 @@ extension AppDelegate {
     func installKeyMonitor() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, event.window === window else { return event }
+            // Typing in a pane that took the keyboard without the user (see `sync`) is the user at it.
+            paneFocusReporter?.userActed()
             if let terminal = window.firstResponder as? PaneTerminalView {
                 if terminal.sendEditingKey(event) { return nil }
                 // ⌃V with an image, for an agent on another machine (see ImagePaste).

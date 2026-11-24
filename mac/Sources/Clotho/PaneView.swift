@@ -30,6 +30,19 @@ final class PaneTerminalView: TerminalView {
         super.paste(sender)
     }
 
+    /// Tests stand in for a key window, which a test's window never is: the terminal then has focus
+    /// whenever it has the keyboard, so taking and losing it reports focus (mode 1004) as in the app.
+    static var assumesKeyWindow = false
+    private var hasKeyboard = false
+
+    override var hasFocus: Bool {
+        get { Self.assumesKeyWindow ? hasKeyboard : super.hasFocus }
+        set {
+            hasKeyboard = newValue
+            super.hasFocus = newValue
+        }
+    }
+
     nonisolated override func send(source: Terminal, data: ArraySlice<UInt8>) {
         if isFeeding { return }
         super.send(source: source, data: data)
@@ -42,9 +55,11 @@ final class PaneTerminalView: TerminalView {
     /// Runs something that may make the emulator answer on its own (a feed, or a resize, which sends an
     /// in-band size report when the app asked for one with ?2048), dropping those answers.
     func withoutReplies(_ body: () -> Void) {
+        // The value from before, not false: a call inside a feed must not let replies out again.
+        let was = isFeeding
         isFeeding = true
         body()
-        isFeeding = false
+        isFeeding = was
     }
 
     /// Mac editing keys a terminal app can't get from SwiftTerm, sent the way iTerm2 (Natural Text
@@ -532,19 +547,19 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
 
     func send(source: TerminalView, data: ArraySlice<UInt8>) {
         auditInput(data)
+        Self.inputTap?(paneID, Data(data))
         backend.sendInput(paneID, Data(data))
     }
 
     /// Input with no key, mouse or paste event behind it, which should never happen during reconnect,
     /// resubscribe or snapshot apply. Focus reports when the window activates also land here.
     static var unattributedInputCount = 0
+    /// Tests see every pane's input as it goes to the backend.
+    static var inputTap: ((PaneID, Data) -> Void)?
 
     private func auditInput(_ data: ArraySlice<UInt8>) {
-        let userTypes: Set<NSEvent.EventType> = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
-                                                  .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp, .scrollWheel,
-                                                  .mouseMoved, .otherMouseDragged, .rightMouseDragged]
+        if UserAction.isRecent(within: 1) { return }
         let event = NSApp.currentEvent
-        if let event, userTypes.contains(event.type), ProcessInfo.processInfo.systemUptime - event.timestamp < 1 { return }
         Self.unattributedInputCount += 1
         let hex = data.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
         log("INPUT pane \(paneID) with no user event behind it (#\(Self.unattributedInputCount), current event \(event.map { "\($0.type.rawValue)" } ?? "none")): \(data.count) bytes \(hex)")

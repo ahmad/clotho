@@ -27,20 +27,9 @@ struct AgentEntry {
     /// Detected or idle agents aren't asking anything.
     var offersReplies: Bool { canReply && info.state == .waiting && info.needsAttention && info.isHookSourced }
 
-    /// Needing the user first (waiting, then failed, then finished), then running, then the rest.
-    var rank: Int {
-        if info.needsAttention {
-            switch info.state {
-            case .waiting: return 0
-            case .error: return 1
-            default: return 2
-            }
-        }
-        switch info.state {
-        case .running, .starting: return 3
-        default: return 4
-        }
-    }
+    /// Needing the user first (waiting, then failed, then a finished turn that asks something, then one
+    /// that only finished), then running, then the rest.
+    var rank: Int { info.urgency }
 
     /// Most urgent first, and the most recent change first within a rank.
     static func sorted(_ entries: [AgentEntry]) -> [AgentEntry] {
@@ -105,15 +94,44 @@ extension AgentInfo {
         }
     }
 
-    /// The color a badge shows for this agent, or nil when it needs no badge.
+    /// The color a badge shows for this agent, or nil when it needs no badge (a settling one has none:
+    /// its attention hasn't risen).
     var badgeColor: NSColor? {
-        needsAttention ? state.color : (state == .running || state == .starting ? Theme.accent : nil)
+        needsAttention ? shownState.color : (state == .running || state == .starting ? Theme.accent : nil)
     }
 
-    /// The state as shown: a quiet "waiting" reads as idle.
+    /// A finished turn that asks the user something (clothod 0.1.31's `needs_user`), not yet seen: it
+    /// reads "Needs you", where a turn that only finished reads "Done".
+    var asksUser: Bool { state == .done && needsUser == true && needsAttention }
+
+    /// The state as shown: a quiet "waiting" reads as idle, and a finished turn that asks something as
+    /// "Needs you", with the waiting hand, so the icon alone tells it from a plain Done. A settling agent
+    /// shows as done.
     var shownState: (symbol: String, color: NSColor, label: String) {
-        isQuiet ? ("moon.zzz", Theme.dimText, "Idle") : (state.symbol, state.color, state.label)
+        if isQuiet { return ("moon.zzz", Theme.dimText, "Idle") }
+        if asksUser { return (State.waiting.symbol, State.waiting.color, "Needs you") }
+        return (state.symbol, state.color, state.label)
     }
+
+    /// How much the agent wants the user, most urgent lowest: waiting, failed, a finished turn that asks
+    /// something, a turn that only finished; then, with no attention, running and the rest.
+    var urgency: Int {
+        if needsAttention {
+            switch state {
+            case .waiting: return 0
+            case .error: return 1
+            default: return asksUser ? 2 : 3
+            }
+        }
+        switch state {
+        case .running, .starting: return 4
+        default: return 5
+        }
+    }
+
+    /// Which of the Agents menu's switches a notification about this agent follows: a finished turn that
+    /// asks something goes with "Notify When Waiting for You", any other by its state.
+    var notifySwitch: State { state == .done && needsUser == true ? .waiting : state }
 }
 
 extension AppDelegate {
@@ -159,11 +177,9 @@ extension AppDelegate {
     func agentBadge(machine: MachineKey, panes: [PaneID]) -> NSColor? {
         guard monitorsAgents(machine), let state = connections[machine]?.store.state else { return nil }
         let agents = panes.compactMap { state.pane($0)?.agent }
-        let urgent = agents.filter(\.needsAttention).min { rank($0) < rank($1) }
+        let urgent = agents.filter(\.needsAttention).min { $0.urgency < $1.urgency }
         return (urgent ?? agents.first { $0.badgeColor != nil })?.badgeColor
     }
-
-    private func rank(_ info: AgentInfo) -> Int { info.state == .waiting ? 0 : info.state == .error ? 1 : 2 }
 
     // MARK: Opening
 
@@ -317,7 +333,7 @@ extension AppDelegate {
         // Only when the daemon raises attention (a hook-reported waiting, done or error, or a bell): quiet
         // output alone never alerts. A quiet rise (a turn that ended while the user was at the pane) is
         // badged but not announced.
-        guard let after, monitorsAgents(machine), after.notifiesRise(from: before), notifies(after.state) else {
+        guard let after, monitorsAgents(machine), after.notifiesRise(from: before) else {
             if let after, after.isQuietRise, after.needsAttention, before?.needsAttention != true {
                 log("agent \(machine)/\(pane): quiet rise, no notification")
             }
@@ -327,10 +343,11 @@ extension AppDelegate {
         if NSApp.isActive, window.isKeyWindow, machine == focusedMachine, store.focusedPane?.id == pane { return }
         // Detection can flicker (waiting → running → waiting), so one notification per pane and state a minute.
         let key = "\(machine)/\(pane)"
-        if let last = lastAgentNotification[key], last.state == after.state, Date().timeIntervalSince(last.date) < 60 { return }
+        if Self.throttlesNotice(after, last: lastAgentNotification[key], now: Date()) { return }
         lastAgentNotification[key] = (after.state, Date())
         // The daemon is rewriting the message (clothod 0.1.29): wait for it, as the phone's push does, up
-        // to `summaryWait`, then go with whatever summary there is. Never twice.
+        // to `summaryWait`, then go with whatever summary there is. Never twice. Whether it reads "needs
+        // you" or "is done" may change with the summary, so the switches are asked when it goes out.
         if after.isSummaryPending {
             summaryHold.hold(paneKey, state: after.state)
             return
@@ -338,8 +355,18 @@ extension AppDelegate {
         postAgentNotice(machine: machine, pane: pane, info: after)
     }
 
+    /// Whether a rise is too soon after the last notification for its pane. Only for detected agents,
+    /// whose state can flicker: one per pane and state a minute. An agent that reports through hooks rose
+    /// for a real turn each time (clothod settles a done before raising it), so a second Done within the
+    /// minute is announced.
+    nonisolated static func throttlesNotice(_ after: AgentInfo, last: (state: AgentInfo.State, date: Date)?, now: Date) -> Bool {
+        guard !after.isHookSourced, let last else { return false }
+        return last.state == after.state && now.timeIntervalSince(last.date) < 60
+    }
+
     func postAgentNotice(machine: MachineKey, pane: PaneID, info after: AgentInfo) {
         guard let session = connections[machine] else { return }
+        guard notifies(after) else { return log("agent \(machine)/\(pane): notifications for \(after.notifySwitch.rawValue) are off") }
         let location = session.store.state.location(of: pane)
         // "Platform · Claude finished" / "devbox · api-server · 4m" / the result: the same shape as on iOS.
         let notice = AgentNotice(info: after, machine: session.title, workspace: location?.workspace.name,
@@ -350,13 +377,17 @@ extension AppDelegate {
         let request = session.store.features.contains(.agentDecide) && after.state == .waiting ? after.pendingRequests.first : nil
         let category = request != nil ? Self.permissionCategory
             : canReply ? (after.state == .waiting ? Self.waitingCategory : Self.finishedCategory) : nil
-        postNotification(notice, machine: machine, pane: pane, category: category, request: request?.id)
+        // A plain Done makes no sound (clothod 0.1.31's `needs_user`); anything that needs the user does.
+        postNotification(notice, machine: machine, pane: pane, category: category, request: request?.id, sound: after.playsSound)
     }
 
     /// Mutable per state in the Agents menu; all on by default.
     func notifies(_ state: AgentInfo.State) -> Bool {
         UserDefaults.standard.object(forKey: "NotifyAgent.\(state.rawValue)") as? Bool ?? true
     }
+
+    /// Whether the switches let a notification about this agent out (see `notifySwitch`).
+    func notifies(_ agent: AgentInfo) -> Bool { notifies(agent.notifySwitch) }
 
     /// Notification switches, for the Agents menu and the sidebar's Agents header.
     func agentsNotificationMenu() -> NSMenu {
@@ -411,12 +442,13 @@ extension AppDelegate {
         ]
     }
 
-    private func postNotification(_ notice: AgentNotice, machine: MachineKey, pane: PaneID, category: String? = nil, request: String? = nil) {
+    private func postNotification(_ notice: AgentNotice, machine: MachineKey, pane: PaneID, category: String? = nil, request: String? = nil,
+                                  sound: Bool = true) {
         // AgentNotifications=NO (for test runs) logs instead, so no permission prompt appears. bool(forKey:)
         // reads a launch argument's "NO" too.
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: "AgentNotifications") == nil || defaults.bool(forKey: "AgentNotifications") else {
-            return log("agent notification: \(notice.title) | \(notice.subtitle) | \(notice.body)\(category.map { " [\($0)]" } ?? "")\(request.map { " request \($0)" } ?? "")")
+            return log("agent notification: \(notice.title) | \(notice.subtitle) | \(notice.body)\(category.map { " [\($0)]" } ?? "")\(request.map { " request \($0)" } ?? "")\(sound ? "" : " [silent]")")
         }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
             guard granted else { return }
@@ -424,7 +456,7 @@ extension AppDelegate {
             content.title = notice.title
             content.subtitle = notice.subtitle
             content.body = notice.body
-            content.sound = .default
+            content.sound = sound ? .default : nil
             var userInfo: [String: Any] = ["machine": machine, "pane": NSNumber(value: pane)]
             if let request { userInfo["request"] = request }
             content.userInfo = userInfo

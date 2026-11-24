@@ -7,6 +7,8 @@ final class ClothodBackendTests: XCTestCase {
     var clothod: String!
     var runtimeDir: String!
     /// More environment for the daemon a test starts (a fake `CLOTHOD_SUMMARIZER`).
+    /// `CLOTHOD_TEST_SETTLE_MS` is the settle window before a done turn raises attention (30 s for
+    /// real, clothod 0.1.31): 300 ms here unless a test sets its own before it starts the daemon.
     var daemonEnvironment: [String: String] = [:]
 
     override func setUpWithError() throws {
@@ -19,6 +21,7 @@ final class ClothodBackendTests: XCTestCase {
         // CLOTHOKIT_RUNTIME_PREFIX lets a role run them in its own dirs (the mac agent's /tmp/cmac-).
         let prefix = ProcessInfo.processInfo.environment["CLOTHOKIT_RUNTIME_PREFIX"] ?? "/tmp/ckt-"
         runtimeDir = "\(prefix)\(getpid())-\(UUID().uuidString.prefix(6))"
+        if daemonEnvironment["CLOTHOD_TEST_SETTLE_MS"] == nil { daemonEnvironment["CLOTHOD_TEST_SETTLE_MS"] = "300" }
     }
 
     override func tearDown() {
@@ -177,6 +180,63 @@ final class ClothodBackendTests: XCTestCase {
         }
         let again = try await backend.getSettings()
         XCTAssertEqual(again.scrollbackLines, target)
+    }
+
+    /// Fewer, clearer alerts (clothod 0.1.31, feature `alerts`): `client.active`, the rewrite's health in
+    /// `settings.get`, `settings.set` and the `settings` event, and a done turn that settles before it rises.
+    func testAlerts() async throws {
+        let backend = makeBackend()
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        try XCTSkipUnless(backend.lastHello?.features.contains(.alerts) == true, "this clothod predates alerts")
+
+        // Accepted from any client; only a Mac app's counts as the user being there.
+        try await backend.clientActive()
+
+        // An ephemeral daemon runs no `claude` (only a CLOTHOD_SUMMARIZER, and this test names none).
+        let before = try await backend.getSettings()
+        XCTAssertEqual(before.config, runtimeDir + "/config.toml")
+        guard before.config == runtimeDir + "/config.toml" else { return }
+        XCTAssertEqual(before.notificationRewrite, true)
+        XCTAssertEqual(before.notificationRewriteHealth, RewriteHealth(state: .unavailable))
+
+        // The result of a set carries it too, and `off` is checked before `unavailable`.
+        let target = before.limits.scrollbackLines.default == 1000 ? 1200 : 1000
+        let lines = try await backend.setSettings(.init(scrollbackLines: target))
+        XCTAssertEqual(lines.notificationRewriteHealth?.state, .unavailable)
+        let off = try await backend.setSettings(.init(notificationRewrite: false))
+        XCTAssertEqual(off.notificationRewriteHealth, RewriteHealth(state: .off))
+        try await waitFor("the settings event with the health") {
+            collector.all.contains { if case .settings(let s) = $0 { return s.notificationRewriteHealth?.state == .off }; return false }
+        }
+        let again = try await backend.getSettings()
+        XCTAssertEqual(again.notificationRewriteHealth?.state, .off)
+
+        // A done turn settles first (300 ms here), with no attention, then rises with `needs_user` decided.
+        let created = try await backend.createWorkspace(name: "alerts", spawn: SpawnOptions(command: ["/bin/sh"], cwd: "/tmp"))
+        func agents() -> [AgentInfo] {
+            collector.all.compactMap { event -> AgentInfo? in
+                switch event {
+                case let .agent(p, info) where p == created.pane: return info
+                case let .pane(pane, _) where pane.id == created.pane: return pane.agent
+                default: return nil
+                }
+            }
+        }
+        _ = try await backend.request("agent.report", ["pane": created.pane, "state": "running", "kind": "claude", "prompt": "run the tests"])
+        _ = try await backend.request("agent.report", ["pane": created.pane, "state": "done", "kind": "claude", "message": "All tests pass."])
+        try await waitFor("the settling done") { agents().contains { $0.state == .done && $0.isSettling } }
+        let settling = try XCTUnwrap(agents().first { $0.state == .done && $0.isSettling })
+        XCTAssertFalse(settling.needsAttention, "no badge or notification while it settles")
+        XCTAssertNotEqual(settling.attention, true)
+        try await waitFor("the rise") { agents().contains { $0.state == .done && $0.needsAttention } }
+        let rise = try XCTUnwrap(agents().first { $0.state == .done && $0.needsAttention })
+        XCTAssertFalse(rise.isSettling)
+        XCTAssertEqual(rise.needsUser, false, "a plain finished turn")
+        XCTAssertFalse(rise.playsSound)
+        XCTAssertTrue(AgentNotice(info: rise, machine: "m").title.hasPrefix("Claude is done"), AgentNotice(info: rise, machine: "m").title)
     }
 
     /// service.status on a test instance: it reports, but this test never installs (on macOS that loads a

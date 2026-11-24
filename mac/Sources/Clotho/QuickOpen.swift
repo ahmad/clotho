@@ -357,7 +357,7 @@ extension AppDelegate {
         let focusedStore = connections[focusedMachine]?.store
         let currentWorkspace = focusedStore?.focusedWorkspace?.id
 
-        // Agents: the waiting ones lead any search, and those waiting or in error are "Needs you".
+        // Agents: the waiting ones lead any search, and those waiting, in error or asking are "Needs you".
         for entry in AgentEntry.sorted(agentEntries()) {
             let title = "\(entry.info.kindName): \(entry.paneTitle ?? entry.tabTitle ?? "agent")"
             let place = [entry.workspace?.name, entry.tabTitle].compactMap { $0 }.joined(separator: " › ")
@@ -430,21 +430,25 @@ extension AppDelegate {
                                machine: focusedMachine, workspace: currentWorkspace, tab: focusedStore?.focusedTab?.id, actions: actions)
     }
 
-    /// An agent in ⌘P's "Needs you": waiting for you or in error, and not muted or already seen.
+    /// An agent in ⌘P's "Needs you": waiting for you, in error, or finished with a question for you
+    /// (`needs_user`), and not muted or already seen. A turn that only finished isn't, nor one still
+    /// settling.
     static func needsYou(_ info: AgentInfo) -> Bool {
-        info.needsAttention && [.waiting, .error].contains(info.state)
+        info.needsAttention && ([.waiting, .error].contains(info.state) || info.asksUser)
     }
 
-    /// "waiting: Allow Bash?", "running", "done: Tests pass".
+    /// "waiting for you: Allow Bash?", "running", "needs you: Should I push?", "done: Tests pass".
     static func agentDetail(_ info: AgentInfo) -> String {
         let state = info.shownState.label.lowercased()
-        guard let what = info.prompt ?? info.headline, !what.isEmpty else { return state }
+        // What it asks, for a finished turn with a question; else what it was asked to do.
+        guard let what = info.asksUser ? info.headline ?? info.prompt : info.prompt ?? info.headline, !what.isEmpty else { return state }
         return "\(state): \(what)"
     }
 
-    /// The agent that most needs the user (waiting, then error), else the first.
+    /// The agent that most needs the user (waiting, then error, then a finished turn that asks
+    /// something, then one that only finished), else the first.
     static func mostUrgent(_ agents: [AgentInfo]) -> AgentInfo? {
-        func rank(_ info: AgentInfo) -> Int { !info.needsAttention ? 3 : info.state == .waiting ? 0 : info.state == .error ? 1 : 2 }
+        func rank(_ info: AgentInfo) -> Int { info.needsAttention ? info.urgency : 4 }
         return agents.min { rank($0) < rank($1) }
     }
 }

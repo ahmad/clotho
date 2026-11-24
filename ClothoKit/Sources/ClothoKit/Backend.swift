@@ -87,6 +87,9 @@ public struct Hello: Codable, Equatable, Sendable {
         case agentDecide = "agent.decide"
         /// `settings.get` / `settings.set` and `settings` events (clothod 0.1.7).
         case settings
+        /// Fewer, clearer alerts (clothod 0.1.31): agents' `needs_user` and `settling`, `client.active`,
+        /// and the `notification_rewrite_health` setting.
+        case alerts
         /// `service.status` / `install` / `uninstall` and `service` events: start clothod at login (0.1.7).
         case service
         /// `client.colors`: the client's terminal colours, which the daemon reports to apps that ask (OSC
@@ -375,6 +378,10 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// the window or app becoming active, switching to its tab), once per action. Does nothing when
     /// hello's `features` lacks `.paneFocus`.
     func focusPane(_ pane: PaneID) async throws
+    /// Tells the daemon the user is at this app right now (`client.active`), so it holds back pushes to
+    /// their phone. A Mac app sends it about once a minute while the user is really at it. Does nothing
+    /// when hello's `features` lacks `.alerts`.
+    func clientActive() async throws
 
     /// Keys, paste, mouse and focus reports. Never the local emulator's automatic replies.
     func sendInput(_ pane: PaneID, _ bytes: Data)
@@ -468,6 +475,9 @@ public extension SessionBackend {
 
     /// Backends with one client: its viewport is already the size.
     func focusPane(_ pane: PaneID) async throws {}
+
+    /// Backends with no phone to push to: nothing to say.
+    func clientActive() async throws {}
 
     func muteAgent(_ pane: PaneID, muted: Bool) async throws {
         throw BackendError(code: "unknown_method", message: "this backend can't mute agents")
@@ -604,6 +614,10 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
     /// Whether notifications get Haiku's rewrite of an agent's message (`notification_rewrite`, 0.1.29;
     /// default true). Off: the message cleaned of Markdown, and no model runs. Nil on older daemons.
     public var notificationRewrite: Bool?
+    /// Whether that rewrite works on this machine (`notification_rewrite_health`, 0.1.31, feature
+    /// `alerts`). Read-only: the daemon reports it in `settings.get`, `settings.set` and the `settings`
+    /// event. Nil on older daemons.
+    public var notificationRewriteHealth: RewriteHealth?
     /// The config file that holds them.
     public var config: String?
     /// After a set: the panes whose scrollback changed.
@@ -612,6 +626,10 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
     public struct Limits: Codable, Equatable, Sendable {
         public var scrollbackLines: Range
 
+        public init(scrollbackLines: Range) {
+            self.scrollbackLines = scrollbackLines
+        }
+
         enum CodingKeys: String, CodingKey { case scrollbackLines = "scrollback_lines" }
     }
 
@@ -619,6 +637,48 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
         public var min: Int
         public var max: Int
         public var `default`: Int
+
+        public init(min: Int, max: Int, default value: Int) {
+            self.min = min
+            self.max = max
+            self.default = value
+        }
+    }
+
+    /// How the notification rewrite is doing (protocol.md, "Settings").
+    public struct RewriteHealth: Codable, Equatable, Sendable {
+        public enum State: String, Codable, Sendable, CaseIterable {
+            /// The last rewrite that ran worked.
+            case ok
+            /// The last rewrite that ran failed; `reason` says why.
+            case failing
+            /// The rewrite is on, but none has run since the daemon started. Also a state this client
+            /// doesn't know yet.
+            case unknown
+            /// `notification_rewrite` is false.
+            case off
+            /// There is no `claude` on the machine to run it.
+            case unavailable
+
+            /// Never throws for a string: the `settings` event is decoded whole, and one new state
+            /// must not drop it.
+            public init(from decoder: Decoder) throws {
+                let raw = try decoder.singleValueContainer().decode(String.self)
+                self = State(rawValue: raw) ?? .unknown
+            }
+        }
+
+        public var state: State
+        /// For `failing`: one line saying why ("exit 1: Not logged in · Please run /login").
+        public var reason: String?
+        /// When the run this reports ended, in seconds since 1970; nil for the states no run decides.
+        public var at: Double?
+
+        public init(state: State, reason: String? = nil, at: Double? = nil) {
+            self.state = state
+            self.reason = reason
+            self.at = at
+        }
     }
 
     /// The fields a `settings.set` changes; nil ones stay as they are.
@@ -638,19 +698,25 @@ public struct DaemonSettings: Codable, Equatable, Sendable {
         }
     }
 
-    public init(scrollbackLines: Int, limits: Limits, notificationRewrite: Bool? = nil, config: String? = nil, appliedPanes: [PaneID]? = nil) {
+    public init(scrollbackLines: Int, limits: Limits, notificationRewrite: Bool? = nil, config: String? = nil, appliedPanes: [PaneID]? = nil,
+                notificationRewriteHealth: RewriteHealth? = nil) {
         self.scrollbackLines = scrollbackLines
         self.limits = limits
         self.notificationRewrite = notificationRewrite
         self.config = config
         self.appliedPanes = appliedPanes
+        self.notificationRewriteHealth = notificationRewriteHealth
     }
 
     enum CodingKeys: String, CodingKey {
         case scrollbackLines = "scrollback_lines", limits, config, appliedPanes = "applied_panes"
         case notificationRewrite = "notification_rewrite"
+        case notificationRewriteHealth = "notification_rewrite_health"
     }
 }
+
+/// How a machine's notification rewrite is doing (`DaemonSettings.notificationRewriteHealth`).
+public typealias RewriteHealth = DaemonSettings.RewriteHealth
 
 /// The machine's login service for clothod (protocol.md, "Start at login"): a launchd agent on macOS, a
 /// systemd user unit on Linux. Only the user turns it on.

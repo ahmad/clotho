@@ -12,6 +12,9 @@ extension ClothodBackendTests {
         try "#!/bin/sh\ncat > /dev/null\nsleep 1\necho 'Fixed the **auth** bug; tests pass.'\n".write(toFile: fake, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake)
         daemonEnvironment["CLOTHOD_SUMMARIZER"] = fake
+        // No settle window (clothod 0.1.31): this is about the text, and the rise must come while the
+        // fake still sleeps.
+        daemonEnvironment["CLOTHOD_TEST_SETTLE_MS"] = "0"
 
         let backend = makeBackend()
         let collector = FakeBackendTests.Collector()

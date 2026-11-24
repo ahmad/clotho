@@ -322,6 +322,23 @@ final class CommandBarTests: XCTestCase {
         XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .running, attention: true)))
         XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .waiting, attention: true, muted: true)), "muted")
         XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .waiting, attention: false)), "already seen")
+        // clothod 0.1.31's needs_user: a finished turn that asks something is listed, one that only finished isn't.
+        XCTAssertTrue(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .done, attention: true, needsUser: true)))
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .done, attention: true, needsUser: false)))
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .done, attention: false, needsUser: true)), "already seen")
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .done, attention: true, needsUser: true, settling: true)), "settling")
+        XCTAssertFalse(AppDelegate.needsYou(AgentInfo(kind: "claude", state: .done, attention: false, settling: true)), "settling")
+    }
+
+    func testAgentDetailAndTheMostUrgent() {
+        let asks = AgentInfo(kind: "claude", state: .done, attention: true, prompt: "fix the login bug", summary: "Should I push it?", needsUser: true)
+        let plain = AgentInfo(kind: "claude", state: .done, attention: true, summary: "Tests pass", needsUser: false)
+        XCTAssertEqual(AppDelegate.agentDetail(asks), "needs you: Should I push it?")
+        XCTAssertEqual(AppDelegate.agentDetail(plain), "done: Tests pass")
+        let running = AgentInfo(kind: "claude", state: .running)
+        XCTAssertEqual(AppDelegate.mostUrgent([running, plain, asks]), asks)
+        XCTAssertEqual(AppDelegate.mostUrgent([plain, asks, AgentInfo(kind: "claude", state: .error, attention: true)])?.state, .error)
+        XCTAssertEqual(AppDelegate.mostUrgent([running, AgentInfo(kind: "codex", state: .waiting, attention: false)]), running, "else the first")
     }
 
     func testNodeIDsRoundTrip() {

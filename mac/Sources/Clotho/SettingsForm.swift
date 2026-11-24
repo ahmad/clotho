@@ -55,7 +55,9 @@ final class FormRow: NSView {
     let captionLabel: NSTextField?
     let control: NSView?
 
-    init(_ title: String, caption: String? = nil, captionColor: NSColor = .secondaryLabelColor, control: NSView?) {
+    /// `captionLines` caps a caption that may run long (a daemon's error text) at that many lines, cut
+    /// with an ellipsis, with all of it in the row's tooltip; nil lets the caption wrap freely.
+    init(_ title: String, caption: String? = nil, captionColor: NSColor = .secondaryLabelColor, captionLines: Int? = nil, control: NSView?) {
         titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = SettingsStyle.titleFont
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -87,6 +89,12 @@ final class FormRow: NSView {
         }
         NSLayoutConstraint.activate(constraints)
         captionLabel?.preferredMaxLayoutWidth = SettingsStyle.width - 2 * SettingsStyle.margin - 220
+        if let captionLines, let captionLabel {
+            captionLabel.maximumNumberOfLines = captionLines
+            captionLabel.cell?.truncatesLastVisibleLine = true
+            captionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            toolTip = caption
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }

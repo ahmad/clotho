@@ -411,6 +411,222 @@ final class QuietRiseTests: XCTestCase {
     }
 }
 
+/// Fewer, clearer alerts (clothod 0.1.31, feature `alerts`): agents' `needs_user` and `settling`, the
+/// rewrite's health in the settings, and the notification wording and sound that follow `needs_user`.
+final class AlertsTests: XCTestCase {
+    private func agent(_ fields: String) throws -> AgentInfo {
+        try JSONDecoder().decode(AgentInfo.self, from: Data(("{\"kind\":\"claude\",\"state\":\"done\"" + fields + "}").utf8))
+    }
+
+    private func settings(_ health: String) throws -> DaemonSettings {
+        let json = #"{"scrollback_lines":2000,"notification_rewrite":true,"limits":{"scrollback_lines":{"min":0,"max":50000,"default":2000}},"#
+            + health + #""config":"/c/config.toml"}"#
+        return try JSONDecoder().decode(DaemonSettings.self, from: Data(json.utf8))
+    }
+
+    private func waitFor(_ what: String, _ condition: @escaping () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while !condition() {
+            if Date() > deadline { XCTFail("timed out waiting for \(what)"); return }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    func testDecodesNeedsUser() throws {
+        XCTAssertEqual(try agent(#","needs_user":true"#).needsUser, true)
+        XCTAssertEqual(try agent(#","needs_user":false"#).needsUser, false)
+        XCTAssertNil(try agent(#","needs_user":null"#).needsUser)
+        XCTAssertNil(try agent("").needsUser, "an older daemon")
+        let info = AgentInfo(kind: "claude", state: .done, attention: true, needsUser: false, settling: false)
+        let json = try XCTUnwrap(String(data: JSONEncoder().encode(info), encoding: .utf8))
+        XCTAssertTrue(json.contains(#""needs_user":false"#), json)
+        XCTAssertEqual(try JSONDecoder().decode(AgentInfo.self, from: Data(json.utf8)), info, "round trip")
+    }
+
+    func testDecodesSettling() throws {
+        let settling = try agent(#","attention":false,"settling":true"#)
+        XCTAssertEqual(settling.settling, true)
+        XCTAssertTrue(settling.isSettling)
+        XCTAssertFalse(settling.needsAttention)
+        let older = try agent(#","attention":true"#)
+        XCTAssertNil(older.settling)
+        XCTAssertFalse(older.isSettling)
+        XCTAssertTrue(older.needsAttention)
+        XCTAssertFalse(try agent(#","settling":false"#).isSettling)
+    }
+
+    /// The daemon keeps `attention` false while settling; if one ever says otherwise, nothing badges or notifies.
+    func testSettlingNeverNeedsAttention() throws {
+        let both = try agent(#","attention":true,"settling":true"#)
+        XCTAssertFalse(both.needsAttention)
+        let running = AgentInfo(kind: "claude", state: .running, attention: false)
+        XCTAssertFalse(both.notifiesRise(from: running))
+        // The window ends: the rise.
+        let risen = AgentInfo(kind: "claude", state: .done, attention: true, needsUser: false, settling: false)
+        XCTAssertTrue(risen.needsAttention)
+        XCTAssertTrue(risen.notifiesRise(from: both))
+        XCTAssertTrue(risen.notifiesRise(from: AgentInfo(kind: "claude", state: .done, attention: false, settling: true)))
+    }
+
+    func testDecodesRewriteHealth() throws {
+        let ok = try settings(#""notification_rewrite_health":{"state":"ok","reason":null,"at":1763900000.5},"#)
+        XCTAssertEqual(ok.notificationRewriteHealth, RewriteHealth(state: .ok, reason: nil, at: 1763900000.5))
+        XCTAssertEqual(ok.scrollbackLines, 2000)
+
+        let failing = try settings(#""notification_rewrite_health":{"state":"failing","reason":"exit 1: Not logged in · Please run /login","at":1763900001},"#)
+        XCTAssertEqual(failing.notificationRewriteHealth?.state, .failing)
+        XCTAssertEqual(failing.notificationRewriteHealth?.reason, "exit 1: Not logged in · Please run /login")
+
+        for (name, state) in [("unknown", RewriteHealth.State.unknown), ("off", .off), ("unavailable", .unavailable)] {
+            let fixed = try settings(#""notification_rewrite_health":{"state":""# + name + #"","reason":null,"at":null},"#)
+            XCTAssertEqual(fixed.notificationRewriteHealth, RewriteHealth(state: state), name)
+        }
+
+        // A state this client doesn't know: unknown, and the settings still decode (the `settings`
+        // event is decoded whole, so a throw here would drop it).
+        let newer = try settings(#""notification_rewrite_health":{"state":"throttled","reason":"later","at":5,"more":true},"#)
+        XCTAssertEqual(newer.notificationRewriteHealth?.state, .unknown)
+        XCTAssertEqual(newer.notificationRewriteHealth?.reason, "later")
+        XCTAssertEqual(newer.notificationRewrite, true)
+        XCTAssertEqual(newer.config, "/c/config.toml")
+
+        // Only the state (reason and at left out), and no health at all (an older daemon).
+        XCTAssertEqual(try settings(#""notification_rewrite_health":{"state":"ok"},"#).notificationRewriteHealth, RewriteHealth(state: .ok))
+        let older = try settings("")
+        XCTAssertNil(older.notificationRewriteHealth)
+        XCTAssertEqual(older.limits.scrollbackLines.max, 50000)
+    }
+
+    func testAlertsFeature() {
+        var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clothod", version: "0.1.31", instance: "i")
+        hello.featureNames = ["agents", "summary", "alerts", "something.new"]
+        XCTAssertTrue(hello.features.contains(.alerts))
+        hello.featureNames = ["agents", "summary"]
+        XCTAssertFalse(hello.features.contains(.alerts))
+    }
+
+    func testTitlesFollowNeedsUser() {
+        func title(_ state: AgentInfo.State, _ needsUser: Bool?, workspace: String? = "Platform") -> String {
+            AgentNotice(info: AgentInfo(kind: "claude", state: state, attention: true, needsUser: needsUser),
+                        machine: "devbox", workspace: workspace).title
+        }
+        XCTAssertEqual(title(.done, true), "Platform · Claude needs you")
+        XCTAssertEqual(title(.waiting, true), "Platform · Claude needs you")
+        XCTAssertEqual(title(.error, true), "Platform · Claude needs you")
+        XCTAssertEqual(title(.done, false), "Platform · Claude is done")
+        XCTAssertEqual(title(.done, true, workspace: nil), "Claude needs you on devbox")
+        XCTAssertEqual(title(.done, false, workspace: nil), "Claude is done on devbox")
+        // Not known (an older daemon): exactly as before.
+        XCTAssertEqual(title(.done, nil), "Platform · Claude finished")
+        XCTAssertEqual(title(.waiting, nil), "Platform · Claude is waiting")
+        XCTAssertEqual(title(.error, nil), "Platform · Claude hit an error")
+        XCTAssertEqual(title(.done, nil, workspace: nil), "Claude finished on devbox")
+        // The daemon never sends false for these; if one did, the state words it.
+        XCTAssertEqual(title(.waiting, false), "Platform · Claude is waiting")
+        XCTAssertEqual(title(.error, false), "Platform · Claude hit an error")
+
+        // The plain-fields init (a push record's `nu`) reads the same, and leaving it out is nil.
+        func record(_ needsUser: Bool?) -> AgentNotice {
+            AgentNotice(kind: "claude", state: "done", machine: "devbox", workspace: "Platform", project: nil, duration: nil,
+                        result: "Done.", tool: nil, toolInput: nil, needsUser: needsUser)
+        }
+        XCTAssertEqual(record(true).title, "Platform · Claude needs you")
+        XCTAssertEqual(record(false).title, "Platform · Claude is done")
+        XCTAssertEqual(record(nil), AgentNotice(kind: "claude", state: "done", machine: "devbox", workspace: "Platform", project: nil,
+                                                duration: nil, result: "Done.", tool: nil, toolInput: nil))
+        XCTAssertEqual(record(nil).title, "Platform · Claude finished")
+        XCTAssertEqual(record(true).body, "Done.", "only the title changes")
+    }
+
+    func testOnlyAPlainDoneIsSilent() {
+        func plays(_ state: AgentInfo.State, _ needsUser: Bool?) -> Bool {
+            AgentInfo(kind: "claude", state: state, attention: true, needsUser: needsUser).playsSound
+        }
+        XCTAssertFalse(plays(.done, false), "a plain Done")
+        XCTAssertTrue(plays(.done, true), "done, with a question")
+        XCTAssertTrue(plays(.done, nil), "an older daemon: as before")
+        XCTAssertTrue(plays(.waiting, true))
+        XCTAssertTrue(plays(.waiting, nil))
+        XCTAssertTrue(plays(.error, true))
+        XCTAssertTrue(plays(.waiting, false), "never sent; a wait is never silent")
+        XCTAssertTrue(plays(.error, false))
+    }
+
+    /// The fake: more hello features on request, settings in memory, and a health tests can set.
+    func testFakeAdvertisesAndReportsHealth() async throws {
+        let plain = FakeBackend()
+        let plainEvents = FakeBackendTests.Collector()
+        let plainReader = Task { for await event in plain.events { plainEvents.add(event) } }
+        defer { plain.stop(); plainReader.cancel() }
+        try await plain.start()
+        let hello = { (c: FakeBackendTests.Collector) in c.all.compactMap { e -> Hello? in if case .connected(let h) = e { return h }; return nil }.first }
+        try await waitFor("hello") { hello(plainEvents) != nil }
+        XCTAssertEqual(hello(plainEvents)?.featureNames, ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move"], "the same hello as ever")
+
+        let backend = FakeBackend(extraFeatures: ["settings", "summary", "alerts", "agents"])
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        try await waitFor("hello") { hello(collector) != nil }
+        XCTAssertEqual(hello(collector)?.features.isSuperset(of: [.settings, .summary, .alerts, .agents, .paneKeys]), true)
+        XCTAssertEqual(hello(collector)?.featureNames?.filter { $0 == "agents" }.count, 1, "no feature twice")
+
+        let before = try await backend.getSettings()
+        XCTAssertEqual(before.notificationRewrite, true)
+        XCTAssertNil(before.notificationRewriteHealth)
+        let health = { collector.all.compactMap { e -> DaemonSettings? in if case .settings(let s) = e { return s }; return nil }.last?.notificationRewriteHealth }
+
+        backend.setRewriteHealth(.init(state: .failing, reason: "claude said: not logged in", at: 10))
+        try await waitFor("the settings event") { health()?.state == .failing }
+        XCTAssertEqual(health()?.reason, "claude said: not logged in")
+        let failing = try await backend.getSettings()
+        XCTAssertEqual(failing.notificationRewriteHealth?.state, .failing)
+
+        let off = try await backend.setSettings(.init(notificationRewrite: false))
+        XCTAssertEqual(off.notificationRewrite, false)
+        XCTAssertEqual(off.notificationRewriteHealth, RewriteHealth(state: .off))
+        try await waitFor("off in the event") { health()?.state == .off }
+        let lines = try await backend.setSettings(.init(scrollbackLines: 5000))
+        XCTAssertEqual(lines.scrollbackLines, 5000)
+        XCTAssertEqual(lines.notificationRewriteHealth?.state, .off, "the health comes back with every set")
+        do {
+            _ = try await backend.setSettings(.init(scrollbackLines: 50001))
+            XCTFail("an out-of-range value was accepted")
+        } catch let error as BackendError {
+            XCTAssertEqual(error.code, "bad_request")
+        }
+
+        try await backend.clientActive()
+        try await backend.clientActive()
+        XCTAssertEqual(backend.clientActiveCalls, 2)
+    }
+
+    /// A settling fake agent: an explicit `attention: false` stays, and none is raised for it.
+    func testFakeKeepsASettlingAgentQuiet() async throws {
+        let backend = FakeBackend()
+        defer { backend.stop() }
+        try await backend.start()
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh"]))
+        let agent = { try await backend.getState().pane(created.pane)?.agent }
+
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .done, source: "hook", attention: false, settling: true))
+        var now = try await agent()
+        XCTAssertEqual(now?.attention, false)
+        XCTAssertEqual(now?.needsAttention, false)
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .done, source: "hook", settling: true))
+        now = try await agent()
+        XCTAssertNotEqual(now?.attention, true, "no attention while settling")
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .done, source: "hook", attention: false, needsUser: false))
+        now = try await agent()
+        XCTAssertEqual(now?.attention, false, "an explicit false is kept")
+        backend.setAgent(created.pane, AgentInfo(kind: "claude", state: .done, source: "hook", needsUser: false, settling: false))
+        now = try await agent()
+        XCTAssertEqual(now?.needsAttention, true, "the rise")
+        XCTAssertEqual(now?.playsSound, false)
+    }
+}
+
 /// Notification text, shared by the Mac and iOS: "Platform · Claude finished" / "devbox · api-server · 4m" / result.
 final class AgentNoticeTests: XCTestCase {
     func testDecodesTheDetailFields() throws {

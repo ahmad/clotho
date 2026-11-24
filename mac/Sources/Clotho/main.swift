@@ -1182,6 +1182,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 (6, 0, AgentInfo(kind: "claude", state: .waiting, source: "hook", message: "Allow running `swift test`?")),
                 (8, 1, AgentInfo(kind: "codex", state: .done, message: "All 15 tests pass")),
                 (10, 2, AgentInfo(kind: "claude", state: .error, source: "hook", message: "API rate limit reached")),
+                // clothod 0.1.31 (`alerts`), in panes 3 to 5 when the workspace has them: a finished turn that
+                // asks something ("Needs you", with sound), one that only finished ("Done", silent), and one
+                // that settles first (done, no badge, no notification) and rises after.
+                (12, 3, AgentInfo(kind: "claude", state: .done, source: "hook", message: "The fix is committed. Should I push it?",
+                                  needsUser: true)),
+                (13, 4, AgentInfo(kind: "claude", state: .done, source: "hook", message: "All 212 tests pass.", needsUser: false)),
+                (14, 5, AgentInfo(kind: "claude", state: .done, source: "hook", message: "Renamed the module.", attention: false,
+                                  settling: true)),
+                (40, 5, AgentInfo(kind: "claude", state: .done, source: "hook", message: "Renamed the module.", attention: true,
+                                  needsUser: false, settling: false)),
             ]
             for (time, index, agent) in steps {
                 DispatchQueue.main.asyncAfter(deadline: .now() + time) { [self] in
@@ -1191,6 +1201,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     fake.setAgent(panes[index], agent)
                 }
             }
+        }
+        // FakeRewriteHealth=failing (or unavailable, ok, off, unknown; with Backend=fake) sets what the fake
+        // reports for "Summarize agent messages" in Settings › Machines.
+        if let name = UserDefaults.standard.string(forKey: "FakeRewriteHealth"),
+           let fake = connections[Self.localKey]?.store.backend as? FakeBackend {
+            let state = DaemonSettings.RewriteHealth.State(rawValue: name) ?? .unknown
+            let reason = "exit 1: Not logged in · Please run /login, then try again: the saved credentials for this account expired on this machine"
+            log("FakeRewriteHealth: \(state.rawValue)")
+            fake.setRewriteHealth(.init(state: state, reason: state == .failing ? reason : nil, at: Date().timeIntervalSince1970))
         }
         // SetUpAgentStatus="devbox" (or "local") opens the agent status setup sheet after 6 seconds.
         if let name = UserDefaults.standard.string(forKey: "SetUpAgentStatus") {
@@ -1341,7 +1360,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let env = ProcessInfo.processInfo.environment
         if defaults.string(forKey: "Backend") == "fake" {
             log("backend: fake")
-            return (FakeBackend(), nil)
+            // The fake says hello as it always did, unless a default asks for what 0.1.31 daemons have.
+            let alerts = defaults.bool(forKey: "FakeAgents") || defaults.string(forKey: "FakeRewriteHealth") != nil
+            return (FakeBackend(extraFeatures: alerts ? ["settings", "summary", "alerts"] : []), nil)
         }
         let override = [defaults.string(forKey: "ClothodPath"), env["CLOTHOD_BIN"]].compactMap { $0 }.first
         let bundled = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("clothod").path

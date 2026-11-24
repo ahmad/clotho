@@ -31,6 +31,25 @@ final class SummaryHoldTests: XCTestCase {
         XCTAssertEqual(posted.count, 1, "never twice")
     }
 
+    /// The small model decides `needs_user` with the summary: the notice goes out with the final word and
+    /// sound, not the ones the rise came with.
+    func testPostsWithTheFinalNeedsUser() {
+        var now = agent(summary: "Done. Fixed auth.", pending: true)
+        now.needsUser = false
+        var posted: [(title: String, sound: Bool, key: AgentInfo.State)] = []
+        let hold = SummaryHold(current: { _ in now }) { _, info in
+            posted.append((AgentNotice(info: info, machine: "m", workspace: "Platform").title, info.playsSound, info.notifySwitch))
+        }
+        hold.wait = 30
+        hold.hold(key, state: .done)
+        now = agent(summary: "Fixed auth. Should I push?", pending: false)
+        now.needsUser = true
+        hold.agentChanged(key, to: now)
+        XCTAssertEqual(posted.map(\.title), ["Platform · Claude needs you"])
+        XCTAssertEqual(posted.map(\.sound), [true])
+        XCTAssertEqual(posted.map(\.key), [.waiting], "and it follows the Waiting for You switch")
+    }
+
     func testPostsAfterTheWaitWithWhatThereIs() async throws {
         let now = agent(summary: "Done. Fixed auth.", pending: true)
         var posted: [String] = []

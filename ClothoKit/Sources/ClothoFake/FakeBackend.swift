@@ -31,7 +31,20 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     /// How many times `setTerminalColors` was called.
     public private(set) var terminalColorsCalls = 0
 
-    public init() {
+    /// Hello features on top of the fake's usual ones (see `init`).
+    private let extraFeatures: [String]
+    /// The fake's settings, in memory (`getSettings`, `setSettings`, `setRewriteHealth`).
+    private var settings = DaemonSettings(scrollbackLines: 2000,
+                                          limits: .init(scrollbackLines: .init(min: 0, max: 50000, default: 2000)),
+                                          notificationRewrite: true)
+    /// How many times `clientActive` was called (tests count how often a client sends it).
+    public var clientActiveCalls: Int { locked { activeCalls } }
+    private var activeCalls = 0
+
+    /// `extraFeatures`: more names for hello's `features` ("settings", "summary", "alerts"), for building
+    /// and testing what a client gates on them. Without any, hello is what it always was.
+    public init(extraFeatures: [String] = []) {
+        self.extraFeatures = extraFeatures
         (events, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
     }
 
@@ -52,7 +65,8 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        hello.featureNames = ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move"]
+        let features = ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move"]
+        hello.featureNames = features + extraFeatures.filter { !features.contains($0) }
         locked {
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
@@ -289,6 +303,55 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
+    /// Counted; the fake has no phone to hold pushes back from.
+    public func clientActive() async throws {
+        locked { activeCalls += 1 }
+    }
+
+    // MARK: Settings
+
+    public func getSettings() async throws -> DaemonSettings {
+        return locked { () -> DaemonSettings in
+            var current = settings
+            current.appliedPanes = nil
+            return current
+        }
+    }
+
+    /// Like clothod: an out-of-range scrollback is refused, the result lists no panes (the fake's panes
+    /// keep their history), turning the rewrite off or on moves a reported health between `off` and
+    /// `unknown`, and a `settings` event follows.
+    public func setSettings(_ change: DaemonSettings.Change) async throws -> DaemonSettings {
+        return try locked { () throws -> DaemonSettings in
+            if let lines = change.scrollbackLines {
+                let range = settings.limits.scrollbackLines
+                guard (range.min...range.max).contains(lines) else {
+                    throw BackendError(code: "bad_request", message: "scrollback_lines must be \(range.min)..\(range.max)")
+                }
+                settings.scrollbackLines = lines
+            }
+            if let rewrite = change.notificationRewrite, rewrite != settings.notificationRewrite {
+                settings.notificationRewrite = rewrite
+                if settings.notificationRewriteHealth != nil {
+                    settings.notificationRewriteHealth = .init(state: rewrite ? .unknown : .off)
+                }
+            }
+            var result = settings
+            result.appliedPanes = []
+            continuation.yield(.settings(settings))
+            return result
+        }
+    }
+
+    /// Sets what the fake reports as `notification_rewrite_health` (nil: none, as on an older daemon) and
+    /// sends the `settings` event, as clothod does when the health changes.
+    public func setRewriteHealth(_ health: DaemonSettings.RewriteHealth?) {
+        locked {
+            settings.notificationRewriteHealth = health
+            continuation.yield(.settings(settings))
+        }
+    }
+
     public func resize(_ pane: PaneID, _ size: Size) async throws {
         try await applySize(pane, size, notifySubscriber: true)
     }
@@ -402,7 +465,8 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     }
 
     /// Puts a fake agent in a pane (nil removes it), for building the UI without clothod. A waiting,
-    /// done or error state starts out needing attention, as clothod's do, unless the agent is muted.
+    /// done or error state starts out needing attention, as clothod's do, unless the agent is muted or
+    /// settling. An `attention` the caller gives (true or false) is kept.
     /// The same kind of agent keeps its mute; a different one (a new session) starts unmuted.
     public func setAgent(_ pane: PaneID, _ agent: AgentInfo?) {
         locked {
@@ -413,7 +477,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
             }
             if agent?.isMuted == true {
                 agent?.attention = false
-            } else if let state = agent?.state, [.waiting, .done, .error].contains(state), agent?.attention == nil {
+            } else if let state = agent?.state, [.waiting, .done, .error].contains(state), agent?.attention == nil, agent?.isSettling != true {
                 agent?.attention = true
             }
             if agent?.since == nil { agent?.since = Date().timeIntervalSince1970 }

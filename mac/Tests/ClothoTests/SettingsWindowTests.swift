@@ -1,4 +1,5 @@
 import AppKit
+import ClothoFake
 import ClothoKit
 import XCTest
 @testable import Clotho
@@ -105,6 +106,148 @@ final class SettingsWindowTests: XCTestCase {
         XCTAssertEqual(S.of(isLocal: false, isEnabled: true, connected: nil, paused: false, check: .unreachable("no route")), .unreachable)
         XCTAssertEqual(S.of(isLocal: false, isEnabled: true, connected: nil, paused: false, check: .reachable), .notConnected)
         XCTAssertNil(S.off.color, "off is a hollow ring")
+    }
+}
+
+/// Settings › Machines › "Summarize agent messages" says when the rewrite doesn't work on a machine
+/// (clothod 0.1.31, feature `alerts`), in a caption that never grows past two lines.
+@MainActor
+final class RewriteHealthTests: XCTestCase {
+    private typealias Health = DaemonSettings.RewriteHealth
+    private static let plain = "Claude Haiku writes one line for notifications; off shows the message itself"
+    private static let longReason = "exit 1: Not logged in · Please run /login, then try again: the saved credentials for this account expired on this machine"
+
+    override func setUp() { _ = NSApplication.shared }
+
+    func testCaptionForEachState() {
+        let caption = MachinesSettingsController.rewriteCaption
+        XCTAssertEqual(caption(Health(state: .failing, reason: "exit 1: Not logged in"), true).text, "Not working: exit 1: Not logged in")
+        XCTAssertTrue(caption(Health(state: .failing, reason: "exit 1"), true).failing)
+        XCTAssertEqual(caption(Health(state: .failing, reason: "two\nlines  here"), true).text, "Not working: two lines here")
+        XCTAssertEqual(caption(Health(state: .failing), true).text, "Not working")
+        XCTAssertEqual(caption(Health(state: .failing, reason: " "), true).text, "Not working")
+        let missing = caption(Health(state: .unavailable), true)
+        XCTAssertEqual(missing.text, "Claude Code wasn't found on this machine")
+        XCTAssertFalse(missing.failing)
+        for state in [Health.State.ok, .unknown, .off] {
+            XCTAssertEqual(caption(Health(state: state, reason: "ignored"), true).text, Self.plain, "\(state)")
+            XCTAssertFalse(caption(Health(state: state), true).failing)
+        }
+        XCTAssertEqual(caption(nil, true).text, Self.plain)
+        // Without `alerts`, as before, whatever a daemon sends.
+        XCTAssertEqual(caption(Health(state: .failing, reason: "exit 1"), false).text, Self.plain)
+        XCTAssertFalse(caption(Health(state: .failing, reason: "exit 1"), false).failing)
+    }
+
+    private func group(caption: String, lines: Int?) -> (FormGroup, FormRow) {
+        let row = FormRow("Summarize agent messages", caption: caption, captionColor: .systemRed, captionLines: lines, control: NSSwitch())
+        let group = FormGroup([row])
+        group.translatesAutoresizingMaskIntoConstraints = false
+        group.widthAnchor.constraint(equalToConstant: SettingsStyle.width - 2 * SettingsStyle.margin).isActive = true
+        group.layoutSubtreeIfNeeded()
+        return (group, row)
+    }
+
+    func testALongReasonStaysWithinTwoLines() throws {
+        let text = MachinesSettingsController.rewriteCaption(health: Health(state: .failing, reason: Self.longReason), alerts: true).text
+        XCTAssertGreaterThan(text.count, 120)
+        let (one, _) = group(caption: "Short", lines: 2)
+        let (long, row) = group(caption: text, lines: 2)
+        let (free, _) = group(caption: text + " " + text, lines: nil)
+        let lineHeight = try XCTUnwrap(row.captionLabel).font.map { ceil($0.ascender - $0.descender + $0.leading) } ?? 14
+        XCTAssertLessThanOrEqual(long.fittingSize.height, one.fittingSize.height + lineHeight + 2, "at most one line more than a short caption")
+        XCTAssertGreaterThan(free.fittingSize.height, long.fittingSize.height, "uncapped, the same text would grow the row")
+        XCTAssertEqual(row.captionLabel?.maximumNumberOfLines, 2)
+        XCTAssertEqual(row.toolTip, text, "all of it on hover")
+        XCTAssertLessThanOrEqual(try XCTUnwrap(row.captionLabel).frame.maxX, try XCTUnwrap(row.control).frame.minX, "never under the switch")
+    }
+
+    /// The Machines tab of the real window, on a fake machine whose rewrite is failing: the caption, the
+    /// window as tall as its contents, nothing scrolling but the machine list. Writes review images with
+    /// CLOTHO_SNAPSHOT_DIR set.
+    func testMachinesTabWithAFailingMachine() async throws {
+        let keys = ["Backend", "AgentNotifications", OnboardingController.doneKey, "LaunchInBackground", "FakeRewriteHealth"]
+        var saved: [String: Any] = [:]
+        for key in keys { saved[key] = UserDefaults.standard.object(forKey: key) }
+        let suite = TestDefaults.name("rewrite-health"), machines = Machine.store
+        Machine.store = UserDefaults(suiteName: suite)!
+        let appearance = NSApp.appearance
+        defer {
+            for key in keys { UserDefaults.standard.set(saved[key], forKey: key) }
+            TestDefaults.remove(suite)
+            Machine.store = machines
+            NSApp.appearance = appearance
+            Theme.followAppAppearance()
+        }
+        UserDefaults.standard.set("fake", forKey: "Backend")
+        UserDefaults.standard.set(false, forKey: "AgentNotifications")
+        UserDefaults.standard.set(true, forKey: OnboardingController.doneKey)
+        UserDefaults.standard.set(true, forKey: "LaunchInBackground")
+
+        // The fake then says hello with what a 0.1.31 daemon has (settings, summary, alerts), and reports
+        // a health no run has decided yet.
+        UserDefaults.standard.set("unknown", forKey: "FakeRewriteHealth")
+
+        let app = AppDelegate()
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            app.settingsWindow?.window?.close()
+            app.window?.orderOut(nil)
+            app.connections.values.forEach { $0.store.stop() }
+            UserPresence.shared?.stop()
+        }
+        func wait(_ what: String, _ done: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(10)
+            while !done() {
+                guard Date() < deadline else { return XCTFail("timed out waiting for \(what)") }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        try await wait("the fake's hello") { app.store.hello?.features.contains(.alerts) == true }
+        let fake = try XCTUnwrap(app.store.backend as? FakeBackend)
+        app.showMachineManager(nil)
+        let settings = try XCTUnwrap(app.settingsWindow), tab = settings.machines.view
+        func row() -> FormRow? { tab.descendants(of: FormRow.self).first { $0.titleLabel.stringValue == "Summarize agent messages" } }
+        try await wait("the machine's settings") { row() != nil }
+        XCTAssertEqual(row()?.captionLabel?.stringValue, Self.plain, "not known yet: the plain caption")
+        tab.layoutSubtreeIfNeeded()
+        let plainHeight = tab.fittingSize.height
+
+        for (name, health) in [("failing", Health(state: .failing, reason: Self.longReason)), ("unavailable", Health(state: .unavailable))] {
+            fake.setRewriteHealth(health)
+            let expected = MachinesSettingsController.rewriteCaption(health: health, alerts: true).text
+            try await wait("the \(name) caption") { row()?.captionLabel?.stringValue == expected }
+            let shown = try XCTUnwrap(row())
+            XCTAssertEqual(shown.captionLabel?.textColor, name == "failing" ? .systemRed : .secondaryLabelColor)
+            XCTAssertEqual((shown.control as? NSSwitch)?.isEnabled, true, "the switch still works")
+            tab.layoutSubtreeIfNeeded()
+            XCTAssertLessThanOrEqual(tab.fittingSize.height, plainHeight + 16, "one caption line more at most")
+            XCTAssertEqual(tab.descendants(of: NSScrollView.self).count, 1, "only the machine list scrolls")
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(settings.window?.contentLayoutRect.height ?? 0, tab.fittingSize.height, accuracy: 1,
+                           "the window is exactly as tall as its contents")
+            guard let folder = ProcessInfo.processInfo.environment["CLOTHO_SNAPSHOT_DIR"] else { continue }
+            for (mode, look) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+                NSApp.appearance = NSAppearance(named: look)
+                settings.window?.appearance = NSApp.appearance
+                tab.layoutSubtreeIfNeeded()
+                tab.displayIfNeeded()
+                guard let rep = tab.bitmapImageRepForCachingDisplay(in: tab.bounds) else { return XCTFail("no image") }
+                // The tab draws no background of its own: the window's goes in first.
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+                tab.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    NSColor.windowBackgroundColor.setFill()
+                    NSRect(origin: .zero, size: tab.bounds.size).fill()
+                }
+                NSGraphicsContext.restoreGraphicsState()
+                tab.cacheDisplay(in: tab.bounds, to: rep)
+                try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(folder)/alerts-settings-\(name)-\(mode).png"))
+            }
+        }
+        // Working again: the plain caption is back.
+        fake.setRewriteHealth(Health(state: .ok, at: 1))
+        try await wait("the plain caption") { row()?.captionLabel?.stringValue == Self.plain }
     }
 }
 

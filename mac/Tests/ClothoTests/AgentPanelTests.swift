@@ -43,6 +43,151 @@ final class AgentPanelTests: XCTestCase {
     }
 }
 
+/// clothod 0.1.31 (`alerts`): a finished turn reads "Needs you" or "Done" by `needs_user`, and a settling
+/// one is a quiet done until its attention rises.
+@MainActor
+final class ClearerAlertsTests: XCTestCase {
+    override func setUp() { _ = NSApplication.shared }
+
+    private func agent(_ state: AgentInfo.State, attention: Bool? = true, needsUser: Bool? = nil, settling: Bool? = nil,
+                       source: String? = "hook", message: String? = nil, since: Double = 100) -> AgentInfo {
+        AgentInfo(kind: "claude", state: state, source: source, message: message, since: since, attention: attention,
+                  needsUser: needsUser, settling: settling)
+    }
+
+    private func entry(_ pane: PaneID, _ info: AgentInfo, workspace: String? = nil) -> AgentEntry {
+        AgentEntry(machine: "local", machineName: "Mac", pane: pane, workspace: workspace.map { Workspace(id: WorkspaceID(pane), name: $0, tabs: []) },
+                   tab: nil, paneTitle: nil, tabTitle: nil, info: info, canReply: false)
+    }
+
+    func testOrder() {
+        let entries = [
+            entry(1, agent(.done, needsUser: false)),
+            entry(2, agent(.running, attention: nil)),
+            entry(3, agent(.done, needsUser: true)),
+            entry(4, agent(.done, attention: false, settling: true)),
+            entry(5, agent(.error, needsUser: true)),
+            entry(6, agent(.waiting, needsUser: true)),
+            entry(7, agent(.done)),                              // an older daemon: no needs_user
+        ]
+        XCTAssertEqual(entries.map(\.rank), [3, 4, 2, 5, 1, 0, 3])
+        let (attention, others) = AgentEntry.split(entries)
+        XCTAssertEqual(attention.map(\.pane).prefix(3), [6, 5, 3], "waiting, failed, then the finished turn that asks something")
+        XCTAssertEqual(Set(attention.map(\.pane).suffix(2)), [1, 7], "then the ones that only finished")
+        XCTAssertEqual(others.map(\.pane), [2, 4], "a settling agent sits below, after the running one")
+    }
+
+    func testAFinishedTurnShowsNeedsYouOrDone() {
+        let asks = agent(.done, needsUser: true), plain = agent(.done, needsUser: false), old = agent(.done)
+        XCTAssertEqual(asks.shownState.label, "Needs you")
+        XCTAssertEqual(asks.shownState.symbol, AgentInfo.State.waiting.symbol, "the hand, so the icon tells it from Done")
+        XCTAssertEqual(asks.badgeColor, Theme.warning)
+        XCTAssertEqual(plain.shownState.label, "Done")
+        XCTAssertEqual(plain.shownState.symbol, AgentInfo.State.done.symbol)
+        XCTAssertEqual(plain.badgeColor, Theme.success)
+        XCTAssertEqual(old.shownState.label, "Done", "without needs_user, as before")
+        XCTAssertEqual(old.shownState.symbol, AgentInfo.State.done.symbol)
+        // Seen (resolved, or answered): a done like any other.
+        XCTAssertEqual(agent(.done, attention: false, needsUser: true).shownState.label, "Done")
+        // Waiting and error keep their own words.
+        XCTAssertEqual(agent(.waiting, needsUser: true).shownState.label, "Waiting for you")
+        XCTAssertEqual(agent(.error, needsUser: true).shownState.label, "Error")
+    }
+
+    func testASettlingAgentIsAQuietDone() {
+        let settling = agent(.done, attention: false, settling: true)
+        XCTAssertEqual(settling.shownState.label, "Done")
+        XCTAssertNil(settling.badgeColor, "no badge")
+        XCTAssertFalse(settling.needsAttention)
+        // Even if a daemon sent attention with it: never listed, badged or counted while it settles.
+        let odd = agent(.done, attention: true, needsUser: true, settling: true)
+        XCTAssertFalse(odd.needsAttention)
+        XCTAssertNil(odd.badgeColor)
+        XCTAssertEqual(odd.shownState.label, "Done")
+        XCTAssertFalse(AppDelegate.needsYou(odd))
+        XCTAssertFalse(odd.notifiesRise(from: agent(.running, attention: nil)), "no notification")
+        let entries = [entry(1, settling), entry(2, odd), entry(3, agent(.done, needsUser: false))]
+        XCTAssertEqual(AgentEntry.split(entries).attention.map(\.pane), [3])
+        XCTAssertEqual(entries.filter(\.info.needsAttention).count, 1, "what the dock badge counts")
+        // The rise at the end of the settle window (an `agent` event whose `from` is the state) notifies.
+        XCTAssertTrue(agent(.done, needsUser: false, settling: false).notifiesRise(from: settling))
+    }
+
+    func testWhichSwitchANoticeFollows() {
+        XCTAssertEqual(agent(.done, needsUser: true).notifySwitch, .waiting, "a finished turn that asks: Notify When Waiting for You")
+        XCTAssertEqual(agent(.done, needsUser: false).notifySwitch, .done)
+        XCTAssertEqual(agent(.done).notifySwitch, .done)
+        XCTAssertEqual(agent(.waiting, needsUser: true).notifySwitch, .waiting)
+        XCTAssertEqual(agent(.error, needsUser: true).notifySwitch, .error)
+    }
+
+    func testOnlyAPlainDoneIsSilent() {
+        XCTAssertFalse(agent(.done, needsUser: false).playsSound)
+        XCTAssertTrue(agent(.done, needsUser: true).playsSound)
+        XCTAssertTrue(agent(.done).playsSound, "an older daemon's done sounds as before")
+        XCTAssertTrue(agent(.waiting, needsUser: true).playsSound)
+        XCTAssertTrue(agent(.error, needsUser: true).playsSound)
+    }
+
+    /// The minute's throttle is for detected agents, whose state flickers. A hook-reported agent that
+    /// finishes again 40 s later is announced again.
+    func testOnlyDetectedAgentsAreThrottled() {
+        let now = Date()
+        let last = (state: AgentInfo.State.done, date: now.addingTimeInterval(-40))
+        XCTAssertFalse(AppDelegate.throttlesNotice(agent(.done, needsUser: false), last: last, now: now), "hook-reported")
+        XCTAssertTrue(AppDelegate.throttlesNotice(agent(.done, source: nil), last: last, now: now), "detected, same state, within the minute")
+        XCTAssertFalse(AppDelegate.throttlesNotice(agent(.waiting, source: nil), last: last, now: now), "another state")
+        XCTAssertFalse(AppDelegate.throttlesNotice(agent(.done, source: nil), last: (.done, now.addingTimeInterval(-61)), now: now))
+        XCTAssertFalse(AppDelegate.throttlesNotice(agent(.done, source: nil), last: nil, now: now))
+    }
+
+    func testNoticeWords() {
+        XCTAssertEqual(AgentNotice(info: agent(.done, needsUser: true), machine: "Mac", workspace: "Platform").title, "Platform · Claude needs you")
+        XCTAssertEqual(AgentNotice(info: agent(.done, needsUser: false), machine: "Mac", workspace: "Platform").title, "Platform · Claude is done")
+        XCTAssertEqual(AgentNotice(info: agent(.done), machine: "Mac", workspace: "Platform").title, "Platform · Claude finished", "as before")
+    }
+
+    /// Review images of the Agents panel with a Needs you, a Done and a settling agent, light and dark.
+    /// Runs only with CLOTHO_SNAPSHOT_DIR set.
+    func testSnapshotsForReview() throws {
+        guard let folder = ProcessInfo.processInfo.environment["CLOTHO_SNAPSHOT_DIR"] else { throw XCTSkip("no CLOTHO_SNAPSHOT_DIR") }
+        let saved = NSApp.appearance, expanded = UserDefaults.standard.object(forKey: "AgentsOthersExpanded")
+        let height = UserDefaults.standard.object(forKey: "AgentsPanelHeight")
+        defer {
+            NSApp.appearance = saved
+            Theme.followAppAppearance()
+            UserDefaults.standard.set(expanded, forKey: "AgentsOthersExpanded")
+            UserDefaults.standard.set(height, forKey: "AgentsPanelHeight")
+        }
+        UserDefaults.standard.set(true, forKey: "AgentsOthersExpanded")
+        // Tall enough for all five rows and the Quiet header.
+        UserDefaults.standard.set(290.0, forKey: "AgentsPanelHeight")
+        let now = Date().timeIntervalSince1970
+        let agents = AgentEntry.sorted([
+            entry(1, agent(.waiting, needsUser: true, message: "Allow running `swift test`?", since: now - 30), workspace: "Platform"),
+            entry(2, agent(.done, needsUser: true, message: "The fix is committed. Should I push it?", since: now - 95), workspace: "api"),
+            entry(3, agent(.done, needsUser: false, message: "All 212 tests pass.", since: now - 200), workspace: "web"),
+            entry(4, agent(.done, attention: false, settling: true, message: "Renamed the module.", since: now - 5), workspace: "docs"),
+            entry(5, agent(.running, attention: nil, message: "Editing Sources/Model.swift", since: now - 400), workspace: "infra"),
+        ])
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+            NSApp.appearance = NSAppearance(named: appearance)
+            Theme.followAppAppearance()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 260, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = NSApp.appearance
+            defer { window.close() }
+            let sidebar = SidebarView(frame: window.contentView!.bounds)
+            window.contentView!.addSubview(sidebar)
+            sidebar.update(agents: agents, unreachable: [], groups: [])
+            sidebar.layoutSubtreeIfNeeded()
+            guard let rep = sidebar.bitmapImageRepForCachingDisplay(in: sidebar.bounds) else { return XCTFail("no image") }
+            sidebar.cacheDisplay(in: sidebar.bounds, to: rep)
+            try rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: "\(folder)/alerts-agents-panel-\(name).png"))
+        }
+    }
+}
+
 /// The hover actions (Mute, Resolve) float over the row's right end only while it's hovered; the time
 /// stays pinned to the right edge and nothing reflows.
 @MainActor

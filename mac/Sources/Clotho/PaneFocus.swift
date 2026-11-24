@@ -8,6 +8,11 @@ import ClothoKit
 // focuses it. One action can set off several of those at once (a click that activates the app makes the
 // window key and the terminal first responder), so they're coalesced into one call per run loop turn,
 // and a repeat for the same pane right after is dropped.
+//
+// The keyboard also follows the daemon's focus when the user did nothing (another device focused a pane,
+// a pane exited). That isn't the user's focus, and clothod reads `pane.focus` as the user being at the
+// Mac (0.1.31 holds phone pushes back for it), so such a change is made `quietly`: no note. The pane is
+// owed its `pane.focus` until the user next does something in the window.
 
 /// Coalesces "a pane may have the user's focus now" into one `focusPane` per action.
 @MainActor
@@ -21,6 +26,10 @@ final class PaneFocusReporter {
     static let repeatInterval: TimeInterval = 0.3
 
     private var scheduled: String?
+    /// Inside `quietly`: notes are dropped.
+    private var quiet = false
+    /// A pane took the keyboard quietly and hasn't had its `pane.focus`.
+    private(set) var owed = false
     private var last: (key: PaneKey, at: Date)?
     private(set) var sent = 0
 
@@ -31,6 +40,8 @@ final class PaneFocusReporter {
 
     /// Something happened that may have given a pane the user's focus; `reason` is for the log.
     func note(_ reason: String) {
+        guard !quiet else { return }
+        owed = false
         guard scheduled == nil else { return }
         scheduled = reason
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.flush() } }
@@ -49,8 +60,26 @@ final class PaneFocusReporter {
     }
 
     /// The user left (the window resigned key, the app went to the background): the next focus is a
-    /// new action even for the same pane.
-    func forget() { last = nil }
+    /// new action even for the same pane. Coming back notes it, so nothing stays owed.
+    func forget() {
+        last = nil
+        owed = false
+    }
+
+    /// Runs a focus change the user didn't ask for: the notes it sets off are dropped, and the pane is
+    /// owed one.
+    func quietly(_ body: () -> Void) {
+        let was = quiet
+        quiet = true
+        body()
+        quiet = was
+        owed = true
+    }
+
+    /// The user typed in the window: a pane that took the keyboard quietly gets its `pane.focus` now.
+    func userActed() {
+        if owed { note("the user is back at the pane") }
+    }
 }
 
 extension AppDelegate {
@@ -72,6 +101,7 @@ extension AppDelegate {
             }
         }
         paneFocusReporter = reporter
+        installUserPresence()
         let center = NotificationCenter.default
         let notes: [(Notification.Name, AnyObject?, String, Bool)] = [
             (NSWindow.didBecomeKeyNotification, window, "window became key", false),
@@ -81,7 +111,16 @@ extension AppDelegate {
         ]
         for (name, object, reason, leaving) in notes {
             paneFocusObservers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak reporter] _ in
-                MainActor.assumeIsolated { if leaving { reporter?.forget() } else { reporter?.note(reason) } }
+                MainActor.assumeIsolated {
+                    if leaving {
+                        reporter?.forget()
+                    } else {
+                        // The user brought the app forward: a focus change right after is theirs.
+                        UserAction.cameForward()
+                        reporter?.note(reason)
+                        UserPresence.shared?.check()
+                    }
+                }
             })
         }
         // A click into the pane that already has the keyboard (the user is back from the phone).
