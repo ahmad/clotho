@@ -68,6 +68,64 @@ final class GitInfoTests: XCTestCase {
         XCTAssertEqual(host.fittedSize(), outside)
     }
 
+    /// The strip's change count: lines and files, files alone when the lines weren't counted, nothing
+    /// when nothing changed; a click asks for the inspector; a narrow strip drops the files, then the count.
+    func testStripShowsTheChangeCountAndGivesWayWhenNarrow() throws {
+        let strip = GitStrip(frame: NSRect(x: 0, y: 0, width: 600, height: GitStrip.height))
+        window.contentView!.addSubview(strip)
+        var shown = 0
+        strip.onShowChanges = { shown += 1 }
+        func changes(_ files: Int, _ added: Int?, _ removed: Int?) -> PaneGit.Changes {
+            PaneGit.Changes(uncommitted: .init(files: files, added: added, removed: removed))
+        }
+        var counted = git
+        counted.changes = PaneGit.Changes(uncommitted: .init(files: 2, added: 14, removed: 5),
+                                          branch: .init(base: "main", commits: 4, files: 4, added: 114, removed: 27))
+        strip.show(counted)
+        strip.layoutSubtreeIfNeeded()
+        XCTAssertFalse(strip.changeCount.isHidden)
+        XCTAssertEqual(strip.changeCount.attributedTitle.string, "+128 \u{2212}32 · 6 files", "both groups added up")
+        XCTAssertEqual(strip.changeCount.accessibilityLabel(), "128 lines added, 32 removed, in 6 files. Show changes")
+        XCTAssertEqual(strip.changeCount.accessibilityRole(), .button)
+        XCTAssertEqual(strip.changeCount.frame.maxX, strip.bounds.maxX - s(10), accuracy: 0.5, "at the trailing edge")
+        XCTAssertLessThanOrEqual(strip.pullRequest.frame.maxX, strip.changeCount.frame.minX - s(10) + 0.5, "the PR stays clear of it")
+        XCTAssertEqual(strip.frame.height, GitStrip.height, "the strip is as tall as before")
+        strip.changeCount.performClick(nil)
+        XCTAssertEqual(shown, 1, "a click opens Changes")
+
+        counted.changes = changes(1, 3, 0)
+        strip.show(counted)
+        XCTAssertEqual(strip.changeCount.attributedTitle.string, "+3 \u{2212}0 · 1 file")
+        counted.changes = changes(6, nil, nil)
+        strip.show(counted)
+        XCTAssertEqual(strip.changeCount.attributedTitle.string, "6 files", "the lines weren't counted")
+        XCTAssertEqual(strip.changeCount.accessibilityLabel(), "6 files changed. Show changes")
+        counted.changes = changes(0, 0, 0)
+        strip.show(counted)
+        strip.layoutSubtreeIfNeeded()
+        XCTAssertTrue(strip.changeCount.isHidden, "nothing changed")
+        strip.show(git)
+        strip.layoutSubtreeIfNeeded()
+        XCTAssertTrue(strip.changeCount.isHidden, "a daemon that doesn't count sends no changes")
+
+        // Narrow: the files go first, then the count; it never sits on the branch or the PR.
+        counted.changes = changes(6, 128, 32)
+        strip.show(counted)
+        var forms: [GitStrip.CountForm] = []
+        for width in stride(from: CGFloat(600), through: 60, by: -20) {
+            strip.setFrameSize(NSSize(width: width, height: GitStrip.height))
+            strip.layoutSubtreeIfNeeded()
+            if forms.last != strip.countForm { forms.append(strip.countForm) }
+            guard !strip.changeCount.isHidden else { continue }
+            XCTAssertGreaterThanOrEqual(strip.changeCount.frame.minX, strip.icon.frame.maxX, "width \(width)")
+            XCTAssertLessThanOrEqual(strip.changeCount.frame.maxX, strip.bounds.maxX, "width \(width)")
+            if !strip.pullRequest.isHidden {
+                XCTAssertLessThanOrEqual(strip.pullRequest.frame.maxX, strip.changeCount.frame.minX + 0.5, "width \(width)")
+            }
+        }
+        XCTAssertEqual(forms, [.full, .linesOnly, .hidden])
+    }
+
     func testCommandBarFindsByBranchWorktreeAndPR() {
         let tab = CommandBarEntry(item: QuickOpenItem(kind: .tab, title: "zsh", subtitle: "MacBook · Platform · \(git.searchText)", id: "tab|local|1"), tier: 2)
         let other = CommandBarEntry(item: QuickOpenItem(kind: .tab, title: "vim", subtitle: "MacBook · Platform", id: "tab|local|2"), tier: 2)

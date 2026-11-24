@@ -19,6 +19,10 @@ import ClothoKit
 //
 // A state word in the search ("needs", "needs you", "working", "done") puts the agents in that state on
 // top, under their own header (see `CommandBar.stateFilter`).
+//
+// Rows in a repository show their branch and, after it, how much changed there ("+128 −32": clothod
+// 0.1.32's `git.changes`). "New Tab in a Worktree…" among the ">" commands turns the bar into a small
+// prompt for the new branch's name (Worktree.swift).
 
 /// One row of the command bar.
 struct CommandBarEntry {
@@ -46,6 +50,46 @@ struct CommandBarEntry {
     /// Agent rows: the oldest permission request it waits on, when its machine can answer it
     /// (`agent.decide`). ⌥↩ allows it.
     var request: PermissionRequest? = nil
+    /// How much changed in the work tree there (the same pane as `branch`), on a machine that counts
+    /// it (`git.changes`): shown after the branch.
+    var changes: PaneGit.Changes? = nil
+}
+
+/// A ">" command as the bar lists it: one of the shared ones (ClothoKit's CommandList, as on iOS), or
+/// the Mac's own.
+enum BarCommand: Equatable {
+    case shared(CommandListItem)
+    /// New Tab in a Worktree…: the bar asks for the branch's name.
+    case newWorktreeTab
+
+    var title: String {
+        switch self {
+        case let .shared(item): return item.title
+        case .newWorktreeTab: return "New Tab in a Worktree…"
+        }
+    }
+
+    var keywords: [String] {
+        switch self {
+        case let .shared(item): return item.keywords
+        case .newWorktreeTab: return ["git", "branch", "agent", "checkout"]
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case let .shared(item): return QuickOpenOverlay.symbol(for: item.id)
+        case .newWorktreeTab: return "arrow.triangle.branch"
+        }
+    }
+
+    /// The row's id in the bar.
+    var entryID: String {
+        switch self {
+        case let .shared(item): return "cmd|\(item.id.rawValue)"
+        case .newWorktreeTab: return "cmd|newWorktreeTab"
+        }
+    }
 }
 
 extension CommandTree.Node {
@@ -248,6 +292,8 @@ extension AppDelegate {
             self?.quickOpen?.dismiss()
         }
         overlay.onAllow = { [weak self] entry in self?.commandBarAllow(entry) }
+        overlay.worktreeSubject = { [weak self] node in self?.worktreeSubject(for: node, origin: origin) }
+        overlay.onCreateWorktree = { [weak self] subject, name, base in self?.createWorktreeTab(subject, name: name, base: base) }
         overlay.reload = { [weak self] in
             guard let self else { return nil }
             model = commandBarModel()
@@ -466,7 +512,8 @@ extension AppDelegate {
                                        tier: entry.info.needsAttention ? 0 : here ? 1 : 2,
                                        mark: entry.info.mark, detail: request?.askText ?? Self.agentDetail(entry.info),
                                        path: ([entry.machineName] + [entry.workspace?.name, entry.tabTitle].compactMap { $0 }).joined(separator: " › "),
-                                       branch: store.flatMap { git(entry.pane, in: $0) }?.branch, since: entry.info.since, request: request))
+                                       branch: store.flatMap { git(entry.pane, in: $0) }?.branch, since: entry.info.since, request: request,
+                                       changes: store.flatMap { changes(entry.pane, in: $0) }))
             actions[id] = { [weak self] in self?.openAgent(machine: entry.machine, pane: entry.pane) }
             if Self.needsYou(entry.info) { needsYou.append((entry.machine, entry.pane)) }
         }
@@ -509,7 +556,8 @@ extension AppDelegate {
                                            tier: here ? 1 : 2,
                                            mark: agentMark(machine: key, panes: workspace.tabs.flatMap(\.layout.panes))?.mark,
                                            detail: workspace.tabs.count == 1 ? "1 tab" : "\(workspace.tabs.count) tabs",
-                                           path: session.title, branch: workspaceGit?.branch))
+                                           path: session.title, branch: workspaceGit?.branch,
+                                           changes: activeTab.flatMap { changes($0.activePane, in: store) }))
                 // Its last active tab, by the model's rules (LocalFocus), as a sidebar click.
                 actions[workspaceID] = { [weak self] in self?.focusNow(.workspace(workspace.id), on: key, trace: "command bar") }
                 for tab in workspace.tabs {
@@ -521,7 +569,8 @@ extension AppDelegate {
                                                                    subtitle: ([session.title, workspace.name] + [tabGit?.searchText].compactMap { $0 }).joined(separator: " · "), id: id),
                                                tier: here ? 1 : 2, mark: agentMark(machine: key, panes: panes)?.mark,
                                                detail: agent.map(Self.agentDetail), panes: panes.count,
-                                               path: "\(session.title) › \(workspace.name)", branch: tabGit?.branch))
+                                               path: "\(session.title) › \(workspace.name)", branch: tabGit?.branch,
+                                               changes: changes(tab.activePane, in: store)))
                     actions[id] = { [weak self] in self?.focusNow(.tab(tab.id), on: key, trace: "command bar") }
                 }
             }
@@ -529,6 +578,12 @@ extension AppDelegate {
         }
         return CommandBarModel(all: all, outline: CommandTree.Outline(machines: machines, needsYou: needsYou),
                                machine: focusedMachine, workspace: currentWorkspace, tab: focusedStore?.focusedTab?.id, actions: actions)
+    }
+
+    /// A pane's change count, on a machine whose daemon counts changes.
+    func changes(_ pane: PaneID, in store: ModelStore) -> PaneGit.Changes? {
+        guard store.features.contains(.gitChanges) else { return nil }
+        return git(pane, in: store)?.changes
     }
 
     /// An agent in ⌘P's "Needs you": waiting for you, in error, or finished with a question for you
@@ -576,6 +631,11 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     var commandContext: ((CommandTree.Node?) -> CommandContext)?
     /// The model now, after a change (a tab closed, an agent started waiting).
     var reload: (() -> (all: [CommandBarEntry], outline: CommandTree.Outline)?)?
+    /// Where "New Tab in a Worktree…" would work for the selected row; nil when it can't (no repository
+    /// there, or a daemon without `worktree`), and the command isn't listed.
+    var worktreeSubject: ((CommandTree.Node?) -> WorktreeSubject?)?
+    /// Return in the worktree prompt: the name and the base (nil: the branch's HEAD).
+    var onCreateWorktree: ((WorktreeSubject, _ name: String, _ base: String?) -> Void)?
 
     let card = NSView()
     private let field = NSTextField()
@@ -583,6 +643,16 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     private let footer = NSTextField(labelWithString: "")
     private let footerEsc = NSTextField(labelWithString: "esc")
     private let empty = NSTextField(labelWithString: "No matches")
+    private let fieldIcon = NSImageView()
+    /// The worktree prompt's own part, in the list's place while it's up.
+    let baseField = NSTextField()
+    let namingPreview = NSTextField(wrappingLabelWithString: "")
+    let namingStatus = NSTextField(wrappingLabelWithString: "")
+    let namingSpinner = NSProgressIndicator()
+    private let namingBox = NSStackView()
+    /// The last ⌥↩ that allowed a request here: for `AskBar.settleDelay` after it, ⌥↩ on a row with no
+    /// request opens no tab (the second tap of a double tap, once the last request's row is gone).
+    private var lastAllowAt: Date?
     private(set) var all: [CommandBarEntry]
     private var byID: [String: CommandBarEntry] = [:]
     private(set) var tree: CommandTree
@@ -630,8 +700,10 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         field.focusRingType = .none
         field.textColor = Theme.foreground
         field.delegate = self
-        let icon = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil) ?? NSImage())
+        let icon = fieldIcon
+        icon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         icon.contentTintColor = Theme.dimText
+        buildNamingBox()
         let top = NSStackView(views: [icon, field])
         top.orientation = .horizontal
         top.spacing = s(10)
@@ -658,7 +730,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         footerRow.spacing = s(8)
         footerRow.edgeInsets = NSEdgeInsets(top: s(7), left: s(16), bottom: s(8), right: s(16))
 
-        let stack = NSStackView(views: [top, Self.rule(), list, Self.rule(), footerRow])
+        let stack = NSStackView(views: [top, Self.rule(), list, namingBox, Self.rule(), footerRow])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
@@ -725,6 +797,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     /// Esc or ⌘P: back to where you were, and close.
     func cancel() {
+        if naming != nil {
+            // While the worktree is being made, Esc only puts the bar away: the work goes on.
+            if isCreating || namingDirect { return dismiss() }
+            endNaming()
+            field.stringValue = ">"
+            return update()
+        }
         if picking != nil {
             endPick()
             field.stringValue = ""
@@ -771,8 +850,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     var query: String { field.stringValue }
     /// ">" typed: the commands for the selected row.
-    var isCommandMode: Bool { picking == nil && CommandList.commandQuery(query) != nil }
-    var isSearching: Bool { !isCommandMode && !query.trimmingCharacters(in: .whitespaces).isEmpty }
+    var isCommandMode: Bool { picking == nil && naming == nil && CommandList.commandQuery(query) != nil }
+    var isSearching: Bool { naming == nil && !isCommandMode && !query.trimmingCharacters(in: .whitespaces).isEmpty }
     /// A command that needs a target (Move Tab) waits for a workspace to be picked in the tree.
     private(set) var picking: (item: CommandListItem, subject: CommandTree.Node)?
     /// The tree as it was before picking, to come back to.
@@ -780,7 +859,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// While picking: the tab's own workspace ("current") and machine (others are dimmed: a tab can't
     /// move between machines).
     private var pickSource: (machine: String, workspace: WorkspaceID?)?
-    private(set) var commands: [CommandListItem] = []
+    private(set) var commands: [BarCommand] = []
     private var commandSelected = 0
     /// The search field (tests and TypeText).
     var fieldForTesting: NSTextField { field }
@@ -795,9 +874,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// The selected row's index in `rows`.
     var selected: Int { isCommandMode ? commandSelected : isSearching ? searchSelected : tree.selectedIndex ?? 0 }
 
-    static func entry(for command: CommandListItem) -> CommandBarEntry {
-        CommandBarEntry(item: QuickOpenItem(kind: .agent, title: command.title, id: "cmd|\(command.id.rawValue)"), tier: 2,
-                        symbol: symbol(for: command.id))
+    static func entry(for command: BarCommand) -> CommandBarEntry {
+        CommandBarEntry(item: QuickOpenItem(kind: .agent, title: command.title, id: command.entryID), tier: 2, symbol: command.symbol)
     }
 
     static func symbol(for id: CommandListItem.ID) -> String {
@@ -864,9 +942,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
 
     // MARK: Keys
 
-    func controlTextDidChange(_ obj: Notification) { update() }
+    func controlTextDidChange(_ obj: Notification) {
+        if naming != nil { return renderNaming() }
+        update()
+    }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        if naming != nil { return namingCommand(control, selector) }
         switch selector {
         case #selector(moveDown(_:)): move(1)
         case #selector(moveUp(_:)): move(-1)
@@ -894,9 +976,12 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags == .command, let key = event.charactersIgnoringModifiers?.lowercased() else { return super.performKeyEquivalent(with: event) }
         if key == "p" {
-            cancel()
+            // From the worktree prompt too, ⌘P closes the bar (Esc there goes back to the commands).
+            if naming != nil { dismiss() } else { cancel() }
             return true
         }
+        // The row keys mean nothing in the worktree prompt.
+        guard naming == nil else { return super.performKeyEquivalent(with: event) }
         if key == "\r" {
             openBeside()
             return true
@@ -917,8 +1002,12 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     func open() {
         if isCommandMode {
             guard commands.indices.contains(commandSelected) else { return }
-            let command = commands[commandSelected]
             let subject = tree.selection
+            guard case let .shared(command) = commands[commandSelected] else {
+                // New Tab in a Worktree…: the bar becomes its prompt.
+                guard let place = worktreeSubject?(subject) else { return NSSound.beep() }
+                return beginNaming(place, direct: false)
+            }
             if command.target != nil, let subject {
                 // Move Tab: pick the workspace in the tree, then it moves.
                 picking = (command, subject)
@@ -984,10 +1073,15 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     func allowOrNewTab() {
         guard !isKeyRepeat() else { return }
         guard !isCommandMode, picking == nil, let entry = selectedEntry else { return }
-        guard let request = entry.request else { return newTab() }
         let now = Date()
+        guard let request = entry.request else {
+            // The second tap of a double ⌥↩ on the last request's row lands here once the row is gone.
+            if let lastAllowAt, now.timeIntervalSince(lastAllowAt) < AskBar.settleDelay { return }
+            return newTab()
+        }
         guard allowRefusedUntil(request.id, now: now) == nil else { return }
         allowed[request.id] = now
+        lastAllowAt = now
         onAllow?(entry)
         if isSearching {
             // The row leaves when the model catches up; `apply` keeps the selection on this next one by id.
@@ -1010,13 +1104,15 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// The footer's hints. "⌥↩ Allow" dims while a press would be refused, the way the pane's ask bar
     /// turns its buttons off, and comes back when the wait is over.
     private func updateFooter() {
-        footer.stringValue = isCommandMode ? "↑↓ move    ↩ run    esc back"
+        footer.stringValue = naming != nil
+            ? (isCreating ? "esc hide (the worktree is still being made)" : "↩ create    ⇥ base    esc \(namingDirect ? "close" : "back")")
+            : isCommandMode ? "↑↓ move    ↩ run    esc back"
             : picking != nil ? "↑↓ move    → expand    ↩ move here    esc cancel"
             : selectedEntry?.request != nil ? Self.allowHints : Self.openHints
         allowHintDimmed = false
         footerRefresh?.cancel()
         footerRefresh = nil
-        guard !isCommandMode, picking == nil, let request = selectedEntry?.request, let until = allowRefusedUntil(request.id) else { return }
+        guard naming == nil, !isCommandMode, picking == nil, let request = selectedEntry?.request, let until = allowRefusedUntil(request.id) else { return }
         allowHintDimmed = true
         let text = NSMutableAttributedString(string: Self.allowHints, attributes: [.font: footer.font as Any, .foregroundColor: Theme.faintText])
         text.addAttribute(.foregroundColor, value: Theme.faintText.withAlphaComponent(0.35), range: (Self.allowHints as NSString).range(of: Self.allowHint))
@@ -1090,7 +1186,13 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         searchSelected = 0
         if isCommandMode, let text = CommandList.commandQuery(query) {
             let context = commandContext?(tree.selection) ?? CommandContext()
-            commands = CommandList.matching(CommandList.items(for: context), query: text)
+            var listed = CommandList.items(for: context).map(BarCommand.shared)
+            if worktreeSubject?(tree.selection) != nil {
+                // Right after New Tab, which it is a kind of.
+                let newTab = listed.firstIndex { if case let .shared(item) = $0 { item.id == .newTab } else { false } }
+                listed.insert(.newWorktreeTab, at: newTab.map { $0 + 1 } ?? 0)
+            }
+            commands = CommandList.matching(listed, query: text, title: \.title, keywords: \.keywords)
         } else {
             commands = []
         }
@@ -1098,9 +1200,181 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         render()
     }
 
+    // MARK: The worktree prompt (New Tab in a Worktree…)
+
+    /// The prompt's subject while the bar is asking for a worktree's name.
+    private(set) var naming: WorktreeSubject?
+    /// Opened straight into the prompt (the menu, ⌥⌘T): Esc closes the bar, there's no list to go back to.
+    private var namingDirect = false
+    /// The worktree is being made: the fields are off until it's done.
+    private(set) var isCreating = false
+    /// The error under the fields, when the last try failed.
+    private(set) var namingError: String?
+
+    static let namePlaceholder = "Branch name for the new worktree"
+    static let creatingWords = "Creating the worktree… A big repository can take a couple of minutes."
+
+    private func buildNamingBox() {
+        baseField.placeholderString = "HEAD"
+        baseField.font = .systemFont(ofSize: s(13))
+        baseField.delegate = self
+        baseField.setAccessibilityLabel("Base, optional: a branch, tag or commit")
+        baseField.lineBreakMode = .byTruncatingTail
+        baseField.cell?.usesSingleLineMode = true
+        let baseLabel = NSTextField(labelWithString: "Base (optional)")
+        baseLabel.font = .systemFont(ofSize: s(12))
+        baseLabel.textColor = Theme.dimText
+        baseLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        baseLabel.setContentHuggingPriority(.required, for: .horizontal)
+        let baseRow = NSStackView(views: [baseLabel, baseField])
+        baseRow.orientation = .horizontal
+        baseRow.spacing = s(8)
+        namingPreview.font = .systemFont(ofSize: s(12))
+        namingPreview.textColor = Theme.secondaryText
+        namingPreview.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        namingStatus.font = .systemFont(ofSize: s(12))
+        namingStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        namingSpinner.style = .spinning
+        namingSpinner.controlSize = .small
+        namingSpinner.isDisplayedWhenStopped = false
+        let statusRow = NSStackView(views: [namingSpinner, namingStatus])
+        statusRow.orientation = .horizontal
+        statusRow.alignment = .top
+        statusRow.spacing = s(8)
+        namingBox.orientation = .vertical
+        namingBox.alignment = .leading
+        namingBox.spacing = s(8)
+        namingBox.edgeInsets = NSEdgeInsets(top: s(12), left: s(16), bottom: s(12), right: s(16))
+        for view in [baseRow, namingPreview, statusRow] as [NSView] {
+            namingBox.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalTo: namingBox.widthAnchor, constant: -s(32)).isActive = true
+        }
+        namingBox.isHidden = true
+    }
+
+    /// Turns the bar into the prompt for a worktree's name. `name` and `base` prefill it (Edit… after a
+    /// failed try).
+    func beginNaming(_ subject: WorktreeSubject, direct: Bool, name: String = "", base: String = "") {
+        endPick()
+        naming = subject
+        namingDirect = direct
+        namingError = nil
+        field.stringValue = name
+        field.placeholderString = Self.namePlaceholder
+        field.setAccessibilityLabel("Worktree branch name")
+        baseField.stringValue = base
+        baseField.placeholderString = "HEAD of \(subject.git.place)"
+        fieldIcon.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: nil)
+        list.isHidden = true
+        namingBox.isHidden = false
+        // The base is reached with Tab from the name, and the name with Tab from the base.
+        field.nextKeyView = baseField
+        baseField.nextKeyView = field
+        renderNaming()
+        window?.makeFirstResponder(field)
+    }
+
+    private func endNaming() {
+        naming = nil
+        namingDirect = false
+        namingError = nil
+        isCreating = false
+        field.isEnabled = true
+        baseField.isEnabled = true
+        field.placeholderString = Self.placeholder
+        field.setAccessibilityLabel(nil)
+        fieldIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
+        namingBox.isHidden = true
+        list.isHidden = false
+        window?.makeFirstResponder(field)
+    }
+
+    /// The name and the base as typed (the base nil when left empty).
+    var worktreeEntry: (name: String, base: String?) {
+        let base = baseField.stringValue.trimmingCharacters(in: .whitespaces)
+        return (field.stringValue.trimmingCharacters(in: .whitespaces), base.isEmpty ? nil : base)
+    }
+
+    /// Types a name into the prompt (tests and TypeText).
+    func setWorktreeName(_ name: String, base: String = "") {
+        guard naming != nil else { return }
+        field.stringValue = name
+        baseField.stringValue = base
+        renderNaming()
+    }
+
+    /// "Creates ../clotho-fix-login on the new branch fix/login, from HEAD of main."
+    static func worktreePreview(_ subject: WorktreeSubject, name: String, base: String?) -> String {
+        guard !name.isEmpty else { return "Creates a folder beside \(DiffText.display(subject.repo)) on a new branch, and opens a Tab in it." }
+        let folder = "\(subject.repo)-\(name.replacingOccurrences(of: "/", with: "-"))"
+        let from = base.map { DiffText.display($0) } ?? "HEAD of \(DiffText.display(subject.git.place))"
+        return "Creates ../\(DiffText.display(folder)) on the new branch \(DiffText.display(name)), from \(from)."
+    }
+
+    private func renderNaming() {
+        guard let naming else { return }
+        let entry = worktreeEntry
+        namingPreview.stringValue = Self.worktreePreview(naming, name: entry.name, base: entry.base)
+        if isCreating {
+            namingStatus.stringValue = Self.creatingWords
+            namingStatus.textColor = Theme.secondaryText
+            namingSpinner.startAnimation(nil)
+        } else {
+            namingStatus.stringValue = namingError ?? ""
+            namingStatus.textColor = Theme.danger
+            namingSpinner.stopAnimation(nil)
+        }
+        namingSpinner.isHidden = !isCreating
+        namingStatus.isHidden = namingStatus.stringValue.isEmpty
+        namingStatus.setAccessibilityLabel(namingStatus.stringValue)
+        field.isEnabled = !isCreating
+        baseField.isEnabled = !isCreating
+        updateFooter()
+        footerEsc.isHidden = true
+    }
+
+    /// Keys in the prompt's two fields.
+    private func namingCommand(_ control: NSControl, _ selector: Selector) -> Bool {
+        switch selector {
+        case #selector(insertNewline(_:)): submitWorktree()
+        case #selector(cancelOperation(_:)): cancel()
+        case #selector(insertTab(_:)), #selector(insertBacktab(_:)):
+            window?.makeFirstResponder(control === field ? baseField : field)
+        default: return false
+        }
+        return true
+    }
+
+    /// Return: asks the app to make it. An empty name does nothing; the rest is the daemon's to judge.
+    func submitWorktree() {
+        guard let naming, !isCreating else { return }
+        let entry = worktreeEntry
+        guard !entry.name.isEmpty else { return NSSound.beep() }
+        onCreateWorktree?(naming, entry.name, entry.base)
+    }
+
+    /// The app started making the worktree (or finished without closing the bar).
+    func setCreating(_ on: Bool) {
+        guard naming != nil else { return }
+        isCreating = on
+        if on { namingError = nil }
+        renderNaming()
+        if !on { window?.makeFirstResponder(field) }
+    }
+
+    /// The try failed: the words under the fields, which are on again with what was typed.
+    func showWorktreeError(_ words: String) {
+        guard naming != nil else { return }
+        isCreating = false
+        namingError = words
+        renderNaming()
+        window?.makeFirstResponder(field)
+    }
+
     // MARK: Drawing
 
     private func render() {
+        if naming != nil { return renderNaming() }
         list.arrangedSubviews.forEach { $0.removeFromSuperview() }
         headings = []
         // Command mode and picking keep their own lines; otherwise three hints, and "esc" at the far side.
@@ -1238,6 +1512,8 @@ final class QuickOpenRow: NSView {
     /// The branch (its symbol and name) in the trailing group, when the row has one.
     private(set) var branchView: NSStackView?
     private(set) var branchLabel: NSTextField?
+    /// The change count after the branch ("+128 −32", or "6 files" when the lines weren't counted).
+    private(set) var changesLabel: NSTextField?
     static var branchMaxWidth: CGFloat { s(160) }
     /// On a row with a permission request the branch gets less, so the request shows whole in the card.
     static var branchWidthBesideRequest: CGFloat { s(96) }
@@ -1332,6 +1608,16 @@ final class QuickOpenRow: NSView {
             branchView = group
             branchLabel = name
         }
+        // How much changed there, after the branch. Not on a row with a permission request: what ⌥↩ would
+        // allow needs the room, and the card is as wide as it gets (VoiceOver still says the count).
+        if entry.request == nil, let title = Self.changesTitle(entry.changes) {
+            let count = NSTextField(labelWithAttributedString: title)
+            count.setContentCompressionResistancePriority(.required, for: .horizontal)
+            count.setContentHuggingPriority(.required, for: .horizontal)
+            count.toolTip = ChangeCountText.spoken(entry.changes)
+            trailing.addArrangedSubview(count)
+            changesLabel = count
+        }
         // Rows past the ninth keep an empty slot, so every row is the same height.
         let key = Self.dim(shortcut.map { "⌘\($0)" } ?? "", compression: .required)
         key.font = .monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
@@ -1359,8 +1645,21 @@ final class QuickOpenRow: NSView {
 
     /// What VoiceOver says for a row: its title, the agent's state, where it is, and the branch.
     static func accessibilityLabel(_ entry: CommandBarEntry, place: String?) -> String {
-        [entry.item.title, entry.mark?.label, place, entry.branch.map { "branch \($0)" }]
+        [entry.item.title, entry.mark?.label, place, entry.branch.map { "branch \($0)" }, ChangeCountText.spoken(entry.changes)]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+
+    /// "+128" in green and "−32" in red, or "6 files" dim when the lines weren't counted. Nil when
+    /// nothing changed or nothing is known.
+    static func changesTitle(_ changes: PaneGit.Changes?) -> NSAttributedString? {
+        guard let total = changes?.total, total.files > 0 else { return nil }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
+        guard let added = total.added, let removed = total.removed else {
+            return NSAttributedString(string: ChangeCountText.files(total.files), attributes: [.font: font, .foregroundColor: Theme.dimText])
+        }
+        let title = NSMutableAttributedString(string: "+\(added)", attributes: [.font: font, .foregroundColor: Theme.success])
+        title.append(NSAttributedString(string: " \u{2212}\(removed)", attributes: [.font: font, .foregroundColor: Theme.danger]))
+        return title
     }
 
     override func accessibilityPerformPress() -> Bool {

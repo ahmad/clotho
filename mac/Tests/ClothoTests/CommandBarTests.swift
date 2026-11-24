@@ -635,6 +635,104 @@ final class CommandBarTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(inCard.frame.width, request, "the request isn't cut in the card")
     }
 
+    /// A row in a repository shows how much changed there after its branch; a row with a permission
+    /// request keeps the room for the request, and VoiceOver says the count either way.
+    func testARowShowsTheChangeCountAfterTheBranch() throws {
+        let both = PaneGit.Changes(uncommitted: .init(files: 2, added: 14, removed: 5), branch: .init(base: "main", commits: 4, files: 4, added: 114, removed: 27))
+        var entry = tab("web", machine: "MacBook", workspace: "Platform", tier: 1)
+        entry.branch = "fix-login"
+        entry.changes = both
+        let shown = row(entry)
+        let count = try XCTUnwrap(shown.changesLabel)
+        XCTAssertEqual(count.attributedStringValue.string, "+128 \u{2212}32")
+        XCTAssertEqual(shown.trailing.arrangedSubviews.count, 3, "the branch, the count, the ⌘ number")
+        XCTAssertTrue(shown.trailing.arrangedSubviews[0] === shown.branchView)
+        XCTAssertTrue(shown.trailing.arrangedSubviews[1] === count, "after the branch")
+        XCTAssertGreaterThanOrEqual(count.frame.width, count.intrinsicContentSize.width - 0.5, "whole")
+        XCTAssertEqual(shown.accessibilityLabel(), "web, MacBook › Platform, branch fix-login, 128 lines added, 32 removed, in 6 files")
+        // Narrow: the count stays whole inside the row.
+        let narrow = row(entry, width: 300)
+        XCTAssertLessThanOrEqual(narrow.trailing.convert(narrow.trailing.bounds, to: narrow).maxX, narrow.bounds.maxX + 0.5)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(narrow.changesLabel).frame.width, count.intrinsicContentSize.width - 0.5)
+
+        entry.changes = PaneGit.Changes(uncommitted: .init(files: 6))
+        XCTAssertEqual(row(entry).changesLabel?.attributedStringValue.string, "6 files", "the lines weren't counted")
+        entry.changes = PaneGit.Changes(uncommitted: .init(files: 0, added: 0, removed: 0))
+        XCTAssertNil(row(entry).changesLabel, "nothing changed")
+        entry.changes = nil
+        XCTAssertNil(row(entry).changesLabel, "a machine that doesn't count")
+        XCTAssertEqual(row(entry).trailing.arrangedSubviews.count, 2)
+
+        var asking = withAgents.first { $0.item.id == "agent|bb|7" }!
+        asking.changes = both
+        let ask = row(asking, width: 608)
+        XCTAssertNil(ask.changesLabel, "the request keeps the room")
+        XCTAssertTrue(ask.accessibilityLabel()?.hasSuffix("128 lines added, 32 removed, in 6 files") == true)
+        let request = NSAttributedString(string: "Allow Bash: cargo test -p clothod", attributes: [.font: ask.subtitle!.font!]).size().width
+        XCTAssertGreaterThanOrEqual(ask.subtitle!.frame.width, request, "and shows whole")
+    }
+
+    /// New Tab in a Worktree… is the Mac's own command: listed right after New Tab where the row's pane is
+    /// in a repository on a machine that makes worktrees, found by "worktree" and "branch", and Return
+    /// turns the bar into its prompt.
+    func testTheWorktreeCommandIsListedOnlyWhereItWorks() {
+        openWithCommands()
+        bar.setQuery(">")
+        XCTAssertFalse(titles.contains("New Tab in a Worktree…"), "no repository, or no `worktree`: not offered")
+        let subject = WorktreeSubject(machine: "local", machineName: "MacBook", workspace: 1, pane: 5, cwd: "/p/clotho",
+                                      git: PaneGit(repo: "clotho", root: "/p/clotho", branch: "main", head: "a1b2c3d"))
+        bar.worktreeSubject = { node in
+            guard case .tab? = node else { return nil }
+            return subject
+        }
+        bar.setQuery(">")
+        XCTAssertEqual(Array(titles.prefix(2)), ["New Tab in Platform", "New Tab in a Worktree…"], "right after New Tab")
+        XCTAssertEqual(bar.rows[1].entry.symbol, "arrow.triangle.branch")
+        bar.setQuery(">worktree")
+        XCTAssertEqual(titles, ["New Tab in a Worktree…"])
+        bar.setQuery(">branch")
+        XCTAssertEqual(titles, ["New Tab in a Worktree…"], "by a keyword")
+        bar.setQuery(">new tab")
+        XCTAssertEqual(Array(titles.prefix(2)), ["New Tab in Platform", "New Tab in a Worktree…"], "ranked with the shared ones")
+        bar.setQuery(">worktree")
+        command(#selector(NSResponder.insertNewline(_:)))
+        XCTAssertEqual(bar.naming, subject, "the bar asks for the name")
+        XCTAssertTrue(ran.isEmpty, "no shared command ran")
+        XCTAssertFalse(bar.isCommandMode)
+        // Esc goes back to the commands, as from picking a workspace.
+        command(#selector(NSResponder.cancelOperation(_:)))
+        XCTAssertNil(bar.naming)
+        XCTAssertTrue(bar.isCommandMode)
+        XCTAssertEqual(dismissed, 0)
+        XCTAssertTrue(titles.contains("New Tab in a Worktree…"))
+    }
+
+    /// The second tap of a double ⌥↩ on the last request's row: the selection has moved on to a row with
+    /// no request, where ⌥↩ would open a New Tab. It opens none for the settle delay after the allow.
+    func testADoubleTapOnTheLastRequestOpensNoTab() {
+        AskBar.settleDelay = 0.3
+        open(all: withAgents, outline: agentsOutline)
+        var allowed: [String] = []
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        bar.setQuery("needs")
+        while bar.selectedEntry?.request?.id != "r7" { command(#selector(NSResponder.moveDown(_:))) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+        XCTAssertNil(bar.selectedEntry?.request, "the selection moved on to a row with no request")
+        XCTAssertTrue(command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))), "the second tap is swallowed")
+        XCTAssertTrue(newTabs.isEmpty, "and opens no tab")
+        XCTAssertEqual(allowed, ["r7"])
+        XCTAssertEqual(dismissed, 0)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(newTabs.count, 1, "after the settle delay ⌥↩ on that row opens a tab again")
+        // A row with no request and no allow before it: at once, as ever.
+        open(all: withAgents, outline: agentsOutline)
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(newTabs.count, 2)
+    }
+
     func testTheFooterShowsThreeHintsAndAllowOnAnAskRow() {
         open(all: withAgents, outline: agentsOutline)
         XCTAssertEqual(bar.footerText, "↩ Open   ⌘↩ Open beside   ⌥↩ New tab")

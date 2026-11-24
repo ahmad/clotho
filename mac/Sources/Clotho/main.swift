@@ -362,6 +362,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var fileSidebarWidth: NSLayoutConstraint!
     var fileSidebarTrailing: NSLayoutConstraint!
     var tabBarTrailing: NSLayoutConstraint!
+    /// What changed in the focused pane's work tree: the inspector's Changes and the centre diff read it.
+    lazy var changesModel: ChangesModel = {
+        let model = ChangesModel()
+        model.backend = { [weak self] key in self?.connections[key]?.store.backend }
+        model.paneGit = { [weak self] key, pane in
+            guard let self, let store = connections[key]?.store, let found = store.state.pane(pane), found.exited == nil else { return (false, nil) }
+            return (true, git(pane, in: store))
+        }
+        return model
+    }()
+    /// A changed file's side-by-side diff, over the pane area while it shows (ChangesDiffView.swift).
+    var changesDiff: ChangesDiffView!
+    /// Where the focus and the list were when the centre diff opened: it closes when either moves.
+    var changesDiffOpened: (machine: MachineKey, focus: Focus, target: PaneID?)?
+    /// The worktree Tab being made, if one is (Worktree.swift): one at a time.
+    var worktreeCreation: WorktreeCreation?
     /// Remote files opened through local copies, made on first use.
     var remoteEditsStore: RemoteEdits?
     var openingFiles: Set<String> = []
@@ -620,6 +636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         emptyState.isHidden = true
         emptyState.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(emptyState)
+        let diff = makeChangesDiff()
 
         let corner = WindowButtons(
             target: self,
@@ -655,6 +672,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             emptyState.bottomAnchor.constraint(equalTo: splitView.bottomAnchor),
             emptyState.leadingAnchor.constraint(equalTo: splitView.leadingAnchor),
             emptyState.trailingAnchor.constraint(equalTo: splitView.trailingAnchor),
+            diff.topAnchor.constraint(equalTo: splitView.topAnchor),
+            diff.bottomAnchor.constraint(equalTo: splitView.bottomAnchor),
+            diff.leadingAnchor.constraint(equalTo: splitView.leadingAnchor),
+            diff.trailingAnchor.constraint(equalTo: splitView.trailingAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: splitView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: splitView.centerYAnchor),
             corner.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -1134,6 +1155,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     guard let handler = chain.first(where: { $0.responds(to: action) }) else { return log("menutarget: \(title) reaches nothing") }
                     let enabled = (handler as? NSMenuItemValidation)?.validateMenuItem(item) ?? true
                     return log("menutarget: \(title) (\(NSStringFromSelector(action))) from \(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil") → \(type(of: handler)), enabled \(enabled)")
+                }
+                // "inspector:changes", "inspector:files" or "inspector:activity" shows that view of the
+                // inspector; "inspector:diff" opens the selected file's diff in the centre (the first
+                // file's when none is selected) and "inspector:back" closes it.
+                if step.hasPrefix("inspector:") {
+                    let arg = String(step.dropFirst("inspector:".count))
+                    if let kind = FileSidebarView.Kind(rawValue: arg) { return showInspector(kind, takeKeyboard: true) }
+                    if arg == "diff" {
+                        if changesModel.selection == nil { changesModel.step(by: 1) }
+                        return openChangesDiff()
+                    }
+                    if arg == "back" { return closeChangesDiff() }
+                    return log("TypeText: no inspector view \(arg)")
+                }
+                // "worktree:<name>" opens the New Tab in a Worktree prompt with that name typed.
+                if step.hasPrefix("worktree:") {
+                    newWorktreeTab(nil)
+                    quickOpen?.setWorktreeName(String(step.dropFirst("worktree:".count)))
+                    return
                 }
                 // "sidebarfiles:on" / "sidebarfiles:off" shows or hides the file sidebar; "sidebarfiles:<path>"
                 // browses to a folder (the follow button shows). (Not "files…": that's the browser's.)

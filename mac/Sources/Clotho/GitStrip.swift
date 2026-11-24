@@ -5,6 +5,10 @@ import ClothoKit
 // then its pull request, "PR #42 open", which opens in the browser. The strip's height is kept for every
 // pane in a repo, so moving focus never resizes a shell; only the focused pane fills it in. Outside a repo,
 // or against a daemon without `git`, there's no strip at all.
+//
+// At its trailing edge, how much changed there (the daemon's `git.changes`, clothod 0.1.32): "+128 −32 ·
+// 6 files", or only the files when the lines weren't counted. A click opens the inspector on Changes. In
+// a narrow pane it drops the files, then goes: it never covers the branch or the pull request.
 
 final class GitStrip: NSView {
     static var height: CGFloat { s(20) }
@@ -12,7 +16,18 @@ final class GitStrip: NSView {
     let icon = NSImageView()
     let summary = NSTextField(labelWithString: "")
     let pullRequest = NSButton()
+    /// The change count at the trailing edge; hidden when nothing changed or nothing is known.
+    let changeCount = NSButton()
+    /// A click on the count: the inspector opens on Changes.
+    var onShowChanges: (() -> Void)?
     private(set) var url: URL?
+    /// The work tree's counts, as last shown.
+    private var changes: PaneGit.Changes?
+    /// How much of the count the strip has room for.
+    enum CountForm { case full, linesOnly, hidden }
+    private(set) var countForm = CountForm.hidden
+    private var pullRequestToEdge: NSLayoutConstraint!
+    private var pullRequestToCount: NSLayoutConstraint!
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -29,10 +44,20 @@ final class GitStrip: NSView {
         pullRequest.target = self
         pullRequest.action = #selector(openPullRequest)
         pullRequest.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        for view in [icon, summary, pullRequest] {
+        changeCount.isBordered = false
+        changeCount.bezelStyle = .inline
+        changeCount.target = self
+        changeCount.action = #selector(showChanges)
+        changeCount.isHidden = true
+        changeCount.setContentCompressionResistancePriority(.required, for: .horizontal)
+        changeCount.setContentHuggingPriority(.required, for: .horizontal)
+        changeCount.setAccessibilityRole(.button)
+        for view in [icon, summary, pullRequest, changeCount] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
+        pullRequestToEdge = pullRequest.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -s(10))
+        pullRequestToCount = pullRequest.trailingAnchor.constraint(lessThanOrEqualTo: changeCount.leadingAnchor, constant: -s(10))
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -40,7 +65,9 @@ final class GitStrip: NSView {
             summary.centerYAnchor.constraint(equalTo: centerYAnchor),
             pullRequest.leadingAnchor.constraint(equalTo: summary.trailingAnchor, constant: s(10)),
             pullRequest.centerYAnchor.constraint(equalTo: centerYAnchor),
-            pullRequest.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -s(10)),
+            pullRequestToEdge,
+            changeCount.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -s(10)),
+            changeCount.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -60,8 +87,52 @@ final class GitStrip: NSView {
     }
 
     override func layout() {
+        fitChangeCount()
         super.layout()
         needsDisplay = true
+    }
+
+    /// The count's text: "+128" in green, "−32" in red, then " · 6 files" dim; only the files when the
+    /// lines weren't counted. Nil when nothing changed.
+    static func countTitle(_ changes: PaneGit.Changes?, form: CountForm) -> NSAttributedString? {
+        guard form != .hidden, let total = changes?.total, total.files > 0 else { return nil }
+        let font = NSFont.monospacedDigitSystemFont(ofSize: s(11), weight: .regular)
+        let files = ChangeCountText.files(total.files)
+        guard let added = total.added, let removed = total.removed else {
+            return NSAttributedString(string: files, attributes: [.font: font, .foregroundColor: Theme.secondaryText])
+        }
+        let title = NSMutableAttributedString(string: "+\(added)", attributes: [.font: font, .foregroundColor: Theme.success])
+        title.append(NSAttributedString(string: " \u{2212}\(removed)", attributes: [.font: font, .foregroundColor: Theme.danger]))
+        if form == .full {
+            title.append(NSAttributedString(string: " · \(files)", attributes: [.font: font, .foregroundColor: Theme.secondaryText]))
+        }
+        return title
+    }
+
+    /// Picks the longest form of the count that leaves the branch some room, and shows it.
+    private func fitChangeCount() {
+        // What stays for the icon, a few letters of the branch and the gaps.
+        let room = bounds.width - s(10) * 3 - s(14) - s(5) - s(44)
+        var form = CountForm.hidden
+        for candidate in [CountForm.full, .linesOnly] {
+            guard let title = Self.countTitle(changes, form: candidate) else { break }
+            if ceil(title.size().width) + s(4) <= room {
+                form = candidate
+                break
+            }
+        }
+        let title = Self.countTitle(changes, form: form)
+        if form != countForm || title != changeCount.attributedTitle {
+            countForm = form
+            if let title { changeCount.attributedTitle = title }
+        }
+        let hidden = form == .hidden
+        if changeCount.isHidden != hidden {
+            changeCount.isHidden = hidden
+            pullRequestToEdge.isActive = hidden
+            pullRequestToCount.isActive = !hidden
+            window?.invalidateCursorRects(for: self)
+        }
     }
 
     private let topLine = CALayer()
@@ -80,6 +151,12 @@ final class GitStrip: NSView {
     func show(_ git: PaneGit) {
         summary.stringValue = git.summary
         toolTip = git.root
+        changes = git.changes
+        let spoken = ChangeCountText.spoken(git.changes)
+        changeCount.toolTip = spoken.map { "\($0). Show changes" }
+        changeCount.setAccessibilityLabel(spoken.map { "\($0). Show changes" })
+        fitChangeCount()
+        needsLayout = true
         guard let pr = git.pr else {
             pullRequest.isHidden = true
             url = nil
@@ -103,6 +180,8 @@ final class GitStrip: NSView {
     /// Where the PR click goes; tests replace it.
     var open: (URL) -> Void = { NSWorkspace.shared.open($0) }
 
+    @objc private func showChanges() { onShowChanges?() }
+
     @objc private func openPullRequest() {
         guard let url else { return }
         open(url)
@@ -111,6 +190,7 @@ final class GitStrip: NSView {
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .arrow)
         if !pullRequest.isHidden, url != nil { addCursorRect(pullRequest.frame, cursor: .pointingHand) }
+        if !changeCount.isHidden { addCursorRect(changeCount.frame, cursor: .pointingHand) }
     }
 
     // Clicks on the strip (outside the PR) stay here, not the terminal under the pane.
@@ -131,6 +211,7 @@ extension PaneHostView {
             gitStrip = strip
             return strip
         }()
+        strip.onShowChanges = { [weak self] in self?.onShowChanges?() }
         strip.show(git)
         strip.isHidden = !isFocusedPane
         needsLayout = true

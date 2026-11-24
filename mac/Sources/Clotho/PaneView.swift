@@ -263,6 +263,8 @@ final class PaneHostView: NSView, PaneDataSink, TerminalViewDelegate {
     var cornerTracking: NSTrackingArea?
     /// The git strip at the bottom (GitStrip.swift), while the pane is in a repo.
     var gitStrip: GitStrip?
+    /// A click on the strip's change count: the app opens the inspector on Changes.
+    var onShowChanges: (() -> Void)?
     /// The pane's git info (nil outside a repo, or without the daemon's `git`), from the model on every sync.
     var git: PaneGit? {
         didSet {

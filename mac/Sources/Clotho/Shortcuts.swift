@@ -72,6 +72,8 @@ extension AppDelegate {
             Shortcut(menu: "Clotho", title: "Hide Clotho", key: "h", action: #selector(NSApplication.hide(_:))),
             Shortcut(menu: "Clotho", title: "Quit Clotho", key: "q", action: #selector(NSApplication.terminate(_:))),
 
+            // A new git worktree on a new branch, with a Tab in it (Worktree.swift; clothod 0.1.32).
+            Shortcut(menu: "File", title: "New Tab in a Worktree…", key: "t", modifiers: [.command, .option], action: #selector(newWorktreeTab(_:))),
             Shortcut(menu: "File", title: "Upload Files…", key: "u", modifiers: [.command, .shift], action: #selector(chooseFilesToUpload(_:))),
             Shortcut(menu: "File", title: "Manage Machines…", key: "", action: #selector(showMachineManager(_:)), listed: false),
             Shortcut(menu: "File", title: "Add Machine…", key: "", action: #selector(addMachine(_:)), listed: false),
@@ -96,7 +98,11 @@ extension AppDelegate {
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "/", action: #selector(showOrHideSidebar(_:))),
             Shortcut(menu: "View", title: "Toggle Sidebar", key: "s", modifiers: [.command, .control], action: #selector(showOrHideSidebar(_:)),
                      hiddenInMenu: true, listed: false),
-            Shortcut(menu: "View", title: "Toggle File Sidebar", key: "b", modifiers: [.command, .option], action: #selector(showOrHideFileSidebar(_:))),
+            Shortcut(menu: "View", title: "Toggle Inspector", key: "b", modifiers: [.command, .option], action: #selector(showOrHideFileSidebar(_:))),
+            // The inspector's three views (FileSidebar.swift). No keys of their own.
+            Shortcut(menu: "View", title: "Changes", key: "", action: #selector(showInspectorChanges(_:)), listed: false),
+            Shortcut(menu: "View", title: "Files", key: "", action: #selector(showInspectorFiles(_:)), listed: false),
+            Shortcut(menu: "View", title: "Activity", key: "", action: #selector(showInspectorActivity(_:)), listed: false),
             Shortcut(menu: "View", title: "Move Focus to Sidebar", key: "s", modifiers: [.command, .option], action: #selector(focusSidebar(_:))),
 
             Shortcut(menu: "Workspace", title: "New Workspace", key: "n", action: #selector(newWorkspace(_:))),
@@ -365,9 +371,13 @@ extension AppDelegate {
         run { _ = try await $0.split(pane.id, direction: direction, ratio: nil, spawn: options) }
     }
 
-    // ⌘W hides the shortcuts card or file browser when one is showing; otherwise it closes the focused
-    // pane (and its tab, if it was the last pane).
+    // ⌘W hides the shortcuts card, the file browser or the centre diff when one is showing; otherwise it
+    // closes the focused pane (and its tab, if it was the last pane).
     @objc func closePane(_ sender: Any?) {
+        if isChangesDiffShown, shortcutsOverlay == nil, fileBrowser == nil {
+            closeChangesDiff()
+            return
+        }
         if let shortcutsOverlay {
             shortcutsOverlay.dismiss()
             return

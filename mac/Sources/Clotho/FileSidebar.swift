@@ -1,10 +1,15 @@
 import AppKit
 import ClothoKit
 
-// The file sidebar on the window's right (View ▸ Show/Hide File Sidebar, ⌥⌘B, or the sidebar.right
-// button at the far right of the title row). It lists the focused pane's folder on the pane's
-// machine and follows the pane as it moves (a `cd`, another pane, another machine) until the user
-// browses somewhere else; then "Follow Pane" brings it back.
+// The inspector on the window's right (View ▸ Toggle Inspector, ⌥⌘B, or the sidebar.right button at the
+// far right of the title row). Three views, picked in the segmented control in its band: Changes (what
+// changed in the focused pane's work tree: ChangesView), Files, and Activity (the focused pane's agent's
+// history: ActivityView). It remembers the view. Against a daemon without `git.changes` (before clothod
+// 0.1.32) it is the file sidebar it always was: no control, Files only.
+//
+// Files lists the focused pane's folder on the pane's machine and follows the pane as it moves (a `cd`,
+// another pane, another machine) until the user browses somewhere else; then "Follow Pane" brings it
+// back.
 //
 // Double-clicking a file on another machine opens a copy of it here in its default app and uploads
 // each save back (RemoteEdits in ClothoKit); a file on this Mac opens in place. Each opened row shows
@@ -14,7 +19,40 @@ import ClothoKit
 // out at width 0 (1.0.13's crash). Its left edge drags to resize, and the width is remembered.
 
 final class FileSidebarView: NSView {
+    /// The inspector's views, in the control's order.
+    enum Kind: String, CaseIterable {
+        case changes, files, activity
+
+        var title: String {
+            switch self {
+            case .changes: return "Changes"
+            case .files: return "Files"
+            case .activity: return "Activity"
+            }
+        }
+    }
+
+    /// The default that remembers the view.
+    static let kindKey = "InspectorView"
+    /// The row Files' machine name and Follow Pane sit in, under the band, when the band holds the control.
+    static var filesRowHeight: CGFloat { s(26) }
+
     let pane: FilePane
+    let segmented = NSSegmentedControl()
+    let changesView: ChangesView
+    let activityView: ActivityView
+    /// The view the user picked last (remembered). `shown` is what shows.
+    private(set) var kind: Kind
+    /// Whether the focused machine's daemon lists changes: the three views, or Files alone.
+    private(set) var available = false
+    /// The view on screen: the picked one, or Files on a machine that has only that.
+    var shown: Kind { available ? kind : .files }
+    /// The picked view changed, or what the machine offers did.
+    var onShownChange: (() -> Void)?
+    private var titleCenter: NSLayoutConstraint!
+    private var paneTop: NSLayoutConstraint!
+    private var followTrailing: NSLayoutConstraint!
+    private var followGone: NSLayoutConstraint!
     let title = NSTextField(labelWithString: "")
     let followButton = NSButton()
     var onResize: ((CGFloat) -> Void)?
@@ -27,13 +65,30 @@ final class FileSidebarView: NSView {
     /// The band at the top, as tall as the tab bar; the toggle sits at its right end.
     static var bandHeight: CGFloat { TabBarView.height }
 
-    init(app: AppDelegate) {
+    init(app: AppDelegate, changes: ChangesModel) {
         pane = FilePane(app: app, machine: .local, path: "~", choosable: false, side: "sidebar", compact: true)
+        changesView = ChangesView(model: changes)
+        activityView = ActivityView(app: app)
+        kind = UserDefaults.standard.string(forKey: Self.kindKey).flatMap(Kind.init(rawValue:)) ?? .changes
         super.init(frame: .zero)
         wantsLayer = true
         withAppearance { layer?.backgroundColor = Theme.sidebar.cgColor }
         setAccessibilityIdentifier("FileSidebar")
         setAccessibilityLabel("Files")
+
+        segmented.segmentCount = Kind.allCases.count
+        for (index, kind) in Kind.allCases.enumerated() { segmented.setLabel(kind.title, forSegment: index) }
+        segmented.trackingMode = .selectOne
+        segmented.segmentStyle = .rounded
+        segmented.controlSize = .small
+        segmented.font = .systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        segmented.target = self
+        segmented.action = #selector(segmentPicked)
+        segmented.setAccessibilityLabel("Inspector view")
+        segmented.isHidden = true
+        segmented.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        changesView.isHidden = true
+        activityView.isHidden = true
 
         title.font = NSFont.systemFont(ofSize: s(12), weight: .semibold)
         title.textColor = Theme.secondaryText
@@ -63,18 +118,34 @@ final class FileSidebarView: NSView {
             onResize?(bounds.width - x)
         }
         handle.onEnd = { [weak self] in self?.onResizeEnd?() }
-        for view in [title, followButton, pane, divider, handle] as [NSView] {
+        for view in [title, followButton, pane, changesView, activityView, segmented, divider, handle] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
+        // Clear of the toggle at the band's right end (in the band; in its own row under it, of the edge).
+        followTrailing = followButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -AppDelegate.fileToggleInset)
+        followGone = followButton.widthAnchor.constraint(equalToConstant: 0)
+        titleCenter = title.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.bandHeight / 2)
+        paneTop = pane.topAnchor.constraint(equalTo: topAnchor, constant: Self.bandHeight)
+        for view in [changesView, activityView] as [NSView] {
+            NSLayoutConstraint.activate([
+                view.topAnchor.constraint(equalTo: topAnchor, constant: Self.bandHeight),
+                view.leadingAnchor.constraint(equalTo: leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: trailingAnchor),
+                view.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ])
+        }
         NSLayoutConstraint.activate([
+            segmented.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(10)),
+            // Clear of the toggle at the band's right end.
+            segmented.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -AppDelegate.fileToggleInset),
+            segmented.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.bandHeight / 2),
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: s(12)),
-            title.centerYAnchor.constraint(equalTo: topAnchor, constant: Self.bandHeight / 2),
+            titleCenter,
             followButton.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: s(8)),
             followButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
-            // Clear of the toggle at the band's right end.
-            followButton.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -AppDelegate.fileToggleInset),
-            pane.topAnchor.constraint(equalTo: topAnchor, constant: Self.bandHeight),
+            followTrailing,
+            paneTop,
             pane.leadingAnchor.constraint(equalTo: leadingAnchor),
             pane.trailingAnchor.constraint(equalTo: trailingAnchor),
             pane.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -94,6 +165,87 @@ final class FileSidebarView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         withAppearance { layer?.backgroundColor = Theme.sidebar.cgColor }
+    }
+
+    // MARK: The three views
+
+    override func layout() {
+        super.layout()
+        fitSegments()
+    }
+
+    /// The width each label needs, and the least room kept around it.
+    static func segmentLabelWidths(font: NSFont?) -> [CGFloat] {
+        let font = font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize(for: .small))
+        return Kind.allCases.map { ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) }
+    }
+    static let segmentMinPadding: CGFloat = 10
+
+    /// Shares the control's width among the segments by what their labels need, so all three read whole
+    /// beside the toggle even at the inspector's least width (equal segments don't fit there).
+    private func fitSegments() {
+        guard !segmented.isHidden, segmented.frame.width > 0 else { return }
+        let labels = Self.segmentLabelWidths(font: segmented.font)
+        // The control draws a point of border at each end and between segments.
+        let room = segmented.frame.width - CGFloat(labels.count + 1)
+        let padding = max(Self.segmentMinPadding, ((room - labels.reduce(0, +)) / CGFloat(labels.count)).rounded(.down))
+        for (index, label) in labels.enumerated() where abs(segmented.width(forSegment: index) - (label + padding)) > 0.5 {
+            segmented.setWidth(label + padding, forSegment: index)
+        }
+    }
+
+    @objc private func segmentPicked() {
+        guard Kind.allCases.indices.contains(segmented.selectedSegment) else { return }
+        select(Kind.allCases[segmented.selectedSegment])
+    }
+
+    /// Shows a view and remembers it. On a machine with Files alone the choice is kept for later.
+    func select(_ new: Kind) {
+        kind = new
+        UserDefaults.standard.set(new.rawValue, forKey: Self.kindKey)
+        apply()
+    }
+
+    /// Whether the focused machine's daemon lists changes (every sync). Without it the inspector is the
+    /// file sidebar as it was; the remembered view isn't overwritten.
+    func setAvailable(_ on: Bool) {
+        guard on != available else { return }
+        available = on
+        apply()
+    }
+
+    private func apply() {
+        let shown = shown
+        segmented.isHidden = !available
+        segmented.selectedSegment = Kind.allCases.firstIndex(of: kind) ?? 0
+        // With the control in the band, Files' own line (the machine, Follow Pane) moves under it.
+        titleCenter.constant = available ? Self.bandHeight + Self.filesRowHeight / 2 - s(2) : Self.bandHeight / 2
+        paneTop.constant = available ? Self.bandHeight + Self.filesRowHeight : Self.bandHeight
+        followTrailing.constant = available ? -s(10) : -AppDelegate.fileToggleInset
+        let files = shown == .files
+        pane.isHidden = !files
+        title.isHidden = !files
+        if files { updateFollowButton() } else { followButton.isHidden = true }
+        changesView.isHidden = shown != .changes
+        activityView.isHidden = shown != .activity
+        setAccessibilityLabel(available ? "Inspector" : "Files")
+        if files { refollow() }
+        onShownChange?()
+    }
+
+    /// Whether the keyboard is somewhere in the inspector (a list of it).
+    var hasKeyboard: Bool {
+        guard !isHidden, let responder = window?.firstResponder as? NSView else { return false }
+        return responder === self || responder.isDescendant(of: self)
+    }
+
+    /// Gives the shown view's list the keyboard.
+    func takeKeyboard() {
+        switch shown {
+        case .changes: changesView.list.takeKeyboard()
+        case .files: window?.makeFirstResponder(pane.table)
+        case .activity: window?.makeFirstResponder(activityView.table)
+        }
     }
 
     /// The focused pane is on `machine`, in `folder` (nil: no pane, or its folder isn't known yet).
@@ -124,7 +276,11 @@ final class FileSidebarView: NSView {
     }
 
     private func updateFollowButton() {
-        guard let target else { return followButton.isHidden = true }
+        defer {
+            // In its own row, a hidden Follow Pane leaves its room to the machine's name.
+            followGone.isActive = available && followButton.isHidden
+        }
+        guard shown == .files, let target else { return followButton.isHidden = true }
         followButton.isHidden = following || (target.machine == pane.machine && target.folder == pane.path)
     }
 }
@@ -152,8 +308,14 @@ extension AppDelegate {
     /// Adds the file sidebar and its toggle to the window, and returns their constraints, the tab bar's
     /// and the terminal area's trailing edges among them.
     func makeFileSidebar(corner: NSView) -> [NSLayoutConstraint] {
-        let files = FileSidebarView(app: self)
+        let files = FileSidebarView(app: self, changes: changesModel)
         files.translatesAutoresizingMaskIntoConstraints = false
+        files.onShownChange = { [weak self] in self?.inspectorVisibilityChanged() }
+        files.changesView.onOpenFull = { [weak self] _, _ in self?.openChangesDiff() }
+        files.changesView.onLeave = { [weak self] in
+            guard let self else { return }
+            window.makeFirstResponder(activeTerminal)
+        }
         files.pane.onOpenFile = { [weak self] location, entry in self?.openFile(location, size: entry.size) }
         files.pane.badge = { [weak self] location in self?.fileBadge(location) }
         files.pane.fillMenu = { [weak self] menu, locations in self?.fillFileMenu(menu, locations) }
@@ -173,11 +335,11 @@ extension AppDelegate {
             UserDefaults.standard.set(Double(fileSidebarWidth.constant), forKey: "FileSidebarWidth")
         }
 
-        let toggle = QuietButton(symbol: "sidebar.right", label: "Show/Hide File Sidebar", pointSize: s(13)) { [weak self] in
+        let toggle = QuietButton(symbol: "sidebar.right", label: "Show/Hide Inspector", pointSize: s(13)) { [weak self] in
             self?.showOrHideFileSidebar(self?.fileSidebarToggle)
         }
-        toggle.toolTip = "Show/Hide File Sidebar (⌥⌘B)"
-        toggle.setAccessibilityLabel("Show/Hide File Sidebar")
+        toggle.toolTip = "Show/Hide Inspector (⌥⌘B)"
+        toggle.setAccessibilityLabel("Show/Hide Inspector")
         toggle.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(toggle)
         fileSidebarToggle = toggle
@@ -197,10 +359,13 @@ extension AppDelegate {
         ]
     }
 
-    /// View ▸ Show/Hide File Sidebar (⌥⌘B): slides it in or out, and remembers which.
+    /// View ▸ Toggle Inspector (⌥⌘B): slides it in or out, and remembers which.
     @objc func showOrHideFileSidebar(_ sender: Any?) {
         let show = !isFileSidebarShown
         log("file sidebar: \(show ? "show" : "hide") (\(Self.describeTrigger(sender)))")
+        // Hidden with the keyboard in one of its lists: the terminal takes it back.
+        if !show, fileSidebar.hasKeyboard { window.makeFirstResponder(activeTerminal) }
+        defer { inspectorVisibilityChanged() }
         UserDefaults.standard.set(show, forKey: Self.showFileSidebarKey)
         let animate = sender != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         if show {
@@ -222,11 +387,50 @@ extension AppDelegate {
         if !animate, !show { fileSidebar.isHidden = true }
     }
 
-    /// Tells the sidebar where the focused pane is (every sync; cheap when nothing moved).
+    /// Tells the inspector where the focused pane is (every sync; cheap when nothing moved): Files its
+    /// folder, Changes its work tree, Activity its agent.
     func followFocusedPaneInFileSidebar() {
-        guard let fileSidebar, isFileSidebarShown else { return }
-        fileSidebar.follow(machine: focusedConnection.machine, folder: store.focusedPane?.cwd)
+        guard let fileSidebar else { return }
+        let session = focusedConnection
+        let pane = store.focusedPane
+        let listsChanges = store.features.contains(.gitChanges)
+        // Changes hears of every sync, shown or not: the centre diff reads the same model.
+        changesModel.setFocused(pane.map {
+            ChangesModel.Target(machine: session.key, machineName: session.title, pane: $0.id, git: git($0.id, in: store),
+                                featureOn: listsChanges, connected: store.isConnected)
+        })
+        fileSidebar.setAvailable(listsChanges)
+        guard isFileSidebarShown else { return }
+        fileSidebar.follow(machine: session.machine, folder: pane?.cwd)
+        fileSidebar.activityView.follow(machine: session.key, pane: pane?.id, hasAgent: monitorsAgents(session.key) && pane?.agent != nil,
+                                        canList: store.features.contains(.agentHistory))
     }
+
+    /// What of the inspector shows changed (slid in or out, another view, the centre diff): the views
+    /// that fetch are told, so nothing is asked of a daemon for a view nobody sees.
+    func inspectorVisibilityChanged() {
+        guard let fileSidebar else { return }
+        let shown = isFileSidebarShown ? fileSidebar.shown : nil
+        changesModel.isVisible = shown == .changes || isChangesDiffShown
+        fileSidebar.activityView.isVisible = shown == .activity
+    }
+
+    /// Slides the inspector in if it's hidden, on `kind`; `takeKeyboard` puts the keyboard in its list.
+    /// On a machine with Files alone, that is what shows.
+    func showInspector(_ kind: FileSidebarView.Kind, takeKeyboard: Bool) {
+        guard let fileSidebar else { return }
+        fileSidebar.select(kind)
+        if !isFileSidebarShown { showOrHideFileSidebar(nil) }
+        inspectorVisibilityChanged()
+        if takeKeyboard {
+            window.contentView?.layoutSubtreeIfNeeded()
+            fileSidebar.takeKeyboard()
+        }
+    }
+
+    @objc func showInspectorChanges(_ sender: Any?) { showInspector(.changes, takeKeyboard: true) }
+    @objc func showInspectorFiles(_ sender: Any?) { showInspector(.files, takeKeyboard: true) }
+    @objc func showInspectorActivity(_ sender: Any?) { showInspector(.activity, takeKeyboard: true) }
 }
 
 // MARK: Opening files

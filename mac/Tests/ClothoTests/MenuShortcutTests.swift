@@ -48,6 +48,30 @@ final class MenuShortcutTests: XCTestCase {
         XCTAssertGreaterThan(checked, 20)
     }
 
+    /// The inspector keeps the file sidebar's key, and the worktree command's key is nobody else's.
+    func testInspectorAndWorktreeKeys() {
+        let inspector = AppDelegate.shortcuts.first { $0.title == "Toggle Inspector" }!
+        XCTAssertEqual(inspector.displayKeys, "⌥⌘B", "unchanged")
+        XCTAssertFalse(AppDelegate.shortcuts.contains { $0.title == "Toggle File Sidebar" })
+        let worktree = AppDelegate.shortcuts.first { $0.title == "New Tab in a Worktree…" }!
+        XCTAssertEqual(worktree.menu, "File")
+        XCTAssertEqual(worktree.displayKeys, "⌥⌘T")
+        // No two items share a key.
+        let keyed = AppDelegate.shortcuts.filter { !$0.key.isEmpty }.map { "\($0.modifiers.rawValue)|\($0.key)" }
+        XCTAssertEqual(Set(keyed).count, keyed.count, "every key equivalent is its own")
+        for view in ["Changes", "Files", "Activity"] {
+            let item = AppDelegate.shortcuts.first { $0.menu == "View" && $0.title == view }
+            XCTAssertEqual(item?.key, "", "\(view) has no key of its own")
+            XCTAssertEqual(item?.listed, false)
+        }
+        // Every key from before is still where it was.
+        let before = ["⌘T": "New Tab", "⌥⌘W": "Close Tab", "⌘W": "Close Pane", "⌘P": "Quick Open…", "⇧⌘O": "File Browser", "⌘/": "Toggle Sidebar",
+                      "⌥⌘S": "Move Focus to Sidebar", "⌘D": "Split Right", "⌥⌘D": "Split Left", "⇧⌘U": "Upload Files…", "⌘N": "New Workspace"]
+        for (keys, title) in before {
+            XCTAssertEqual(AppDelegate.shortcuts.first { $0.displayKeys == keys && !$0.hiddenInMenu }?.title, title, keys)
+        }
+    }
+
     func testSlashKeys() {
         let sidebar = AppDelegate.shortcuts.first { $0.title == "Toggle Sidebar" && !$0.hiddenInMenu }!
         XCTAssertEqual(sidebar.displayKeys, "⌘/")

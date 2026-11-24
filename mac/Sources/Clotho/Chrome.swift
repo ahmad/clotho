@@ -453,6 +453,19 @@ final class TabBarView: NSView {
     private var latest: (() -> Void)?
     private var heldTitles = HeldTitles<TabID>()
     private let addButton = NSButton()
+    /// A small spinner after the +, while something that ends in a new Tab is under way (a worktree being
+    /// made). Its words are the tooltip and what VoiceOver says. Nil: no spinner, and no room taken.
+    var busyText: String? {
+        didSet {
+            guard busyText != oldValue else { return }
+            busySpinner.toolTip = busyText
+            busySpinner.setAccessibilityLabel(busyText)
+            busySpinner.isHidden = busyText == nil
+            if busyText == nil { busySpinner.stopAnimation(nil) } else { busySpinner.startAnimation(nil) }
+            needsLayout = true
+        }
+    }
+    let busySpinner = NSProgressIndicator()
     /// The bar's own constraints, with their sizes at 100%.
     private var scaled: [(NSLayoutConstraint, CGFloat)] = []
 
@@ -490,6 +503,16 @@ final class TabBarView: NSView {
         addButton.toolTip = "New Tab (⌘T)"
         addButton.translatesAutoresizingMaskIntoConstraints = false
         addSubview(addButton)
+        busySpinner.style = .spinning
+        busySpinner.controlSize = .small
+        busySpinner.isDisplayedWhenStopped = false
+        busySpinner.isHidden = true
+        busySpinner.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(busySpinner)
+        NSLayoutConstraint.activate([
+            busySpinner.leadingAnchor.constraint(equalTo: addButton.trailingAnchor, constant: 2),
+            busySpinner.centerYAnchor.constraint(equalTo: addButton.centerYAnchor),
+        ])
 
         // Built once, so kept with their sizes at 100% for applyScale. Tabs are 32 pt in the 40 pt bar.
         scaled = [
@@ -633,11 +656,13 @@ final class TabBarView: NSView {
         // Measured from the cell: the label is placed by frame, and its text was just set.
         let big = NSRect(x: 0, y: 0, width: 10_000, height: 10_000)
         let size = breadcrumbLabel.stringValue.isEmpty ? NSSize.zero : (breadcrumbLabel.cell?.cellSize(forBounds: big) ?? .zero)
-        let free = bounds.maxX - addButton.frame.maxX
+        // The spinner, while it shows, sits where the breadcrumb's leading margin was.
+        let lead = busyText == nil ? addButton.frame.maxX : addButton.frame.maxX + s(20)
+        let free = bounds.maxX - lead
         let fits = size.width > 0 && free >= size.width + Self.breadcrumbMargin * 2
         if breadcrumbLabel.isHidden == fits { breadcrumbLabel.isHidden = !fits }
         guard fits else { return }
-        let frame = NSRect(x: (addButton.frame.maxX + (free - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded(),
+        let frame = NSRect(x: (lead + (free - size.width) / 2).rounded(), y: ((bounds.height - size.height) / 2).rounded(),
                            width: size.width.rounded(.up), height: size.height)
         if breadcrumbLabel.frame != frame { breadcrumbLabel.frame = frame }
     }

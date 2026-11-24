@@ -1,0 +1,293 @@
+import AppKit
+import ClothoFake
+import ClothoKit
+import XCTest
+@testable import Clotho
+
+/// The model behind Changes, on the fake backend: what it follows, when it asks the daemon, and that a
+/// late reply for another pane never shows.
+@MainActor
+final class ChangesModelTests: XCTestCase {
+    private var fake: FakeBackend!
+    private var model: ChangesModel!
+    private var clock = Date(timeIntervalSince1970: 1_000_000)
+    private var gits: [PaneID: PaneGit] = [:]
+    private var notes = 0
+
+    private let login = GitChangedFile(path: "src/login.rs", status: .modified, added: 12, removed: 2)
+    private let renamed = GitChangedFile(path: "src/auth.rs", oldPath: "src/session.rs", status: .renamed, added: 0, removed: 0)
+    private let odd = GitChangedFile(path: "odd?name", status: .untracked, diffable: false)
+
+    override func setUp() async throws {
+        _ = NSApplication.shared
+        fake = FakeBackend(extraFeatures: ["git.changes", "worktree"])
+        try await fake.start()
+        model = ChangesModel()
+        model.backend = { [weak self] _ in self?.fake }
+        model.paneGit = { [weak self] _, pane in (self?.gits[pane] != nil, self?.gits[pane]) }
+        model.now = { [weak self] in self?.clock ?? Date() }
+        model.isAppActive = { true }
+        model.coalesce = 0.15
+        model.pollsByTimer = false
+        model.observe { [weak self] in self?.notes += 1 }
+    }
+
+    override func tearDown() { fake.stop() }
+
+    private func wait(_ what: String, _ done: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !done() {
+            guard Date() < deadline else { return XCTFail("timed out waiting for \(what)") }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    /// A pane in a repository at `root`, with a list of `files` and a summary that agrees.
+    private func pane(root: String, files: [GitChangedFile]) async throws -> PaneID {
+        let created = try await fake.createWorkspace(name: root, spawn: SpawnOptions(command: ["/bin/sleep", "60"], cwd: "/tmp"))
+        let changes = GitChanges(root: root, branch: "fix", head: "a1b2c3d", uncommitted: .init(files: files, added: 12, removed: 2))
+        fake.setChanges(created.pane, .success(changes))
+        gits[created.pane] = PaneGit(repo: "repo", root: root, branch: "fix", head: "a1b2c3d", changes: changes.summary)
+        return created.pane
+    }
+
+    private func target(_ pane: PaneID, on: Bool = true) -> ChangesModel.Target {
+        ChangesModel.Target(machine: "local", machineName: "this Mac", pane: pane, git: gits[pane], featureOn: on, connected: true)
+    }
+
+    private var loaded: GitChanges? {
+        if case let .loaded(changes) = model.list { return changes }
+        return nil
+    }
+
+    func testNothingIsAskedWhileItIsNotVisible() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        model.setFocused(target(one))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(fake.gitChangesCalls.isEmpty, "hidden: no request")
+        XCTAssertEqual(model.list, .loading)
+        model.isVisible = true
+        try await wait("the list") { self.loaded != nil }
+        XCTAssertEqual(fake.gitChangesCalls, [one], "asked once it shows")
+        XCTAssertEqual(loaded?.uncommitted.files, [login])
+    }
+
+    func testTheSummaryAloneDecidesTheEmptyStates() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        model.isVisible = true
+        model.setFocused(nil)
+        XCTAssertEqual(model.list, .none)
+        gits[one] = nil
+        model.setFocused(target(one))
+        XCTAssertEqual(model.list, .notARepo)
+        gits[one] = PaneGit(repo: "repo", root: "/one", branch: "fix", changesReason: "pending")
+        model.setFocused(target(one))
+        XCTAssertEqual(model.list, .unknown(GitText.readingChanges, pending: true))
+        gits[one] = PaneGit(repo: "repo", root: "/one", branch: "fix", changesReason: "no_git")
+        model.setFocused(target(one))
+        XCTAssertEqual(model.list, .unknown("Git isn't installed on this Mac.", pending: false))
+        gits[one] = PaneGit(repo: "repo", root: "/one", branch: "fix", changes: PaneGit.Changes(uncommitted: .init(files: 0, added: 0, removed: 0)))
+        model.setFocused(target(one))
+        XCTAssertEqual(model.list, .empty)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(fake.gitChangesCalls.isEmpty, "none of these needs the list")
+        // A machine whose daemon doesn't list changes.
+        model.setFocused(target(one, on: false))
+        XCTAssertEqual(model.list, .none)
+    }
+
+    func testItFollowsUntilAFileIsSelectedThenStaysOnItsWorkTree() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        let two = try await pane(root: "/two", files: [renamed])
+        let oneAgain = try await pane(root: "/one", files: [login])
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("pane one's list") { self.loaded?.root == "/one" }
+        // No selection: the next focused pane is followed at once.
+        model.setFocused(target(two))
+        XCTAssertEqual(model.target?.pane, two)
+        XCTAssertTrue(model.following)
+        try await wait("pane two's list") { self.loaded?.root == "/two" }
+        // A file selected: another work tree doesn't take the list away.
+        model.select(renamed, group: .uncommitted)
+        model.setFocused(target(one))
+        XCTAssertEqual(model.target?.pane, two, "pinned")
+        XCTAssertFalse(model.following)
+        XCTAssertEqual(loaded?.root, "/two")
+        // Nor does no repository at all, or no pane.
+        gits[one] = nil
+        model.setFocused(target(one))
+        XCTAssertEqual(model.target?.pane, two)
+        model.setFocused(nil)
+        XCTAssertEqual(model.target?.pane, two)
+        // Follow Pane goes back.
+        gits[one] = PaneGit(repo: "repo", root: "/one", branch: "fix", head: "a1b2c3d", changes: .init(uncommitted: .init(files: 1, added: 12, removed: 2)))
+        model.setFocused(target(one))
+        model.followAgain()
+        XCTAssertEqual(model.target?.pane, one)
+        XCTAssertTrue(model.following)
+        XCTAssertNil(model.selection)
+        try await wait("pane one's list again") { self.loaded?.root == "/one" }
+        // A pane in the same work tree never unpins: the list goes with it, the selection stays.
+        model.select(login, group: .uncommitted)
+        model.setFocused(target(oneAgain))
+        XCTAssertEqual(model.target?.pane, oneAgain)
+        XCTAssertTrue(model.following)
+        XCTAssertEqual(model.selection?.path, "src/login.rs")
+        // The pinned pane exits: the focused one is followed.
+        model.setFocused(target(two))
+        XCTAssertEqual(model.target?.pane, oneAgain, "pinned again")
+        gits[oneAgain] = nil
+        model.setFocused(target(two))
+        XCTAssertEqual(model.target?.pane, two)
+        XCTAssertNil(model.selection)
+    }
+
+    func testAReplyForAnotherPaneIsDropped() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        let two = try await pane(root: "/two", files: [renamed])
+        fake.gitDelay = 0.3
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        model.setFocused(target(two))
+        try await wait("pane two's list") { self.loaded != nil }
+        XCTAssertEqual(loaded?.root, "/two", "pane one's reply came first and was dropped")
+        XCTAssertEqual(fake.gitChangesCalls, [one, two], "one request out at a time, the newer one after it")
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(loaded?.root, "/two")
+    }
+
+    func testSummaryChangesBecomeOneRead() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("the list") { self.loaded != nil }
+        XCTAssertEqual(fake.gitChangesCalls.count, 1)
+        // A commit: the counts change, then HEAD, a moment apart.
+        gits[one]?.changes = PaneGit.Changes(uncommitted: .init(files: 1, added: 3, removed: 0))
+        model.setFocused(target(one))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        gits[one]?.head = "b2c3d4e"
+        model.setFocused(target(one))
+        // The same again changes nothing.
+        model.setFocused(target(one))
+        try await wait("the reload") { self.fake.gitChangesCalls.count >= 2 }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertEqual(fake.gitChangesCalls.count, 2, "exactly one more read")
+        // The branch's pull request changing is nothing of ours.
+        gits[one]?.prReason = "none"
+        model.setFocused(target(one))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(fake.gitChangesCalls.count, 2)
+    }
+
+    func testTheDiffIsAskedWithTheOldPathAndNeverForAnUndiffableFile() async throws {
+        let one = try await pane(root: "/one", files: [login, renamed, odd])
+        fake.setDiff(one, path: "src/auth.rs", group: .uncommitted, .success(GitDiff(path: "src/auth.rs", oldPath: "src/session.rs", status: .renamed)))
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("the list") { self.loaded != nil }
+        model.select(renamed, group: .uncommitted)
+        XCTAssertEqual(model.diff, .loading)
+        try await wait("the diff") { if case .loaded = self.model.diff { true } else { false } }
+        XCTAssertEqual(fake.gitDiffRequests.last, FakeBackend.DiffRequest(pane: one, path: "src/auth.rs", group: .uncommitted, oldPath: "src/session.rs"))
+        let asked = fake.gitDiffRequests.count
+        model.select(odd, group: .uncommitted)
+        XCTAssertEqual(model.diff, .undiffable)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(fake.gitDiffRequests.count, asked, "no request for a name that can't be sent")
+        XCTAssertFalse(model.pollTick(), "and no poll")
+    }
+
+    func testAFileWithNoChangesAnyMoreReloadsTheList() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("the list") { self.loaded != nil }
+        // The file was reverted meanwhile: the fake has no diff for it and says `not_changed`.
+        fake.setChanges(one, .success(GitChanges(root: "/one", uncommitted: .init(files: [renamed]))))
+        model.select(login, group: .uncommitted)
+        try await wait("the list read again") { self.fake.gitChangesCalls.count == 2 }
+        try await wait("the file gone from it") { self.loaded?.uncommitted.files == [self.renamed] }
+        XCTAssertNil(model.selection, "the selection goes with its file")
+        XCTAssertEqual(model.diff, .none)
+    }
+
+    func testAnErrorIsSaidInWordsAndRefreshAsksAgain() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        fake.setChanges(one, .failure(BackendError(code: "timeout", message: "git took too long")))
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("the error") { self.model.list == .failed("Git took too long in this repository.") }
+        fake.setChanges(one, .success(GitChanges(root: "/one", uncommitted: .init(files: [login]))))
+        model.refresh()
+        try await wait("the list") { self.loaded != nil }
+        fake.setDiff(one, path: "src/login.rs", group: .uncommitted, .failure(BackendError(code: "bad_path", message: "no")))
+        model.select(login, group: .uncommitted)
+        try await wait("the diff's error") { self.model.diff == .failed("Clotho can't ask for this file by its name.") }
+    }
+
+    func testThePollWaitsFiveSecondsAndTenTimesTheLastReply() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        let diff = GitDiff(path: "src/login.rs", status: .modified, added: 12, removed: 2,
+                           hunks: [.init(oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: [.init(kind: .context, old: 1, new: 1, text: "x")])])
+        fake.setDiff(one, path: "src/login.rs", group: .uncommitted, .success(diff))
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("the list") { self.loaded != nil }
+        model.select(login, group: .uncommitted)
+        try await wait("the diff") { self.model.diff == .loaded(diff) }
+        let asked = fake.gitDiffRequests.count
+        XCTAssertEqual(model.lastDiffDuration, 0, "the injected clock didn't move")
+        XCTAssertFalse(model.pollTick(), "too soon")
+        clock += 4.9
+        XCTAssertFalse(model.pollTick())
+        clock += 0.2
+        model.isAppActive = { false }
+        XCTAssertFalse(model.pollTick(), "not while the app is in the back")
+        model.isAppActive = { true }
+        model.isVisible = false
+        XCTAssertFalse(model.pollTick(), "not while hidden")
+        model.isVisible = true
+        try await wait("the diff asked again as it shows") { self.fake.gitDiffRequests.count == asked + 1 }
+        try await wait("that reply") { self.model.nextPoll > self.clock }
+        clock += 5.1
+        XCTAssertTrue(model.pollTick(), "due")
+        try await wait("the poll's request") { self.fake.gitDiffRequests.count == asked + 2 }
+        try await wait("its reply") { self.model.nextPoll > self.clock }
+        XCTAssertEqual(model.diff, .loaded(diff), "the same diff: nothing redrawn")
+
+        // A slow repository: the reply took 2 s, so the next ask is 20 s away.
+        fake.gitDelay = 0.2
+        clock += 5.1
+        XCTAssertTrue(model.pollTick())
+        try await Task.sleep(nanoseconds: 50_000_000)
+        clock += 2
+        try await wait("the slow reply") { self.model.lastDiffDuration >= 2 }
+        XCTAssertEqual(model.nextPoll.timeIntervalSince(clock), 20, accuracy: 0.01)
+        clock += 19
+        XCTAssertFalse(model.pollTick(), "ten times the last reply")
+        clock += 1.1
+        XCTAssertTrue(model.pollTick())
+    }
+
+    func testPathsStayInsideTheWorkTree() {
+        XCTAssertEqual(ChangesModel.absolutePath(root: "/repo", file: login), "/repo/src/login.rs")
+        XCTAssertEqual(ChangesModel.absolutePath(root: "/repo/", file: login), "/repo/src/login.rs")
+        for bad in ["../etc/passwd", "a/../../b", "/etc/passwd", "", "a//b", "./a", "a/\u{1b}[31m"] {
+            XCTAssertNil(ChangesModel.absolutePath(root: "/repo", file: GitChangedFile(path: bad, status: .modified)), bad)
+        }
+        XCTAssertNil(ChangesModel.absolutePath(root: "/repo", file: odd), "only a display form of the name")
+        XCTAssertNil(ChangesModel.absolutePath(root: "repo", file: login), "the root must be absolute")
+    }
+
+    func testSummaryWords() {
+        let both = PaneGit.Changes(uncommitted: .init(files: 2, added: 14, removed: 5), branch: .init(base: "main", commits: 4, files: 4, added: 114, removed: 27))
+        XCTAssertEqual(ChangesModel.summary(both), "6 files vs main")
+        XCTAssertEqual(ChangesModel.breakdown(both), "Uncommitted: 2 files, +14 \u{2212}5. On this branch, vs main: 4 files, +114 \u{2212}27.")
+        XCTAssertEqual(ChangesModel.summary(.init(uncommitted: .init(files: 2, added: 1, removed: 0))), "2 uncommitted files")
+        XCTAssertEqual(ChangesModel.summary(.init(uncommitted: .init(files: 1))), "1 uncommitted file")
+        XCTAssertEqual(ChangesModel.breakdown(.init(uncommitted: .init(files: 1))), "Uncommitted: 1 file.")
+    }
+}
