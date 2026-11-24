@@ -58,7 +58,7 @@ Each row is one line: the agent's mark, where it runs (workspace › tab), and w
 
 The chip in a pane's header opens the agent's menu too (click or right-click it): **Open Pane**, **Resolve**, **Mute** or **Unmute**, **History…**, and the permission and reply items. A muted agent has no inbox row and shows a crossed bell in its chip, so this is where you unmute it.
 
-When an agent waits on a permission request, its pane shows the request in a bar at its bottom with **Deny** and **Allow**. With the keyboard in that pane, **⌘↩** allows and **⌘.** denies. The bar goes away when the request is answered, here or anywhere else. (This needs a clothod on that machine that answers permission requests; without it, answer in the terminal or with the quick replies below.)
+When an agent waits on a permission request, its pane shows the request in a bar at its bottom with **Deny** and **Allow**. With the keyboard in that pane, **⌘↩** allows and **⌘.** denies. In a narrow pane the bar shows the tool and the start of the command (**Bash: cargo test…**); hover for all of it. When several requests wait, each needs its own press: holding the key answers only the one shown, and the next can't be answered for half a second after it appears. The bar goes away when the request is answered, here or anywhere else. (This needs a clothod on that machine that answers permission requests; without it, answer in the terminal or with the quick replies below.)
 
 A finished turn reads **Needs you** when the agent ended it by asking you something, and **Done** when it only finished. (This needs clothod 0.1.31 or later on that machine; before that every finished turn reads Done.)
 

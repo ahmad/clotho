@@ -14,8 +14,13 @@ final class AskBarTests: XCTestCase {
     private var store: ModelStore!
     private let git = PaneGit(repo: "clotho", root: "/p/clotho", branch: "main", head: "a1b2c3d")
 
+    private var settleDelay: TimeInterval = 0
+
     override func setUp() async throws {
         _ = NSApplication.shared
+        // No wait between one request and the next, except where a test is about it.
+        settleDelay = AskBar.settleDelay
+        AskBar.settleDelay = 0
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 500), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         backend = FakeBackend(extraFeatures: ["agent.decide"])
@@ -24,6 +29,7 @@ final class AskBarTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        AskBar.settleDelay = settleDelay
         store.stop()
         window.close()
     }
@@ -62,9 +68,9 @@ final class AskBarTests: XCTestCase {
         sync(host, pane, canDecide: canDecide)
     }
 
-    private func key(_ keyCode: UInt16, _ characters: String, _ modifiers: NSEvent.ModifierFlags) -> NSEvent {
+    private func key(_ keyCode: UInt16, _ characters: String, _ modifiers: NSEvent.ModifierFlags, isARepeat: Bool = false) -> NSEvent {
         NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: window.windowNumber,
-                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)!
+                         context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: isARepeat, keyCode: keyCode)!
     }
 
     private let npmTest = PermissionRequest(id: "r1", tool: "Bash", summary: "npm test")
@@ -128,11 +134,12 @@ final class AskBarTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         XCTAssertLessThanOrEqual(host.terminal.frame.maxY, bar.frame.minY + 0.5, "the terminal ends above the bar")
 
-        // A long command: the middle goes, the tooltip has it all.
+        // A long command: "Allow " and the tail go, the tool and the command's start stay; the tooltip has it all.
         let command = "cd /a/very/long/path && " + (1...40).map { "step-\($0)" }.joined(separator: " && ")
         try await ask([PermissionRequest(id: "r2", tool: "Bash", summary: command)], in: host, pane)
         XCTAssertTrue(host.askBar === bar, "the same bar")
-        XCTAssertEqual(bar.label.lineBreakMode, .byTruncatingMiddle)
+        XCTAssertEqual(bar.label.lineBreakMode, .byTruncatingTail)
+        XCTAssertEqual(bar.label.stringValue, "Bash: \(command)", "the button says Allow")
         XCTAssertLessThan(bar.label.frame.width, bar.label.intrinsicContentSize.width, "truncated")
         XCTAssertEqual(bar.label.toolTip, "Allow Bash: \(command)")
         XCTAssertLessThanOrEqual(bar.label.frame.maxX, bar.deny.frame.minX, "never under the buttons")
@@ -269,7 +276,14 @@ final class AskBarTests: XCTestCase {
         try await ask([PermissionRequest(id: "r1", tool: "Bash", summary: "npm run build -- --production --verbose"),
                        PermissionRequest(id: "r2", tool: "Edit", summary: "main.swift")], in: host, pane)
         let bar = try XCTUnwrap(host.askBar)
-        XCTAssertEqual(bar.allow.title, "Allow ⌘↩")
+        // The request keeps the room: no "Allow " before it, no key on the button, no "+1 more".
+        XCTAssertEqual(bar.label.stringValue, "Bash: npm run build -- --production --verbose")
+        XCTAssertEqual(bar.label.lineBreakMode, .byTruncatingTail, "the tool and the command's start show")
+        XCTAssertEqual(bar.allow.title, "Allow")
+        XCTAssertTrue(bar.more.isHidden)
+        XCTAssertEqual(bar.label.toolTip, "Allow Bash: npm run build -- --production --verbose")
+        let character = ("M" as NSString).size(withAttributes: [.font: bar.label.font!]).width
+        XCTAssertGreaterThanOrEqual(bar.label.frame.width, character * 9, "room for the tool and a word of the command")
         XCTAssertTrue(host.bounds.contains(bar.frame), "\(bar.frame)")
         for view in [bar.label, bar.deny, bar.allow] as [NSView] {
             XCTAssertTrue(bar.bounds.insetBy(dx: -0.5, dy: -0.5).contains(view.frame), "\(view.frame) in \(bar.bounds)")
@@ -285,5 +299,103 @@ final class AskBarTests: XCTestCase {
         }
         XCTAssertFalse(bar.frame.intersects(try XCTUnwrap(host.gitStrip).frame))
         XCTAssertFalse(bar.frame.intersects(host.header.frame))
+
+        // Wider: the key comes back first with the short text, then the whole of it.
+        host.frame.size.width = 600
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(bar.allow.title, "Allow ⌘↩")
+        XCTAssertEqual(bar.label.stringValue, "Allow Bash: npm run build -- --production --verbose")
+        XCTAssertFalse(bar.more.isHidden)
+    }
+
+    /// The label at the widths of ordinary split panes: the tool and the start of the command, never its end alone.
+    func testANarrowLabelKeepsTheToolAndTheStartOfTheCommand() async throws {
+        let (host, pane) = try await host(frame: NSRect(x: 0, y: 0, width: 320, height: 300))
+        let request = PermissionRequest(id: "r1", tool: "Bash", summary: "cargo test -p clothod --test e2e holder_survives_a_server_restart")
+        XCTAssertEqual(request.askSubject, "Bash: cargo test -p clothod --test e2e holder_survives_a_server_restart")
+        XCTAssertEqual(PermissionRequest(id: "r2", tool: "Edit").askSubject, "Edit")
+        try await ask([request], in: host, pane)
+        let bar = try XCTUnwrap(host.askBar)
+        let character = ("M" as NSString).size(withAttributes: [.font: bar.label.font!]).width
+        for width in [380, 320, 260, 220] as [CGFloat] {
+            host.frame.size.width = width
+            host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(bar.label.stringValue, request.askSubject, "at \(width)")
+            XCTAssertGreaterThanOrEqual(bar.label.frame.width, character * 9, "\"Bash: ca…\" at the least, at \(width)")
+            XCTAssertLessThanOrEqual(bar.label.frame.maxX, bar.deny.frame.minX)
+        }
+        // A short request shows whole where it fits, "Allow " and all.
+        host.frame.size.width = 320
+        try await ask([npmTest], in: host, pane)
+        XCTAssertEqual(bar.label.stringValue, "Allow Bash: npm test")
+        XCTAssertGreaterThanOrEqual(bar.label.frame.width, bar.label.textSize.width)
+    }
+
+    /// A held ⌘↩ (or ⌘.) answers one request: its repeats are swallowed, also once the next request shows.
+    func testAHeldKeyAnswersOnlyTheRequestItWasPressedFor() async throws {
+        let (host, pane) = try await host()
+        var decided: [String] = []
+        host.onDecide = { request, decision in decided.append("\(request) \(decision.rawValue)") }
+        let second = PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")
+        func handled(_ event: NSEvent) -> Bool { PaneHostView.handleAskKey(event, firstResponder: window.firstResponder) }
+        for (keyCode, characters, decision) in [(36, "\r", "allow"), (47, ".", "deny")] as [(UInt16, String, String)] {
+            decided = []
+            try await ask([npmTest, second], in: host, pane)
+            XCTAssertTrue(window.makeFirstResponder(host.terminal))
+            XCTAssertTrue(handled(key(keyCode, characters, .command)))
+            XCTAssertTrue(handled(key(keyCode, characters, .command, isARepeat: true)), "swallowed while the first is sent")
+            XCTAssertEqual(decided, ["r1 \(decision)"])
+            // The daemon drops the first; the second takes its place, with the buttons on (no settle delay here).
+            try await ask([second], in: host, pane)
+            let bar = try XCTUnwrap(host.askBar)
+            XCTAssertEqual(bar.request.id, "r2")
+            XCTAssertTrue(bar.isEnabled)
+            for _ in 0..<5 {
+                XCTAssertTrue(handled(key(keyCode, characters, .command, isARepeat: true)), "a repeat never reaches the terminal")
+            }
+            XCTAssertEqual(decided, ["r1 \(decision)"], "the held key didn't answer the request the user never read")
+            // A new press does.
+            XCTAssertTrue(handled(key(keyCode, characters, .command)))
+            XCTAssertEqual(decided, ["r1 \(decision)", "r2 \(decision)"])
+            try await ask(nil, in: host, pane)
+            XCTAssertNil(host.askBar)
+        }
+    }
+
+    /// A request that takes another's place can't be answered for a moment: a double tap, or a click
+    /// aimed at the one before, doesn't answer it.
+    func testANewRequestSettlesBeforeItCanBeAnswered() async throws {
+        AskBar.settleDelay = 0.3
+        let (host, pane) = try await host()
+        var decided: [String] = []
+        host.onDecide = { request, decision in decided.append("\(request) \(decision.rawValue)") }
+        let second = PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")
+        try await ask([npmTest, second], in: host, pane)
+        let bar = try XCTUnwrap(host.askBar)
+        XCTAssertTrue(bar.isEnabled, "the first request a bar shows needs no wait")
+        XCTAssertTrue(window.makeFirstResponder(host.terminal))
+        let allow = key(36, "\r", .command)
+        XCTAssertTrue(PaneHostView.handleAskKey(allow, firstResponder: window.firstResponder))
+        XCTAssertEqual(decided, ["r1 allow"])
+
+        try await ask([second], in: host, pane)
+        XCTAssertEqual(bar.label.stringValue, "Allow Bash: rm -rf build")
+        XCTAssertFalse(bar.allow.isEnabled, "off while the new request settles")
+        XCTAssertFalse(bar.deny.isEnabled)
+        XCTAssertTrue(PaneHostView.handleAskKey(allow, firstResponder: window.firstResponder), "the second tap is swallowed")
+        bar.allow.performClick(nil)
+        bar.decide(.deny)
+        sync(host, pane)
+        XCTAssertFalse(bar.isEnabled, "a sync of the same request doesn't cut the wait short")
+        XCTAssertEqual(decided, ["r1 allow"])
+
+        try await waitFor("the buttons") { bar.allow.isEnabled && bar.deny.isEnabled }
+        XCTAssertTrue(PaneHostView.handleAskKey(key(47, ".", .command), firstResponder: window.firstResponder))
+        XCTAssertEqual(decided, ["r1 allow", "r2 deny"])
+
+        // Answered elsewhere while it showed: the one after it settles too.
+        try await ask([PermissionRequest(id: "r3", tool: "Edit", summary: "main.swift")], in: host, pane)
+        XCTAssertFalse(bar.isEnabled)
+        try await waitFor("the buttons again") { bar.isEnabled }
     }
 }

@@ -11,7 +11,7 @@ import XCTest
 @MainActor
 final class FileSidebarTests: XCTestCase {
     private let keys = ["Backend", "AgentNotifications", "HideSidebar", "Appearance", OnboardingController.doneKey, "LaunchInBackground",
-                        AppDelegate.showFileSidebarKey, "FileSidebarWidth", "OpenFilesInApps"]
+                        AppDelegate.showFileSidebarKey, "FileSidebarWidth", "OpenFilesInApps", "NSWindow Frame ClothoMainWindow"]
     private var saved: [String: Any] = [:]
 
     override func setUp() {
@@ -26,6 +26,9 @@ final class FileSidebarTests: XCTestCase {
         defaults.set(false, forKey: "OpenFilesInApps")
         defaults.removeObject(forKey: AppDelegate.showFileSidebarKey)
         defaults.removeObject(forKey: "FileSidebarWidth")
+        // The window at its first-launch size: a narrow frame saved by an earlier run leaves no room for
+        // the widths this test drags to.
+        defaults.removeObject(forKey: "NSWindow Frame ClothoMainWindow")
     }
 
     override func tearDown() {
