@@ -372,7 +372,7 @@ final class AskBarTests: XCTestCase {
         let second = PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")
         try await ask([npmTest, second], in: host, pane)
         let bar = try XCTUnwrap(host.askBar)
-        XCTAssertTrue(bar.isEnabled, "the first request a bar shows needs no wait")
+        XCTAssertTrue(bar.isEnabled, "the first request in a pane with no bar a moment ago needs no wait")
         XCTAssertTrue(window.makeFirstResponder(host.terminal))
         let allow = key(36, "\r", .command)
         XCTAssertTrue(PaneHostView.handleAskKey(allow, firstResponder: window.firstResponder))
@@ -397,5 +397,64 @@ final class AskBarTests: XCTestCase {
         try await ask([PermissionRequest(id: "r3", tool: "Edit", summary: "main.swift")], in: host, pane)
         XCTAssertFalse(bar.isEnabled)
         try await waitFor("the buttons again") { bar.isEnabled }
+    }
+
+    /// The agent has no request for an instant between two: the bar goes and a new one comes. The second
+    /// tap of a double ⌘↩ (or a ⌘., or a click) meant for the first request doesn't answer the second.
+    func testARequestRightAfterTheBarWentSettlesToo() async throws {
+        // Long enough for the fake daemon's round trip between the bar going and the next request.
+        AskBar.settleDelay = 0.6
+        let (host, pane) = try await host()
+        var decided: [String] = []
+        host.onDecide = { request, decision in decided.append("\(request) \(decision.rawValue)") }
+        let allow = key(36, "\r", .command), deny = key(47, ".", .command)
+        func handled(_ event: NSEvent) -> Bool { PaneHostView.handleAskKey(event, firstResponder: window.firstResponder) }
+
+        try await ask([npmTest], in: host, pane)
+        XCTAssertEqual(host.askBar?.isEnabled, true, "no bar before it: no wait")
+        XCTAssertTrue(window.makeFirstResponder(host.terminal))
+        XCTAssertTrue(handled(allow))
+        XCTAssertEqual(decided, ["r1 allow"])
+        // Allowed: the agent has no request, then asks for the next thing.
+        try await ask([], in: host, pane)
+        XCTAssertNil(host.askBar)
+        try await ask([PermissionRequest(id: "r2", tool: "Bash", summary: "rm -rf build")], in: host, pane)
+        let bar = try XCTUnwrap(host.askBar)
+        XCTAssertEqual(bar.label.stringValue, "Allow Bash: rm -rf build")
+        XCTAssertFalse(bar.allow.isEnabled, "a new bar right after the last one starts off")
+        XCTAssertFalse(bar.deny.isEnabled)
+        XCTAssertTrue(handled(allow), "the second tap is swallowed")
+        XCTAssertTrue(handled(deny))
+        bar.allow.performClick(nil)
+        bar.deny.performClick(nil)
+        sync(host, pane)
+        XCTAssertTrue(host.askBar === bar)
+        XCTAssertFalse(bar.isEnabled, "a sync doesn't cut the wait short")
+        XCTAssertEqual(decided, ["r1 allow"], "nothing answered the request the user never read")
+
+        // After the delay each of them answers.
+        try await waitFor("the buttons") { bar.allow.isEnabled && bar.deny.isEnabled }
+        XCTAssertTrue(handled(allow))
+        XCTAssertEqual(decided, ["r1 allow", "r2 allow"])
+        let answers: [(String, (AskBar) -> Void)] = [("deny", { _ in _ = handled(deny) }), ("allow", { $0.allow.performClick(nil) }),
+                                                     ("deny", { $0.deny.performClick(nil) })]
+        for (index, (decision, answer)) in answers.enumerated() {
+            let id = "r\(index + 3)"
+            try await ask([], in: host, pane)
+            try await ask([PermissionRequest(id: id, tool: "Bash", summary: "ls")], in: host, pane)
+            let next = try XCTUnwrap(host.askBar)
+            XCTAssertFalse(next.isEnabled)
+            answer(next)
+            XCTAssertEqual(decided.count, index + 2, "refused while \(id) settles")
+            try await waitFor("the buttons for \(id)") { next.allow.isEnabled && next.deny.isEnabled }
+            answer(next)
+            XCTAssertEqual(decided.last, "\(id) \(decision)")
+        }
+
+        // A bar long gone: the next request needs no wait.
+        try await ask([], in: host, pane)
+        try await Task.sleep(nanoseconds: 800_000_000)
+        try await ask([PermissionRequest(id: "r9", tool: "Edit", summary: "main.swift")], in: host, pane)
+        XCTAssertEqual(host.askBar?.isEnabled, true)
     }
 }

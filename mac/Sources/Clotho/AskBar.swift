@@ -11,6 +11,8 @@ import ClothoKit
 //
 // A request that takes another's place can't be answered for a moment (`settleDelay`), and a held key
 // never answers: a long ⌘↩ or a double tap meant for one request must not allow the next one unread.
+// The same holds when the bar went away in between (the agent had no request for an instant): a bar
+// that comes back within `settleDelay` of the last one starts off.
 
 final class AskBar: NSView {
     static var height: CGFloat { max(28, s(30)) }
@@ -18,7 +20,8 @@ final class AskBar: NSView {
     static var margin: CGFloat { s(8) }
     /// How long the buttons stay off after a press whose request didn't leave the model (a failed decide).
     static var retryDelay: TimeInterval = 3
-    /// How long the buttons and keys stay off after another request takes the shown one's place.
+    /// How long the buttons and keys stay off after another request takes the shown one's place, or
+    /// shows right after the pane's last bar went.
     static var settleDelay: TimeInterval = 0.5
 
     let label = NSTextField(labelWithString: "")
@@ -39,7 +42,9 @@ final class AskBar: NSView {
 
     override var isFlipped: Bool { true }
 
-    init(_ request: PermissionRequest) {
+    /// `settles`: the pane showed another request a moment ago, so this one starts off like one that
+    /// took its place.
+    init(_ request: PermissionRequest, settles: Bool = false) {
         self.request = request
         super.init(frame: .zero)
         wantsLayer = true
@@ -62,6 +67,7 @@ final class AskBar: NSView {
         for view in [label, more, deny, allow] as [NSView] { addSubview(view) }
         applyScale()
         show(request, more: 0)
+        if settles { settle() }
         updateAllowTitle()
     }
 
@@ -80,18 +86,8 @@ final class AskBar: NSView {
             // The one that showed is gone (answered here or elsewhere): this is another, and the user
             // hasn't read it yet.
             sent = nil
-            let id = request.id
-            if Self.settleDelay > 0 {
-                settling = id
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay) { [weak self] in
-                    guard let self, settling == id else { return }
-                    settling = nil
-                    updateEnabled()
-                }
-            } else {
-                settling = nil
-            }
-            updateEnabled()
+            self.request = request
+            settle()
         }
         self.request = request
         // Layout picks the text that fits: all of it, or without its "Allow ".
@@ -102,6 +98,22 @@ final class AskBar: NSView {
         allow.setAccessibilityLabel(request.askText)
         deny.setAccessibilityLabel("Deny \(request.tool)")
         needsLayout = true
+    }
+
+    /// Turns the buttons and keys off for `settleDelay`: the user hasn't read the request shown yet.
+    private func settle() {
+        let id = request.id
+        if Self.settleDelay > 0 {
+            settling = id
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay) { [weak self] in
+                guard let self, settling == id else { return }
+                settling = nil
+                updateEnabled()
+            }
+        } else {
+            settling = nil
+        }
+        updateEnabled()
     }
 
     var isEnabled: Bool { sent == nil && settling == nil }
@@ -214,12 +226,15 @@ extension PaneHostView {
             guard let bar = askBar else { return }
             bar.removeFromSuperview()
             askBar = nil
+            askBarRemoved = Date()
             // The terminal gets its rows back (layout sends the viewport).
             needsLayout = true
             return
         }
         let bar = askBar ?? {
-            let bar = AskBar(first)
+            // Right after the last bar went (a double tap can still be on its way): this one settles first.
+            let recent = askBarRemoved.map { Date().timeIntervalSince($0) < AskBar.settleDelay } ?? false
+            let bar = AskBar(first, settles: recent)
             bar.onDecide = { [weak self] request, decision in self?.onDecide?(request.id, decision) }
             addSubview(bar)
             askBar = bar

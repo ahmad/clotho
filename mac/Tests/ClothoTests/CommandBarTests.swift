@@ -759,6 +759,102 @@ final class CommandBarTests: XCTestCase {
         XCTAssertEqual(allowed.count, 2, "once")
     }
 
+    /// The selected ask row leaves (answered on the phone or in the terminal) and the selection lands on
+    /// another agent's request: a ⌥↩ on its way was for the one that left, so this one settles first.
+    func testARequestTheSelectionLandedOnByItselfIsNotAllowedYet() {
+        let settleDelay = AskBar.settleDelay
+        AskBar.settleDelay = 0.3
+        defer { AskBar.settleDelay = settleDelay }
+        let second = PermissionRequest(id: "r9", tool: "Bash", summary: "npm test")
+        let entries = withAgents.map { $0.item.id == "agent|bb|9" ? agent("api review", pane: 9, mark: .needsYou, since: 200, request: second) : $0 }
+        open(all: entries, outline: agentsOutline)
+        var allowed: [String] = []
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        bar.setQuery("needs")
+        command(#selector(NSResponder.moveDown(_:)))
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r9", "the user's own move")
+        XCTAssertFalse(bar.allowHintDimmed, "a request the user moved to can be allowed at once")
+        // r9 is answered elsewhere: its agent works again and its row leaves the results.
+        let after = withAgents.map { $0.item.id == "agent|bb|9" ? agent("api review", pane: 9, mark: .working, since: 400, detail: "running") : $0 }
+        bar.apply(all: after, outline: agentsOutline)
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7", "the selection landed on the next request")
+        XCTAssertEqual(bar.footerText, QuickOpenOverlay.allowHints)
+        XCTAssertTrue(bar.allowHintDimmed, "⌥↩ Allow is dimmed while a press would be refused")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, [], "the press on its way doesn't allow a request the user wasn't looking at")
+        XCTAssertTrue(newTabs.isEmpty)
+        // The same rows again (any model change): the wait isn't cut short, nor started over.
+        bar.apply(all: after, outline: agentsOutline)
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, [])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(bar.allowHintDimmed, "back when the wait is over")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+
+        // The same in the tree: the row now at the place of the one that left.
+        func outline(_ panes: [PaneID]) -> CommandTree.Outline {
+            CommandTree.Outline(machines: agentsOutline.machines, needsYou: panes.map { (machine: "bb", pane: $0) })
+        }
+        open(all: entries, outline: outline([7, 9, 8]))
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        allowed = []
+        while bar.selectedEntry?.request?.id != "r7" { command(#selector(NSResponder.moveUp(_:))) }
+        XCTAssertFalse(bar.allowHintDimmed)
+        let answered = entries.map { $0.item.id == "agent|bb|7" ? agent("deploy api", pane: 7, mark: .working, since: 400, detail: "running") : $0 }
+        bar.apply(all: answered, outline: outline([9, 8]))
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r9")
+        XCTAssertTrue(bar.allowHintDimmed)
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, [])
+        XCTAssertTrue(newTabs.isEmpty)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(bar.allowHintDimmed)
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r9"])
+    }
+
+    /// The footer's "⌥↩ Allow" dims while a press would be refused (the request just took another's
+    /// place, or was just allowed and the model hasn't caught up), like the ask bar's buttons going off.
+    func testTheAllowHintDimsWhileAPressWouldBeRefused() {
+        let settleDelay = AskBar.settleDelay, retryDelay = AskBar.retryDelay
+        AskBar.settleDelay = 0.3
+        AskBar.retryDelay = 0.3
+        defer {
+            AskBar.settleDelay = settleDelay
+            AskBar.retryDelay = retryDelay
+        }
+        open(all: withAgents, outline: agentsOutline)
+        var allowed: [String] = []
+        bar.onAllow = { allowed.append($0.request?.id ?? "none") }
+        bar.setQuery("deploy")
+        XCTAssertEqual(bar.footerText, QuickOpenOverlay.allowHints)
+        XCTAssertFalse(bar.allowHintDimmed, "a request that was there when the bar opened")
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+        XCTAssertEqual(bar.selectedEntry?.request?.id, "r7")
+        XCTAssertTrue(bar.allowHintDimmed, "sent: another press would do nothing")
+        XCTAssertEqual(bar.footerText, QuickOpenOverlay.allowHints, "the words stay")
+        // The decide failed (the request stays): the hint comes back by itself after the retry delay.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(bar.allowHintDimmed)
+        // The agent's next request takes its place: dimmed while it settles.
+        let next = PermissionRequest(id: "r7b", tool: "Edit", summary: "src/main.rs")
+        let entries = withAgents.map { $0.item.id == "agent|bb|7" ? agent("deploy api", pane: 7, mark: .needsYou, since: 300, request: next) : $0 }
+        bar.apply(all: entries, outline: agentsOutline)
+        XCTAssertTrue(bar.allowHintDimmed)
+        command(#selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)))
+        XCTAssertEqual(allowed, ["r7"])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        XCTAssertFalse(bar.allowHintDimmed)
+        // Never on a row with no request, nor in command mode.
+        bar.setQuery("web")
+        XCTAssertEqual(bar.footerText, QuickOpenOverlay.openHints)
+        XCTAssertFalse(bar.allowHintDimmed)
+        bar.setQuery(">")
+        XCTAssertFalse(bar.allowHintDimmed)
+    }
+
     func testTheCardFitsANarrowWindow() {
         open()
         bar.frame = NSRect(x: 0, y: 0, width: 500, height: 600)

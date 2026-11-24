@@ -607,8 +607,9 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     }
     /// Every permission request the rows have carried while the bar is open.
     private var knownRequests: Set<String> = []
-    /// Requests that showed up after the bar opened, and when: the user hasn't read them yet, so ⌥↩
-    /// leaves them alone for `AskBar.settleDelay`.
+    /// Requests that showed up after the bar opened, or came under the selection without the user moving
+    /// it (the selected row left), and when: the user hasn't read them yet, so ⌥↩ leaves them alone for
+    /// `AskBar.settleDelay`.
     private var arrived: [String: Date] = [:]
     /// Requests ⌥↩ allowed here, and when: not sent again while the model catches up (`AskBar.retryDelay`).
     private var allowed: [String: Date] = [:]
@@ -731,7 +732,11 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     static var cardWidth: CGFloat { s(620) }
     static var sideMargin: CGFloat { s(16) }
     static let openHints = "↩ Open   ⌘↩ Open beside   ⌥↩ New tab"
-    static let allowHints = "↩ Open   ⌘↩ Open beside   ⌥↩ Allow"
+    static let allowHint = "⌥↩ Allow"
+    static let allowHints = "↩ Open   ⌘↩ Open beside   " + allowHint
+    /// Whether the footer's "⌥↩ Allow" is dimmed: a press now would be refused (the request just showed
+    /// up, or was just allowed).
+    private(set) var allowHintDimmed = false
     /// The footer's hints (tests).
     var footerText: String { footer.stringValue }
     /// Whether "esc" shows at the footer's trailing edge (command mode and picking say it in their own line).
@@ -839,6 +844,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
     /// New model contents, keeping the place (and the selected search result, by id).
     func apply(all: [CommandBarEntry], outline: CommandTree.Outline) {
         let selectedID = isSearching ? selectedEntry?.item.id : nil
+        let selectedRequest = selectedEntry?.request?.id
         self.all = all
         index()
         let now = Date()
@@ -848,6 +854,9 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             rank()
             searchSelected = selectedID.flatMap { id in results.firstIndex { $0.entry.item.id == id } } ?? min(searchSelected, max(0, results.count - 1))
         }
+        // The selection is on another request and the user didn't put it there (its row left, answered
+        // on the phone or in the terminal): a ⌥↩ on its way was meant for the one before.
+        if let id = selectedEntry?.request?.id, id != selectedRequest { arrived[id] = now }
         render()
     }
 
@@ -974,8 +983,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         guard !isCommandMode, picking == nil, let entry = selectedEntry else { return }
         guard let request = entry.request else { return newTab() }
         let now = Date()
-        if let at = arrived[request.id], now.timeIntervalSince(at) < AskBar.settleDelay { return }
-        if let at = allowed[request.id], now.timeIntervalSince(at) < AskBar.retryDelay { return }
+        guard allowRefusedUntil(request.id, now: now) == nil else { return }
         allowed[request.id] = now
         onAllow?(entry)
         if isSearching {
@@ -986,6 +994,32 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
             _ = tree.move(1)
         }
         render()
+    }
+
+    /// Until when ⌥↩ leaves `request` alone: it just showed up or came under the selection
+    /// (`AskBar.settleDelay`), or was just allowed here (`AskBar.retryDelay`). Nil when a press allows it.
+    private func allowRefusedUntil(_ request: String, now: Date = Date()) -> Date? {
+        let until = [arrived[request]?.addingTimeInterval(AskBar.settleDelay), allowed[request]?.addingTimeInterval(AskBar.retryDelay)]
+            .compactMap { $0 }.max()
+        return until.flatMap { $0 > now ? $0 : nil }
+    }
+
+    /// The footer's hints. "⌥↩ Allow" dims while a press would be refused, the way the pane's ask bar
+    /// turns its buttons off, and comes back when the wait is over.
+    private func updateFooter() {
+        footer.stringValue = isCommandMode ? "↑↓ move    ↩ run    esc back"
+            : picking != nil ? "↑↓ move    → expand    ↩ move here    esc cancel"
+            : selectedEntry?.request != nil ? Self.allowHints : Self.openHints
+        allowHintDimmed = false
+        guard !isCommandMode, picking == nil, let request = selectedEntry?.request, let until = allowRefusedUntil(request.id) else { return }
+        allowHintDimmed = true
+        let text = NSMutableAttributedString(string: Self.allowHints, attributes: [.font: footer.font as Any, .foregroundColor: Theme.faintText])
+        text.addAttribute(.foregroundColor, value: Theme.faintText.withAlphaComponent(0.35), range: (Self.allowHints as NSString).range(of: Self.allowHint))
+        footer.attributedStringValue = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + until.timeIntervalSinceNow + 0.01) { [weak self] in
+            guard let self, superview != nil else { return }
+            updateFooter()
+        }
     }
 
     /// ⌘↩: the selected tab's panes beside the current pane (the app checks it can).
@@ -1063,9 +1097,7 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         headings = []
         // Command mode and picking keep their own lines; otherwise three hints, and "esc" at the far side.
         let ownLine = isCommandMode || picking != nil
-        footer.stringValue = isCommandMode ? "↑↓ move    ↩ run    esc back"
-            : picking != nil ? "↑↓ move    → expand    ↩ move here    esc cancel"
-            : selectedEntry?.request != nil ? Self.allowHints : Self.openHints
+        updateFooter()
         footerEsc.isHidden = ownLine
         let rows = rows
         if rows.isEmpty {
