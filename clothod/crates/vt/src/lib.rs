@@ -366,6 +366,27 @@ pub fn printable(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect()
 }
 
+/// One visible row as text, untrimmed. A wide character is one char: its spacer cells are
+/// skipped, except an orphan one, which reads as a space.
+fn row_text(grid: &Grid<Cell>, l: usize) -> String {
+    let row = &grid[Line(l as i32)];
+    let mut s = String::new();
+    for c in 0..grid.columns() {
+        let cell = &row[Column(c)];
+        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            if is_orphan_spacer(grid, Line(l as i32), c) {
+                s.push(' ');
+            }
+            continue;
+        }
+        s.push(cell.c);
+        if let Some(zw) = cell.zerowidth() {
+            s.extend(zw);
+        }
+    }
+    s
+}
+
 /// Copy-only OSC 52, stated rather than left to alacritty's default: a pane may set the
 /// clipboard but must never read it (a load would reply with the user's clipboard contents).
 fn term_config(scrollback: usize) -> Config {
@@ -710,26 +731,29 @@ impl Vt {
     /// Visible screen as text, one string per row, trailing spaces trimmed.
     pub fn screen_text(&self) -> Vec<String> {
         let grid = self.term.grid();
-        (0..grid.screen_lines())
-            .map(|l| {
-                let row = &grid[Line(l as i32)];
-                let mut s = String::new();
-                for c in 0..grid.columns() {
-                    let cell = &row[Column(c)];
-                    if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-                        if is_orphan_spacer(grid, Line(l as i32), c) {
-                            s.push(' ');
-                        }
-                        continue;
-                    }
-                    s.push(cell.c);
-                    if let Some(zw) = cell.zerowidth() {
-                        s.extend(zw);
-                    }
-                }
-                s.trim_end().to_string()
-            })
-            .collect()
+        (0..grid.screen_lines()).map(|l| row_text(grid, l).trim_end().to_string()).collect()
+    }
+
+    /// The last `n` non-empty rows of the visible screen (whichever is active, the alternate one
+    /// included), oldest first: trimmed, control characters stripped, at most `max_chars` chars
+    /// each. It walks up from the bottom row and stops at `n`, so it reads a few rows, not the
+    /// whole screen.
+    pub fn peek_lines(&self, n: usize, max_chars: usize) -> Vec<String> {
+        let grid = self.term.grid();
+        let mut lines = Vec::with_capacity(n.min(grid.screen_lines()));
+        for l in (0..grid.screen_lines()).rev() {
+            if lines.len() >= n {
+                break;
+            }
+            let line = printable(row_text(grid, l).trim(), max_chars);
+            // A cut can leave a trailing space, and a row of control characters nothing at all.
+            let line = line.trim_end();
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+        }
+        lines.reverse();
+        lines
     }
 
     /// Cursor position as (column, line) on the visible screen.

@@ -505,3 +505,59 @@ fn color_scheme_reports_follow_the_palette() {
     assert_eq!(vt.set_palette(None), None, "RIS turns it off");
     assert!(light().dark() == false && dark.dark());
 }
+
+/// The peek: the last non-empty rows of the visible screen, oldest first.
+#[test]
+fn peek_lines_are_the_last_non_empty_rows() {
+    let mut vt = Vt::new(20, 8);
+    assert!(vt.peek_lines(2, 200).is_empty(), "an empty screen has none");
+    vt.feed(b"one\r\ntwo\r\nthree\r\nfour");
+    assert_eq!(vt.peek_lines(2, 200), ["three", "four"]);
+    assert_eq!(vt.peek_lines(8, 200), ["one", "two", "three", "four"], "fewer lines than asked");
+    assert!(vt.peek_lines(0, 200).is_empty());
+    assert!(vt.peek_lines(2, 0).is_empty(), "nothing left of a line is no line");
+}
+
+#[test]
+fn peek_lines_skip_blank_rows_and_trim() {
+    let mut vt = Vt::new(20, 8);
+    // Blank rows between the lines and below them, a row of spaces, and indentation.
+    vt.feed(b"top\r\n\r\n   \r\n  middle  \r\n\r\nlast\r\n\r\n");
+    assert_eq!(vt.peek_lines(2, 200), ["middle", "last"]);
+    assert_eq!(vt.peek_lines(3, 200), ["top", "middle", "last"]);
+}
+
+#[test]
+fn peek_lines_are_cut_and_printable() {
+    let mut vt = Vt::new(40, 4);
+    vt.feed(b"abcdefghijklmnopqrstuvwxyz\r\nab   cd");
+    assert_eq!(vt.peek_lines(2, 5), ["abcde", "ab"], "cut to max_chars, and no space left at the cut");
+    // Control and C1 characters never reach a line, whatever the application wrote.
+    let mut vt = Vt::new(40, 4);
+    vt.feed("a\x07b\x08c\td\x7fe\u{85}f\u{9b}mg\x1b[31mred\x1b[0m\x00h".as_bytes());
+    let lines = vt.peek_lines(4, 200);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|l| !l.chars().any(char::is_control)), "{lines:?}");
+    assert!(lines.concat().contains("red"));
+}
+
+#[test]
+fn peek_lines_keep_wide_characters_whole() {
+    let mut vt = Vt::new(10, 4);
+    vt.feed("日本語 ok\r\n".as_bytes());
+    // A wide character that doesn't fit the last column wraps whole, leaving a spacer behind.
+    vt.feed("123456789漢字".as_bytes());
+    assert_eq!(vt.peek_lines(1, 200), ["漢字"]);
+    assert_eq!(vt.peek_lines(3, 200), ["日本語 ok", "123456789", "漢字"], "the spacer cell adds nothing");
+    assert_eq!(vt.peek_lines(3, 2), ["日本", "12", "漢字"], "max_chars counts characters, not cells");
+}
+
+#[test]
+fn peek_lines_read_the_active_screen() {
+    let mut vt = Vt::new(20, 4);
+    vt.feed(b"shell one\r\nshell two");
+    vt.feed(b"\x1b[?1049h\x1b[2;3Hfull screen");
+    assert_eq!(vt.peek_lines(2, 200), ["full screen"], "the alternate screen while it is active");
+    vt.feed(b"\x1b[?1049l");
+    assert_eq!(vt.peek_lines(2, 200), ["shell one", "shell two"]);
+}
