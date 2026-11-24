@@ -1,4 +1,4 @@
-# Status and handoff (2026-11-07, after Mac 1.0.17, clothod 0.1.30, iOS 202611071915)
+# Status and handoff (2026-11-23, after clothod 0.1.31; Mac 1.0.17, iOS 202611071915)
 
 CLAUDE.md has the rules, including Shipping (ship verified work without asking) and the Mac's disk
 rule. This file has where things stand. The main session keeps it current.
@@ -6,7 +6,11 @@ rule. This file has where things stand. The main session keeps it current.
 ## Where things stand
 
 - **Built-in Tailscale, Phase 0** (PLAN.md): merged offline for all three roles: clothod `clothod-net` + testctl (503a066), ClothoKit/Tailnet + the Mac's dev-only Tailnet Test window (2f1eaeb), iOS debug Tailnet Test screen, Keychain store and SSH dialer (76db659). Nothing released or shipped with the node; default and TestFlight builds refuse it. Left: the physical-iPhone lock test, which needs a second Tailscale account (a test tailnet) from the user.
-- **clothod 0.1.30** runs on the dev box, the build Mac and the laptop Mac, upgraded in place (holders 1799611, 49964 (the build Mac, since its reboot), 9573 kept).
+- **clothod 0.1.31** (2026-11-23) runs on the dev box (holder 1799611 kept) and the build Mac (holder 27952 kept), upgraded in place. **The laptop Mac is still on 0.1.30**: it was unreachable over SSH; upgrade it in place when it answers, then check `clothod summarize` there.
+  0.1.31 (PLAN.md "Fewer, clearer alerts"): a finished turn alerts only after 30 s without the agent working again; `needs_user` labels it Needs you or Done (`nu` in the push record, `silent` on /v1/push for a plain Done); phone pushes are held up to 2 min while the user is at the Mac (`client.active`); every push decision is logged in clothod.log; the Haiku rewrite runs `claude --safe-mode --setting-sources user`, so a login from the user's settings works (it had failed every time on the dev box), with `notification_rewrite_health` in settings. Checked with the real helper on the dev box and the build Mac: both rewrite and label.
+  Until the apps follow, phones still show the old wording and a plain Done still makes a sound (the relay ignores `silent`). Next: mac (labels, health, `client.active`), then ios (relay `silent`, `nu`, labels; the docs/push.md patch is in ~/.config/clotho/clear-alerts-push-md.patch on the dev box). Then generic agent status (OSC 9/99/777/7501, more agents) and worktree panes with a changes view.
+  Left open on purpose: a daemon killed within a second of a hold ending can resend; a push in its 6 s rewrite wait is lost on restart; linux-aarch64 0.1.31 was built but never run.
+- **clothod 0.1.30** ran on the dev box, the build Mac and the laptop Mac, upgraded in place (holders 1799611, 49964 (the build Mac, since its reboot), 9573 kept).
   0.1.30: every spawn (incl. restore after a reboot) gets TERM/COLORTERM/TERM_PROGRAM(_VERSION) and a UTF-8 LANG when
   the daemon has none (pane_env); before, restored panes ran without them (black-and-white Claude).
   0.1.29: notification text rewritten by Claude Haiku through the machine's own claude login (`agent.summary`,
