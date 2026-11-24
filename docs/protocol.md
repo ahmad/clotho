@@ -78,7 +78,13 @@ Events (daemon → client) have no `id`:
 when a method takes none. Unknown fields are ignored on both sides.
 
 Error codes: `bad_request`, `unknown_method`, `not_found`, `handshake_required`,
-`protocol_mismatch`, `spawn_failed`, `wrong_pane`, `internal`.
+`protocol_mismatch`, `spawn_failed`, `wrong_pane`, `internal`. Some requests add their own
+(`stale`, the `fs.*` codes, the git and worktree codes): each is listed where the request is
+described.
+
+Replies carry the request's `id` because they may come out of order: most requests are answered
+before the next one is read, but one that waits on something slow (a permission decision, git)
+is answered when it is done, while later requests go ahead.
 
 Ordering: the daemon writes every frame for a connection through one ordered queue, so replies,
 events, OUTPUT and SNAPSHOT frames reach the client in the order the daemon produced them. That
@@ -96,7 +102,7 @@ The first request on a connection must be `hello`. Any other request gets `hands
                   "pane.clipboard", "settings", "service", "agent.mute",
                   "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors",
                   "restore", "move", "git", "pane.move", "pane.focus",
-                  "summary", "alerts"],
+                  "summary", "alerts", "git.changes", "worktree", "peek"],
      "daemon": "clothod", "version": "0.1.0",
      "instance": "7f3a9c2e5b104d8a",
      "pid": 4242,
@@ -138,7 +144,12 @@ The first request on a connection must be `hello`. Any other request gets `hands
   agents' `needs_user` and `settling`, the settle window before a finished turn raises
   `attention`, `agent.report`'s `tail`, the `client.active` request, the
   `notification_rewrite_health` setting, and push records' `nu` with `/v1/push`'s `silent`, see
-  [Fewer, clearer alerts](#fewer-clearer-alerts); since 0.1.31).
+  [Fewer, clearer alerts](#fewer-clearer-alerts); since 0.1.31), `git.changes` (the
+  `changes` and `changes_reason` fields of a pane's `git`, and the `git.changes` and `git.diff`
+  requests, see [Changes](#changes); since 0.1.32), `worktree` (the `worktree` option of
+  `tab.create` and `workspace.create`, see [Worktree Tabs](#worktree-tabs); since 0.1.32) and
+  `peek` (`peek.subscribe`, `peek.unsubscribe` and the `peek` event, see [Peek](#peek); since
+  0.1.32).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -368,7 +379,11 @@ is `null` outside one:
   "worktree": {"name": "fix-login", "path": "../clotho-fix"},
   "pr": {"number": 42, "state": "open", "draft": false,
          "url": "https://github.com/ahmad/clotho/pull/42", "title": "Fix the login page"},
-  "pr_reason": null
+  "pr_reason": null,
+  "changes": {"uncommitted": {"files": 3, "added": 40, "removed": 2},
+              "branch": {"base": "origin/main", "commits": 4, "files": 7, "added": 120, "removed": 30},
+              "reason": null},
+  "changes_reason": null
 }
 ```
 
@@ -399,11 +414,16 @@ is `null` outside one:
   - `"timeout"`
 
   Treat unknown values as unknown.
+- `changes` and `changes_reason` (feature `git.changes`, since 0.1.32) count what changed in
+  the work tree: see [Changes](#changes).
 - A submodule is its own repo. A cwd inside a bare repository, which has no work tree, gives
   `null`.
 
-**How it is read.** Git info comes from plain file reads only, and git is never run, so nothing
-a repository configures (hooks, fsmonitor, aliases, includes) can execute. The daemon walks up
+**How it is read.** Everything above except `changes` comes from plain file reads only: git is
+not run for it, so nothing a repository configures (hooks, fsmonitor, aliases, includes) can
+execute. (`changes`, `git.changes`, `git.diff` and worktree creation do run git, in a way that
+gives a repository's config nothing to run: see [Changes](#changes) and docs/security.md,
+"Running git in a repo the user didn't write".) The daemon walks up
 from the cwd to `.git`. A `.git` file's `gitdir:` leads to a linked worktree (its git dir has a
 `commondir`) or a submodule's or a separate git dir (one without, read as its own repo). It
 reads HEAD, the branch's ref, origin's URL in `config`, and `refs/remotes/origin/HEAD`. The
@@ -424,6 +444,168 @@ subscribed to a pane on it. Input never triggers a lookup. The default branch, a
 and non-GitHub remotes are never looked up.
 
 Changes come as `pane` events, as for any pane field. `git` is not saved in the layout file.
+
+### Changes
+
+Feature `git.changes`, since 0.1.32. A pane's `git` object says how much changed in its work
+tree, and two requests list the files and give one file's diff.
+
+**The summary.** `changes` has two groups:
+
+```json
+"changes": {
+  "uncommitted": {"files": 3, "added": 40, "removed": 2},
+  "branch": {"base": "origin/main", "commits": 4, "files": 7, "added": 120, "removed": 30},
+  "reason": null
+},
+"changes_reason": null
+```
+
+- `uncommitted` compares the work tree with HEAD: staged and unstaged changes together, and
+  untracked files (not ignored ones) as added. `files` is how many files differ, and `added` and
+  `removed` are lines.
+- `branch` compares HEAD with the commit where it left the base branch (the merge base):
+  `commits` on HEAD since then, and the files and lines they changed. `base` is the name to
+  show. The base is `origin/<branch>` for the branch `refs/remotes/origin/HEAD` names, when
+  that ref is in the repo; else the local `main`; else `master`. `branch` is `null` when the
+  pane is on that branch itself (`main` with the base `origin/main` counts), when there is no
+  base, when HEAD is unborn, and when the two share no commit. A detached HEAD is compared
+  like a branch.
+- `added` and `removed` are `null` when the lines were not counted (`files` is still right):
+  more than 1,000 changed tracked files, or the count took more than 3 s or 8 MiB of output. A
+  binary file adds nothing to them. Untracked files are counted by reading them: at most 200
+  files, 1 MiB each and 8 MiB in all per run; the ones past that add nothing.
+- `changes.reason` is `null`, or says why `branch` is `null` although there is a base: git
+  failed on that part (`timeout`, `too_large`, `partial_clone`, `error`). `uncommitted` stands.
+- `changes` is `null` when nothing is known, and `changes_reason` says why:
+  - `"pending"`: not read yet (the first run hasn't ended, or no client is subscribed to
+    events).
+  - `"no_git"`: there is no git on this machine.
+  - `"git_unsupported"`: the git here is older than 2.31, or the repository keeps its refs in
+    a reftable.
+  - `"unsafe"`: git refused the repository (dubious ownership: it belongs to another user).
+  - `"timeout"`: git took more than 6 s in all.
+  - `"too_large"`: the list of changed files is over 4 MiB.
+  - `"partial_clone"`: a partial clone that lacks objects the comparison needs. The daemon
+    never fetches them.
+  - `"error"`: anything else (a corrupt repository, a config git can't read). The daemon's log
+    names the work tree and the reason each time the reason changes.
+
+  Treat unknown values as unknown.
+
+**When it is read.** Git runs for a work tree only while some client is subscribed to events,
+once for all the panes in it. Once a second the daemon looks at what it can see without git,
+and reads the summary again when HEAD, the commit it is at or the base changed, when
+`<git dir>/index` was written (a `git add`, a commit, a checkout), when a pane in the work tree
+printed something since the last run (an edit made there usually prints), or when 15 s have
+passed. Runs for one work tree start at least 3 s apart, and at least ten times the last run's
+duration apart, so a repository where git takes 2 s is read every 20 s. Without a usable git
+(`no_git`, `git_unsupported`) the daemon looks again once a minute. At most two git jobs run at
+once in the whole daemon, these requests included. So an edit made in a pane shows within a few
+seconds, and one made elsewhere (an editor outside Clotho) within 15 s. A new summary comes as
+a `pane` event, and only when its numbers changed.
+
+**`git.changes`** lists the files of both groups for a pane's work tree:
+
+```json
+→ {"id": 4, "method": "git.changes", "params": {"pane": 3, "limit": 500}}
+← {"id": 4, "result": {
+     "root": "/Users/me/Projects/clotho-fix", "branch": "fix-login", "head": "a1b2c3d",
+     "uncommitted": {
+       "files": [
+         {"path": "src/login.rs", "status": "modified", "added": 12, "removed": 2, "binary": false, "diffable": true},
+         {"path": "src/auth.rs", "old_path": "src/session.rs", "status": "renamed", "added": 0, "removed": 0, "binary": false, "diffable": true},
+         {"path": "notes.txt", "status": "untracked", "added": 28, "removed": 0, "binary": false, "diffable": true}
+       ],
+       "total": 3, "added": 40, "removed": 2, "truncated": false
+     },
+     "branch_changes": {
+       "base": "origin/main", "base_head": "9f8e7d6", "merge_base": "9f8e7d6", "commits": 4,
+       "files": [..], "total": 7, "added": 120, "removed": 30, "truncated": false
+     },
+     "branch_reason": null
+   }}
+```
+
+- `limit` is the most files per group: 500 when left out, 2,000 at most (more is read as
+  2,000). `files` is sorted by path and cut there, with `truncated: true`; `total`, `added` and
+  `removed` are for the whole group, and are the summary's numbers.
+- `status` is `"added"`, `"modified"`, `"deleted"`, `"renamed"` (with `old_path`),
+  `"untracked"` or `"conflicted"`. Treat unknown values as modified.
+- `added` and `removed` are `null` for a file whose lines were not counted (a binary file, and
+  the cases under the summary above). `binary` is true for a file git treats as binary, which
+  includes any file over 8 MiB.
+- `path` is exact when the file's name is valid UTF-8 without control characters. Otherwise it
+  is a form to show (invalid bytes replaced, control characters dropped) and `diffable` is
+  false: `git.diff` can't be asked for that file.
+- `branch_changes` is `null` when there is nothing to compare, and `branch_reason` says why:
+  `"no_base"` (on the base branch, no base, or an unborn HEAD), `"no_merge_base"`, or what
+  failed (`"timeout"`, `"too_large"`, `"partial_clone"`, `"error"`). `base_head` and
+  `merge_base` are 7-character shas.
+- The reply also becomes the panes' `changes` summary, so the list a client shows and the
+  counts on the pane agree.
+- Errors: `not_found` (no such pane), `not_a_repo` (the pane's cwd is in no work tree),
+  `no_git`, `git_unsupported`, `timeout`, `git_failed` (git's first line as the message; also
+  a list of changed files over 4 MiB).
+
+**`git.diff`** gives one file's diff as hunks:
+
+```json
+→ {"id": 5, "method": "git.diff", "params": {"pane": 3, "path": "src/login.rs", "group": "uncommitted", "context": 3}}
+← {"id": 5, "result": {
+     "path": "src/login.rs", "old_path": null, "status": "modified", "binary": false,
+     "truncated": false, "added": 2, "removed": 1,
+     "hunks": [
+       {"old_start": 10, "old_lines": 3, "new_start": 10, "new_lines": 4, "header": "fn login() {",
+        "lines": [
+          {"t": " ", "old": 10, "new": 10, "text": "    let user = find(name);"},
+          {"t": "-", "old": 11, "new": null, "text": "    check(user);"},
+          {"t": "+", "old": null, "new": 11, "text": "    let user = user?;"},
+          {"t": "+", "old": null, "new": 12, "text": "    check(&user)?;"},
+          {"t": " ", "old": 12, "new": 13, "text": "}"}
+        ]}
+     ]
+   }}
+```
+
+- `group` is `"uncommitted"` (the work tree against HEAD) or `"branch"` (HEAD against the
+  merge base). `path` is a file's `path` from `git.changes`, and for a renamed file `old_path`
+  is its `old_path`. `context` is the unchanged lines around each change: 0 to 20, 3 when left
+  out.
+- Each line has its type `t` (`" "` unchanged, `"+"` added, `"-"` removed), its line number
+  in the old file (`old`) and the new one (`new`), `null` on the side it isn't in, and its
+  `text` without the line end. That is enough to draw the diff unified or side by side.
+  `no_newline: true` marks a last line that has no newline at its end. `header` is what git
+  prints after the hunk's `@@` (usually the enclosing function), or empty.
+- An untracked file comes as one hunk of added lines.
+- **Limits.** A diff is cut at 1 MiB of patch or 20,000 lines, with `truncated: true` (the
+  hunks up to there are whole lines, and `added` and `removed` count only what is in the
+  reply). A line is cut at 2,000 characters, with `cut: true` on it. A binary file, or one over
+  8 MiB, gives `binary: true` and no hunks.
+- `text` is always valid UTF-8: bytes that aren't are replaced with U+FFFD. It is the file's
+  content and may hold anything else, control characters and escape sequences included: see
+  docs/security.md, "For client authors".
+- Errors, besides those of `git.changes`: `bad_request` (no `path`, a `group` that is neither
+  of the two, `context` over 20), `bad_path` (a path that is absolute, has a `..`, `.` or empty
+  component or a control character, or is longer than 4096 bytes; an untracked path that is not
+  a regular file) and `not_changed` (the file has no changes in that group).
+
+Both requests are answered when git is done, and other requests on the connection go ahead
+meanwhile. Each has 10 s in all, the wait for one of the two git slots included, and 6 s of git;
+past that the reply is `timeout` and its git is killed. Nothing is cached between requests.
+
+**How git is run.** The daemon runs the machine's own git (2.31 or later), found on its PATH,
+then in `/opt/homebrew/bin` and `/usr/local/bin`, and on macOS in the developer tools
+(`/usr/bin/git` itself is never run: without the tools it opens an install dialog). It runs
+only these commands: `config --list`, `status --porcelain=v2`, `diff-index`, `diff-tree`,
+`merge-base`, `rev-list --count`, `rev-parse`, `hash-object` (of nothing, for the empty tree),
+and for a worktree `check-ref-format`, `worktree add`, and `worktree remove` and `update-ref -d`
+to take back one that failed. It runs them from `/`, with an
+empty environment, without the system and global config, with every setting that could run a
+program or reach the network overridden, and with a timeout, an output cap and a process-group
+kill on every call. It never writes to the repository for a summary, a list or a diff (the
+index included), never fetches, and never looks inside a submodule. It reads untracked files
+itself. docs/security.md has the full invocation and what was measured.
 
 ## Restore after restart
 
@@ -535,11 +717,11 @@ panes had none of the terminal variables, so programs in them (Claude Code) ran 
 | `state.get` | – | model (above) |
 | `events.subscribe` | – | `{}`, then the daemon sends a `state` event right away and events after that |
 | `events.unsubscribe` | – | `{}` |
-| `workspace.create` | `name?`, spawn options | `{"workspace", "tab", "pane"}` |
+| `workspace.create` | `name?`, spawn options, `worktree?` | `{"workspace", "tab", "pane"}`, plus `"worktree"` when one was asked for; see [Worktree Tabs](#worktree-tabs) |
 | `workspace.rename` | `workspace`, `name` | `{}` |
 | `workspace.close` | `workspace` | `{}` (hangs up all its panes) |
 | `workspace.move` | `workspace`, `index` | `{"index"}`: its final place; see [Moving tabs and workspaces](#moving-tabs-and-workspaces) |
-| `tab.create` | `workspace`, spawn options | `{"tab", "pane"}` |
+| `tab.create` | `workspace`, spawn options, `worktree?` | `{"tab", "pane"}`, plus `"worktree"` when one was asked for; see [Worktree Tabs](#worktree-tabs) |
 | `tab.rename` | `tab`, `title` (null clears it) | `{}` |
 | `tab.close` | `tab` | `{}` |
 | `tab.move` | `tab`, `index`, `workspace?`, `focus?` | `{"workspace", "index"}`: the tab's final place; see [Moving tabs and workspaces](#moving-tabs-and-workspaces) |
@@ -559,6 +741,10 @@ panes had none of the terminal variables, so programs in them (Claude Code) ran 
 | `pane.dismiss_restored` | `pane` | `{}`: clears the pane's `restored` for every client (a `pane` event). Idempotent; `not_found` for an unknown pane. See [Restore after restart](#restore-after-restart) |
 | `pane.search` | `pane`, `query`; optional `regex`, `case_sensitive` (both default false), `limit` (1–1000, default 100), `before` (`{line, col}`) | matches in the scrollback and screen, newest first; see [Searching scrollback](#searching-scrollback) |
 | `pane.text` | `pane` | `{"lines": [..], "cursor": [col, row], "cols", "rows", "seq", "modes": {"kitty_flags", "bracketed_paste", "app_cursor", "app_keypad"}}`: plain text of the visible screen, plus the input modes the application set (debugging and tests) |
+| `git.changes` | `pane`, `limit?` | the changed files of the pane's work tree, in two groups; see [Changes](#changes) (since 0.1.32, feature `git.changes`) |
+| `git.diff` | `pane`, `path`, `group` (`"uncommitted"` or `"branch"`), `old_path?`, `context?` | one file's diff as hunks; see [Changes](#changes) |
+| `peek.subscribe` | `panes?` (ids; all panes when left out), `lines?` (1–8, default 2) | `{"peeks": [{"pane", "lines": [..]}]}`, then `peek` events; see [Peek](#peek) (since 0.1.32, feature `peek`) |
+| `peek.unsubscribe` | – | `{}` |
 | `client.active` | – | `{}`: a Mac app says the user is at it right now (since 0.1.31, feature `alerts`); see [Fewer, clearer alerts](#fewer-clearer-alerts) |
 | `settings.get` | – | the settings object; see [Settings](#settings) |
 | `settings.set` | any settings to change, e.g. `scrollback_lines`, `notification_rewrite` | the settings object, plus `applied_panes`; see [Settings](#settings) |
@@ -593,6 +779,58 @@ frame.
 
 File access (`fs.*`) is described in [Files](#files).
 
+### Worktree Tabs
+
+Feature `worktree`, since 0.1.32. `tab.create` and `workspace.create` take an optional
+`worktree`, which makes a git worktree on a new branch and opens the new Tab (or Workspace) in
+it:
+
+```json
+→ {"id": 9, "method": "tab.create", "params": {"workspace": 1, "cwd": "/Users/me/Projects/clotho",
+     "worktree": {"name": "fix/login", "base": "origin/main"}}}
+← {"id": 9, "result": {"tab": 14, "pane": 31,
+     "worktree": {"path": "/Users/me/Projects/clotho-fix-login", "branch": "fix/login", "head": "9f8e7d6"}}}
+```
+
+- `cwd` is required with `worktree` and names the repository: any folder in one of its work
+  trees (a pane's cwd will do).
+- `name` is the new branch: 1 to 100 characters from letters, digits, `.`, `_`, `-` and `/`,
+  and a valid branch name. The worktree's folder goes beside the repository's main work tree,
+  named after it and the branch, with `/` as `-`: `clotho` and `fix/login` give
+  `../clotho-fix-login`. This holds from inside a linked worktree too.
+- `base` is where the branch starts: a branch, tag or commit, at most 255 characters. Left out,
+  it is the HEAD of the work tree `cwd` is in. The new branch tracks nothing.
+- The pane starts in the new folder (the worktree's `path`, whatever `cwd` was), and its
+  `git.worktree` shows up like any linked worktree's. `head` is the 7-character sha the
+  branch starts at. `worktree: null` is the same as leaving it out.
+- The request is answered when the checkout is done (git gets up to two minutes), and other
+  requests on the connection go ahead meanwhile. One worktree is made at a time.
+- The checkout runs none of the repository's hooks (`post-checkout`) and none of its filters,
+  so Git LFS files come out as pointer files until the user runs `git lfs pull` there. See
+  docs/security.md.
+- Errors:
+  - `bad_request`: no `cwd`, or `worktree` is not `{name, base?}` with strings.
+  - `not_found`: no such workspace (`tab.create`). Nothing is made.
+  - `not_a_repo`: `cwd` is in no work tree.
+  - `worktree_unsupported`: the repository has no main work tree to go beside (a bare
+    repository's worktree).
+  - `worktree_name`: `name` is not a branch name of that form.
+  - `worktree_exists`: the folder is already there (any file, folder or link at that path).
+  - `branch_exists`: so is a branch of that name.
+  - `bad_base`: `base` is not a commit in this repository (or the repository has no commit).
+  - `no_git`, `git_unsupported`, `timeout`.
+  - `git_failed`: git refused; the message is its first error line.
+  - `spawn_failed`: the worktree was made but the pane could not be started. **The worktree
+    and its branch stay**, and the message says where: nothing the daemon made is deleted
+    behind the user's back.
+
+  After any other error the repository is as it was: no folder and no branch are left. If git
+  fails or times out half way, the daemon takes back what it made through git
+  (`worktree remove --force --force`, and the branch only if it still points where it was
+  created); should something remain, the message names it.
+- The daemon's log records which client made which worktree. Removing a worktree is the
+  user's to do (`git worktree remove`); there is no request for it.
+
 ## Events
 
 | event | data | when |
@@ -606,6 +844,7 @@ File access (`fs.*`) is described in [Files](#files).
 | `pane.clipboard` | `{"pane", "target", "text"}` | the pane's application copied text with OSC 52; see [Clipboard](#clipboard-osc-52) |
 | `settings` | the settings object | a client changed a setting (`settings.set`), or `notification_rewrite_health` changed; see [Settings](#settings) |
 | `service` | the service object | a client installed or removed the login unit; see [Start at login](#start-at-login) |
+| `peek` | `{"pane", "lines": [..]}` | the last lines of a pane changed; only to connections with a peek subscription; see [Peek](#peek) |
 
 `state`, `pane`, `bell`, `agent`, `settings` and `service` go only to connections that called `events.subscribe`. `pane.resized`,
 `pane.resync` and `pane.clipboard` are part of a pane's data stream: they go to every subscriber of that pane,
@@ -617,6 +856,34 @@ the new `focus`. That is the only way they are delivered.
 A client keeps its model current by replacing everything on `state` and replacing one pane on
 `pane`. If `rev` jumps by more than one between events the client saw, it missed nothing that
 matters: a later `state` covers structure, and `pane` events always carry the whole pane.
+
+### Peek
+
+Feature `peek`, since 0.1.32. A peek is the last few lines of a pane's screen as plain text,
+for showing what a pane is doing without subscribing to it (a sidebar row, an overview).
+
+```json
+→ {"id": 6, "method": "peek.subscribe", "params": {"panes": [3, 5], "lines": 2}}
+← {"id": 6, "result": {"peeks": [{"pane": 3, "lines": ["Compiling clothod v0.1.32", "Finished in 4.2s"]},
+                                 {"pane": 5, "lines": []}]}}
+← {"event": "peek", "data": {"pane": 3, "lines": ["Finished in 4.2s", "$ cargo test"]}}
+```
+
+- `peek.subscribe` sets the connection's one peek subscription, replacing any earlier one.
+  `panes` lists the panes wanted; left out (or `null`), it is every pane, also ones created
+  later. `lines` is how many lines of each: 1 to 8, 2 when left out. Other values are
+  `bad_request`. The reply has each wanted pane's lines as they are now (ids that name no pane
+  are skipped), and no `peek` event of the new subscription comes before it.
+- `lines` are the last non-empty rows of the visible screen (the alternate screen while an
+  application uses it), oldest first, with leading and trailing spaces and all control
+  characters removed, at most 200 characters each. There can be fewer than asked for, or none.
+- A `peek` event carries a pane's lines again when they differ from what this connection was
+  last sent. The daemon looks once a second, and only at wanted panes that got output since it
+  last looked: at most one event per pane per second, and none while the text stays the same.
+- `peek.unsubscribe` ends it, as does the end of the connection. It doesn't depend on
+  `events.subscribe` or on `pane.subscribe`.
+- Peeks are not part of the model: a `peek` event has no `rev`, changes no `rev`, and nothing
+  about peeks is stored. A pane that closes just stops sending.
 
 ## Settings
 

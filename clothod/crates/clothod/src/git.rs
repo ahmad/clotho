@@ -1,6 +1,8 @@
-//! Git info for a pane's cwd (docs/protocol.md, "Git"), read from files only: git itself is
-//! never run, so nothing a repo configures (hooks, fsmonitor, aliases) can execute. The one
+//! Git info for a pane's cwd (docs/protocol.md, "Git"), read from files only: nothing here
+//! runs git, so nothing a repo configures (hooks, fsmonitor, aliases) can execute. The one
 //! command is `gh pr view` for the pull request, run outside the repo with everything explicit.
+//! What does need git (the `changes` summary, `git.changes`, `git.diff` and worktree creation)
+//! runs it through `crate::gitrun`, never from here.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -122,24 +124,56 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// The commit `refs/heads/<branch>` points at: the loose ref, else packed-refs.
-pub fn branch_sha(commondir: &Path, branch: &str) -> Option<String> {
-    // A branch name is never `..`-anything inside refs/heads (git refuses those); refuse them
+/// The commit a full ref name (`refs/heads/main`, `refs/remotes/origin/main`) points at: the
+/// loose ref, else packed-refs.
+pub fn ref_sha(commondir: &Path, full_ref: &str) -> Option<String> {
+    // A ref name never has an empty, `.` or `..` component (git refuses those); refuse them
     // here too rather than read outside the refs dir.
-    if branch.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+    if !full_ref.starts_with("refs/") || full_ref.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
         return None;
     }
-    if let Some(t) = read(&commondir.join("refs/heads").join(branch)) {
+    if let Some(t) = read(&commondir.join(full_ref)) {
         let t = t.trim();
         if is_sha(t) {
             return Some(t.to_string());
         }
     }
-    let want = format!("refs/heads/{branch}");
     read(&commondir.join("packed-refs"))?.lines().find_map(|l| {
         let (sha, name) = l.split_once(' ')?;
-        (name.trim() == want && is_sha(sha)).then(|| sha.to_string())
+        (name.trim() == full_ref && is_sha(sha)).then(|| sha.to_string())
     })
+}
+
+/// The commit `refs/heads/<branch>` points at: the loose ref, else packed-refs.
+pub fn branch_sha(commondir: &Path, branch: &str) -> Option<String> {
+    if branch.is_empty() {
+        return None;
+    }
+    ref_sha(commondir, &format!("refs/heads/{branch}"))
+}
+
+/// The commit HEAD is at, in full: the branch's, or the detached one. `None` while the branch
+/// is unborn, or when HEAD can't be read.
+pub fn head_sha(commondir: &Path, head_text: &str) -> Option<String> {
+    match parse_head(head_text) {
+        Head::Branch(b) => branch_sha(commondir, &b),
+        Head::Detached(s) => Some(s),
+        Head::Unknown => None,
+    }
+}
+
+/// The branch a pane's branch is compared with, as (the name clients show, its commit):
+/// `origin/<origin's default branch>` when origin/HEAD is recorded and that ref is here, else
+/// the local `main`, else `master`. `None` when there is none, or when `branch` (the one HEAD is
+/// on) is that branch itself.
+pub fn base_ref(commondir: &Path, branch: Option<&str>) -> Option<(String, String)> {
+    let origin = origin_default(commondir).and_then(|d| {
+        let sha = ref_sha(commondir, &format!("refs/remotes/origin/{d}"))?;
+        Some((d.clone(), format!("origin/{d}"), sha))
+    });
+    let local = |name: &str| branch_sha(commondir, name).map(|sha| (name.to_string(), name.to_string(), sha));
+    let (on, name, sha) = origin.or_else(|| local("main")).or_else(|| local("master"))?;
+    (branch != Some(on.as_str())).then_some((name, sha))
 }
 
 /// origin's `owner/name` if origin is on github.com.
@@ -510,6 +544,47 @@ mod tests {
         // Control characters in a branch name never reach clients.
         let i = info(&loc, "ref: refs/heads/a\u{1b}[31mb\u{9b}c");
         assert_eq!(i.branch.as_deref(), Some("a[31mbc"));
+    }
+
+    #[test]
+    fn refs_and_the_base_branch() {
+        const OTHER: &str = "fedcba9876543210fedcba9876543210fedcba98";
+        let t = tempfile::tempdir().unwrap();
+        let root = repo(t.path(), "feature");
+        let git = root.join(".git");
+        assert_eq!(ref_sha(&git, "refs/heads/feature").as_deref(), Some(SHA));
+        assert_eq!(head_sha(&git, "ref: refs/heads/feature\n").as_deref(), Some(SHA));
+        assert_eq!(head_sha(&git, OTHER).as_deref(), Some(OTHER));
+        assert_eq!(head_sha(&git, "ref: refs/heads/unborn"), None);
+        assert_eq!(head_sha(&git, "garbage"), None);
+        // Nothing outside refs/ is read, however the name is spelled.
+        for bad in ["HEAD", "config", "refs/../config", "refs/heads/../../config", "refs//heads/feature", "refs/heads/", "/etc/passwd", ""] {
+            assert_eq!(ref_sha(&git, bad), None, "{bad:?}");
+        }
+        assert_eq!(branch_sha(&git, ""), None);
+
+        // No main, no master, no origin/HEAD: nothing to compare with.
+        assert_eq!(base_ref(&git, Some("feature")), None);
+        // master, then main before it.
+        write(&git.join("refs/heads/master"), &format!("{OTHER}\n"));
+        assert_eq!(base_ref(&git, Some("feature")), Some(("master".into(), OTHER.into())));
+        assert_eq!(base_ref(&git, Some("master")), None, "on the base branch itself");
+        write(&git.join("packed-refs"), &format!("# pack-refs with: peeled fully-peeled sorted\n{SHA} refs/heads/main\n{OTHER} refs/remotes/origin/trunk\n"));
+        assert_eq!(base_ref(&git, Some("feature")), Some(("main".into(), SHA.into())));
+        assert_eq!(base_ref(&git, Some("main")), None);
+        assert_eq!(base_ref(&git, None), Some(("main".into(), SHA.into())), "a detached HEAD is compared too");
+        // origin's default branch wins, from packed-refs or loose.
+        write(&git.join("refs/remotes/origin/HEAD"), "ref: refs/remotes/origin/trunk\n");
+        assert_eq!(base_ref(&git, Some("feature")), Some(("origin/trunk".into(), OTHER.into())));
+        assert_eq!(base_ref(&git, Some("main")), Some(("origin/trunk".into(), OTHER.into())));
+        assert_eq!(base_ref(&git, Some("trunk")), None);
+        write(&git.join("refs/remotes/origin/trunk"), &format!("{SHA}\n"));
+        assert_eq!(base_ref(&git, Some("feature")), Some(("origin/trunk".into(), SHA.into())));
+        // origin/HEAD naming a ref that isn't here, or trying to leave refs/: the local one.
+        for head in ["ref: refs/remotes/origin/gone\n", "ref: refs/remotes/origin/../../../config\n"] {
+            write(&git.join("refs/remotes/origin/HEAD"), head);
+            assert_eq!(base_ref(&git, Some("feature")), Some(("main".into(), SHA.into())), "{head:?}");
+        }
     }
 
     #[test]

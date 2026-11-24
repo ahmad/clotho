@@ -36,6 +36,11 @@ model is about who can get to the socket, and what can reach the daemon without 
   nothing tells the daemon. It must not cost the daemon memory without bound.
 - **What the daemon writes on the user's behalf.** config.toml, agent hook settings, and login
   units must keep their permissions, and their embedded paths must stay paths.
+- **The repositories panes are in** (since 0.1.32). A pane's cwd can be in a repository the
+  user cloned and never read, or one an agent just changed. Its contents, its `.gitattributes`,
+  its `.git/config` (and what that includes), its hooks, its refs and its file names are all
+  untrusted. Showing a pane must never run anything such a repository names. See
+  [Running git in a repo the user didn't write](#running-git-in-a-repo-the-user-didnt-write).
 
 **Out of scope:** an attacker who already runs code as the user; root; the client apps'
 rendering of untrusted output (each client has its own terminal emulator and applies its own
@@ -196,6 +201,9 @@ unchanged.
   limited to 128 levels of nesting by serde_json (e2e `deeply_nested_json_closes_only_that_connection`:
   1 MiB of `[` closes that connection, and serve keeps serving). Unknown frame types are
   ignored. Requests on a connection run one at a time, so a flood is that connection's problem.
+  The ones that wait on something slow are answered later (`agent.permission`, and since 0.1.32
+  `git.changes`, `git.diff` and a create with `worktree`): the git ones queue for two slots, and
+  each gives up after 10 s, so a flood of them costs waiting tasks, not git processes.
 - **Handshake:** everything but `hello` is refused before it.
 - **Pane output to clients** is capped per client (8 MiB queued, then a deferred snapshot).
 - **OSC 52:** copy only. Reads are never answered, so a pane can't read the user's clipboard.
@@ -215,10 +223,154 @@ unchanged.
 - **Remote commands** quote every environment value (`sq`), and the bridge passes only
   protocol bytes to stdout.
 
+## Running git in a repo the user didn't write
+
+Since 0.1.32 (features `git.changes` and `worktree`) the daemon runs git: for the `changes`
+summary on a pane, for `git.changes` and `git.diff`, and to create a worktree. Until then it
+only read a few files under `.git`, because git, run the ordinary way, runs what a repository
+tells it to: `core.fsmonitor`, hooks, clean and smudge filters, external diff and textconv
+drivers, a pager, an ssh command. A summary is read for every pane that is in a repository,
+without the user asking, so `git status` the ordinary way in a hostile repository would be code
+execution on opening a Tab.
+
+All of it goes through one runner (`crate::gitrun`). Nothing else in the daemon starts git.
+
+**The invocation.** Every call is
+
+```
+<git> --no-pager --no-optional-locks -C <work tree root> <plumbing command> …
+```
+
+- `<git>` is an absolute path the daemon resolved: the first `git` on its PATH, then
+  `/opt/homebrew/bin` and `/usr/local/bin`, and on macOS the one in the developer directory.
+  Never a relative path, so a repository can't supply its own, and never macOS's `/usr/bin/git`
+  shim (without developer tools it opens an install dialog). It must be 2.31 or later
+  (`GIT_CONFIG_COUNT`); an older or unidentifiable git is `git_unsupported`.
+- It runs from `/`, with no stdin, in its own process group, and with **an environment built
+  from nothing**: only `HOME`, `PATH=/usr/bin:/bin`, `LC_ALL=C` and the variables below. Nothing
+  of the daemon's own environment reaches git.
+- No system and no global config (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`), no
+  system attributes (`GIT_ATTR_NOSYSTEM=1`), no prompts (`GIT_TERMINAL_PROMPT=0`,
+  `GIT_ASKPASS=/bin/false`, `GIT_EDITOR=:`), no optional locks (`GIT_OPTIONAL_LOCKS=0`), no
+  lazy fetch (`GIT_NO_LAZY_FETCH=1`), no replace objects, literal pathspecs, `GIT_PAGER=cat`.
+  The user's global ignore file is the one thing taken from the global config: its path is
+  read once, from `/`, and passed back as `core.excludesFile`.
+- Config overrides, which win over the repository's config and anything it includes:
+  `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.pager=cat`,
+  `core.untrackedCache=false`, `diff.external=`, `diff.autoRefreshIndex=false`,
+  `core.alternateRefsCommand=`, `core.sshCommand=/bin/false`, `core.gitProxy=`,
+  `protocol.allow=never`, `credential.helper=`, `submodule.recurse=false`,
+  `diff.ignoreSubmodules=all`, `status.submoduleSummary=false`, `log.showSignature=false`,
+  `gpg.program=/bin/false`, `core.quotePath=false`, `core.bigFileThreshold=8m`. They are
+  passed as `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, not as `-c
+  key=value`, so a key that itself holds `=` is passed exactly.
+- Every call has a timeout and a cap on its output, read as it comes. Past either, the whole
+  process group is killed and the child reaped; the same happens when the request that wanted
+  it is dropped. Stderr is kept to 4 KiB, with control characters removed.
+- Refs are never given to git by name. The daemon resolves HEAD and the base branch to commit
+  ids from the files itself, and git gets ids. Paths from a client go after `--`, with literal
+  pathspecs, and are checked first (relative, no `..`, no control characters).
+
+**Three things config overrides alone don't cover**, and what covers them:
+
+1. **Filters have no global off switch.** `filter.<name>.clean`, `.smudge` and `.process` are
+   looked up by a name that `.gitattributes` picks, so there is no fixed key to override.
+   Before anything else in a repository, the runner lists its config (`git config --list -z`,
+   which only reads files: the repository's and what it includes) and overrides every
+   `filter.<name>.*` it finds with an empty command and `required=false`. The same listing
+   finds each `protocol.<name>.allow`, which would win over `protocol.allow=never`, and sets it
+   to `never`. A config with more than 256 such names, or over 1 MiB, is refused.
+2. **`git diff` writes the index**, and so does `git status` unless told not to: they refresh
+   stat information and write it back, taking `index.lock`. The runner uses plumbing only:
+   `status --porcelain=v2` under `--no-optional-locks`, and `diff-index` and `diff-tree` for
+   every count and patch, never `git diff`. Plumbing also ignores aliases and most of the
+   user-facing config.
+3. **Submodules need a flag.** A submodule is another repository with its own config, which
+   the overrides above (scanned from the outer one) don't describe. `diff.ignoreSubmodules=all`
+   as config is not enough for every command, so each diff command carries `--no-ext-diff
+   --no-textconv --ignore-submodules=all`, and `status` carries `--ignore-submodules=all`: git
+   never looks inside one. (`--no-ext-diff` and `--no-textconv` also cover
+   `diff.<driver>.command` and `.textconv`, whose driver names come from `.gitattributes` like
+   filter names.) A pane whose cwd is inside a submodule gets that submodule as its own
+   repository, scanned on its own.
+
+Untracked files are read by the daemon, not by git: opened one path component at a time with
+`O_NOFOLLOW` (a directory swapped for a symlink between the listing and the read is refused),
+regular files only, non-blocking (a FIFO can't hang it), at most 1 MiB each.
+
+**What was measured.**
+
+- Linux, git 2.43.0: the e2e test `a_hostile_repo_cannot_run_anything_through_the_daemon`
+  with the daemon under `strace -f -e trace=execve`. The repository's config, attributes and
+  hooks all name a marker script (fsmonitor, pager, sshCommand, alternateRefsCommand, external
+  diff, a diff driver's command and textconv, a required clean/smudge/process filter, and
+  hooks). Over the summary, `git.changes`, four `git.diff`s and a worktree Tab, the daemon and
+  its children made 48 `execve` calls: 2 of clothod itself (serve and the holder), 2 of
+  `/bin/sh` (the panes), and 44 of git (`config`, `status`, `diff-index`, `diff-tree`,
+  `merge-base`, `rev-list`, `rev-parse`, `check-ref-format`, `worktree`, and the `branch`,
+  `symbolic-ref` and `reset` that `worktree add` runs itself). Nothing else, and none failed.
+  `.git/index` was byte-for-byte and mtime-for-mtime what it was before.
+- macOS, Apple git 2.54.0 (Apple Git-157), the build Mac: the same tests pass (the marker never
+  appears, the index is unchanged). No syscall trace was taken there.
+- Each of these tests first runs ordinary `git status` and `git diff` on a copy of the same
+  repository and requires the marker to appear, so a test whose trap doesn't work fails
+  instead of passing.
+
+**The tests that pin it** (real git; a machine without git fails them):
+
+- `gitrun::tests::a_hostile_repo_runs_nothing_and_is_not_written`: every command the daemon
+  uses, one by one, in a repository that also claims to be a partial clone with an `ext::`
+  promisor remote; then a missing object, which must fail and not fetch.
+- `gitrun::tests::a_hostile_submodule_runs_nothing`.
+- `gitrun::tests::a_timeout_kills_the_whole_process_group`,
+  `a_dropped_call_kills_the_whole_process_group`, `the_output_cap_truncates_and_stops_reading`,
+  `an_old_or_unknown_git_is_unsupported`, `open_refuses_what_it_cannot_make_safe`,
+  `find_git_honours_the_override_and_is_never_relative`.
+- `worktree::tests::hooks_and_filters_never_run`, `each_refusal_leaves_no_branch_and_no_folder`,
+  `a_failed_add_rolls_the_branch_back`, `a_locked_half_made_worktree_is_taken_back`.
+- e2e `a_hostile_repo_cannot_run_anything_through_the_daemon` (the whole path, through the
+  protocol) and `git_requests_do_not_block_the_connection` (a git that hangs).
+
+**Limits, and what is not covered.**
+
+- **Git LFS and other filters.** With filters off, git compares what is in the work tree with
+  what is stored, so a repository that uses LFS (or any clean filter) can show files as
+  modified that `git status` in a terminal calls clean, and their diffs are of the stored
+  form (the pointer file).
+- **Partial clones** are refused, not completed: a comparison that needs an object the clone
+  doesn't have fails (`partial_clone`), and nothing is fetched.
+- **Worktree creation is hardened the same way**, which changes what the user gets: LFS files
+  in the new worktree are pointer files until `git lfs pull`, and `post-checkout` (and every
+  other hook) does not run, so a repository that relies on one to set up a checkout isn't set
+  up. This is the price of creating a worktree from a client's request without running the
+  repository's code. The daemon never deletes a worktree or a branch it didn't just create, and
+  what it just created it removes only through git.
+- **Reftable** repositories are refused (`git_unsupported`): the daemon reads HEAD and refs
+  from files, and there are none to read. **SHA-256** repositories and **sparse checkouts**
+  are not refused and not tested.
+- **Git older than 2.31** is `git_unsupported`. No workaround is attempted.
+- **A config that changes between the scan and the command** is out of scope: the filter and
+  protocol names are listed when a job starts, and a filter added to the config in the
+  milliseconds after that is not overridden for that job. Whoever can write `.git/config` at
+  will already runs code as the user.
+- **Resource use** is bounded per call (time, output), per job (the config scan, at most 5 s,
+  then 6 s of git for a summary, a list or a diff, and 10 s in all for a request; two minutes
+  for a checkout) and per daemon (two git jobs at once), not by the
+  repository's size: a very large repository gives `timeout` or uncounted lines, and is then
+  read again less often (ten times the last run's duration apart).
+- **What clients get is still untrusted data.** File names and diff text come from the
+  repository. The daemon makes paths and messages printable and marks the paths it changed
+  (`diffable: false`), and makes diff text valid UTF-8, but diff lines keep their content,
+  escape sequences included.
+
 ## For client authors
 
 - Treat everything from a pane as untrusted: OUTPUT bytes, titles, cwd, clipboard copies, agent
   messages. On a remote machine, so is the daemon's whole stream.
+- Diff text and paths (`git.changes`, `git.diff`) are untrusted too: they are a repository's
+  contents. Draw them as text, never as markup or as terminal output, and never build a shell
+  command or a URL from a path without quoting it. The same goes for `peek` lines, which are
+  pane output with the control characters removed.
 - Keep reading, or expect to be disconnected. Heartbeat with `ping` (Transfers).
 - Never pass a user-entered host to ssh where it could be read as an option (use
   `ssh … -- host`, or refuse a leading `-`).

@@ -16,6 +16,10 @@ There is one binary, `clothod`, and it runs as two processes:
 
 `clotho` is a small test client.
 
+What changed in a pane's repository (the `changes` counts, `git.changes`, `git.diff`) and
+worktree Tabs need git 2.31 or later on the machine; without it everything else works, and those
+say `no_git` or `git_unsupported` (docs/protocol.md, "Changes"; docs/security.md for how git is run).
+
 ## Build
 
 ```sh

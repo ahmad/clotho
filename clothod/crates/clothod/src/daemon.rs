@@ -5,7 +5,7 @@
 //! Lock order: model -> panes map -> pane -> clients map. Nothing that holds a pane lock takes
 //! the model lock.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -97,6 +97,36 @@ pub(crate) struct Client {
     /// The client's terminal colors (`hello.colors`, `client.colors`) and when it set them (the
     /// daemon's `colors_seq`): applications in the panes it uses query these.
     colors: Mutex<Option<(Arc<clotho_vt::Palette>, u64)>>,
+    /// Its peek subscription (`peek.subscribe`), if it has one.
+    peek: Mutex<Option<PeekSub>>,
+}
+
+/// One client's peek subscription: the last lines of the panes it names, sent as `peek` events
+/// when they change (docs/protocol.md, "Peek").
+struct PeekSub {
+    /// The panes wanted; `None` is all of them.
+    panes: Option<HashSet<u64>>,
+    /// How many lines of each (1 to PEEK_LINES).
+    lines: usize,
+    /// What this client was last sent, by pane.
+    sent: HashMap<u64, Vec<String>>,
+}
+
+impl PeekSub {
+    fn wants(&self, pane: u64) -> bool {
+        self.panes.as_ref().is_none_or(|set| set.contains(&pane))
+    }
+}
+
+/// The most lines a peek carries, and the most characters of each.
+const PEEK_LINES: usize = 8;
+const PEEK_CHARS: usize = 200;
+/// The most pane ids one `peek.subscribe` names.
+const PEEK_PANES: usize = 4096;
+
+/// The last `n` of a pane's peek lines.
+fn last_lines(lines: &[String], n: usize) -> &[String] {
+    &lines[lines.len().saturating_sub(n)..]
 }
 
 impl Client {
@@ -464,6 +494,8 @@ struct Pane {
     own_scrollback: bool,
     /// Output position the VT has consumed.
     vt_seq: u64,
+    /// The output position the peek subscribers' lines were last read at (`send_peeks`).
+    peek_seq: u64,
     ring: Ring,
     /// Resizes still to apply while replaying recovered output: (seq, cols, rows).
     replay_resizes: Vec<(u64, u16, u16)>,
@@ -626,6 +658,7 @@ impl Pane {
             muted_agent: None,
             own_scrollback,
             vt_seq: info.seq_start,
+            peek_seq: info.seq_start,
             ring: {
                 // Only for replays to clients, which are capped at REPLAY_LIMIT (the holder
                 // keeps the longer buffer for recovery).
@@ -720,6 +753,8 @@ pub struct Daemon {
     git: Mutex<GitCache>,
     /// At most this many `gh` lookups at once.
     gh_slots: Arc<tokio::sync::Semaphore>,
+    /// At most this many git jobs at once: `changes` refreshes, `git.changes` and `git.diff`.
+    git_slots: Arc<tokio::sync::Semaphore>,
     /// Notification text rewrites (crate::summary; setting `notification_rewrite`).
     summary: Arc<crate::summary::Summarizer>,
     /// This daemon, for tasks that come back to it later.
@@ -736,6 +771,62 @@ struct GitCache {
     repos: HashMap<PathBuf, crate::git::Info>,
     /// By (owner/name, branch).
     prs: HashMap<(String, String), PrEntry>,
+    /// By git dir: the `changes` summary and when to read it again.
+    changes: HashMap<PathBuf, ChangesEntry>,
+}
+
+/// What a work tree's `changes` summary depends on that can be read from files: HEAD's text,
+/// the commit it is at, the base branch (name and commit), and when the index was last written.
+type ChangesKey = (String, Option<String>, Option<(String, String)>, Option<std::time::SystemTime>);
+
+struct ChangesEntry {
+    /// `None` until the first run ends (`changes_reason: "pending"`).
+    value: Option<crate::changes::Summary>,
+    key: Option<ChangesKey>,
+    /// When the last run started; `None` before the first.
+    at: Option<Instant>,
+    /// How long the last run spent in git.
+    took: Duration,
+    running: bool,
+    /// Something changed since the last run started: the next one is due.
+    dirty: bool,
+}
+
+/// A work tree's `changes` are read again at most this often (and never more often than ten
+/// times the last run's duration), and only while a client is subscribed to events.
+fn git_refresh() -> Duration {
+    std::env::var("CLOTHOD_TEST_GIT_REFRESH_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).unwrap_or(Duration::from_secs(3))
+}
+/// ...and at least this often while one is, whatever was or wasn't noticed: an edit made
+/// outside any pane changes nothing the daemon watches.
+const GIT_REFRESH_MAX: Duration = Duration::from_secs(15);
+/// Without a usable git a run can't succeed until one is installed: looked at again this often.
+const GIT_RETRY: Duration = Duration::from_secs(60);
+/// The whole of one `git.changes` or `git.diff`, the wait for a slot included.
+const GIT_REQUEST: Duration = Duration::from_secs(10);
+
+/// The `changes` summary a `git.changes` reply amounts to (the same numbers, without a second
+/// run): see `crate::changes::summary`.
+fn summary_of(list: &Value) -> crate::changes::Summary {
+    let group = |g: &Value| json!({"files": g["total"], "added": g["added"], "removed": g["removed"]});
+    let branch = match &list["branch_changes"] {
+        Value::Null => Value::Null,
+        b => {
+            let mut v = group(b);
+            v["base"] = b["base"].clone();
+            v["commits"] = b["commits"].clone();
+            v
+        }
+    };
+    // No base and no merge base are not failures: the summary has no reason for them.
+    let reason = list["branch_reason"].as_str().filter(|r| !["no_base", "no_merge_base"].contains(r));
+    crate::changes::Summary { changes: Some(json!({"uncommitted": group(&list["uncommitted"]), "branch": branch, "reason": reason})), reason: None }
+}
+
+/// Whether a repository keeps its refs in a reftable: HEAD and the refs can't be read from
+/// files there, so nothing is compared rather than compared with the wrong commit.
+fn unreadable_refs(loc: &crate::git::Location) -> bool {
+    loc.commondir.join("reftable").is_dir()
 }
 
 struct PrEntry {
@@ -1127,6 +1218,7 @@ pub async fn serve(dir: PathBuf) -> Result<()> {
         push: crate::push::Push::load(&if platform::ephemeral().is_some() { dir.clone() } else { platform::log_dir(&dir) }),
         git: Mutex::new(GitCache::default()),
         gh_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        git_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         summary: crate::summary::Summarizer::new(&dir, crate::config::notification_rewrite()),
         me: std::sync::OnceLock::new(),
         desktop_seen: Mutex::new(None),
@@ -2706,6 +2798,7 @@ impl Daemon {
         }
         if snapshot_check && self.live.load(Ordering::Relaxed) {
             self.refresh_git();
+            self.send_peeks();
         }
         if snapshot_check && (self.dirty.load(Ordering::Relaxed) || self.layout.as_ref().is_some_and(|w| w.agent_gone_due())) {
             self.persist();
@@ -2716,12 +2809,14 @@ impl Daemon {
     }
 
     /// Once a second: find each pane's work tree when its cwd changed, read every work tree in
-    /// use once (HEAD, the branch's ref, origin), start PR lookups that are due, and send a
-    /// `pane` event for every pane whose `git` changed.
+    /// use once (HEAD, the branch's ref, origin), start the PR lookups and `changes` runs that
+    /// are due, and send a `pane` event for every pane whose `git` changed.
     fn refresh_git(self: &Arc<Self>) {
         use crate::git;
-        // Panes: (id, location, shown by a client).
-        let mut panes: Vec<(u64, Option<git::Location>, bool)> = Vec::new();
+        // Before the cache's lock (the clients map is never taken under it).
+        let watched = !self.event_clients().is_empty();
+        // Panes: (id, location, shown by a client, last output).
+        let mut panes: Vec<(u64, Option<git::Location>, bool, Instant)> = Vec::new();
         for p in self.panes.lock().unwrap().values().cloned().collect::<Vec<_>>() {
             let mut p = p.lock().unwrap();
             if p.exited.is_some() {
@@ -2732,13 +2827,13 @@ impl Daemon {
                 p.git_loc = cwd.as_deref().and_then(|c| git::locate(Path::new(c)));
                 p.git_cwd = cwd;
             }
-            panes.push((p.id, p.git_loc.clone(), !p.subs.is_empty()));
+            panes.push((p.id, p.git_loc.clone(), !p.subs.is_empty(), p.last_output));
         }
         let mut views: HashMap<PathBuf, Value> = HashMap::new();
         {
             let mut cache = self.git.lock().unwrap();
             let mut seen = std::collections::HashSet::new();
-            for (_, loc, _) in &panes {
+            for (_, loc, _, _) in &panes {
                 let Some(loc) = loc else { continue };
                 if !seen.insert(loc.gitdir.clone()) {
                     continue;
@@ -2746,7 +2841,8 @@ impl Daemon {
                 let head = std::fs::read_to_string(loc.gitdir.join("HEAD")).unwrap_or_default();
                 let info = git::info(loc, &head);
                 cache.repos.insert(loc.gitdir.clone(), info.clone());
-                let shown = panes.iter().any(|(_, l, shown)| *shown && l.as_ref().is_some_and(|l| l.gitdir == loc.gitdir));
+                let here = |l: &Option<git::Location>| l.as_ref().is_some_and(|l| l.gitdir == loc.gitdir);
+                let shown = panes.iter().any(|(_, l, shown, _)| *shown && here(l));
                 let (pr, reason) = match (&info.remote, &info.branch) {
                     (None, _) => (None, Some("no_remote")),
                     (_, None) => (None, Some("detached")),
@@ -2771,20 +2867,60 @@ impl Daemon {
                         }
                     }
                 };
+                // The changes summary: marked dirty by what can be seen from here, read again by
+                // a task of its own (git never runs under this lock, or a pane's).
+                let head_sha = git::head_sha(&loc.commondir, &head);
+                let branch = match git::parse_head(&head) {
+                    git::Head::Branch(b) => Some(b),
+                    _ => None,
+                };
+                let base = git::base_ref(&loc.commondir, branch.as_deref());
+                let index = std::fs::metadata(loc.gitdir.join("index")).and_then(|m| m.modified()).ok();
+                let key: ChangesKey = (head, head_sha.clone(), base.clone(), index);
+                let output = panes.iter().filter(|(_, l, _, _)| here(l)).map(|(_, _, _, at)| *at).max();
+                let entry = cache.changes.entry(loc.gitdir.clone()).or_insert(ChangesEntry { value: None, key: None, at: None, took: Duration::ZERO, running: false, dirty: true });
+                if entry.key.as_ref() != Some(&key) {
+                    entry.key = Some(key);
+                    entry.dirty = true;
+                }
+                if entry.at.is_none_or(|at| output.is_some_and(|o| o > at) || at.elapsed() >= GIT_REFRESH_MAX) {
+                    entry.dirty = true;
+                }
+                if unreadable_refs(loc) {
+                    entry.value = Some(crate::changes::Summary::none("git_unsupported"));
+                } else if entry.dirty && watched && !entry.running {
+                    let no_git = entry.value.as_ref().is_some_and(|v| matches!(v.reason, Some("no_git" | "git_unsupported")));
+                    let wait = if no_git { GIT_RETRY } else { git_refresh() }.max(entry.took * 10);
+                    if entry.at.is_none_or(|at| at.elapsed() >= wait) {
+                        entry.dirty = false;
+                        entry.running = true;
+                        entry.at = Some(Instant::now());
+                        let (d, loc) = (self.clone(), loc.clone());
+                        let base = base.map(|(name, sha)| crate::changes::Base { name, sha });
+                        tokio::spawn(async move { d.refresh_changes(loc, head_sha, base).await });
+                    }
+                }
+                let (changes, changes_reason) = match &entry.value {
+                    None => (None, Some("pending")),
+                    Some(s) => (s.changes.clone(), s.reason),
+                };
                 views.insert(
                     loc.gitdir.clone(),
                     json!({
                         "repo": info.repo, "root": info.root, "remote": info.remote, "branch": info.branch, "head": info.head,
                         "worktree": info.worktree.as_ref().map(|(name, path)| json!({"name": name, "path": path})),
                         "pr": pr, "pr_reason": reason,
+                        "changes": changes, "changes_reason": changes_reason,
                     }),
                 );
             }
             cache.repos.retain(|k, _| seen.contains(k));
+            // A run still going for a work tree no pane is in finds no entry, and stores nothing.
+            cache.changes.retain(|k, _| seen.contains(k));
             // Lookups nobody has needed for an hour go (results only: a running one stays).
             cache.prs.retain(|_, e| e.running || e.at.elapsed() < Duration::from_secs(3600));
         }
-        for (id, loc, _) in panes {
+        for (id, loc, _, _) in panes {
             let view = loc.and_then(|l| views.get(&l.gitdir).cloned());
             let Some(p) = self.pane(id) else { continue };
             let mut p = p.lock().unwrap();
@@ -2808,6 +2944,233 @@ impl Daemon {
         }
         let mut cache = self.git.lock().unwrap();
         cache.prs.insert(key, PrEntry { result: Some(result), at: Instant::now(), running: false });
+    }
+
+    /// One `changes` run for a work tree (at most two git jobs at once); the next refresh_git
+    /// shows its result.
+    async fn refresh_changes(self: Arc<Self>, loc: crate::git::Location, head: Option<String>, base: Option<crate::changes::Base>) {
+        let slots = self.git_slots.clone();
+        let root = loc.root.clone();
+        // A task of its own, so that whatever happens in it the entry stops saying `running`.
+        let run = tokio::spawn(async move {
+            let _slot = slots.acquire_owned().await.ok()?;
+            let started = Instant::now();
+            let summary = match crate::gitrun::Repo::open(&root).await {
+                Ok(repo) => crate::changes::summary(&repo, head.as_deref(), base.as_ref()).await,
+                Err(e) => crate::changes::Summary::none(crate::changes::reason(&e)),
+            };
+            Some((summary, started.elapsed()))
+        });
+        let (summary, took) = run.await.ok().flatten().unwrap_or((crate::changes::Summary::none("error"), Duration::ZERO));
+        let mut cache = self.git.lock().unwrap();
+        if let Some(e) = cache.changes.get_mut(&loc.gitdir) {
+            // The reason once per change, not once per run.
+            if summary.reason.is_some() && e.value.as_ref().is_none_or(|v| v.reason != summary.reason) && summary.reason != Some("no_git") {
+                log(format_args!("git: no changes for {}: {}", clotho_vt::printable(&loc.root.to_string_lossy(), 200), summary.reason.unwrap_or_default()));
+            }
+            e.value = Some(summary);
+            e.took = took;
+            e.running = false;
+        }
+    }
+
+    /// The work tree a pane is in right now (its cwd may have changed since the last refresh).
+    fn pane_git_loc(&self, p: &Value) -> std::result::Result<crate::git::Location, RpcError> {
+        let pane = param_u64(p, "pane")?;
+        let pp = self.pane(pane).ok_or_else(|| err("not_found", format!("no pane {pane}")))?;
+        let pp = pp.lock().unwrap();
+        let cwd = pp.cwd.clone().or_else(|| pp.polled_cwd.clone()).or_else(|| platform::process_cwd(pp.pid).map(|c| c.to_string_lossy().into_owned()));
+        let loc = if cwd == pp.git_cwd { pp.git_loc.clone() } else { cwd.as_deref().and_then(|c| crate::git::locate(Path::new(c))) };
+        loc.ok_or_else(|| err("not_a_repo", format!("pane {pane} is not in a git repository")))
+    }
+
+    /// `git.changes` and `git.diff`: run off the read loop (the caller spawns this), behind the
+    /// same two slots as the summaries, within GIT_REQUEST in all.
+    async fn git_request(&self, method: &str, p: &Value) -> RpcResult {
+        use crate::{changes, git};
+        let loc = self.pane_git_loc(p)?;
+        let text = |key: &str, required: bool| -> std::result::Result<Option<String>, RpcError> {
+            match p.get(key) {
+                None | Some(Value::Null) if !required => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                _ => Err(err("bad_request", format!("{key} must be a string"))),
+            }
+        };
+        let number = |key: &str, default: u64| -> std::result::Result<u64, RpcError> {
+            match p.get(key) {
+                None | Some(Value::Null) => Ok(default),
+                Some(v) => v.as_u64().ok_or_else(|| err("bad_request", format!("{key} must be a non-negative integer"))),
+            }
+        };
+        // Everything about the request is checked before git runs.
+        let limit = number("limit", changes::DEFAULT_LIMIT as u64)?;
+        let diff = match method {
+            "git.diff" => Some((text("path", true)?.unwrap_or_default(), text("group", true)?.unwrap_or_default(), text("old_path", false)?, number("context", changes::DEFAULT_CONTEXT)?)),
+            _ => None,
+        };
+        if unreadable_refs(&loc) {
+            return Err(err("git_unsupported", "this repository keeps its refs in a reftable, which clothod does not read"));
+        }
+        let slots = self.git_slots.clone();
+        let work = async {
+            let _slot = slots.acquire_owned().await.map_err(|_| ("git_failed", "the daemon is stopping".to_string()))?;
+            let head_text = std::fs::read_to_string(loc.gitdir.join("HEAD")).unwrap_or_default();
+            let head = git::head_sha(&loc.commondir, &head_text);
+            let branch = match git::parse_head(&head_text) {
+                git::Head::Branch(b) => Some(b),
+                _ => None,
+            };
+            let base = git::base_ref(&loc.commondir, branch.as_deref()).map(|(name, sha)| changes::Base { name, sha });
+            let repo = crate::gitrun::Repo::open(&loc.root).await.map_err(|e| changes::error(&e))?;
+            match &diff {
+                Some((path, group, old_path, context)) => changes::diff(&repo, head.as_deref(), base.as_ref(), group, path, old_path.as_deref(), *context).await,
+                None => {
+                    let mut v = changes::list(&repo, head.as_deref(), base.as_ref(), usize::try_from(limit).unwrap_or(usize::MAX)).await?;
+                    let info = git::info(&loc, &head_text);
+                    v["root"] = json!(info.root);
+                    v["branch"] = json!(info.branch);
+                    v["head"] = json!(info.head);
+                    Ok(v)
+                }
+            }
+        };
+        // Past the budget the job is dropped, which kills its git (the runner's guard).
+        let result = match tokio::time::timeout(GIT_REQUEST, work).await {
+            Ok(r) => r,
+            Err(_) => Err(("timeout", "git took too long".to_string())),
+        };
+        let v = result.map_err(|(code, message)| err(code, clotho_vt::printable(&message, 500)))?;
+        if diff.is_none() {
+            // The list was just read: the panes' summary follows it without a run of its own.
+            if let Some(e) = self.git.lock().unwrap().changes.get_mut(&loc.gitdir) {
+                e.value = Some(summary_of(&v));
+            }
+        }
+        Ok(v)
+    }
+
+    /// `tab.create` and `workspace.create` with `worktree`: make the worktree beside the repo
+    /// `cwd` is in, then the Tab or Workspace with its pane there. Run off the read loop (a
+    /// checkout can take long).
+    async fn create_in_worktree(&self, client: &Client, method: &str, p: &Value) -> RpcResult {
+        let wt = p.get("worktree").filter(|w| w.is_object()).ok_or_else(|| err("bad_request", "worktree must be an object"))?;
+        let name = wt.get("name").and_then(Value::as_str).ok_or_else(|| err("bad_request", "worktree.name must be a string"))?;
+        let base = match wt.get("base") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(v.as_str().ok_or_else(|| err("bad_request", "worktree.base must be a string"))?),
+        };
+        let mut opts = SpawnOpts::from_params(p)?;
+        let cwd = opts.cwd.clone().ok_or_else(|| err("bad_request", "cwd is required with worktree: it names the repository"))?;
+        let ws = match method {
+            "tab.create" => {
+                let ws = param_u64(p, "workspace")?;
+                if self.model.lock().unwrap().workspace(ws).is_none() {
+                    return Err(err("not_found", format!("no workspace {ws}")));
+                }
+                Some(ws)
+            }
+            _ => None,
+        };
+        let made = crate::worktree::create(Path::new(&cwd), name, base).await.map_err(|(code, message)| {
+            log(format_args!("{} could not create worktree {} for {method}: {code}", client.label(), clotho_vt::printable(name, 100)));
+            err(code, message)
+        })?;
+        let path = made.path.to_string_lossy().into_owned();
+        log(format_args!("{} created worktree {} (branch {}, at {}) for {method}", client.label(), clotho_vt::printable(&path, 300), made.branch, made.head));
+        // Nothing made here is ever deleted: when the Tab can't be opened the worktree stays,
+        // and the message says so.
+        let stays = |e: RpcError| err(e.code, format!("{} (the worktree {} on the new branch {} was created and is still there)", e.message, clotho_vt::printable(&path, 300), made.branch));
+        opts.cwd = Some(path.clone());
+        let pane = self.spawn_pane(opts).await.map_err(stays)?;
+        let mut reply = match ws {
+            Some(ws) => {
+                let tab = self.model.lock().unwrap().create_tab(ws, pane);
+                let Some(tab) = tab else {
+                    self.hang_up(&[pane]);
+                    return Err(stays(err("not_found", format!("no workspace {ws}"))));
+                };
+                json!({"tab": tab, "pane": pane})
+            }
+            None => {
+                let name = p.get("name").and_then(Value::as_str).map(String::from);
+                let (ws, tab) = self.model.lock().unwrap().create_workspace(name, pane);
+                json!({"workspace": ws, "tab": tab, "pane": pane})
+            }
+        };
+        self.model_changed();
+        reply["worktree"] = json!({"path": path, "branch": made.branch, "head": made.head});
+        Ok(reply)
+    }
+
+    /// `peek.subscribe`: replaces the client's peek subscription and replies with the lines as
+    /// they are now. It sends its own reply, under the subscription's lock, so that no `peek`
+    /// event for the new subscription can go out before it.
+    fn peek_subscribe(&self, client: &Client, req_id: Value, p: &Value) -> std::result::Result<(), RpcError> {
+        let wanted = match p.get("panes") {
+            None | Some(Value::Null) => None,
+            Some(Value::Array(a)) if a.len() <= PEEK_PANES => Some(a.iter().map(Value::as_u64).collect::<Option<HashSet<u64>>>().ok_or_else(|| err("bad_request", "panes must be an array of pane ids"))?),
+            _ => return Err(err("bad_request", format!("panes must be an array of at most {PEEK_PANES} pane ids"))),
+        };
+        let lines = match p.get("lines") {
+            None | Some(Value::Null) => 2,
+            Some(v) => v.as_u64().filter(|n| (1..=PEEK_LINES as u64).contains(n)).ok_or_else(|| err("bad_request", format!("lines must be 1..={PEEK_LINES}")))? as usize,
+        };
+        let mut sub = PeekSub { panes: wanted, lines, sent: HashMap::new() };
+        let mut current = client.peek.lock().unwrap();
+        let mut panes: Vec<(u64, Arc<Mutex<Pane>>)> = self.panes.lock().unwrap().iter().filter(|(id, _)| sub.wants(**id)).map(|(id, p)| (*id, p.clone())).collect();
+        panes.sort_by_key(|(id, _)| *id);
+        let mut peeks = Vec::new();
+        for (id, pane) in panes {
+            let all = pane.lock().unwrap().vt.peek_lines(PEEK_LINES, PEEK_CHARS);
+            let last = last_lines(&all, lines).to_vec();
+            peeks.push(json!({"pane": id, "lines": last}));
+            sub.sent.insert(id, last);
+        }
+        *current = Some(sub);
+        client.json(json!({"id": req_id, "result": {"peeks": peeks}}));
+        Ok(())
+    }
+
+    /// Once a second: send each peek subscriber the last lines of the panes it wants, where
+    /// they changed. Not part of the state: no `rev`, nothing stored.
+    fn send_peeks(&self) {
+        // A client's peek lock is never taken under the clients map's (`peek_subscribe` holds
+        // it while it takes pane locks, and a pane's lock comes before the clients map).
+        let mut subs: Vec<Arc<Client>> = self.clients.lock().unwrap().values().cloned().collect();
+        subs.retain(|c| c.peek.lock().unwrap().is_some());
+        if subs.is_empty() {
+            return;
+        }
+        let panes: Vec<(u64, Arc<Mutex<Pane>>)> = self.panes.lock().unwrap().iter().map(|(id, p)| (*id, p.clone())).collect();
+        let ids: HashSet<u64> = panes.iter().map(|(id, _)| *id).collect();
+        for c in &subs {
+            if let Some(s) = c.peek.lock().unwrap().as_mut() {
+                s.sent.retain(|id, _| ids.contains(id));
+            }
+        }
+        // Each wanted pane that got output since it was last read, read once for everyone.
+        let mut fresh: Vec<(u64, Vec<String>)> = Vec::new();
+        for (id, p) in &panes {
+            if !subs.iter().any(|c| c.peek.lock().unwrap().as_ref().is_some_and(|s| s.wants(*id))) {
+                continue;
+            }
+            let mut p = p.lock().unwrap();
+            if p.vt_seq != p.peek_seq {
+                p.peek_seq = p.vt_seq;
+                fresh.push((*id, p.vt.peek_lines(PEEK_LINES, PEEK_CHARS)));
+            }
+        }
+        for c in &subs {
+            let mut sub = c.peek.lock().unwrap();
+            let Some(s) = sub.as_mut() else { continue };
+            for (id, lines) in &fresh {
+                let lines = last_lines(lines, s.lines);
+                if s.wants(*id) && s.sent.get(id).map_or(&[][..], Vec::as_slice) != lines {
+                    s.sent.insert(*id, lines.to_vec());
+                    c.event("peek", json!({"pane": id, "lines": lines}));
+                }
+            }
+        }
     }
 
     // ---- clients -----------------------------------------------------------------------
@@ -2835,6 +3198,7 @@ impl Daemon {
             mac: AtomicBool::new(false),
             peer_pid,
             colors: Mutex::new(None),
+            peek: Mutex::new(None),
         });
         self.clients.lock().unwrap().insert(id, client.clone());
 
@@ -2904,6 +3268,29 @@ impl Daemon {
                                 });
                                 continue;
                             }
+                            Err(e) => Err(e),
+                        }
+                    } else if matches!(method.as_str(), "git.changes" | "git.diff")
+                        || (matches!(method.as_str(), "tab.create" | "workspace.create") && params.get("worktree").is_some_and(|w| !w.is_null()))
+                    {
+                        // These run git, which can take seconds (a worktree's checkout, longer):
+                        // answered by id when done, while the read loop goes on.
+                        let (d, c, req_id) = (self.clone(), client.clone(), req_id.clone());
+                        tokio::spawn(async move {
+                            let result = match method.as_str() {
+                                "git.changes" | "git.diff" => d.git_request(&method, &params).await,
+                                _ => d.create_in_worktree(&c, &method, &params).await,
+                            };
+                            c.json(match result {
+                                Ok(v) => json!({"id": req_id, "result": v}),
+                                Err(e) => json!({"id": req_id, "error": {"code": e.code, "message": e.message}}),
+                            });
+                        });
+                        continue;
+                    } else if method == "peek.subscribe" {
+                        // Sends its own reply, ordered before the subscription's first event.
+                        match self.peek_subscribe(&client, req_id.clone(), &params) {
+                            Ok(()) => continue,
                             Err(e) => Err(e),
                         }
                     } else if method == "pane.subscribe" {
@@ -2999,7 +3386,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary", "alerts"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary", "alerts", "git.changes", "worktree", "peek"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -3076,6 +3463,10 @@ impl Daemon {
                 // this one), so a restart, an upgrade or a crash keeps it.
                 self.persist();
                 Ok(json!({"agent": agent}))
+            }
+            "peek.unsubscribe" => {
+                *client.peek.lock().unwrap() = None;
+                Ok(json!({}))
             }
             "state.get" => Ok(self.state_json()),
             "events.subscribe" => {

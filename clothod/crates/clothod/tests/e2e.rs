@@ -33,6 +33,9 @@ impl Env {
             std::env::set_var("CLOTHOD_EPHEMERAL", "60");
             // Never the user's real gh (and GitHub login): tests that want one use a stub.
             std::env::set_var("CLOTHOD_GH", "/nonexistent/gh");
+            // Never git on whatever repository a test's panes happen to be in (this one, when
+            // the tests run from the clone): tests that want git name it (`real_git`).
+            std::env::set_var("CLOTHOD_GIT", "/nonexistent/git");
             // Never the real claude for notification text: tests that want one use a fake.
             std::env::set_var("CLOTHOD_SUMMARIZER", "/nonexistent/summarizer");
             sweep_stale_test_instances();
@@ -5218,6 +5221,8 @@ esac
         (json!("proj"), json!(main.display().to_string()), json!("ahmad/clotho"), json!("feature"), json!("0123456"), Value::Null, Value::Null)
     );
     assert_eq!(g["pr"], json!({"number": 42, "state": "open", "draft": false, "url": "https://github.com/ahmad/clotho/pull/42", "title": "Fix the[31m login"}));
+    // These repos are a few files, with nothing git could read: no changes, and a reason.
+    assert!(g["changes"].is_null() && g["changes_reason"].is_string(), "{g}");
     let first = std::fs::read_to_string(&calls).unwrap();
     assert_eq!(first.trim(), "pr view --repo ahmad/clotho --json number,state,isDraft,url,title -- feature");
     // Nobody shows the pane: no refresh, however long.
@@ -6780,4 +6785,750 @@ async fn only_typing_and_focus_count_as_at_the_mac() {
     let (at, body) = relay.next();
     assert!(at - t >= Duration::from_millis(1500), "sent early: {:?}", at - t);
     assert_eq!(opened(&body)["p"], b);
+}
+
+// ---- git changes, worktree Tabs and the peek ---------------------------------------------------
+
+/// The real git, for the tests that are about it. Like the runner's own tests, these are the
+/// proof that a repository can't run anything through the daemon: a machine without git fails
+/// them rather than skipping them.
+fn real_git() -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(PathBuf::from));
+    let git = dirs.into_iter().filter(|d| d.is_absolute()).map(|d| d.join("git")).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0));
+    git.expect("these tests need git installed").display().to_string()
+}
+
+/// Test setup: git the ordinary way (the repo's config applies), but without the user's.
+fn git_command(dir: &std::path::Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(real_git());
+    cmd.args(["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", "-c", "core.autocrlf=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
+    cmd
+}
+
+fn git_do(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = git_command(dir, args).output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn git_commit(root: &std::path::Path, message: &str) -> String {
+    git_do(root, &["add", "-A"]);
+    git_do(root, &["commit", "-q", "-m", message]);
+    git_do(root, &["rev-parse", "HEAD"])
+}
+
+/// A repository at `<env>/work/proj` with one commit on `main`: `a.txt` (three lines),
+/// `src/b.txt`, `old.txt` (ten lines) and the binary `logo.bin`. Returns its root (canonical, as
+/// a shell's cwd reads) and that commit.
+fn git_repo(env: &Env) -> (PathBuf, String) {
+    let root = env.dir.path().join("work/proj");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    git_do(&root, &["init", "-q"]);
+    put(&root.join("a.txt"), "one\ntwo\nthree\n");
+    put(&root.join("src/b.txt"), "b\n");
+    put(&root.join("old.txt"), &(0..10).map(|n| format!("line {n}\n")).collect::<String>());
+    std::fs::write(root.join("logo.bin"), b"\x89PNG\0\x01\x02one").unwrap();
+    let head = git_commit(&root, "one");
+    (root, head)
+}
+
+/// An executable script. A shell writes it, so this process never holds it open for writing: a
+/// test on another thread that forks at that moment would make running it fail (ETXTBSY).
+fn script_file(p: &std::path::Path, body: &str) {
+    use std::io::Write;
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    let mut sh = Command::new("/bin/sh").args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"]).arg(p).stdin(Stdio::piped()).spawn().unwrap();
+    sh.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+    assert!(sh.wait().unwrap().success());
+}
+
+/// Start a daemon that runs the real git and reads `changes` again after 300 ms at the soonest
+/// (`vars` are set after these, and win).
+fn start_git(env: &mut Env, vars: &[(&str, &str)]) {
+    let git = real_git();
+    let mut all = vec![("CLOTHOD_GIT", git.as_str()), ("CLOTHOD_TEST_GIT_REFRESH_MS", "300")];
+    all.extend_from_slice(vars);
+    env.start_with(&test_bin(), &all);
+}
+
+/// A client subscribed to events: `changes` are only read while there is one.
+async fn watching(env: &Env) -> Client {
+    let c = env.client().await;
+    c.request("events.subscribe", json!({})).await.unwrap();
+    c
+}
+
+/// The error code a request fails with.
+async fn err_code(c: &Client, method: &str, params: Value) -> String {
+    let e = c.request(method, params.clone()).await.expect_err(&format!("{method} {params} should fail")).to_string();
+    let code = e.rsplit_once('(').map(|(_, code)| code.trim_end_matches(')').to_string());
+    code.unwrap_or_else(|| panic!("no code in {e}"))
+}
+
+fn dir(p: &std::path::Path) -> String {
+    p.display().to_string()
+}
+
+fn group_file<'a>(group: &'a Value, path: &str) -> &'a Value {
+    group["files"].as_array().unwrap().iter().find(|f| f["path"] == path).unwrap_or_else(|| panic!("no {path} in {group}"))
+}
+
+/// The `changes` summary on a pane's `git` object: nothing until a client subscribes to events,
+/// then a dirty repo's counts, an edit made in the pane, a commit, a branch ahead of `main`, and
+/// the default branch again.
+#[tokio::test]
+async fn panes_show_change_counts() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    put(&root.join("a.txt"), "one\ntwo\nthree\nfour\n");
+    put(&root.join("new.txt"), "x\ny\n");
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    for f in ["git.changes", "worktree", "peek"] {
+        assert!(c.hello["features"].as_array().unwrap().contains(&json!(f)), "{f} in {}", c.hello["features"]);
+    }
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+
+    // Nobody is subscribed to events: git isn't run, however long.
+    let pending = |g: &Value| g["repo"] == "proj" && g["changes"].is_null() && g["changes_reason"] == "pending";
+    wait_git(&c, p, "the repo", pending).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let g = pane_git(&c, p).await;
+    assert!(pending(&g), "{g}");
+
+    // One is: the summary comes as a `pane` event.
+    let mut ev = watching(&env).await;
+    let deadline = Instant::now() + T;
+    let g = loop {
+        let f = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), ev.recv()).await.expect("no pane event with changes").unwrap();
+        if let Frame::Json(v) = f {
+            if v["event"] == "pane" && v["data"]["id"] == p && v["data"]["git"]["changes"].is_object() {
+                break v["data"]["git"].clone();
+            }
+        }
+    };
+    assert_eq!(g["changes"], json!({"uncommitted": {"files": 2, "added": 3, "removed": 0}, "branch": null, "reason": null}));
+    assert_eq!((g["changes_reason"].clone(), g["branch"].clone()), (Value::Null, json!("main")));
+
+    // An edit made in the pane.
+    c.input(p, b"echo five >> a.txt\r");
+    wait_git(&c, p, "the edit", |g| g["changes"]["uncommitted"] == json!({"files": 2, "added": 4, "removed": 0})).await;
+    // A commit (made outside any pane: the index and the branch's ref are what show it).
+    let second = git_commit(&root, "two");
+    wait_git(&c, p, "the commit", |g| g["changes"]["uncommitted"] == json!({"files": 0, "added": 0, "removed": 0}) && g["head"] == second[..7]).await;
+
+    // A branch ahead of main: its base and what it adds, beside what is uncommitted.
+    git_do(&root, &["checkout", "-q", "-b", "feat"]);
+    put(&root.join("feat.txt"), "f1\nf2\n");
+    git_do(&root, &["rm", "-q", "old.txt"]);
+    git_commit(&root, "three");
+    put(&root.join("src/b.txt"), "b\nB\n");
+    let g = wait_git(&c, p, "the branch", |g| g["branch"] == "feat" && g["changes"]["branch"]["commits"] == 1 && g["changes"]["uncommitted"]["files"] == 1).await;
+    assert_eq!(g["changes"], json!({"uncommitted": {"files": 1, "added": 1, "removed": 0}, "branch": {"base": "main", "commits": 1, "files": 2, "added": 2, "removed": 10}, "reason": null}));
+
+    // The default branch has nothing to be compared with.
+    git_do(&root, &["checkout", "-q", "main"]);
+    let g = wait_git(&c, p, "main again", |g| g["branch"] == "main" && g["changes"]["branch"].is_null()).await;
+    assert_eq!(g["changes"]["uncommitted"], json!({"files": 1, "added": 1, "removed": 0}));
+    // origin's default branch is the base when there is one: main is then compared with it.
+    git_do(&root, &["update-ref", "refs/remotes/origin/trunk", &second]);
+    git_do(&root, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
+    git_do(&root, &["checkout", "-q", "feat"]);
+    wait_git(&c, p, "origin's default branch", |g| g["changes"]["branch"]["base"] == "origin/trunk" && g["changes"]["branch"]["commits"] == 1).await;
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// Two panes in one work tree: git runs once per interval for both, and both show its result.
+#[tokio::test]
+async fn two_panes_in_one_work_tree_share_one_refresh() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    put(&root.join("a.txt"), "one\n");
+    let calls = env.dir.path().join("git.calls");
+    let wrapper = env.dir.path().join("bin/git");
+    script_file(&wrapper, &format!("#!/bin/sh\necho \"$*\" >> '{}'\nexec '{}' \"$@\"\n", calls.display(), real_git()));
+    start_git(&mut env, &[("CLOTHOD_GIT", &dir(&wrapper)), ("CLOTHOD_TEST_GIT_REFRESH_MS", "1000")]);
+    let statuses = || std::fs::read_to_string(&calls).unwrap_or_default().lines().filter(|l| l.contains(" status --porcelain")).count();
+    let c = env.client().await;
+    let _ev = watching(&env).await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+    let q = new_pane(&c, with(sh(), json!({"cwd": dir(&root.join("src"))}))).await;
+    for pane in [p, q] {
+        wait_git(&c, pane, "the summary", |g| g["changes"]["uncommitted"]["files"] == 1).await;
+    }
+    // Both panes keep printing, so their work tree is always due for another look.
+    for pane in [p, q] {
+        c.input(pane, b"while :; do echo x; sleep 0.2; done\r");
+    }
+    let (t0, n0) = (Instant::now(), statuses());
+    let deadline = Instant::now() + T;
+    while statuses() < n0 + 2 {
+        assert!(Instant::now() < deadline, "git was not run again: {} status runs", statuses());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+    let (n, elapsed) = (statuses() - n0, t0.elapsed());
+    // One run per second at most, whatever the number of panes (and one for a run that had
+    // started before the count did).
+    let max = 2 + (elapsed.as_millis() / 1000) as usize;
+    assert!(n <= max, "{n} status runs in {elapsed:?} (at most {max})");
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let (a, b) = (&pane_of(&s, p)["git"], &pane_of(&s, q)["git"]);
+    assert!(a["changes"].is_object(), "{a}");
+    assert_eq!(a, b, "both panes show the same work tree");
+    // The wrapper saw what the runner passes: the repository by -C, never a cwd.
+    let all = std::fs::read_to_string(&calls).unwrap();
+    assert!(all.lines().filter(|l| l.contains(" status ")).all(|l| l.starts_with(&format!("--no-pager --no-optional-locks -C {} status", root.display()))), "{all}");
+}
+
+/// `git.changes`: both groups' files, with a rename, a binary file, an untracked one, the limit,
+/// a linked worktree, and the errors. Its result also becomes the panes' summary.
+#[tokio::test]
+async fn git_changes_lists_both_groups() {
+    let mut env = Env::empty();
+    let (root, first) = git_repo(&env);
+    git_do(&root, &["checkout", "-q", "-b", "feat"]);
+    put(&root.join("feat.txt"), "f\n");
+    let head = git_commit(&root, "feat");
+    git_do(&root, &["mv", "old.txt", "new.txt"]);
+    std::fs::write(root.join("logo.bin"), b"\x89PNG\0\x03\x04two").unwrap();
+    put(&root.join("a.txt"), "one\nTWO\nthree\nfour\n");
+    put(&root.join("notes.txt"), "n1\nn2\n");
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root.join("src"))}))).await;
+    // No client is subscribed to events, so no summary is read by itself.
+    wait_git(&c, p, "the repo", |g| g["repo"] == "proj" && g["changes_reason"] == "pending").await;
+
+    let r = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["root"].clone(), r["branch"].clone(), r["head"].clone()), (json!(dir(&root)), json!("feat"), json!(head[..7])));
+    let u = &r["uncommitted"];
+    assert_eq!((u["total"].clone(), u["truncated"].clone(), u["added"].clone(), u["removed"].clone()), (json!(4), json!(false), json!(4), json!(1)), "{u}");
+    let paths: Vec<&str> = u["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, ["a.txt", "logo.bin", "new.txt", "notes.txt"]);
+    assert_eq!(group_file(u, "a.txt"), &json!({"path": "a.txt", "status": "modified", "added": 2, "removed": 1, "binary": false, "diffable": true}));
+    let renamed = group_file(u, "new.txt");
+    assert_eq!((renamed["status"].clone(), renamed["old_path"].clone(), renamed["diffable"].clone()), (json!("renamed"), json!("old.txt"), json!(true)));
+    let logo = group_file(u, "logo.bin");
+    assert_eq!((logo["status"].clone(), logo["binary"].clone()), (json!("modified"), json!(true)));
+    let notes = group_file(u, "notes.txt");
+    assert_eq!((notes["status"].clone(), notes["added"].clone(), notes["binary"].clone()), (json!("untracked"), json!(2), json!(false)));
+    let b = &r["branch_changes"];
+    assert_eq!(
+        (b["base"].clone(), b["base_head"].clone(), b["merge_base"].clone(), b["commits"].clone(), b["total"].clone(), b["truncated"].clone()),
+        (json!("main"), json!(first[..7]), json!(first[..7]), json!(1), json!(1), json!(false)),
+        "{b}"
+    );
+    assert_eq!(group_file(b, "feat.txt"), &json!({"path": "feat.txt", "status": "added", "added": 1, "removed": 0, "binary": false, "diffable": true}));
+    assert!(r["branch_reason"].is_null());
+
+    // A limit cuts each group's list, not its totals.
+    let r = c.request("git.changes", json!({"pane": p, "limit": 1})).await.unwrap();
+    let u = &r["uncommitted"];
+    assert_eq!((u["files"].as_array().unwrap().len(), u["files"][0]["path"].clone(), u["total"].clone(), u["truncated"].clone(), u["added"].clone()), (1, json!("a.txt"), json!(4), json!(true), json!(4)));
+    assert_eq!(r["branch_changes"]["truncated"], false);
+
+    // The panes' summary follows the request, without a run of its own.
+    let g = wait_git(&c, p, "the summary", |g| g["changes"].is_object()).await;
+    assert_eq!(g["changes"], json!({"uncommitted": {"files": 4, "added": 4, "removed": 1}, "branch": {"base": "main", "commits": 1, "files": 1, "added": 1, "removed": 0}, "reason": null}));
+
+    // A linked worktree is its own work tree: its own root, branch and changes.
+    let wt = root.parent().unwrap().join("proj-wt");
+    git_do(&root, &["worktree", "add", "-q", "-b", "side", &dir(&wt), "main"]);
+    put(&wt.join("a.txt"), "one\n");
+    let q = new_pane(&c, with(sh(), json!({"cwd": dir(&wt)}))).await;
+    wait_git(&c, q, "the worktree", |g| g["worktree"]["name"] == "proj-wt").await;
+    let r = c.request("git.changes", json!({"pane": q})).await.unwrap();
+    assert_eq!((r["root"].clone(), r["branch"].clone(), r["head"].clone()), (json!(dir(&wt)), json!("side"), json!(first[..7])));
+    assert_eq!(r["uncommitted"]["total"], 1);
+    assert_eq!(group_file(&r["uncommitted"], "a.txt"), &json!({"path": "a.txt", "status": "modified", "added": 0, "removed": 2, "binary": false, "diffable": true}));
+    assert_eq!((r["branch_changes"]["base"].clone(), r["branch_changes"]["commits"].clone(), r["branch_changes"]["total"].clone()), (json!("main"), json!(0), json!(0)));
+
+    // On the default branch there is no branch group, and the reason says so.
+    git_do(&wt, &["checkout", "-q", "--detach"]);
+    git_do(&root, &["stash", "-q", "--include-untracked"]);
+    git_do(&root, &["checkout", "-q", "main"]);
+    let r = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["branch"].clone(), r["branch_changes"].clone(), r["branch_reason"].clone(), r["uncommitted"]["total"].clone()), (json!("main"), Value::Null, json!("no_base"), json!(0)));
+
+    let outside = new_pane(&c, with(sh(), json!({"cwd": "/"}))).await;
+    assert_eq!(err_code(&c, "git.changes", json!({"pane": 9999})).await, "not_found");
+    assert_eq!(err_code(&c, "git.changes", json!({})).await, "bad_request");
+    assert_eq!(err_code(&c, "git.changes", json!({"pane": outside})).await, "not_a_repo");
+    assert_eq!(err_code(&c, "git.changes", json!({"pane": p, "limit": "many"})).await, "bad_request");
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// `git.diff`: hunks with a line number on every line, for a tracked, an untracked and a binary
+/// file and for a file of the branch; the caps; the errors; and text that is always UTF-8.
+#[tokio::test]
+async fn git_diff_returns_hunks_and_caps() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    std::fs::write(root.join("latin.txt"), b"caf\xe9\n").unwrap();
+    put(&root.join("big.txt"), "start\n");
+    git_commit(&root, "more");
+    git_do(&root, &["checkout", "-q", "-b", "feat"]);
+    put(&root.join("feat.txt"), "f1\nf2\n");
+    git_commit(&root, "feat");
+    put(&root.join("a.txt"), "one\nTWO\nthree\nfour\n");
+    put(&root.join("notes.txt"), "n1\nn2");
+    std::fs::write(root.join("logo.bin"), b"\x89PNG\0\x03\x04two").unwrap();
+    std::fs::write(root.join("latin.txt"), b"caf\xe9 au lait\n").unwrap();
+    put(&root.join("big.txt"), &(0..30_000).map(|n| format!("line {n}\n")).collect::<String>());
+    put(&root.join("wide.txt"), &format!("{}\n", "w".repeat(5000)));
+    let index = std::fs::read(root.join(".git/index")).unwrap();
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+    let diff = |path: &str, group: &str| json!({"pane": p, "path": path, "group": group});
+    let lines = |d: &Value| -> Vec<Value> { d["hunks"].as_array().unwrap().iter().flat_map(|h| h["lines"].as_array().unwrap().clone()).collect() };
+
+    let d = c.request("git.diff", diff("a.txt", "uncommitted")).await.unwrap();
+    assert_eq!(
+        (d["path"].clone(), d["old_path"].clone(), d["status"].clone(), d["binary"].clone(), d["truncated"].clone(), d["added"].clone(), d["removed"].clone()),
+        (json!("a.txt"), Value::Null, json!("modified"), json!(false), json!(false), json!(2), json!(1)),
+        "{d}"
+    );
+    let h = &d["hunks"][0];
+    assert_eq!((h["old_start"].clone(), h["old_lines"].clone(), h["new_start"].clone(), h["new_lines"].clone()), (json!(1), json!(3), json!(1), json!(4)));
+    assert_eq!(
+        h["lines"],
+        json!([
+            {"t": " ", "old": 1, "new": 1, "text": "one"},
+            {"t": "-", "old": 2, "new": null, "text": "two"},
+            {"t": "+", "old": null, "new": 2, "text": "TWO"},
+            {"t": " ", "old": 3, "new": 3, "text": "three"},
+            {"t": "+", "old": null, "new": 4, "text": "four"},
+        ])
+    );
+    // No context: only what changed.
+    let d = c.request("git.diff", with(diff("a.txt", "uncommitted"), json!({"context": 0}))).await.unwrap();
+    assert!(lines(&d).iter().all(|l| l["t"] != " ") && lines(&d).len() == 3, "{d}");
+
+    // An untracked file is all added lines; its last one has no newline.
+    let d = c.request("git.diff", diff("notes.txt", "uncommitted")).await.unwrap();
+    assert_eq!((d["status"].clone(), d["added"].clone(), d["removed"].clone(), d["binary"].clone()), (json!("untracked"), json!(2), json!(0), json!(false)));
+    assert_eq!(lines(&d), [json!({"t": "+", "old": null, "new": 1, "text": "n1"}), json!({"t": "+", "old": null, "new": 2, "text": "n2", "no_newline": true})]);
+    // A binary file has no hunks.
+    let d = c.request("git.diff", diff("logo.bin", "uncommitted")).await.unwrap();
+    assert_eq!((d["binary"].clone(), d["hunks"].clone(), d["status"].clone()), (json!(true), json!([]), json!("modified")));
+    // A Latin-1 file: the reply parsed, so it is UTF-8; the byte that isn't reads as U+FFFD.
+    let d = c.request("git.diff", diff("latin.txt", "uncommitted")).await.unwrap();
+    let texts: Vec<String> = lines(&d).iter().map(|l| format!("{}{}", l["t"].as_str().unwrap(), l["text"].as_str().unwrap())).collect();
+    assert_eq!(texts, ["-caf\u{fffd}", "+caf\u{fffd} au lait"]);
+    // A large diff is cut at 20,000 lines, and a long line at 2,000 characters.
+    let d = c.request("git.diff", diff("big.txt", "uncommitted")).await.unwrap();
+    assert_eq!(d["truncated"], true);
+    let n = lines(&d).len();
+    assert!((1000..=20_000).contains(&n), "{n} lines");
+    let d = c.request("git.diff", diff("wide.txt", "uncommitted")).await.unwrap();
+    let l = &lines(&d)[0];
+    assert_eq!((l["text"].as_str().unwrap().chars().count(), l["cut"].clone(), d["truncated"].clone()), (2000, json!(true), json!(false)));
+
+    // The branch group: what HEAD adds to its merge base with main.
+    let d = c.request("git.diff", diff("feat.txt", "branch")).await.unwrap();
+    assert_eq!((d["status"].clone(), d["added"].clone(), lines(&d).len()), (json!("added"), json!(2), 2));
+
+    for (params, code) in [
+        (diff("../a.txt", "uncommitted"), "bad_path"),
+        (diff("/etc/passwd", "uncommitted"), "bad_path"),
+        (diff("src/../a.txt", "uncommitted"), "bad_path"),
+        (diff("", "uncommitted"), "bad_path"),
+        (json!({"pane": p, "group": "uncommitted"}), "bad_request"),
+        (json!({"pane": p, "path": 7, "group": "uncommitted"}), "bad_request"),
+        (json!({"pane": p, "path": "a.txt"}), "bad_request"),
+        (diff("a.txt", "staged"), "bad_request"),
+        (with(diff("a.txt", "uncommitted"), json!({"context": 21})), "bad_request"),
+        (with(diff("a.txt", "uncommitted"), json!({"context": -1})), "bad_request"),
+        (with(diff("a.txt", "uncommitted"), json!({"old_path": "../x"})), "bad_path"),
+        (diff("src/b.txt", "uncommitted"), "not_changed"),
+        (diff("nothing-here.txt", "uncommitted"), "not_changed"),
+        (diff("a.txt", "branch"), "not_changed"),
+        (json!({"pane": 9999, "path": "a.txt", "group": "uncommitted"}), "not_found"),
+    ] {
+        assert_eq!(err_code(&c, "git.diff", params.clone()).await, code, "{params}");
+    }
+    assert_eq!(std::fs::read(root.join(".git/index")).unwrap(), index, "a diff wrote the index");
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// A repository whose config, attributes and hooks all name a marker script, looked at every
+/// way the daemon looks at one: the summary, `git.changes`, `git.diff` and a worktree Tab. The
+/// script never runs, and the index is never written. (crate::gitrun's own tests cover the
+/// runner; this is the same through the protocol.)
+#[tokio::test]
+async fn a_hostile_repo_cannot_run_anything_through_the_daemon() {
+    let mut env = Env::empty();
+    let (root, _) = git_repo(&env);
+    let (evil, marker) = (env.dir.path().join("evil.sh"), env.dir.path().join("marker"));
+    let body = format!("#!/bin/sh\necho \"ran $0 $*\" >> '{}'\nexit 0\n", marker.display());
+    script_file(&evil, &body);
+    put(&root.join(".gitattributes"), "* filter=evil diff=evil\n");
+    git_commit(&root, "attributes");
+    git_do(&root, &["checkout", "-q", "-b", "feat"]);
+    put(&root.join("feat.txt"), "feat\n");
+    git_commit(&root, "feat");
+    put(&root.join("a.txt"), "one\ntwo\nthree\ndirty\n");
+    put(&root.join("untracked.txt"), "u\n");
+    // Stat-dirty: the same size with other bytes. Git has to read it again to compare, which is
+    // where a clean filter would run.
+    put(&root.join("src/b.txt"), "B\n");
+    std::fs::File::options().write(true).open(root.join("src/b.txt")).unwrap().set_modified(std::time::SystemTime::now() + Duration::from_secs(5)).unwrap();
+    for hook in ["post-checkout", "post-index-change", "reference-transaction", "pre-auto-gc", "fsmonitor-watchman"] {
+        script_file(&root.join(".git/hooks").join(hook), &body);
+    }
+    // `sh <script>`, not the script itself: see `script_file`.
+    let e = format!("sh {}", evil.display());
+    let mut config = std::fs::read_to_string(root.join(".git/config")).unwrap();
+    config.push_str(&format!(
+        "[core]\n\tfsmonitor = {e}\n\tpager = {e}\n\tsshCommand = {e}\n\talternateRefsCommand = {e}\n\tuntrackedCache = true\n\
+         [diff]\n\texternal = {e}\n\
+         [diff \"evil\"]\n\tcommand = {e}\n\ttextconv = {e}\n\
+         [filter \"evil\"]\n\tclean = {e}\n\tsmudge = {e}\n\tprocess = {e}\n\trequired = true\n"
+    ));
+    std::fs::write(root.join(".git/config"), config).unwrap();
+
+    // The control: in a copy, git the ordinary way does run the script. Without this the
+    // assertions below would prove nothing.
+    let control = env.dir.path().join("control");
+    assert!(Command::new("/bin/cp").arg("-a").arg(&root).arg(&control).status().unwrap().success());
+    let _ = git_command(&control, &["status"]).output().unwrap();
+    let _ = git_command(&control, &["diff", "HEAD"]).output().unwrap();
+    let ran = std::fs::read_to_string(&marker).expect("the control must run the marker script");
+    assert!(ran.contains("ran "), "{ran}");
+    std::fs::remove_file(&marker).unwrap();
+
+    let index = root.join(".git/index");
+    let before = (std::fs::read(&index).unwrap(), std::fs::metadata(&index).unwrap().modified().unwrap());
+    start_git(&mut env, &[]);
+    let c = env.client().await;
+    let _ev = watching(&env).await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+
+    let g = wait_git(&c, p, "the summary", |g| g["changes"].is_object()).await;
+    assert_eq!(g["changes"]["uncommitted"]["files"], 3, "{g}");
+    assert_eq!(g["changes"]["branch"]["commits"], 1, "{g}");
+    let r = c.request("git.changes", json!({"pane": p})).await.unwrap();
+    assert_eq!((r["uncommitted"]["total"].clone(), r["branch_changes"]["total"].clone()), (json!(3), json!(1)), "{r}");
+    for (path, group) in [("a.txt", "uncommitted"), ("src/b.txt", "uncommitted"), ("untracked.txt", "uncommitted"), ("feat.txt", "branch")] {
+        let d = c.request("git.diff", json!({"pane": p, "path": path, "group": group})).await.unwrap();
+        assert!(d["added"].as_u64().unwrap() >= 1 && d["binary"] == false, "{path}: {d}");
+    }
+    // A worktree Tab: checked out with no hook and no filter (the files are as stored).
+    let ws = c.request("state.get", json!({})).await.unwrap()["workspaces"][0]["id"].clone();
+    let r = c.request("tab.create", with(sh(), json!({"workspace": ws, "cwd": dir(&root), "worktree": {"name": "safe"}}))).await.unwrap();
+    let wt = PathBuf::from(r["worktree"]["path"].as_str().unwrap());
+    assert_eq!(wt, root.parent().unwrap().join("proj-safe"));
+    assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+    // The new Tab's pane is in the worktree, which shares the config: its summary is read too.
+    let q = r["pane"].as_u64().unwrap();
+    wait_git(&c, q, "the worktree's summary", |g| g["branch"] == "safe" && g["changes"].is_object()).await;
+    // And every repo here a few more times.
+    c.input(p, b"echo again\r");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    assert!(!marker.exists(), "the daemon ran the script: {}", std::fs::read_to_string(&marker).unwrap());
+    let after = (std::fs::read(&index).unwrap(), std::fs::metadata(&index).unwrap().modified().unwrap());
+    assert!(before == after, "the daemon rewrote .git/index");
+    assert!(!root.join(".git/index.lock").exists());
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// A git that never answers holds up only its own request: the connection goes on, and the
+/// request ends as `timeout`.
+#[tokio::test]
+async fn git_requests_do_not_block_the_connection() {
+    let mut env = Env::empty();
+    let root = env.dir.path().join("work/proj");
+    put(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
+    put(&root.join(".git/refs/heads/main"), &format!("{GIT_SHA}\n"));
+    let root = std::fs::canonicalize(&root).unwrap();
+    // It answers what opening a repository asks, then hangs.
+    let stub = env.dir.path().join("stub/git");
+    script_file(&stub, "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'git version 2.43.0'; exit 0; fi\nfor a; do if [ \"$a\" = config ]; then exit 0; fi; done\nsleep 60\n");
+    env.start_with(&test_bin(), &[("CLOTHOD_GIT", &dir(&stub)), ("CLOTHOD_TEST_GIT_BUDGET_MS", "1500")]);
+    let c = env.client().await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+
+    let started = Instant::now();
+    let slow = c.request("git.changes", json!({"pane": p}));
+    tokio::pin!(slow);
+    let quick = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        c.request("ping", json!({})).await.unwrap();
+        // Another pane's worth of work goes through meanwhile, too.
+        c.request("state.get", json!({})).await.unwrap()
+    };
+    tokio::select! {
+        r = &mut slow => panic!("git.changes answered before the ping: {r:?}"),
+        s = quick => assert!(s["panes"].is_array()),
+    }
+    assert!(started.elapsed() < Duration::from_millis(1400), "the ping waited for git: {:?}", started.elapsed());
+    let e = slow.await.unwrap_err().to_string();
+    assert!(e.ends_with("(timeout)"), "{e}");
+    assert!(started.elapsed() < Duration::from_secs(9), "took {:?}", started.elapsed());
+    // A diff ends the same way, and the daemon is as it was.
+    assert_eq!(err_code(&c, "git.diff", json!({"pane": p, "path": "a.txt", "group": "uncommitted"})).await, "timeout");
+    c.request("ping", json!({})).await.unwrap();
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// The folders beside a repo, the repo's branches, and how many tabs there are: what a refused
+/// worktree request must leave as it was.
+async fn worktree_state(c: &Client, root: &std::path::Path) -> (Vec<String>, String, usize) {
+    let mut dirs: Vec<String> = std::fs::read_dir(root.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    dirs.sort();
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let tabs = s["workspaces"].as_array().unwrap().iter().map(|w| w["tabs"].as_array().unwrap().len()).sum();
+    (dirs, git_do(root, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]), tabs)
+}
+
+/// `worktree` on `tab.create` and `workspace.create`: a new branch in a new folder beside the
+/// repo, with the new pane in it; each refusal by its code, leaving nothing behind.
+#[tokio::test]
+async fn worktree_tabs_open_beside_the_repo() {
+    let mut env = Env::empty();
+    let (root, first) = git_repo(&env);
+    put(&root.join("src/c.txt"), "c\n");
+    let second = git_commit(&root, "two");
+    let beside = root.parent().unwrap().to_path_buf();
+    // A worktree of a bare repo has no main work tree to go beside.
+    let bare = beside.join("bare.git");
+    git_do(&beside, &["clone", "-q", "--bare", &dir(&root), &dir(&bare)]);
+    let of_bare = beside.join("of-bare");
+    git_do(&bare, &["worktree", "add", "-q", "-b", "w", &dir(&of_bare), "main"]);
+    git_do(&root, &["branch", "taken"]);
+    std::fs::create_dir_all(beside.join("plain")).unwrap();
+    start_git(&mut env, &[]);
+    let c = client_named(&env, "clotho-mac/9.9").await;
+    let first_pane = new_pane(&c, sh()).await;
+    let ws = c.request("state.get", json!({})).await.unwrap()["workspaces"][0]["id"].clone();
+
+    // A Tab, from a subfolder of the repo, at HEAD.
+    let r = c.request("tab.create", with(sh(), json!({"workspace": ws, "cwd": dir(&root.join("src")), "worktree": {"name": "fix/login"}}))).await.unwrap();
+    let fix = beside.join("proj-fix-login");
+    assert_eq!(r["worktree"], json!({"path": dir(&fix), "branch": "fix/login", "head": second[..7]}));
+    assert!(r["tab"].is_u64() && r["pane"].is_u64(), "{r}");
+    let p = r["pane"].as_u64().unwrap();
+    assert_eq!(std::fs::read_to_string(fix.join("src/c.txt")).unwrap(), "c\n");
+    assert_eq!(git_do(&fix, &["rev-parse", "--abbrev-ref", "HEAD"]), "fix/login");
+    // The pane starts in the new folder, and its git info says which worktree that is.
+    let g = wait_git(&c, p, "the worktree", |g| g["worktree"].is_object()).await;
+    assert_eq!((g["root"].clone(), g["branch"].clone(), g["head"].clone(), g["worktree"].clone()), (json!(dir(&fix)), json!("fix/login"), json!(second[..7]), json!({"name": "proj-fix-login", "path": "../proj-fix-login"})));
+    let s = c.request("state.get", json!({})).await.unwrap();
+    assert_eq!(pane_of(&s, p)["cwd"], json!(dir(&fix)));
+    assert!(s["workspaces"][0]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == r["tab"]), "{s}");
+
+    // A Workspace, with a base.
+    let r = c.request("workspace.create", with(sh(), json!({"name": "Old", "cwd": dir(&root), "worktree": {"name": "old", "base": "HEAD~1"}}))).await.unwrap();
+    let old = beside.join("proj-old");
+    assert_eq!(r["worktree"], json!({"path": dir(&old), "branch": "old", "head": first[..7]}));
+    assert!(r["workspace"].is_u64() && r["tab"].is_u64() && r["pane"].is_u64(), "{r}");
+    assert!(!old.join("src/c.txt").exists());
+    let s = c.request("state.get", json!({})).await.unwrap();
+    let w = s["workspaces"].as_array().unwrap().iter().find(|w| w["id"] == r["workspace"]).unwrap();
+    assert_eq!(w["name"], "Old");
+    wait_git(&c, r["pane"].as_u64().unwrap(), "the workspace's worktree", |g| g["branch"] == "old" && g["root"] == json!(dir(&old))).await;
+    // `worktree: null` is no worktree at all.
+    let r = c.request("tab.create", with(sh(), json!({"workspace": ws, "cwd": dir(&root), "worktree": null}))).await.unwrap();
+    assert!(r.get("worktree").is_none() && r["pane"].is_u64(), "{r}");
+    // The log names who made which.
+    let log = env.log();
+    assert!(log.lines().any(|l| l.contains("(clotho-mac/9.9") && l.contains("created worktree") && l.contains("proj-fix-login") && l.contains("tab.create")), "{log}");
+
+    // Every refusal, and what is beside the repo afterwards.
+    let before = worktree_state(&c, &root).await;
+    let here = dir(&root);
+    let tab = |extra: Value| with(with(sh(), json!({"workspace": ws, "cwd": here})), extra);
+    for (method, params, code) in [
+        ("tab.create", with(sh(), json!({"workspace": ws, "worktree": {"name": "x"}})), "bad_request"),
+        ("workspace.create", with(sh(), json!({"worktree": {"name": "x"}})), "bad_request"),
+        ("tab.create", tab(json!({"worktree": {"name": 7}})), "bad_request"),
+        ("tab.create", tab(json!({"worktree": {}})), "bad_request"),
+        ("tab.create", tab(json!({"worktree": "x"})), "bad_request"),
+        ("tab.create", tab(json!({"worktree": {"name": "x", "base": 7}})), "bad_request"),
+        ("tab.create", with(sh(), json!({"cwd": here, "worktree": {"name": "x"}})), "bad_request"),
+        ("tab.create", with(sh(), json!({"workspace": 9999, "cwd": here, "worktree": {"name": "x"}})), "not_found"),
+        ("tab.create", tab(json!({"cwd": dir(&beside.join("plain")), "worktree": {"name": "x"}})), "not_a_repo"),
+        ("workspace.create", with(sh(), json!({"cwd": dir(&of_bare), "worktree": {"name": "x"}})), "worktree_unsupported"),
+        ("tab.create", tab(json!({"worktree": {"name": "../x"}})), "worktree_name"),
+        ("tab.create", tab(json!({"worktree": {"name": "-x"}})), "worktree_name"),
+        ("tab.create", tab(json!({"worktree": {"name": ""}})), "worktree_name"),
+        ("tab.create", tab(json!({"worktree": {"name": "fix/login"}})), "worktree_exists"),
+        ("workspace.create", with(sh(), json!({"cwd": here, "worktree": {"name": "old"}})), "worktree_exists"),
+        ("tab.create", tab(json!({"worktree": {"name": "taken"}})), "branch_exists"),
+        ("tab.create", tab(json!({"worktree": {"name": "x", "base": "nope"}})), "bad_base"),
+        ("tab.create", tab(json!({"worktree": {"name": "x", "base": "--all"}})), "bad_base"),
+        // Git itself refuses (a branch can't be both a name and a folder of names).
+        ("tab.create", tab(json!({"worktree": {"name": "taken/sub"}})), "git_failed"),
+    ] {
+        assert_eq!(err_code(&c, method, params.clone()).await, code, "{method} {params}");
+        assert_eq!(worktree_state(&c, &root).await, before, "{method} {params}");
+    }
+
+    // The pane can't be started: the worktree was made by then, and stays. The message says so.
+    let e = c.request("tab.create", json!({"workspace": ws, "cwd": here, "command": ["/nonexistent/clotho-test-command"], "worktree": {"name": "stays"}})).await.unwrap_err().to_string();
+    assert!(e.ends_with("(spawn_failed)") && e.contains("proj-stays") && e.contains("still there"), "{e}");
+    assert_eq!(git_do(&beside.join("proj-stays"), &["rev-parse", "--abbrev-ref", "HEAD"]), "stays");
+    let after = worktree_state(&c, &root).await;
+    assert_eq!(after.2, before.2, "no tab was made");
+
+    // The connection, and the first pane, are as they were.
+    c.input(first_pane, b"echo still-here\r");
+    wait_for_text(&c, first_pane, T, |l| has_line(l, "still-here")).await.unwrap();
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// Collect the `peek` events that come within `wait`.
+async fn peek_events(c: &mut Client, wait: Duration) -> Vec<Value> {
+    let deadline = Instant::now() + wait;
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), c.recv()).await {
+            Ok(Some(Frame::Json(v))) if v["event"] == "peek" => out.push(v["data"].clone()),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("disconnected"),
+            Err(_) => return out,
+        }
+    }
+}
+
+/// The next `peek` event `cond` accepts.
+async fn wait_peek(c: &mut Client, what: &str, cond: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + T;
+    loop {
+        match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), c.recv()).await {
+            Ok(Some(Frame::Json(v))) if v["event"] == "peek" && cond(&v["data"]) => return v["data"].clone(),
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("disconnected"),
+            Err(_) => panic!("timed out waiting for {what}"),
+        }
+    }
+}
+
+fn no_controls(v: &Value) -> bool {
+    v["lines"].as_array().unwrap().iter().all(|l| !l.as_str().unwrap().chars().any(char::is_control))
+}
+
+/// The peek: a subscriber gets a pane's last lines when they change, at most once a second,
+/// as plain text; nobody else gets anything.
+#[tokio::test]
+async fn peek_follows_output_at_most_once_a_second() {
+    let env = Env::new();
+    let c = env.client().await;
+    let mut pk = env.client().await;
+    let mut other = watching(&env).await;
+    // Prints twenty coloured lines at each line of input, and nothing else (no prompt).
+    let printer = json!({"command": ["/bin/sh", "-c", r#"stty -echo; while read tag; do i=1; while [ $i -le 20 ]; do printf '\033[1;32m%s-%s\033[0m\r\n' "$tag" $i; i=$((i+1)); done; done"#], "cols": 80, "rows": 24});
+    let a = new_pane(&c, printer.clone()).await;
+    let b = new_pane(&c, printer).await;
+    let said = |pane: u64, lines: &[&str]| json!({"pane": pane, "lines": lines});
+
+    // No subscription, no events.
+    c.input(a, b"zero\r");
+    wait_for_text(&c, a, T, |l| has_line(l, "zero-20")).await.unwrap();
+    assert_eq!(peek_events(&mut pk, Duration::from_millis(1500)).await, Vec::<Value>::new());
+
+    // Subscribing replies with the lines as they are.
+    let r = pk.request("peek.subscribe", json!({})).await.unwrap();
+    assert_eq!(r, json!({"peeks": [said(a, &["zero-19", "zero-20"]), {"pane": b, "lines": []}]}));
+
+    // Twenty lines at once: at most two events in a second and a half, ending on the last two.
+    c.input(a, b"one\r");
+    let mut events = peek_events(&mut pk, Duration::from_millis(1500)).await;
+    assert!(events.len() <= 2, "{events:?}");
+    if events.last() != Some(&said(a, &["one-19", "one-20"])) {
+        events.push(wait_peek(&mut pk, "the last lines", |d| *d == said(a, &["one-19", "one-20"])).await);
+    }
+    assert!(events.iter().all(|e| e["pane"] == a && no_controls(e)), "{events:?}");
+    // Nothing changed since: nothing more is sent.
+    assert_eq!(peek_events(&mut pk, Duration::from_millis(1500)).await, Vec::<Value>::new());
+
+    // One line, and eight: a new subscription replaces the old one.
+    let r = pk.request("peek.subscribe", json!({"lines": 1})).await.unwrap();
+    assert_eq!(r["peeks"][0], said(a, &["one-20"]));
+    c.input(a, b"two\r");
+    wait_peek(&mut pk, "one line", |d| *d == said(a, &["two-20"])).await;
+    let r = pk.request("peek.subscribe", json!({"lines": 8})).await.unwrap();
+    let eight: Vec<String> = (13..=20).map(|i| format!("two-{i}")).collect();
+    assert_eq!(r["peeks"][0], json!({"pane": a, "lines": eight}));
+    assert!(no_controls(&r["peeks"][0]));
+
+    // Only the panes named.
+    let r = pk.request("peek.subscribe", json!({"panes": [b]})).await.unwrap();
+    assert_eq!(r, json!({"peeks": [{"pane": b, "lines": []}]}));
+    c.input(a, b"three\r");
+    wait_for_text(&c, a, T, |l| has_line(l, "three-20")).await.unwrap();
+    c.input(b, b"bee\r");
+    let got = wait_peek(&mut pk, "pane b", |d| *d == said(b, &["bee-19", "bee-20"])).await;
+    assert!(no_controls(&got));
+    assert!(peek_events(&mut pk, Duration::from_millis(1500)).await.iter().all(|e| e["pane"] == b), "an event for a pane that wasn't asked for");
+
+    // Unsubscribed: nothing more.
+    pk.request("peek.unsubscribe", json!({})).await.unwrap();
+    c.input(b, b"gone\r");
+    wait_for_text(&c, b, T, |l| has_line(l, "gone-20")).await.unwrap();
+    assert_eq!(peek_events(&mut pk, Duration::from_millis(1500)).await, Vec::<Value>::new());
+
+    // A client that only subscribed to events never got a peek, and the peek moved no `rev`.
+    let mut revs = Vec::new();
+    while let Some(f) = other.try_recv() {
+        if let Frame::Json(v) = f {
+            assert_ne!(v["event"], "peek", "{v}");
+            revs.push(v["data"]["rev"].clone());
+        }
+    }
+    let rev = c.request("state.get", json!({})).await.unwrap()["rev"].clone();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(c.request("state.get", json!({})).await.unwrap()["rev"], rev);
+
+    for bad in [json!({"lines": 0}), json!({"lines": 9}), json!({"lines": "two"}), json!({"panes": "all"}), json!({"panes": ["a"]}), json!({"panes": [-1]})] {
+        assert_eq!(err_code(&pk, "peek.subscribe", bad.clone()).await, "bad_request", "{bad}");
+    }
+    assert!(!r_log_has(&env, "panicked"));
+}
+
+/// A machine without git: the pane's git info is all there, `changes` is null and says why,
+/// and the requests that need git say the same.
+#[tokio::test]
+async fn no_git_gives_a_reason_not_an_error() {
+    let mut env = Env::empty();
+    let root = env.dir.path().join("work/proj");
+    put(&root.join(".git/HEAD"), "ref: refs/heads/feature\n");
+    let root = std::fs::canonicalize(&root).unwrap();
+    put(&root.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:ahmad/clotho.git\n");
+    put(&root.join(".git/refs/heads/feature"), &format!("{GIT_SHA}\n"));
+    env.start_with(&test_bin(), &[("CLOTHOD_GIT", "/nonexistent/git")]);
+    let c = env.client().await;
+    let _ev = watching(&env).await;
+    let p = new_pane(&c, with(sh(), json!({"cwd": dir(&root)}))).await;
+    let g = wait_git(&c, p, "no git", |g| g["changes_reason"] == "no_git").await;
+    assert!(g["changes"].is_null(), "{g}");
+    assert_eq!(
+        (g["repo"].clone(), g["root"].clone(), g["remote"].clone(), g["branch"].clone(), g["head"].clone(), g["worktree"].clone()),
+        (json!("proj"), json!(dir(&root)), json!("ahmad/clotho"), json!("feature"), json!("0123456"), Value::Null)
+    );
+    assert_eq!(err_code(&c, "git.changes", json!({"pane": p})).await, "no_git");
+    assert_eq!(err_code(&c, "git.diff", json!({"pane": p, "path": "a.txt", "group": "uncommitted"})).await, "no_git");
+    let ws = c.request("state.get", json!({})).await.unwrap()["workspaces"][0]["id"].clone();
+    assert_eq!(err_code(&c, "tab.create", with(sh(), json!({"workspace": ws, "cwd": dir(&root), "worktree": {"name": "x"}}))).await, "no_git");
+    assert!(!root.parent().unwrap().join("proj-x").exists());
+    // Still a pane like any other.
+    c.input(p, b"echo fine\r");
+    wait_for_text(&c, p, T, |l| has_line(l, "fine")).await.unwrap();
+    assert!(!r_log_has(&env, "panicked"));
 }
