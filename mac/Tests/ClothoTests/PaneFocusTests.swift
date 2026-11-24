@@ -204,6 +204,89 @@ final class QuietFocusTests: XCTestCase {
         XCTAssertFalse(terminal.isFeeding)
     }
 
+    /// Opening an agent's pane is the user's doing even with no key or mouse event behind it (a click on
+    /// a notification banner while Clotho is in front): one `pane.focus`, and the focus-in report.
+    func testOpeningAnAgentIsTheUsersFocusWithNoEventBehindIt() async throws {
+        let keys = ["Backend", "AgentNotifications", OnboardingController.doneKey, "LaunchInBackground"]
+        var saved: [String: Any] = [:]
+        for key in keys { saved[key] = UserDefaults.standard.object(forKey: key) }
+        defer { for key in keys { UserDefaults.standard.set(saved[key], forKey: key) } }
+        UserDefaults.standard.set("fake", forKey: "Backend")
+        UserDefaults.standard.set(false, forKey: "AgentNotifications")
+        UserDefaults.standard.set(true, forKey: OnboardingController.doneKey)
+        UserDefaults.standard.set(true, forKey: "LaunchInBackground")
+
+        let app = AppDelegate()
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            app.window?.orderOut(nil)
+            app.connections.values.forEach { $0.store.stop() }
+            UserPresence.shared?.stop()
+        }
+        try await wait("a pane") { app.store.focusedPane != nil }
+        let fake = try XCTUnwrap(app.store.backend as? FakeBackend)
+        let reporter = try XCTUnwrap(app.paneFocusReporter)
+        func host(_ pane: PaneID) -> PaneHostView? { app.paneHosts[PaneKey(machine: AppDelegate.localKey, pane: pane)] }
+
+        // Two panes side by side: the first is the shell, the second asks for focus reports.
+        let a = try XCTUnwrap(app.store.focusedPane?.id)
+        let b = try await fake.split(a, direction: .right, ratio: nil, spawn: Self.wantsFocusReports).pane
+        try await wait("the panes' views") { host(a)?.window != nil && host(b)?.window != nil }
+        let hostA = try XCTUnwrap(host(a)), hostB = try XCTUnwrap(host(b))
+        try await turnOnFocusReports([hostB])
+
+        // The app isn't active under xctest and its window isn't key: the reporter takes the terminal with
+        // the keyboard as the user's pane, so only the path under test decides what's sent.
+        reporter.current = { [weak app] in
+            (app?.window.firstResponder as? PaneTerminalView).map { PaneKey(machine: $0.machine, pane: $0.paneID) }
+        }
+        AppDelegate.openingAgentBringsAppForward = false
+        defer { AppDelegate.openingAgentBringsAppForward = true }
+        // Start from the first pane, with nothing of the user's behind it.
+        UserAction.recentOverride = false
+        try await fake.focus(.pane(a))
+        try await wait("the keyboard on the first pane") { app.window.firstResponder === hostA.terminal }
+        try await pause(0.4)
+        input = []
+        var focused = fake.focusedPanes
+
+        // The banner click: AppKit is asked (no override), there is no recent event, nothing came forward.
+        UserAction.recentOverride = nil
+        UserAction.cameForwardAt = nil
+        XCTAssertFalse(UserAction.isRecentOrCameForward(within: 2), "no event behind it")
+        app.openAgent(machine: AppDelegate.localKey, pane: b)
+        try await wait("the keyboard on the agent's pane") { app.window.firstResponder === hostB.terminal }
+        XCTAssertFalse(reporter.owed, "the user's focus, not a quiet one")
+        XCTAssertFalse(hostB.terminal.owesFocusIn)
+        try await wait("pane.focus for the agent's pane") { fake.focusedPanes.count > focused.count }
+        try await wait("the focus-in report") { sent(Self.focusIn, from: b) > 0 }
+        try await pause(0.4)
+        XCTAssertEqual(fake.focusedPanes, focused + [b], "one pane.focus")
+        XCTAssertEqual(sent(Self.focusIn, from: b), 1, "one focus-in: \(input)")
+
+        // The pane already has the keyboard, taken quietly (another device focused it): opening it pays
+        // what it's owed.
+        UserAction.recentOverride = true
+        try await fake.focus(.pane(a))
+        try await wait("the keyboard back on the first pane") { app.window.firstResponder === hostA.terminal }
+        try await pause(0.4)
+        UserAction.recentOverride = false
+        try await fake.focus(.pane(b))
+        try await wait("the keyboard on the agent's pane again") { app.window.firstResponder === hostB.terminal }
+        try await pause(0.4)
+        XCTAssertTrue(reporter.owed)
+        input = []
+        focused = fake.focusedPanes
+        UserAction.recentOverride = nil
+        app.openAgent(machine: AppDelegate.localKey, pane: b)
+        try await wait("the owed pane.focus") { fake.focusedPanes.count > focused.count }
+        try await wait("the owed focus-in") { sent(Self.focusIn, from: b) > 0 }
+        try await pause(0.4)
+        XCTAssertEqual(fake.focusedPanes, focused + [b], "one pane.focus")
+        XCTAssertEqual(sent(Self.focusIn, from: b), 1, "one focus-in: \(input)")
+        XCTAssertFalse(reporter.owed)
+    }
+
     /// In the real window (the fake backend), with focus reports on in a pane: a focus change from the
     /// daemon's side sends `pane.focus` and focus-in when the user is behind it, and neither when not.
     func testADaemonFocusChangeIsOnlyReportedWithTheUserBehindIt() async throws {

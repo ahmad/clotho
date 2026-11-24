@@ -185,12 +185,25 @@ extension AppDelegate {
 
     /// Shows the agent's pane (its machine, workspace, tab and pane). Looking doesn't resolve it: the
     /// checkmark does, or typing into the pane (the daemon clears attention on input).
+    ///
+    /// Every way here is the user asking (an Agents row, its menu, the command bar, a notification), so the
+    /// focus that follows is theirs: the pane gets its `pane.focus`, which also drops a held phone push. A
+    /// notification click has to say so itself: it reaches the app with no key or mouse event, and with
+    /// Clotho already in front nothing comes forward either.
     func openAgent(machine: MachineKey, pane: PaneID) {
         guard connections[machine] != nil else { return }
-        if NSApp.isHidden || !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
-        window.makeKeyAndOrderFront(nil)
+        UserAction.acted()
+        if Self.openingAgentBringsAppForward {
+            if NSApp.isHidden || !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            window.makeKeyAndOrderFront(nil)
+        }
         focusNow(.pane(pane), on: machine, trace: "agent \(pane)")
+        // The pane already had the keyboard, taken quietly: nothing changes above, and it's owed its focus.
+        paneFocusReporter?.userActed()
     }
+
+    /// Tests turn this off: a test run must not come in front of what's on the screen.
+    static var openingAgentBringsAppForward = true
 
     /// Whether the machine's clothod can mute agents.
     func canMute(_ machine: MachineKey) -> Bool {

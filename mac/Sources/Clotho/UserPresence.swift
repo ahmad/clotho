@@ -11,7 +11,8 @@ import ClothoKit
 enum UserAction {
     /// Tests answer for the event queue (nil: ask AppKit).
     static var recentOverride: Bool?
-    /// When the app last became active or its window key (system uptime), which the user did too.
+    /// When the app last became active or its window key (system uptime), which the user did too, or when
+    /// the user last did something that reaches the app with no event (`acted`).
     static var cameForwardAt: TimeInterval?
 
     private static let types: Set<NSEvent.EventType> = [.keyDown, .keyUp, .flagsChanged, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
@@ -34,6 +35,11 @@ enum UserAction {
     }
 
     static func cameForward() { cameForwardAt = ProcessInfo.processInfo.systemUptime }
+
+    /// The user did something that reaches the app with no key or mouse event of its own: a click on a
+    /// notification banner (the system delivers the response, and with Clotho already in front nothing
+    /// comes forward either). What the app does next is theirs.
+    static func acted() { cameForwardAt = ProcessInfo.processInfo.systemUptime }
 }
 
 /// Sends `client.active` to each daemon that takes it while the user is at the app: at most once per
