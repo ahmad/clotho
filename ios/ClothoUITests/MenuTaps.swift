@@ -33,6 +33,22 @@ extension XCUIElement {
 }
 
 extension XCUIApplication {
+    /// The last "Workspace N" row of Machines' list: the newest workspace. The list builds its rows only once
+    /// they are shown, so it is scrolled to its end first (until the last row there stops changing); the last
+    /// row found before that is only the last one built, an older and maybe empty workspace.
+    func newestWorkspaceRow() -> XCUIElement {
+        let rows = buttons.matching(NSPredicate(format: "label BEGINSWITH 'Workspace '"))
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10), "no workspace rows on Machines")
+        var last = ""
+        for _ in 0..<12 {
+            swipeUp()
+            let now = rows.allElementsBoundByIndex.last?.label ?? ""
+            if now == last { break }
+            last = now
+        }
+        return rows.element(boundBy: rows.count - 1)
+    }
+
     /// Shows one of the iPhone's tabs (Agents, Machines, Settings).
     func showTab(_ name: String) {
         let tab = tabBars.buttons[name]

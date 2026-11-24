@@ -33,11 +33,8 @@ final class PaneActionsUITests: XCTestCase {
 
         // Back on Home, the new workspace (the last row) opens its tab again, with its two panes.
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let workspaces = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Workspace '"))
-        XCTAssertTrue(workspaces.firstMatch.waitForExistence(timeout: 10), "no workspace rows on Home")
-        let row = workspaces.element(boundBy: workspaces.count - 1)
         // Earlier tests' workspaces may push it below the screen.
-        for _ in 0..<8 where !row.isHittable { app.swipeUp() }
+        let row = app.newestWorkspaceRow()
         attach(app, "home")
         row.tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))

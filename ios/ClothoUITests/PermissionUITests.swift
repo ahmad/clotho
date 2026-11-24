@@ -50,10 +50,7 @@ final class PermissionUITests: XCTestCase {
 
         // In the pane (the last workspace), the hook printed Allow for Claude and ended.
         app.showTab("Machines")
-        let workspaces = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Workspace '"))
-        let row = workspaces.element(boundBy: workspaces.count - 1)
-        for _ in 0..<8 where !row.isHittable { app.swipeUp() }
-        row.tap()
+        app.newestWorkspaceRow().tap()
         XCTAssertTrue(actions.waitForExistence(timeout: 10))
         sleep(1)
         attach(app, "hook output")
