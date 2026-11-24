@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod alloc;
+pub mod changes;
 pub mod config;
 pub mod daemon;
 pub mod fs;
@@ -10,10 +11,12 @@ pub mod push;
 pub mod service;
 pub mod summary;
 pub mod git;
+pub mod gitrun;
 pub mod launchd;
 pub mod layout;
 pub mod log;
 pub mod model;
+pub mod worktree;
 
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
