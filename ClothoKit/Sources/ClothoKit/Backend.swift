@@ -109,6 +109,12 @@ public struct Hello: Codable, Equatable, Sendable {
         /// Agents carry `summary` (Haiku's one-line rewrite of their message, plain text) and
         /// `summary_pending`; the `notification_rewrite` setting turns the rewrite off (0.1.29).
         case summary
+        /// A pane's `git` carries `changes` and `changes_reason`, and `git.changes` / `git.diff` list
+        /// the changed files and give one file's diff (0.1.32).
+        case gitChanges = "git.changes"
+        /// `tab.create` and `workspace.create` take `worktree`: a new git worktree on a new branch,
+        /// with the new Tab in it (0.1.32).
+        case worktree
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.
@@ -166,25 +172,58 @@ public struct Hello: Codable, Equatable, Sendable {
     }
 }
 
+/// The `worktree` option of `tab.create` and `workspace.create` (protocol.md, "Worktree Tabs"): a new
+/// git worktree on a new branch, beside the repository the spawn's `cwd` is in.
+public struct WorktreeRequest: Codable, Equatable, Sendable {
+    /// The new branch: 1 to 100 letters, digits, '.', '_', '-' or '/', and a valid branch name.
+    public var name: String
+    /// Where the branch starts (a branch, tag or commit). Nil: the HEAD of the work tree `cwd` is in.
+    public var base: String?
+
+    public init(name: String, base: String? = nil) {
+        self.name = name
+        self.base = base
+    }
+}
+
+/// The worktree a create made: its folder, its branch, and the short sha the branch starts at.
+public struct CreatedWorktree: Codable, Equatable, Sendable {
+    public var path: String
+    public var branch: String
+    public var head: String?
+
+    public init(path: String, branch: String, head: String? = nil) {
+        self.path = path
+        self.branch = branch
+        self.head = head
+    }
+}
+
 public struct CreatedWorkspace: Codable, Equatable, Sendable {
     public var workspace: WorkspaceID
     public var tab: TabID
     public var pane: PaneID
+    /// The worktree made for it, when one was asked for.
+    public var worktree: CreatedWorktree?
 
-    public init(workspace: WorkspaceID, tab: TabID, pane: PaneID) {
+    public init(workspace: WorkspaceID, tab: TabID, pane: PaneID, worktree: CreatedWorktree? = nil) {
         self.workspace = workspace
         self.tab = tab
         self.pane = pane
+        self.worktree = worktree
     }
 }
 
 public struct CreatedTab: Codable, Equatable, Sendable {
     public var tab: TabID
     public var pane: PaneID
+    /// The worktree made for it, when one was asked for.
+    public var worktree: CreatedWorktree?
 
-    public init(tab: TabID, pane: PaneID) {
+    public init(tab: TabID, pane: PaneID, worktree: CreatedWorktree? = nil) {
         self.tab = tab
         self.pane = pane
+        self.worktree = worktree
     }
 }
 
@@ -422,6 +461,22 @@ public protocol SessionBackend: AnyObject, Sendable {
     /// `.agentHistory`. `since` (unix seconds) fetches only newer entries.
     func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory
 
+    /// The changed files of the pane's work tree, in two groups (`git.changes`), when hello's `features`
+    /// contains `.gitChanges`. `limit` is the most files per group (nil: the daemon's 500). The errors
+    /// are `GitErrorCode`'s.
+    func gitChanges(_ pane: PaneID, limit: Int?) async throws -> GitChanges
+    /// One file's diff as hunks (`git.diff`). `path` is a file's `path` from `gitChanges`, and for a
+    /// renamed file `oldPath` is its `oldPath`. `context` is the unchanged lines around each change (0
+    /// to 20; nil: the daemon's 3).
+    func gitDiff(_ pane: PaneID, path: String, group: GitChangeGroup, oldPath: String?, context: Int?) async throws -> GitDiff
+
+    /// A Tab in a new git worktree on a new branch (`tab.create` with `worktree`), when hello's
+    /// `features` contains `.worktree`. `spawn.cwd` is required and names the repository. Answered
+    /// when the checkout is done, which can take two minutes. See `Error.worktreeLeftBehind`.
+    func createTab(in workspace: WorkspaceID, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedTab
+    /// A Workspace whose first Tab is in a new git worktree (`workspace.create` with `worktree`).
+    func createWorkspace(name: String?, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedWorkspace
+
     /// Pastes `text` (bracketed if the app enabled it), then presses `keys` ("enter", "esc", "tab", "up",
     /// "ctrl+c", "shift+tab", "f5"…), encoded by the daemon for the pane's current modes (`pane.keys`).
     /// Only when hello's `features` contains `.paneKeys`; never fall back to raw bytes.
@@ -497,6 +552,22 @@ public extension SessionBackend {
 
     func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory {
         throw BackendError(code: "unknown_method", message: "this backend keeps no agent history")
+    }
+
+    func gitChanges(_ pane: PaneID, limit: Int?) async throws -> GitChanges {
+        throw BackendError(code: "unknown_method", message: "this backend can't list changes")
+    }
+
+    func gitDiff(_ pane: PaneID, path: String, group: GitChangeGroup, oldPath: String?, context: Int?) async throws -> GitDiff {
+        throw BackendError(code: "unknown_method", message: "this backend can't show diffs")
+    }
+
+    func createTab(in workspace: WorkspaceID, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedTab {
+        throw BackendError(code: "unknown_method", message: "this backend can't make worktrees")
+    }
+
+    func createWorkspace(name: String?, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedWorkspace {
+        throw BackendError(code: "unknown_method", message: "this backend can't make worktrees")
     }
 
     func getSettings() async throws -> DaemonSettings {

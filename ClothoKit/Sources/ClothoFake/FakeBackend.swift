@@ -523,6 +523,148 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         return [UInt8(ascii: "I"), UInt8(ascii: "O"), UInt8(ascii: "<"), UInt8(ascii: "M")].contains(b[2])
     }
 
+    // MARK: Changes, diffs and worktrees (canned: the fake never runs git)
+
+    /// One `gitDiff` call, as it was asked (tests).
+    public struct DiffRequest: Equatable, Sendable {
+        public var pane: PaneID
+        public var path: String
+        public var group: GitChangeGroup
+        public var oldPath: String?
+        public var context: Int?
+
+        public init(pane: PaneID, path: String, group: GitChangeGroup, oldPath: String? = nil, context: Int? = nil) {
+            self.pane = pane
+            self.path = path
+            self.group = group
+            self.oldPath = oldPath
+            self.context = context
+        }
+    }
+
+    private struct DiffKey: Hashable {
+        var pane: PaneID
+        var path: String
+        var group: GitChangeGroup
+    }
+
+    private var cannedChanges: [PaneID: Result<GitChanges, BackendError>] = [:]
+    private var cannedDiffs: [DiffKey: Result<GitDiff, BackendError>] = [:]
+    private var changesCalls: [PaneID] = []
+    private var diffRequests: [DiffRequest] = []
+    private var worktreeAsks: [WorktreeRequest] = []
+    private var histories: [PaneID: [AgentHistoryEntry]] = [:]
+
+    /// Makes `gitChanges` and `gitDiff` take this long, as git does in a big repository.
+    public var gitDelay: TimeInterval = 0
+    /// Makes a worktree create take this long, as a checkout does.
+    public var worktreeDelay: TimeInterval = 0
+    /// Makes every worktree create fail with this, after the delay. Nothing is made.
+    public var worktreeError: BackendError?
+
+    /// The panes `gitChanges` was called for, in order (tests count the fetches).
+    public var gitChangesCalls: [PaneID] { locked { changesCalls } }
+    /// Every `gitDiff` call, in order.
+    public var gitDiffRequests: [DiffRequest] { locked { diffRequests } }
+    /// Every worktree asked for, in order, failed ones included.
+    public var worktreeRequests: [WorktreeRequest] { locked { worktreeAsks } }
+
+    /// What `gitChanges` answers for a pane. Unset, it fails with `not_a_repo`. Give the pane's summary
+    /// with `setGit` (`GitChanges.summary` makes one that agrees with the list).
+    public func setChanges(_ pane: PaneID, _ result: Result<GitChanges, BackendError>) {
+        locked { cannedChanges[pane] = result }
+    }
+
+    /// What `gitDiff` answers for a file of a pane. Unset, it fails with `not_changed`.
+    public func setDiff(_ pane: PaneID, path: String, group: GitChangeGroup, _ result: Result<GitDiff, BackendError>) {
+        locked { cannedDiffs[DiffKey(pane: pane, path: path, group: group)] = result }
+    }
+
+    public func gitChanges(_ pane: PaneID, limit: Int?) async throws -> GitChanges {
+        let delay: TimeInterval = locked {
+            changesCalls.append(pane)
+            return gitDelay
+        }
+        if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1e9)) }
+        let result: Result<GitChanges, BackendError> = locked {
+            guard state.panes.contains(where: { $0.id == pane }) else { return .failure(notFound("pane \(pane)")) }
+            return cannedChanges[pane] ?? .failure(BackendError(code: "not_a_repo", message: "pane \(pane) is not in a git repository"))
+        }
+        return try result.get()
+    }
+
+    public func gitDiff(_ pane: PaneID, path: String, group: GitChangeGroup, oldPath: String?, context: Int?) async throws -> GitDiff {
+        let delay: TimeInterval = locked {
+            diffRequests.append(DiffRequest(pane: pane, path: path, group: group, oldPath: oldPath, context: context))
+            return gitDelay
+        }
+        if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1e9)) }
+        let result: Result<GitDiff, BackendError> = locked {
+            guard state.panes.contains(where: { $0.id == pane }) else { return .failure(notFound("pane \(pane)")) }
+            return cannedDiffs[DiffKey(pane: pane, path: path, group: group)]
+                ?? .failure(BackendError(code: "not_changed", message: "\(path) has no \(group.rawValue) changes"))
+        }
+        return try result.get()
+    }
+
+    /// Like clothod's, without git: after `worktreeDelay` (and unless `worktreeError` is set) a normal
+    /// fake Tab, whose pane's `git` says it is in a linked worktree. The folder isn't made, so the shell
+    /// starts in `spawn.cwd`. The path is clothod's: beside the repository, `<repo>-<name with / as ->`.
+    public func createTab(in workspace: WorkspaceID, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedTab {
+        let made = try await prepareWorktree(spawn, worktree)
+        let created = try await createTab(in: workspace, spawn: spawn)
+        setGit(created.pane, made.git)
+        return CreatedTab(tab: created.tab, pane: created.pane, worktree: made.worktree)
+    }
+
+    public func createWorkspace(name: String?, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedWorkspace {
+        let made = try await prepareWorktree(spawn, worktree)
+        let created = try await createWorkspace(name: name, spawn: spawn)
+        setGit(created.pane, made.git)
+        return CreatedWorkspace(workspace: created.workspace, tab: created.tab, pane: created.pane, worktree: made.worktree)
+    }
+
+    /// The delay and the canned error, then where the worktree would be and what its pane's `git` says.
+    /// The repository is the one a pane in `spawn.cwd` (or with that root) reports, else `spawn.cwd` itself.
+    private func prepareWorktree(_ spawn: SpawnOptions, _ request: WorktreeRequest) async throws -> (worktree: CreatedWorktree, git: PaneGit) {
+        guard let cwd = spawn.cwd, !cwd.isEmpty else {
+            throw BackendError(code: "bad_request", message: "a worktree needs cwd")
+        }
+        let (delay, error, source): (TimeInterval, BackendError?, PaneGit?) = locked {
+            worktreeAsks.append(request)
+            return (worktreeDelay, worktreeError, state.panes.first { $0.git != nil && ($0.cwd == cwd || $0.git?.root == cwd) }?.git)
+        }
+        if delay > 0 { try await Task.sleep(nanoseconds: UInt64(delay * 1e9)) }
+        if let error { throw error }
+        let root = source?.root ?? cwd
+        let repo = source?.repo ?? (root as NSString).lastPathComponent
+        let folder = "\(repo)-\(request.name.replacingOccurrences(of: "/", with: "-"))"
+        let path = ((root as NSString).deletingLastPathComponent as NSString).appendingPathComponent(folder)
+        let head = source?.head ?? "0000000"
+        let git = PaneGit(repo: repo, root: path, remote: source?.remote, branch: request.name, head: head,
+                          worktree: PaneGit.Worktree(name: folder, path: "../\(folder)"),
+                          changes: PaneGit.Changes(
+                              uncommitted: PaneGit.Changes.Count(files: 0, added: 0, removed: 0),
+                              branch: PaneGit.Changes.BranchCount(base: request.base ?? source?.place ?? "main", commits: 0, files: 0,
+                                                                  added: 0, removed: 0)))
+        return (CreatedWorktree(path: path, branch: request.name, head: head), git)
+    }
+
+    /// What `agentHistory` answers for a pane, oldest first (the Activity list). Unset: no entries.
+    public func setAgentHistory(_ pane: PaneID, _ entries: [AgentHistoryEntry]) {
+        locked { histories[pane] = entries }
+    }
+
+    public func agentHistory(_ pane: PaneID, limit: Int?, since: Double?) async throws -> AgentHistory {
+        try locked {
+            guard state.panes.contains(where: { $0.id == pane }) else { throw notFound("pane \(pane)") }
+            var entries = histories[pane] ?? []
+            if let since { entries = entries.filter { $0.at > since } }
+            if let limit, limit >= 0 { entries = Array(entries.suffix(limit)) }
+            return AgentHistory(pane: pane, max: 200, entries: entries)
+        }
+    }
+
     // MARK: Called by panes, on their own queues
 
     fileprivate func paneOutput(_ fake: FakePane, _ bytes: Data) {

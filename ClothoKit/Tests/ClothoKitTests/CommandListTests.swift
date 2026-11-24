@@ -74,4 +74,32 @@ final class CommandListTests: XCTestCase {
         XCTAssertEqual(theme, [.appearanceSystem, .appearanceLight, .appearanceDark])
         XCTAssertTrue(CommandList.matching(items, query: "xyz").isEmpty)
     }
+
+    /// The generic match (any rows with a title and keywords) ranks exactly as the commands' own, so an
+    /// app's local command sorts among the shared ones.
+    func testTheGenericMatchRanksTheSame() {
+        struct Row: Equatable {
+            var title: String
+            var keywords: [String]
+        }
+        let items = CommandList.items(for: CommandContext(machine: "local", machineName: "Local Mac (dev)", workspace: 1, workspaceName: "api",
+                                                          tab: 1, tabName: "zsh"))
+        let rows = items.map { Row(title: $0.title, keywords: $0.keywords) }
+        for query in ["", "  ", "rename", "ren", "cla", "new tab", "ZSH", "agent", "appearance", "split d", "terminal", "xyz", "é", "mode dark"] {
+            let expected = CommandList.matching(items, query: query).map(\.title)
+            let got = CommandList.matching(rows, query: query, title: { $0.title }, keywords: { $0.keywords }).map(\.title)
+            XCTAssertEqual(got, expected, "query “\(query)”")
+        }
+
+        // A local row among the shared ones: by its title first, then by a keyword, in list order.
+        var mixed = rows
+        mixed.insert(Row(title: "New Worktree Tab…", keywords: ["branch", "git", "agent"]), at: 1)
+        let titled = CommandList.matching(mixed, query: "worktree", title: { $0.title }, keywords: { $0.keywords })
+        XCTAssertEqual(titled.map(\.title), ["New Worktree Tab…"])
+        let new = CommandList.matching(mixed, query: "new", title: { $0.title }, keywords: { $0.keywords }).map(\.title)
+        XCTAssertEqual(Array(new.prefix(3)), ["New Tab in api", "New Worktree Tab…", "New Workspace on Local Mac (dev)"])
+        let agents = CommandList.matching(mixed, query: "agent", title: { $0.title }, keywords: { $0.keywords }).map(\.title)
+        XCTAssertEqual(agents.first, "New Worktree Tab…", "keyword-only matches keep the list's order")
+        XCTAssertEqual(agents.count, 4)
+    }
 }

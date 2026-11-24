@@ -133,14 +133,20 @@ public enum CommandList {
     /// by how many matched only in keywords; the list's own order breaks ties. Empty: all of them, in
     /// order.
     public static func matching(_ items: [CommandListItem], query: String) -> [CommandListItem] {
+        matching(items, query: query, title: { $0.title }, keywords: { $0.keywords })
+    }
+
+    /// The same match and order for any rows with a title and keywords, so an app can rank a command of
+    /// its own among the shared ones.
+    public static func matching<T>(_ items: [T], query: String, title: (T) -> String, keywords: (T) -> [String]) -> [T] {
         let needles = words(query)
         guard !needles.isEmpty else { return items }
-        let ranked: [(item: CommandListItem, keywordOnly: Int, order: Int)] = items.enumerated().compactMap { order, item in
-            let title = words(item.title), keywords = item.keywords.flatMap(words)
+        let ranked: [(item: T, keywordOnly: Int, order: Int)] = items.enumerated().compactMap { order, item in
+            let titleWords = words(title(item)), keywordWords = keywords(item).flatMap(words)
             var keywordOnly = 0
             for needle in needles {
-                if title.contains(where: { $0.hasPrefix(needle) }) { continue }
-                guard keywords.contains(where: { $0.hasPrefix(needle) }) else { return nil }
+                if titleWords.contains(where: { $0.hasPrefix(needle) }) { continue }
+                guard keywordWords.contains(where: { $0.hasPrefix(needle) }) else { return nil }
                 keywordOnly += 1
             }
             return (item, keywordOnly, order)

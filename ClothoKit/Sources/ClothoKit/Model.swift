@@ -309,6 +309,81 @@ public struct PaneGit: Codable, Equatable, Sendable {
     /// Why `pr` is nil: "none", "pending", "default_branch", "detached", "no_remote", "no_gh", "gh_auth",
     /// "gh_error", "timeout"; others mean unknown.
     public var prReason: String?
+    /// How much changed in the work tree (feature `git.changes`, clothod 0.1.32). Nil when nothing is
+    /// known: `changesReason` says why. Also nil for a shape this client can't read.
+    public var changes: Changes?
+    /// Why `changes` is nil: "pending", "no_git", "git_unsupported", "unsafe", "timeout", "too_large",
+    /// "partial_clone", "error"; others mean unknown (`GitText.reason`).
+    public var changesReason: String?
+
+    /// The counts of a work tree's changes (protocol.md, "Changes"): what isn't committed, and what
+    /// the branch's commits changed since it left its base.
+    public struct Changes: Codable, Equatable, Sendable {
+        /// The work tree against HEAD: staged, unstaged and untracked together.
+        public var uncommitted: Count
+        /// HEAD against the merge base with the base branch. Nil on the base branch itself, without a
+        /// base, or when git failed on this part (`reason`). A fresh worktree has zeros here, not nil.
+        public var branch: BranchCount?
+        /// Why `branch` is nil although there is a base: "timeout", "too_large", "partial_clone", "error".
+        public var reason: String?
+
+        /// Files and lines. The lines are nil when they weren't counted; `files` is still right.
+        public struct Count: Codable, Equatable, Sendable {
+            public var files: Int
+            public var added: Int?
+            public var removed: Int?
+
+            public init(files: Int, added: Int? = nil, removed: Int? = nil) {
+                self.files = files
+                self.added = added
+                self.removed = removed
+            }
+        }
+
+        public struct BranchCount: Codable, Equatable, Sendable {
+            /// The base's name to show ("origin/main").
+            public var base: String
+            /// Commits on HEAD since it left the base.
+            public var commits: Int
+            public var files: Int
+            public var added: Int?
+            public var removed: Int?
+
+            public init(base: String, commits: Int, files: Int, added: Int? = nil, removed: Int? = nil) {
+                self.base = base
+                self.commits = commits
+                self.files = files
+                self.added = added
+                self.removed = removed
+            }
+        }
+
+        public init(uncommitted: Count, branch: BranchCount? = nil, reason: String? = nil) {
+            self.uncommitted = uncommitted
+            self.branch = branch
+            self.reason = reason
+        }
+
+        /// Both groups added up (a file changed in both counts twice). The lines are nil when either
+        /// group's weren't counted.
+        public var total: (files: Int, added: Int?, removed: Int?) {
+            var files = uncommitted.files
+            var lines: (added: Int, removed: Int)?
+            if let added = uncommitted.added, let removed = uncommitted.removed { lines = (added, removed) }
+            if let branch {
+                files += branch.files
+                if let counted = lines, let added = branch.added, let removed = branch.removed {
+                    lines = (counted.added + added, counted.removed + removed)
+                } else {
+                    lines = nil
+                }
+            }
+            return (files, lines?.added, lines?.removed)
+        }
+
+        /// Nothing changed in either group.
+        public var isEmpty: Bool { uncommitted.files == 0 && (branch?.files ?? 0) == 0 }
+    }
 
     public struct Worktree: Codable, Equatable, Sendable {
         /// Its dir name under .git/worktrees.
@@ -325,6 +400,24 @@ public struct PaneGit: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case repo, root, remote, branch, head, worktree, pr
         case prReason = "pr_reason"
+        case changes
+        case changesReason = "changes_reason"
+    }
+
+    /// As the synthesized one, except `changes`: a shape this client can't read becomes nil, and never
+    /// fails the pane or the state it arrives in.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        repo = try c.decode(String.self, forKey: .repo)
+        root = try c.decodeIfPresent(String.self, forKey: .root)
+        remote = try c.decodeIfPresent(String.self, forKey: .remote)
+        branch = try c.decodeIfPresent(String.self, forKey: .branch)
+        head = try c.decodeIfPresent(String.self, forKey: .head)
+        worktree = try c.decodeIfPresent(Worktree.self, forKey: .worktree)
+        pr = try c.decodeIfPresent(PullRequest.self, forKey: .pr)
+        prReason = try c.decodeIfPresent(String.self, forKey: .prReason)
+        changes = try? c.decodeIfPresent(Changes.self, forKey: .changes)
+        changesReason = try? c.decodeIfPresent(String.self, forKey: .changesReason)
     }
 
     public struct PullRequest: Codable, Equatable, Sendable {
@@ -363,7 +456,8 @@ public struct PaneGit: Codable, Equatable, Sendable {
     }
 
     public init(repo: String, root: String? = nil, remote: String? = nil, branch: String?, head: String? = nil,
-                worktree: Worktree? = nil, pr: PullRequest? = nil, prReason: String? = nil) {
+                worktree: Worktree? = nil, pr: PullRequest? = nil, prReason: String? = nil,
+                changes: Changes? = nil, changesReason: String? = nil) {
         self.repo = repo
         self.root = root
         self.remote = remote
@@ -372,6 +466,8 @@ public struct PaneGit: Codable, Equatable, Sendable {
         self.worktree = worktree
         self.pr = pr
         self.prReason = prReason
+        self.changes = changes
+        self.changesReason = changesReason
     }
 
     /// The branch, or the detached commit ("@a1b2c3d").

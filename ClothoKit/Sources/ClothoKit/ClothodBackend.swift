@@ -352,6 +352,44 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         return try Self.decode(CreatedTab.self, from: try await request("tab.create", params))
     }
 
+    /// `cwd` names the repository, so it must be there: checked here, before anything is sent.
+    private static func worktreeParams(_ spawn: SpawnOptions, _ worktree: WorktreeRequest) throws -> [String: Any] {
+        guard let cwd = spawn.cwd, !cwd.isEmpty else {
+            throw BackendError(code: "bad_request", message: "a worktree needs the folder of its repository (cwd)")
+        }
+        var params = spawnParams(spawn)
+        var request: [String: Any] = ["name": worktree.name]
+        if let base = worktree.base { request["base"] = base }
+        params["worktree"] = request
+        return params
+    }
+
+    // No timeout on these two: the reply comes when the checkout is done, and git gets two minutes.
+    public func createTab(in workspace: WorkspaceID, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedTab {
+        var params = try Self.worktreeParams(spawn, worktree)
+        params["workspace"] = workspace
+        return try Self.decode(CreatedTab.self, from: try await request("tab.create", params))
+    }
+
+    public func createWorkspace(name: String?, spawn: SpawnOptions, worktree: WorktreeRequest) async throws -> CreatedWorkspace {
+        var params = try Self.worktreeParams(spawn, worktree)
+        params["name"] = name
+        return try Self.decode(CreatedWorkspace.self, from: try await request("workspace.create", params))
+    }
+
+    public func gitChanges(_ pane: PaneID, limit: Int?) async throws -> GitChanges {
+        var params: [String: Any] = ["pane": pane]
+        if let limit { params["limit"] = limit }
+        return try Self.decode(GitChanges.self, from: try await request("git.changes", params))
+    }
+
+    public func gitDiff(_ pane: PaneID, path: String, group: GitChangeGroup, oldPath: String?, context: Int?) async throws -> GitDiff {
+        var params: [String: Any] = ["pane": pane, "path": path, "group": group.rawValue]
+        if let oldPath { params["old_path"] = oldPath }
+        if let context { params["context"] = context }
+        return try Self.decode(GitDiff.self, from: try await request("git.diff", params))
+    }
+
     public func renameTab(_ tab: TabID, title: String?) async throws {
         _ = try await request("tab.rename", ["tab": tab, "title": title ?? NSNull()])
     }
@@ -548,6 +586,9 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
 
     private var subscribeRequests: [Int: PaneID] = [:]
 
+    /// Sends a request and waits for its reply. A reply is matched to its request by `id` only, never
+    /// by order: the daemon answers a slow request (git, a worktree checkout, a permission decision)
+    /// when it is done, and later requests go ahead meanwhile. There is no timeout here.
     func request(_ method: String, _ params: [String: Any]?, subscribing pane: PaneID? = nil,
                  onReply: ((Any) -> Void)? = nil) async throws -> Any {
         try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Any, Error>) in
@@ -629,6 +670,8 @@ public final class ClothodBackend: SessionBackend, @unchecked Sendable {
         }
     }
 
+    /// Resumes the caller that sent request `id`, whatever was sent before or after it: replies may
+    /// come in any order. A reply for an id nobody waits on (unknown, or already answered) is dropped.
     private func handleReply(id: Int, _ object: [String: Any]) {
         let (waiter, subscribing, hook): (CheckedContinuation<Any, Error>?, PaneID?, ((Any) -> Void)?) = locked {
             (pending.removeValue(forKey: id), subscribeRequests.removeValue(forKey: id), replyHooks.removeValue(forKey: id))
