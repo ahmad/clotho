@@ -86,6 +86,26 @@ final class TabBarWidthTests: XCTestCase {
         XCTAssertEqual(items.map { $0.accessibilityLabel() }, ["a, Needs you", "b, Error", "c, Done", "d, Working", "plain"])
     }
 
+    /// The spinner after the + stays whole when the tabs fill the bar: they give up its room while it shows.
+    func testTheBusySpinnerStaysInsideAFullBar() {
+        for (width, count) in [(CGFloat(390), 2), (724, 7), (1000, 4)] {
+            window.setContentSize(NSSize(width: width, height: 40))
+            bar.busyText = nil
+            let idle = show(Array(repeating: "zsh", count: count))
+            bar.busyText = "Creating worktree clotho-fix-login…"
+            bar.layoutSubtreeIfNeeded()
+            let spinner = bar.busySpinner
+            XCTAssertFalse(spinner.isHidden)
+            XCTAssertGreaterThan(spinner.frame.width, 0)
+            XCTAssertLessThanOrEqual(spinner.frame.maxX, bar.bounds.maxX, "\(count) tabs in \(width) pt")
+            XCTAssertGreaterThanOrEqual(spinner.frame.minX, (bar.tabFrames.last?.maxX ?? 0), "after the tabs")
+            // Done: the tabs have their widths back.
+            bar.busyText = nil
+            bar.layoutSubtreeIfNeeded()
+            XCTAssertEqual(bar.tabFrames, idle, "\(count) tabs in \(width) pt")
+        }
+    }
+
     /// "devbox › clotho › alerts", centred in the space after the +, only when it fits there with room to
     /// spare; clicks go through it to the bar.
     func testTheBreadcrumbShowsOnlyWhereItFits() throws {

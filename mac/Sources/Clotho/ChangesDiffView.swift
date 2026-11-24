@@ -293,6 +293,12 @@ final class ChangesDiffView: NSView {
 
 // MARK: The centre diff in the window
 
+/// A machine and the focus on it.
+struct FocusPlace: Equatable {
+    var machine: MachineKey
+    var focus: Focus
+}
+
 extension AppDelegate {
     var isChangesDiffShown: Bool { changesDiff?.isHidden == false }
 
@@ -301,6 +307,28 @@ extension AppDelegate {
     var inspectorHoldsKeyboard: Bool {
         guard let fileSidebar, isFileSidebarShown, fileSidebar.shown != .files else { return false }
         return fileSidebar.hasKeyboard
+    }
+
+    /// Once per sync: whether the inspector's list keeps the keyboard against the focused pane's terminal.
+    /// It does while the focus is where it was when the list took the keyboard. A new Tab, another Tab,
+    /// pane, workspace or machine gives the keyboard to the terminal there, as from any other place.
+    func inspectorKeepsKeyboard() -> Bool {
+        let now = FocusPlace(machine: focusedMachine, focus: store.state.focus)
+        defer { lastSyncedFocus = now }
+        guard inspectorHoldsKeyboard else {
+            inspectorHold = nil
+            return false
+        }
+        // The list took the keyboard since the last sync (a click on a row tells nobody): the focus then
+        // was what that sync saw.
+        if inspectorHold == nil { inspectorHold = lastSyncedFocus ?? now }
+        guard inspectorHold == now else {
+            // The focus moved: the terminal there takes the keyboard. Taken again later, the list holds
+            // it from where the focus is then.
+            inspectorHold = nil
+            return false
+        }
+        return true
     }
 
     /// Builds the centre diff, hidden, over the pane area. The caller pins it to the pane area's edges.

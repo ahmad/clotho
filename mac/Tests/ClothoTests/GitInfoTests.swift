@@ -122,6 +122,10 @@ final class GitInfoTests: XCTestCase {
             if !strip.pullRequest.isHidden {
                 XCTAssertLessThanOrEqual(strip.pullRequest.frame.maxX, strip.changeCount.frame.minX + 0.5, "width \(width)")
             }
+            // With the PR beside it too, the branch keeps its few letters.
+            XCTAssertFalse(strip.pullRequest.isHidden)
+            XCTAssertGreaterThanOrEqual(strip.summary.frame.width, min(s(44), strip.summary.intrinsicContentSize.width) - 1,
+                                        "the branch keeps its room, width \(width)")
         }
         XCTAssertEqual(forms, [.full, .linesOnly, .hidden])
     }

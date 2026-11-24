@@ -454,7 +454,8 @@ final class TabBarView: NSView {
     private var heldTitles = HeldTitles<TabID>()
     private let addButton = NSButton()
     /// A small spinner after the +, while something that ends in a new Tab is under way (a worktree being
-    /// made). Its words are the tooltip and what VoiceOver says. Nil: no spinner, and no room taken.
+    /// made). Its words are the tooltip and what VoiceOver says. Nil: no spinner, and no room taken; while it
+    /// shows, the tabs share the bar less its room (`tabWidth`).
     var busyText: String? {
         didSet {
             guard busyText != oldValue else { return }
@@ -462,6 +463,8 @@ final class TabBarView: NSView {
             busySpinner.setAccessibilityLabel(busyText)
             busySpinner.isHidden = busyText == nil
             if busyText == nil { busySpinner.stopAnimation(nil) } else { busySpinner.startAnimation(nil) }
+            // Now, not in the next layout pass: the spinner is never drawn over the bar's edge.
+            fitTabWidths()
             needsLayout = true
         }
     }
@@ -558,7 +561,7 @@ final class TabBarView: NSView {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         items = [:]
         widths = []
-        let width = Self.tabWidth(count: tabs.count, barWidth: bounds.width)
+        let width = Self.tabWidth(count: tabs.count, barWidth: bounds.width, busy: busyText != nil)
         for (index, var tab) in tabs.enumerated() {
             if let held = heldTitles.title(for: tab.id, model: tab.custom) { (tab.title, tab.custom) = (held, held) }
             let item = ChromeItem(closable: true)
@@ -606,7 +609,7 @@ final class TabBarView: NSView {
         }
         if UserDefaults.standard.bool(forKey: "LogSidebar") {
             log("tabs: " + stack.arrangedSubviews.compactMap { ($0 as? ChromeItem)?.label.stringValue }.joined(separator: ", ")
-                + " at \(Int(Self.tabWidth(count: tabs.count, barWidth: bounds.width))) pt each")
+                + " at \(Int(Self.tabWidth(count: tabs.count, barWidth: bounds.width, busy: busyText != nil))) pt each")
         }
     }
 
@@ -657,7 +660,7 @@ final class TabBarView: NSView {
         let big = NSRect(x: 0, y: 0, width: 10_000, height: 10_000)
         let size = breadcrumbLabel.stringValue.isEmpty ? NSSize.zero : (breadcrumbLabel.cell?.cellSize(forBounds: big) ?? .zero)
         // The spinner, while it shows, sits where the breadcrumb's leading margin was.
-        let lead = busyText == nil ? addButton.frame.maxX : addButton.frame.maxX + s(20)
+        let lead = busyText == nil ? addButton.frame.maxX : addButton.frame.maxX + Self.busyRoom
         let free = bounds.maxX - lead
         let fits = size.width > 0 && free >= size.width + Self.breadcrumbMargin * 2
         if breadcrumbLabel.isHidden == fits { breadcrumbLabel.isHidden = !fits }
@@ -670,12 +673,15 @@ final class TabBarView: NSView {
     /// Every tab's width: the bar shared equally, between a minimum and a maximum. It depends only on
     /// the number of tabs and the bar's width, never on titles, marks, hover or selection, so tabs don't
     /// jump when an agent retitles its pane or a tab is selected.
-    static func tabWidth(count: Int, barWidth: CGFloat) -> CGFloat {
+    /// While the spinner shows (`busy`), its room after the + is kept too, so a full bar doesn't cut it off.
+    static func tabWidth(count: Int, barWidth: CGFloat, busy: Bool = false) -> CGFloat {
         guard count > 0 else { return maxTabWidth }
         // The stack's leading inset, then the + button with its spacing and the trailing margin.
-        let available = barWidth - s(6) - s(6) - s(24) - s(8) - s(4) * CGFloat(count - 1)
+        let available = barWidth - s(6) - s(6) - s(24) - s(8) - s(4) * CGFloat(count - 1) - (busy ? busyRoom : 0)
         return min(maxTabWidth, max(minTabWidth, (available / CGFloat(count)).rounded(.down)))
     }
+    /// The spinner after the +: its gap, its 16 pt, and a little clear of the bar's edge.
+    static var busyRoom: CGFloat { s(20) }
     static var maxTabWidth: CGFloat { s(240) }
     static var minTabWidth: CGFloat { s(72) }
     /// Room at a tab's leading edge for its agent mark, kept whether or not there is one.
@@ -692,7 +698,11 @@ final class TabBarView: NSView {
     override func layout() {
         super.layout()
         layoutBreadcrumb()
-        let width = Self.tabWidth(count: widths.count, barWidth: bounds.width)
+        fitTabWidths()
+    }
+
+    private func fitTabWidths() {
+        let width = Self.tabWidth(count: widths.count, barWidth: bounds.width, busy: busyText != nil)
         guard let current = widths.first?.constant, current != width else { return }
         widths.forEach { $0.constant = width }
     }

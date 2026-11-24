@@ -152,6 +152,44 @@ final class InspectorTests: XCTestCase {
         app.showOrHideSidebar(nil)
     }
 
+    /// The list holds the keyboard against the terminal only where the focus was when it took it: a new
+    /// Tab's shell gets the keys, whether the list took the keyboard from the strip's count or by a click.
+    func testAnotherTabTakesTheKeyboardFromTheList() async throws {
+        let (app, fake, pane) = try await launch("git.changes,worktree")
+        defer { ChangesFixture.quit(app) }
+        let files = try XCTUnwrap(app.fileSidebar)
+        let list = files.changesView.list
+        ChangesFixture.fill(fake, pane)
+        try await ChangesFixture.wait("the summary on the pane") { app.store.focusedPane?.git?.changes != nil }
+        app.showInspector(.changes, takeKeyboard: true)
+        try await ChangesFixture.wait("the list") { list.rows.count > 2 }
+        app.sync()
+        XCTAssertTrue(app.window.firstResponder === list.table, "the focus didn't move: the list keeps the keyboard")
+
+        // ⌘T: the new Tab's terminal has the keyboard.
+        let first = try XCTUnwrap(app.store.focusedTab?.id)
+        app.newTab(nil)
+        try await ChangesFixture.wait("the new Tab") { app.store.focusedTab.map { $0.id != first } == true }
+        try await ChangesFixture.wait("its terminal has the keyboard") {
+            app.activeTerminal != nil && app.window.firstResponder === app.activeTerminal
+        }
+        XCTAssertFalse(files.hasKeyboard)
+
+        // A click on a row takes the keyboard without a sync in between; the next Tab still gets it.
+        XCTAssertTrue(app.window.makeFirstResponder(list.table))
+        let second = try XCTUnwrap(app.store.focusedTab?.id)
+        app.newTab(nil)
+        try await ChangesFixture.wait("the third Tab") { app.store.focusedTab.map { $0.id != second } == true }
+        try await ChangesFixture.wait("its terminal has the keyboard") {
+            app.activeTerminal != nil && app.window.firstResponder === app.activeTerminal
+        }
+        // Back in the list, on this Tab now, syncs leave it there.
+        XCTAssertTrue(app.window.makeFirstResponder(list.table))
+        app.sync()
+        app.sync()
+        XCTAssertTrue(app.window.firstResponder === list.table)
+    }
+
     func testTheListKeepsTheKeyboardAndTheCentreDiffCreatesNothing() async throws {
         let (app, fake, pane) = try await launch("git.changes,worktree")
         defer { ChangesFixture.quit(app) }

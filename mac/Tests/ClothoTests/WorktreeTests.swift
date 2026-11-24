@@ -29,6 +29,14 @@ final class WorktreeTests: XCTestCase {
         bar.control(control, textView: control.currentEditor() as? NSTextView ?? NSTextView(), doCommandBy: selector)
     }
 
+    /// Esc as the window delivers it: a key down to whatever has the keyboard.
+    private func pressEsc(_ app: AppDelegate) throws {
+        let esc = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: app.window.windowNumber, context: nil, characters: "\u{1b}",
+                                                 charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        try XCTUnwrap(app.window.firstResponder).keyDown(with: esc)
+    }
+
     private func noticeButtons(_ app: AppDelegate) -> [String] {
         func buttons(_ view: NSView) -> [NSButton] { view.subviews.flatMap { ($0 as? NSButton).map { [$0] } ?? buttons($0) } }
         return app.noticeBar.map { buttons($0).map(\.title).filter { !$0.isEmpty } } ?? []
@@ -80,6 +88,8 @@ final class WorktreeTests: XCTestCase {
         XCTAssertEqual(bar.namingStatus.stringValue, "Creating the worktree… A big repository can take a couple of minutes.")
         XCTAssertFalse(field.isEnabled)
         XCTAssertFalse(bar.baseField.isEnabled)
+        // The fields are off, so the bar itself has the keyboard: that is where Esc arrives.
+        XCTAssertTrue(app.window.firstResponder === bar, "the bar holds the keyboard while the fields are off")
         XCTAssertEqual(app.tabBar.busyText, "Creating worktree clotho-fix-login…")
         XCTAssertFalse(app.tabBar.busySpinner.isHidden)
         XCTAssertEqual(app.tabBar.busySpinner.accessibilityLabel(), "Creating worktree clotho-fix-login…")
@@ -88,7 +98,7 @@ final class WorktreeTests: XCTestCase {
         app.createWorktreeTab(subject, name: "another", base: nil)
         XCTAssertTrue(bar.isCreating, "still showing the first")
         // Esc puts the bar away; the work goes on.
-        XCTAssertTrue(command(bar, field, #selector(NSResponder.cancelOperation(_:))))
+        try pressEsc(app)
         XCTAssertNil(app.quickOpen)
         XCTAssertNotNil(app.worktreeCreation)
         try await fake.renameTab(try XCTUnwrap(app.store.focusedTab?.id), title: "still usable")
@@ -98,6 +108,7 @@ final class WorktreeTests: XCTestCase {
         let again = try XCTUnwrap(app.quickOpen)
         XCTAssertTrue(again.isCreating)
         XCTAssertEqual(again.fieldForTesting.stringValue, "fix/login")
+        XCTAssertTrue(app.window.firstResponder === again, "Esc reaches this one too")
         again.submitWorktree()
         // Done: the bar closes, the new Tab is focused, in the worktree.
         try await ChangesFixture.wait("the worktree's Tab") { app.store.focusedWorkspace?.tabs.count == tabs + 1 && app.worktreeCreation == nil }

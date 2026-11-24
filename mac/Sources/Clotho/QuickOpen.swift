@@ -970,6 +970,18 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         return true
     }
 
+    // While a worktree is being made the prompt's fields are off, and a field that is off gives the
+    // keyboard up to the window. The overlay takes it instead, so Esc still puts the bar away.
+    override var acceptsFirstResponder: Bool { isCreating }
+
+    override func cancelOperation(_ sender: Any?) { cancel() }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { return cancel() }
+        // Nothing else means anything while the fields are off; no beep for a stray key.
+        if !isCreating { super.keyDown(with: event) }
+    }
+
     /// ⌘1–9 pick a row in view; ⌘⌫ closes the selected tab or workspace; ⌘P closes the bar (it would
     /// otherwise reach the menu, which does the same).
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -1329,6 +1341,8 @@ final class QuickOpenOverlay: NSView, NSTextFieldDelegate {
         namingStatus.setAccessibilityLabel(namingStatus.stringValue)
         field.isEnabled = !isCreating
         baseField.isEnabled = !isCreating
+        // The fields just gave the keyboard up: the overlay holds it for Esc (see `keyDown`).
+        if isCreating, let window, window.firstResponder !== self { window.makeFirstResponder(self) }
         updateFooter()
         footerEsc.isHidden = true
     }

@@ -144,13 +144,15 @@ extension AppDelegate {
         // Keyboard focus follows the daemon's focus, unless an overlay (the command bar previews tabs while
         // keeping the keyboard), a sheet, the sidebar, the inspector's Changes or Activity list, the centre
         // diff (every reply to `git.changes` comes with a `pane` event, so without this the arrow keys in
-        // the list lost the keyboard mid-use), or a name being edited has it: in the sidebar (the
+        // the list lost the keyboard mid-use; the list keeps it only while the focus stays where it was, so
+        // a new or another Tab still gets the keyboard), or a name being edited has it: in the sidebar (the
         // rename that follows New Workspace starts before the workspace's focus lands), in the tab bar, or
         // any other field being typed in. A sync runs on every retitle and output, so without this a busy
         // pane took the cursor out of a tab's name mid-rename.
+        let listKeepsKeyboard = inspectorKeepsKeyboard()
         if let focusedPane, let host = shown[focusedPane], shortcutsOverlay == nil, fileBrowser == nil, quickOpen == nil,
            window.attachedSheet == nil, window.firstResponder !== host.terminal, !sidebar.hasKeyboard, !sidebar.isEditing,
-           !tabBar.isEditing, !Self.isTypingInAField(window), !inspectorHoldsKeyboard, !isChangesDiffShown {
+           !tabBar.isEditing, !Self.isTypingInAField(window), !listKeepsKeyboard, !isChangesDiffShown {
             if UserAction.isRecentOrCameForward(within: Self.userFocusWindow) {
                 window.makeFirstResponder(host.terminal)
             } else {

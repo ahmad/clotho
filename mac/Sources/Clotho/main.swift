@@ -376,6 +376,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var changesDiff: ChangesDiffView!
     /// Where the focus and the list were when the centre diff opened: it closes when either moves.
     var changesDiffOpened: (machine: MachineKey, focus: Focus, target: PaneID?)?
+    /// Where the focus was when the inspector's list took the keyboard: it keeps it only while the focus
+    /// stays there (`inspectorKeepsKeyboard`).
+    var inspectorHold: FocusPlace?
+    /// The focus as the last sync saw it.
+    var lastSyncedFocus: FocusPlace?
     /// The worktree Tab being made, if one is (Worktree.swift): one at a time.
     var worktreeCreation: WorktreeCreation?
     /// Remote files opened through local copies, made on first use.

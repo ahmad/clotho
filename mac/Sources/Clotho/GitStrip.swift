@@ -111,8 +111,10 @@ final class GitStrip: NSView {
 
     /// Picks the longest form of the count that leaves the branch some room, and shows it.
     private func fitChangeCount() {
-        // What stays for the icon, a few letters of the branch and the gaps.
-        let room = bounds.width - s(10) * 3 - s(14) - s(5) - s(44)
+        // What stays for the icon, a few letters of the branch and the gaps, and for the PR with its gap
+        // when there is one: the PR resists being squeezed, so the count would otherwise take the branch's room.
+        var room = bounds.width - s(10) * 3 - s(14) - s(5) - s(44)
+        if !pullRequest.isHidden { room -= ceil(pullRequest.intrinsicContentSize.width) + s(10) }
         var form = CountForm.hidden
         for candidate in [CountForm.full, .linesOnly] {
             guard let title = Self.countTitle(changes, form: candidate) else { break }
@@ -155,8 +157,9 @@ final class GitStrip: NSView {
         let spoken = ChangeCountText.spoken(git.changes)
         changeCount.toolTip = spoken.map { "\($0). Show changes" }
         changeCount.setAccessibilityLabel(spoken.map { "\($0). Show changes" })
-        fitChangeCount()
         needsLayout = true
+        // The count is fitted last: the room it has depends on the PR.
+        defer { fitChangeCount() }
         guard let pr = git.pr else {
             pullRequest.isHidden = true
             url = nil
