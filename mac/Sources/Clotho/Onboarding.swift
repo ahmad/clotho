@@ -639,7 +639,7 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(hero("bell.badge", tint: .systemOrange))
         stack.setCustomSpacing(16, after: stack.arrangedSubviews.last!)
         stack.addArrangedSubview(title("Agent status"))
-        stack.addArrangedSubview(subtitle("See when Claude Code or Codex is working, waiting for you, or done."))
+        stack.addArrangedSubview(subtitle("See when Claude Code, Codex and other agents are working, waiting for you, or done."))
         stack.setCustomSpacing(22, after: stack.arrangedSubviews.last!)
         setUpButton = ClosureButton(title: "Set Up Agent Status…") { [weak self] in
             guard let self, let app, let window else { return }
@@ -649,24 +649,25 @@ final class OnboardingController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(setUpButton!)
         stack.addArrangedSubview(hooksStatus)
         stack.setCustomSpacing(18, after: hooksStatus)
-        stack.addArrangedSubview(note("Adds hooks to ~/.claude and ~/.codex. You see every change first."))
+        stack.addArrangedSubview(note("Adds hooks to each agent\u{2019}s own settings. You see every change first."))
         refreshHooks()
     }
 
     func refreshHooks() {
         guard let app else { return }
-        let installed = app.hookStatus[AppDelegate.localKey] ?? [:]
-        if !installed.isEmpty, installed.values.allSatisfy({ $0 }) {
-            hooksStatus.stringValue = "✓  Set up for Claude Code and Codex"
-            hooksStatus.textColor = .systemGreen
-            setUpButton?.isEnabled = false
-        } else {
-            let done = installed.filter(\.value).keys.map { $0 == "claude" ? "Claude Code" : "Codex" }.sorted()
-            hooksStatus.stringValue = done.isEmpty ? "" : "Set up for \(done.joined(separator: " and ")) so far"
-            hooksStatus.textColor = .secondaryLabelColor
-            setUpButton?.isEnabled = true
-        }
+        // The button opens the sheet with every agent, so it stays on: there is always more to look at.
+        let done = (app.agentHooks.lines[AppDelegate.localKey] ?? []).filter { $0.state != .notInstalled }.map { AgentKind.of($0.agent).name }
+        hooksStatus.stringValue = Self.hooksLine(done)
+        hooksStatus.textColor = done.isEmpty ? .secondaryLabelColor : .systemGreen
+        setUpButton?.isEnabled = true
         log("onboarding: hooks: \(hooksStatus.stringValue)")
+    }
+
+    /// "✓  Set up for Claude Code and Gemini CLI": the agents whose hooks are installed, by name.
+    nonisolated static func hooksLine(_ names: [String]) -> String {
+        guard let last = names.last else { return "" }
+        let list = names.count == 1 ? last : names.dropLast().joined(separator: ", ") + " and " + last
+        return "✓  Set up for \(list)"
     }
 
     private func showService(_ service: DaemonService?) {

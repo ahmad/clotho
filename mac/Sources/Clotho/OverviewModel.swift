@@ -30,7 +30,8 @@ struct OverviewCard: Equatable {
     let hasPeek: Bool
     /// The branch (or "@commit" when detached); nil outside a repo, or when the machine has no `git`.
     let branch: String?
-    /// How much changed in the work tree, only from a machine with `git.changes`.
+    /// How much changed in the work tree, only from a machine with `git.changes`. The counts alone
+    /// (`PaneGit.Changes.counts`): an edit that only moves the change token redraws nothing.
     let changes: PaneGit.Changes?
     let canMute: Bool
     /// The agent's attention is raised, so Resolve has something to clear.
@@ -45,6 +46,8 @@ struct OverviewCard: Equatable {
     let agent: String
     /// "Claude Code": the filter matches it too.
     let agentFullName: String
+    /// The kind's SF Symbol, one of ClothoKit's `AgentKind` literals: drawn before the sub line.
+    let agentSymbol: String
     /// How long the finished turn took, as the sub line says it ("8 min"); nil when not known.
     let took: String?
 
@@ -71,13 +74,14 @@ struct OverviewCard: Equatable {
         message = said?.isEmpty == false ? said : nil
         agent = info.shortKindName
         agentFullName = info.kindName
+        agentSymbol = info.kindSymbolName
         took = lane == .done ? info.turnDuration.flatMap { Self.time(seconds: Int($0.rounded())) } : nil
         isMuted = info.isMuted
         sub = [entry.machineName, agent, took.map { "took \($0)" }, isMuted ? "muted" : nil]
             .compactMap { $0 }.joined(separator: " · ")
         hasPeek = features.contains(.peek)
         branch = git?.place
-        changes = features.contains(.gitChanges) ? git?.changes : nil
+        changes = features.contains(.gitChanges) ? git?.changes?.counts : nil
         canMute = entry.canMute
         canResolve = info.needsAttention
         tab = entry.tab?.id

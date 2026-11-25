@@ -11,10 +11,16 @@ import ClothoKit
 // Replies come back in any order, so every fetch carries the epoch of its target and a reply for an
 // older one is dropped. At most one list request and one diff request are out at a time; a newer need
 // waits for the one in flight. The list is read again when the pane's summary or HEAD changes (a commit
-// sends two events a second apart: they become one read). An edit that keeps the counts sends no event,
-// so the selected file's diff is asked again every few seconds while it shows, and never sooner than
-// ten times what the last reply took: a slow repository isn't run in a loop. Nothing is asked while
-// neither view shows.
+// sends two events a second apart: they become one read). Nothing is asked while neither view shows.
+//
+// An edit that keeps the counts: with clothod 0.1.33's change token (feature `git.changes.token`,
+// `Target.tokenOn`) the pane's `changes.token` moves, in a `pane` event, whenever the list or a diff would
+// differ. The model holds the token of the list it shows and of the diff it asked for, and reads them
+// again when the pane's is another; nothing is asked by the clock. As a fallback the list and the open
+// diff are looked at again when a view shows again, or the app or the window comes back (`revisit`).
+// Without the feature such an edit sends no event, so the selected file's diff is asked again every few
+// seconds while it shows, and never sooner than ten times what the last reply took: a slow repository
+// isn't run in a loop.
 
 @MainActor
 final class ChangesModel {
@@ -28,6 +34,9 @@ final class ChangesModel {
         /// The machine's daemon lists changes (`git.changes`).
         var featureOn: Bool
         var connected: Bool
+        /// The machine's daemon sends the change token (`git.changes.token`, clothod 0.1.33): reloads
+        /// follow the token, and nothing polls.
+        var tokenOn = false
     }
 
     enum ListState: Equatable {
@@ -92,7 +101,9 @@ final class ChangesModel {
         didSet {
             guard isVisible != oldValue else { return }
             if isVisible {
-                if listStale { reloadList() } else if selection != nil { reloadDiff(quiet: true) }
+                if target?.tokenOn == true {
+                    revisit()
+                } else if listStale { reloadList() } else if selection != nil { reloadDiff(quiet: true) }
                 startPolling()
             } else {
                 pollTimer?.invalidate()
@@ -115,6 +126,28 @@ final class ChangesModel {
     /// The diff counts that last sent the list for a reload, so a list and a diff that disagree for good
     /// (it happens with filters) don't go round.
     private var lastMismatch: String?
+    /// With the change token: the `token` of the `git.changes` reply the shown list came from.
+    private(set) var listToken: String?
+    /// With the change token: the newest token known when the open diff was last asked for.
+    private(set) var diffToken: String?
+    /// The token last heard, from the pane or from a list reply (the reply usually comes first).
+    private var knownToken: String?
+
+    /// The target pane's token now; nil without the feature, or with no summary.
+    private var paneToken: String? { target?.tokenOn == true ? target?.git?.changes?.token : nil }
+
+    /// A view shows again, or the app or its window came back (with the change token only): the fallback
+    /// for a `pane` event that never arrived. The list is read again when it is stale or the pane's token
+    /// isn't the list's, and the open diff is asked again, quietly. Never while one is in flight.
+    func revisit() {
+        guard isVisible, let target, target.tokenOn, target.featureOn, target.git != nil else { return }
+        if listStale || (paneToken != nil && paneToken != listToken) {
+            // The list's reply asks for the open diff again.
+            if !listInFlight { reloadList() }
+        } else if selection != nil, !diffInFlight, !listInFlight {
+            reloadDiff(quiet: true)
+        }
+    }
 
     // MARK: The target
 
@@ -138,6 +171,7 @@ final class ChangesModel {
                 if current.machine == new?.machine, let new {
                     next?.connected = new.connected
                     next?.featureOn = new.featureOn
+                    next?.tokenOn = new.tokenOn
                 }
             }
         }
@@ -165,10 +199,31 @@ final class ChangesModel {
                 diff = .none
                 list = .none
             }
+            // Another pane's tokens say nothing of this one's list.
+            (listToken, diffToken, knownToken) = (nil, nil, nil)
             coalescing?.cancel()
             resolve(reload: .now)
+            // A machine with the token stops the clock; one without it starts it.
+            startPolling()
+        } else if new?.tokenOn == true, old?.tokenOn == true, old?.git?.root == new?.git?.root, old?.git?.head == new?.git?.head,
+                  old?.git?.changesReason == new?.git?.changesReason, old?.connected == new?.connected, old?.featureOn == new?.featureOn,
+                  let token = new?.git?.changes?.token, old?.git?.changes?.counts == new?.git?.changes?.counts {
+            // Only the token can have moved (or nothing of ours did). It is the whole news: read again
+            // what was read under another token, and nothing when the held ones are it already (a reply
+            // usually brings the new token before the pane's event does).
+            knownToken = token
+            if token != listToken {
+                resolve(reload: .soon)
+            } else if selection != nil, token != diffToken {
+                reloadDiff(quiet: true)
+                return
+            } else {
+                return
+            }
         } else if old?.git?.changes != new?.git?.changes || old?.git?.head != new?.git?.head || old?.git?.changesReason != new?.git?.changesReason
             || old?.git?.root != new?.git?.root {
+            if old?.git?.root != new?.git?.root { (listToken, diffToken, knownToken) = (nil, nil, nil) }
+            if let token = new?.git?.changes?.token, new?.tokenOn == true { knownToken = token }
             resolve(reload: .soon)
         } else if old?.connected != new?.connected || old?.featureOn != new?.featureOn {
             resolve(reload: .now)
@@ -254,6 +309,8 @@ final class ChangesModel {
         switch result {
         case let .success(changes):
             list = .loaded(changes)
+            listToken = changes.token
+            if let token = changes.token { knownToken = token }
             if let selection {
                 if let file = Self.file(selection, in: changes) {
                     self.selection = Selection(group: selection.group, path: file.path, oldPath: file.oldPath)
@@ -331,6 +388,7 @@ final class ChangesModel {
             return changed()
         }
         diffInFlight = true
+        diffToken = target.tokenOn ? knownToken ?? target.git?.changes?.token : nil
         let asked = (epoch, selection)
         let started = now()
         let machine = target.machineName
@@ -383,6 +441,12 @@ final class ChangesModel {
     // MARK: Polling the selected file
 
     private func startPolling() {
+        // With the change token nothing is asked by the clock.
+        if target?.tokenOn == true {
+            pollTimer?.invalidate()
+            pollTimer = nil
+            return
+        }
         guard isVisible, pollTimer == nil, pollsByTimer else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { _ = self?.pollTick() }
@@ -398,6 +462,7 @@ final class ChangesModel {
     /// Asks for the selected file's diff again when it's due. Returns whether it asked (tests).
     @discardableResult
     func pollTick() -> Bool {
+        guard target?.tokenOn != true else { return false }
         guard isVisible, isAppActive(), selection != nil, selectedFile?.diffable == true, !diffInFlight, now() >= nextPoll else { return false }
         if case .loading = diff { return false }
         reloadDiff(quiet: true)

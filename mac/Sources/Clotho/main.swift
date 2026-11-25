@@ -63,7 +63,9 @@ enum Theme {
     static func followAppAppearance() {
         let appearance = NSApp.effectiveAppearance
         // Deprecated as a setter, but it's what `.cgColor` reads outside performAsCurrentDrawingAppearance.
-        NSAppearance.current = appearance
+        // Set through a witness that is itself marked deprecated, so the build stays free of the warning
+        // and the call stays.
+        (CurrentAppearanceSetter() as AppearanceSetting).setCurrent(appearance)
     }
 
     static func palette(for appearance: NSAppearance) -> ClothoPalette { appearance.isDark ? .dark : .light }
@@ -91,6 +93,16 @@ enum Theme {
             }
         }
     }
+}
+
+/// Sets the thread's current appearance (see `Theme.followAppAppearance`).
+private protocol AppearanceSetting {
+    func setCurrent(_ appearance: NSAppearance)
+}
+
+private struct CurrentAppearanceSetter: AppearanceSetting {
+    @available(macOS, deprecated: 12.0, message: "Deliberate: see Theme.followAppAppearance.")
+    func setCurrent(_ appearance: NSAppearance) { NSAppearance.current = appearance }
 }
 
 extension NSAppearance {
@@ -125,6 +137,7 @@ final class FramelessWindow: NSWindow {
     /// diff answers for the panes it covers (ChangesDiffView.swift).
     var keyboardRedirect: ((NSResponder) -> NSResponder?)?
 
+    @discardableResult
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         super.makeFirstResponder(responder.flatMap { keyboardRedirect?($0) } ?? responder)
     }
@@ -379,6 +392,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self, let store = connections[key]?.store, let found = store.state.pane(pane), found.exited == nil else { return (false, nil) }
             return (true, git(pane, in: store))
         }
+        // The fallback for the change token (clothod 0.1.33): a look again when the app or its window
+        // comes back. Without the token it does nothing.
+        for name in [NSApplication.didBecomeActiveNotification, NSWindow.didBecomeKeyNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self, weak model] note in
+                MainActor.assumeIsolated {
+                    if let window = note.object as? NSWindow, window !== self?.window { return }
+                    model?.revisit()
+                }
+            }
+        }
         return model
     }()
     /// A changed file's side-by-side diff, over the pane area while it shows (ChangesDiffView.swift).
@@ -438,10 +461,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let agentsMenuDelegate = AgentsMenuDelegate()
     /// Machines where agents have reported through hooks, so setup isn't offered again.
     var hookSourcedMachines: Set<MachineKey> = []
-    /// `hooks status` per machine: agent → installed.
-    var hookStatus: [MachineKey: [String: Bool]] = [:]
-    /// Agents whose hooks on a machine came from an older clothod (`hooks status` says "outdated").
-    var outdatedHooks: [MachineKey: Set<String>] = [:]
+    /// `hooks status` per machine, and what is being installed or removed (AgentHooks.swift).
+    let agentHooks = AgentHooksState()
     var lastAgentNotification: [String: (state: AgentInfo.State, date: Date)] = [:]
     /// Notifications waiting for the daemon's summary (Agents.swift).
     lazy var summaryHold = SummaryHold(current: { [weak self] key in
@@ -1313,7 +1334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let name = UserDefaults.standard.string(forKey: "SetUpAgentStatus") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [self] in
                 let key = name == "local" ? Self.localKey : remoteMachines.first { $0.label == name }?.key
-                log("SetUpAgentStatus: \(name), needs \(key.map(agentsNeedingHooks) ?? [])")
+                log("SetUpAgentStatus: \(name), agents \(key.map { hookRows($0).map(\.agent) } ?? [])")
                 if let key { setUpAgentHooks(on: key) }
             }
         }
@@ -1500,7 +1521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func startBackend() {
         guard let local = connections[Self.localKey] else { return }
         let daemon = localDaemon
-        Task { @MainActor in
+        Task { @MainActor [self] in
             do {
                 // Install the bundled version if it's new, and start the daemon from the installed copy.
                 try await Task.detached { try daemon?.start() }.value
@@ -1722,8 +1743,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             (animate ? tabBarLeading.animator() : tabBarLeading).constant = hide ? Self.hiddenTabBarInset : 0
             if animate { window.contentView?.layoutSubtreeIfNeeded() }
         }, completionHandler: { [weak self] in
-            guard let self, isSidebarHidden else { return }
-            sidebar.isHidden = true
+            MainActor.assumeIsolated {
+                guard let self, self.isSidebarHidden else { return }
+                self.sidebar.isHidden = true
+            }
         })
         if !animate, hide { sidebar.isHidden = true }
     }

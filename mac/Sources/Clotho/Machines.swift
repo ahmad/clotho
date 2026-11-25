@@ -59,7 +59,7 @@ extension AppDelegate {
         guard let id = machine.id, machineStatus[id] != .checking else { return }
         machineStatus[id] = .checking
         sync()
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             let status: MachineStatus
             do {
                 _ = try SSH.run(machine, "true")
@@ -180,10 +180,10 @@ extension AppDelegate {
         }
         monitor.state = monitorsAgents(key) ? .on : .off
         menu.addItem(monitor)
-        // Until an agent there reports through hooks, offer to set them up (never automatically).
-        // Older hooks (from a previous clothod) are offered as an update even though they still report.
-        if (connected || machine.isLocal), !hasHookSourcedAgents(key) || hooksNeedUpdate(key) {
-            add(hooksNeedUpdate(key) ? "Update Agent Status…" : "Set Up Agent Status…") { [weak self] in self?.setUpAgentHooks(on: key) }
+        // The agents' status hooks on this machine, each with its own Install, Update and Remove (never
+        // automatically). The title says what there is to do: set up, update, or just look.
+        if connected || machine.isLocal {
+            add(hooksMenuTitle(key)) { [weak self] in self?.setUpAgentHooks(on: key) }
         }
         guard !machine.isLocal else { return menu }
         if connected {

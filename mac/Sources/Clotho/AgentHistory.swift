@@ -132,8 +132,11 @@ final class AgentHistoryWindowController: NSWindowController, NSWindowDelegate, 
     /// How an entry reads: an icon, a few words, and the detail (its message, and what reported it).
     static func describe(_ entry: AgentHistoryEntry) -> (symbol: String, color: NSColor, what: String, detail: String) {
         let state = entry.state ?? .unknown
-        var detail = entry.message.map(PlainText.oneLine) ?? ""
-        let origin = entry.guess == true ? "detected from output" : entry.source.map { "from \($0)" }
+        // A terminal notification's text is a program's output: plain, never read as Markdown.
+        let isOsc = entry.source == "osc"
+        var detail = entry.message.map { isOsc ? AgentNotice.plainLine($0) : PlainText.oneLine($0) } ?? ""
+        let origin = entry.guess == true ? "detected from output"
+            : isOsc ? "from a terminal notification" : entry.source.map { "from \(AgentKind.safeText($0))" }
         if let origin { detail += detail.isEmpty ? origin.capitalizedFirst : " (\(origin))" }
         switch entry.event {
         case .state:
@@ -172,7 +175,7 @@ extension AppDelegate {
         guard let session = connections[machine] else { return }
         let info = session.store.state.pane(pane)?.agent
         let place = session.store.state.location(of: pane).map { "\($0.workspace.name) › \(session.store.displayTitle(of: $0.tab))" }
-        let title = [info?.kindName ?? "Agent", place, session.title].compactMap { $0 }.joined(separator: " · ")
+        let title = [info?.kindName ?? AgentKind.genericName, place, session.title].compactMap { $0 }.joined(separator: " · ")
         let controller = AgentHistoryWindowController(app: self, key: key, title: "\(title) — History")
         agentHistoryWindows[key] = controller
         controller.show()

@@ -76,7 +76,8 @@ extension AppDelegate {
         if isOverviewShown { updateOverview(agents: agentEntries(monitoredOnly: false)) }
         let tabs = (workspace?.tabs ?? []).map {
             (id: $0.id, title: store.displayTitle(of: $0), custom: $0.title, maximized: maximized[tabKey($0.id)] != nil,
-             mark: agentMark(machine: focusedMachine, panes: $0.layout.panes)?.mark)
+             mark: agentMark(machine: focusedMachine, panes: $0.layout.panes)?.mark,
+             agent: mostUrgentAgent(machine: focusedMachine, panes: $0.layout.panes)?.kindName)
         }
         tabBar.machine = focusedMachine
         tabBar.workspace = workspace?.id
@@ -84,6 +85,9 @@ extension AppDelegate {
             tab.map { (machine: focusedConnection.title, workspace: workspace.name, tab: store.displayTitle(of: $0)) }
         }
         tabBar.update(tabs: tabs, selected: tab?.id)
+        // Progress goes beside the rebuild paths, never through them: it moves up to once a second.
+        tabBar.setProgress(tabProgress(workspace?.tabs ?? [], in: store))
+        sidebar.setProgress(agentProgress(agents))
 
         // One view per pane on every connected machine, kept while the pane exists so its screen survives
         // tab and machine switches.
@@ -121,7 +125,8 @@ extension AppDelegate {
             // shows nowhere, so not here either.
             let pane = state.pane(id)
             host.chrome = PaneChrome(agent: monitorsAgents(focusedMachine) ? pane?.agent : nil, command: pane?.command, cwd: pane?.cwd,
-                                     home: store.hello?.machine?.home, canDecide: store.features.contains(.agentDecide))
+                                     home: store.hello?.machine?.home, canDecide: store.features.contains(.agentDecide),
+                                     progress: store.features.contains(.paneProgress) ? pane?.progress : nil)
             // The 30 s clock (`agentClock`) lands here, so the header's time moves on.
             host.refreshElapsed()
         }
@@ -198,7 +203,7 @@ extension AppDelegate {
             // The quick replies only when the agent itself says it waits for the user, as in the inbox.
             let agent = session?.store.state.pane(key.pane)?.agent
             let canReply = session?.store.hello?.features.contains(.paneKeys) == true && agent?.state == .waiting
-                && agent?.needsAttention == true && agent?.isHookSourced == true
+                && agent?.needsAttention == true && agent?.acceptsReplies == true
             return agentMenu(machine: key.machine, pane: key.pane, canReply: canReply)
         }
         host.onClose = { [weak self] in

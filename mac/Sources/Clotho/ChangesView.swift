@@ -467,6 +467,12 @@ final class ChangesView: NSView, NSSplitViewDelegate {
     let message = ChangesMessageView()
     private let split = ChangesSplitView()
     private let diffBox = NSView()
+    /// What the diff box shows. The box itself is the split view's: hidden, it is collapsed to no size at
+    /// all, and insets pinned to a box of no size can't hold ("Conflicting constraints detected", once
+    /// per layout). So the insets are pinned to this view, which is exactly the box whenever the box has
+    /// room and never smaller than `diffContentLeast` when it has none.
+    let diffContent = NSView()
+    static var diffContentLeast: NSSize { NSSize(width: s(120), height: s(72)) }
     private let followRow = NSView()
     private var bodyTop: NSLayoutConstraint!
     private var placedDivider = false
@@ -523,26 +529,38 @@ final class ChangesView: NSView, NSSplitViewDelegate {
         rule.boxType = .custom
         rule.borderWidth = 0
         rule.fillColor = Theme.divider
+        diffContent.translatesAutoresizingMaskIntoConstraints = false
+        diffBox.addSubview(diffContent)
+        // The box's size whenever it can be (999), and its least size when the box is collapsed.
+        let fills = [diffContent.widthAnchor.constraint(equalTo: diffBox.widthAnchor),
+                     diffContent.heightAnchor.constraint(equalTo: diffBox.heightAnchor)]
+        fills.forEach { $0.priority = NSLayoutConstraint.Priority(999) }
+        NSLayoutConstraint.activate(fills + [
+            diffContent.leadingAnchor.constraint(equalTo: diffBox.leadingAnchor),
+            diffContent.topAnchor.constraint(equalTo: diffBox.topAnchor),
+            diffContent.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.diffContentLeast.width),
+            diffContent.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.diffContentLeast.height),
+        ])
         for view in [diffTitle, openButton!, diffArea, rule] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
-            diffBox.addSubview(view)
+            diffContent.addSubview(view)
         }
         NSLayoutConstraint.activate([
-            rule.topAnchor.constraint(equalTo: diffBox.topAnchor),
-            rule.leadingAnchor.constraint(equalTo: diffBox.leadingAnchor),
-            rule.trailingAnchor.constraint(equalTo: diffBox.trailingAnchor),
+            rule.topAnchor.constraint(equalTo: diffContent.topAnchor),
+            rule.leadingAnchor.constraint(equalTo: diffContent.leadingAnchor),
+            rule.trailingAnchor.constraint(equalTo: diffContent.trailingAnchor),
             rule.heightAnchor.constraint(equalToConstant: 1),
-            diffTitle.leadingAnchor.constraint(equalTo: diffBox.leadingAnchor, constant: s(10)),
-            diffTitle.centerYAnchor.constraint(equalTo: diffBox.topAnchor, constant: s(12)),
+            diffTitle.leadingAnchor.constraint(equalTo: diffContent.leadingAnchor, constant: s(10)),
+            diffTitle.centerYAnchor.constraint(equalTo: diffContent.topAnchor, constant: s(12)),
             openButton.leadingAnchor.constraint(greaterThanOrEqualTo: diffTitle.trailingAnchor, constant: s(6)),
-            openButton.trailingAnchor.constraint(equalTo: diffBox.trailingAnchor, constant: -s(8)),
+            openButton.trailingAnchor.constraint(equalTo: diffContent.trailingAnchor, constant: -s(8)),
             openButton.centerYAnchor.constraint(equalTo: diffTitle.centerYAnchor),
             openButton.widthAnchor.constraint(equalToConstant: s(18)),
             openButton.heightAnchor.constraint(equalToConstant: s(18)),
-            diffArea.topAnchor.constraint(equalTo: diffBox.topAnchor, constant: s(24)),
-            diffArea.leadingAnchor.constraint(equalTo: diffBox.leadingAnchor, constant: 1),
-            diffArea.trailingAnchor.constraint(equalTo: diffBox.trailingAnchor),
-            diffArea.bottomAnchor.constraint(equalTo: diffBox.bottomAnchor),
+            diffArea.topAnchor.constraint(equalTo: diffContent.topAnchor, constant: s(24)),
+            diffArea.leadingAnchor.constraint(equalTo: diffContent.leadingAnchor, constant: 1),
+            diffArea.trailingAnchor.constraint(equalTo: diffContent.trailingAnchor),
+            diffArea.bottomAnchor.constraint(equalTo: diffContent.bottomAnchor),
         ])
 
         split.isVertical = false

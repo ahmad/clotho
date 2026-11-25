@@ -73,7 +73,7 @@ Changes and Activity need clothod 0.1.32 or later on the pane's machine. Against
 
 ## Agents
 
-The top of the sidebar is an inbox of the coding agents (Claude Code, Codex) running in panes on every connected machine, in three sections above the workspaces:
+The top of the sidebar is an inbox of the coding agents (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, OpenCode, Aider, Amp, Cursor Agent) and of any program that reports its status (see [Status from any program](#status-from-any-program)) running in panes on every connected machine, in three sections above the workspaces:
 
 - **Needs you**: agents that wait for you (a permission request, a question, a bell) and ones whose turn failed, the longest wait first.
 - **Done**: agents that finished since you last looked, the most recent first.
@@ -282,7 +282,56 @@ If a machine's shells were started by a clothod too old for the new one to take 
 
 ### Agent status
 
-Clotho detects Claude Code and Codex from the terminal, which works without any setup. For exact status (the moment an agent waits for you, finishes or fails), right-click a machine and choose **Set Up Agent Status…**. Clotho first shows exactly what `clothod hooks install` would change on that machine (the agents' settings files, with backups kept), and installs the hooks only if you confirm. `clothod hooks uninstall` undoes it.
+Clotho detects coding agents from the terminal, which works without any setup. For exact status (the moment an agent waits for you, finishes or fails), an agent reports through its own hooks. clothod has hooks for four agents: **Claude Code**, **Codex**, **Gemini CLI** and **GitHub Copilot CLI**.
+
+Right-click a machine and choose **Set Up Agent Status…** (it reads **Agent Status…** once something is installed, and **Update Agent Status…** when a hook comes from an older clothod), or open **Settings › Machines** and look under **Agent status**. Both list the agents with what is installed, and each agent has its own buttons:
+
+- **Install** shows exactly what `clothod hooks install <agent>` would change on that machine (the agent's settings file, with a backup kept; anything of yours in it stays) and installs only when you confirm.
+- **Update** does the same for hooks left by an older clothod.
+- **Remove** asks first, then runs `clothod hooks uninstall <agent>`.
+
+Nothing is installed, updated or removed without that second click, and always for one agent at a time. An agent picks its hooks up the next time it starts.
+
+The GitHub Copilot CLI hook format was checked against GitHub's documentation, not yet against a running Copilot CLI. If Copilot's status doesn't show after you install it, Clotho still detects it from the terminal.
+
+A machine with a clothod older than 0.1.33 lists Claude Code and Codex only.
+
+### Status from any program
+
+A build, a deploy or any script of yours can show in the inbox and notify you like an agent, from any pane on any machine with clothod 0.1.33 or later. Nothing needs installing.
+
+Say that it needs you. It shows under **Needs you**, with a notification and its sound:
+
+```sh
+clothod report --state waiting --message "Deploy needs approval"
+```
+
+Say that it finished and you don't have to do anything. It shows under **Done**, with a notification that makes no sound, about 30 seconds after the report:
+
+```sh
+clothod report --state done --needs-user no
+```
+
+Add `--kind deploy` to give it a name of its own in the list (lowercase letters, digits, `.`, `_` and `-`), and `--message` for the text. `clothod report --state running` shows it under **Working** while it works, `--state error` says it failed, and `--state clear` takes it away.
+
+A program that can only print (over ssh on a machine without clothod, in a container) sends a terminal notification instead. This shows under **Needs you** with that text:
+
+```sh
+printf '\033]9;Build finished\007'
+```
+
+Show how far it is. A thin bar appears on the pane's Tab and along its pane header, and on its inbox row and Overview card when the pane has an agent. Progress is only drawn: it never notifies. The first line shows 40 percent, the second clears it:
+
+```sh
+printf '\033]9;4;1;40\007'
+printf '\033]9;4;0\007'
+```
+
+The number after `4;` is the state: `1` running, `2` an error (red), `3` no percent known (a moving bar; a still one under Reduce Motion), `4` paused (amber).
+
+Text from a program shows exactly as it was sent: Clotho doesn't read it as Markdown and makes no links from it. Such a row has **Resolve** and **Mute**, and no reply buttons, as there is nobody to answer.
+
+Two limits. A `running` status lasts as long as the program that reported it, and goes away by itself when that program ends. Inside ssh or tmux, Clotho only sees ssh or tmux, so the status lasts as long as they do.
 
 ## Launch options
 

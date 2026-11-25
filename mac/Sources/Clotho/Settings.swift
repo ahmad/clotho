@@ -164,7 +164,7 @@ final class GeneralSettingsController: NSViewController {
                 UserDefaults.standard.set(on, forKey: "NotifyAgent.\(state.rawValue)")
             })
         }
-        return formSection("Notifications", FormGroup(rows), footnote: "From agents that report their state, such as Claude Code and Codex with status hooks.")
+        return formSection("Notifications", FormGroup(rows), footnote: "From agents and programs that report their state.")
     }
 
     private func appearance() -> NSView {

@@ -564,7 +564,9 @@ final class TabBarView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?)], selected: TabID?) {
+    /// `agent`: the full name of the kind of the Tab's most urgent agent ("Gemini CLI"), for the tooltip and
+    /// VoiceOver.
+    func update(tabs: [(id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?, agent: String?)], selected: TabID?) {
         latest = { [weak self] in self?.update(tabs: tabs, selected: selected) }
         // Held while a title is edited, or a drag is in flight (rebuilding would remove what's dragged).
         if items.values.contains(where: { $0.item.isEditing }) || ChromeDrag.isActive {
@@ -572,7 +574,7 @@ final class TabBarView: NSView {
             return
         }
         // Only the selection changed (a click): the tabs stay, so one being pressed can still be dragged.
-        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, mark: $0.mark) }
+        let shape = tabs.map { TabShape(id: $0.id, title: $0.title, custom: $0.custom, maximized: $0.maximized, mark: $0.mark, agent: $0.agent) }
         if shape == lastShape, !items.isEmpty {
             for (id, entry) in items { entry.item.isSelected = id == selected }
             return
@@ -581,6 +583,7 @@ final class TabBarView: NSView {
         order = tabs.map(\.id)
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         items = [:]
+        progressBars = [:]
         widths = []
         let width = Self.tabWidth(count: tabs.count, barWidth: bounds.width, busy: busyText != nil)
         for (index, var tab) in tabs.enumerated() {
@@ -596,8 +599,7 @@ final class TabBarView: NSView {
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .leading }.forEach { $0.constant = Self.dotSlot }
             item.constraints.filter { $0.firstItem === item.label && $0.firstAttribute == .trailing }.forEach { $0.isActive = false }
             item.label.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4)).isActive = true
-            // "alerts, Needs you": the tab's name, and its most urgent agent's state when it has one.
-            let named = tab.mark.map { "\(tab.title), \($0.label)" } ?? tab.title
+            let named = Self.spokenName(title: tab.title, mark: tab.mark, agent: tab.agent)
             item.toolTip = index < 9 ? "\(named) (⌘\(index + 1))" : named
             item.setAccessibilityElement(true)
             item.setAccessibilityRole(.button)
@@ -620,6 +622,23 @@ final class TabBarView: NSView {
                     view.centerYAnchor.constraint(equalTo: item.centerYAnchor),
                 ])
             }
+            // The Tab's progress, along its bottom between the mark's slot and the ×'s room: in place whether
+            // or not there is any, so nothing moves when it comes and goes.
+            let bar = ProgressBarView(progress[tab.id])
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            item.addSubview(bar)
+            // Below required: a tab squeezed to less than its slots (a bar with no width yet) gives the
+            // bar up, and breaks nothing.
+            let trailing = bar.trailingAnchor.constraint(equalTo: item.closeButton.leadingAnchor, constant: s(-4))
+            trailing.priority = NSLayoutConstraint.Priority(999)
+            NSLayoutConstraint.activate([
+                bar.leadingAnchor.constraint(equalTo: item.leadingAnchor, constant: Self.dotSlot),
+                trailing,
+                bar.bottomAnchor.constraint(equalTo: item.bottomAnchor, constant: s(-5)),
+                bar.heightAnchor.constraint(equalToConstant: ProgressBarView.height),
+            ])
+            progressBars[tab.id] = bar
+            item.setAccessibilityValue(progress[tab.id]?.spokenText)
             stack.addArrangedSubview(item)
             let constraint = item.widthAnchor.constraint(equalToConstant: width)
             // Below the window's own resize priorities, so tabs never hold the window wide; layout() sets
@@ -643,7 +662,29 @@ final class TabBarView: NSView {
     /// The last tabs built, to tell a selection-only update apart.
     private var lastShape: [TabShape]?
     private struct TabShape: Equatable {
-        var id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?
+        var id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?, agent: String?
+    }
+
+    /// "alerts, Needs you (Gemini CLI)": the tab's name, and its most urgent agent's state and kind when it
+    /// has one.
+    static func spokenName(title: String, mark: AgentMark?, agent: String?) -> String {
+        guard let mark else { return title }
+        return "\(title), \(mark.label)" + (agent.map { " (\($0))" } ?? "")
+    }
+
+    /// Each Tab's progress (`PaneProgress.forTab` over its panes). Applied to the tabs there are, never by
+    /// building them again: progress moves up to once a second. A rebuild picks it up from here.
+    private(set) var progress: [TabID: PaneProgress] = [:]
+    private(set) var progressBars: [TabID: ProgressBarView] = [:]
+
+    func setProgress(_ progress: [TabID: PaneProgress]) {
+        guard progress != self.progress else { return }
+        self.progress = progress
+        for (id, bar) in progressBars {
+            bar.progress = progress[id]
+            // The spoken text is the tab's value, not part of its label, which would change every second.
+            items[id]?.item.setAccessibilityValue(progress[id]?.spokenText)
+        }
     }
 
     /// Where the focused tab is ("devbox › clotho › alerts"): its machine, workspace and own title, drawn dim
@@ -1097,9 +1138,31 @@ final class SidebarView: NSView {
                 return row.label.stringValue + (row.isSelected ? "*" : "")
             }.joined(separator: " | "))
         }
+        applyProgress()
         refreshHoverSoon()
         startArrivedRename()
     }
+
+    /// The progress of panes that have an agent row, by pane. Applied to the rows there are, never by
+    /// building them again (progress moves up to once a second, and isn't in `layoutSignature`); a rebuild
+    /// picks it up from here.
+    private(set) var progress: [PaneKey: PaneProgress] = [:]
+
+    func setProgress(_ progress: [PaneKey: PaneProgress]) {
+        guard progress != self.progress else { return }
+        self.progress = progress
+        applyProgress()
+    }
+
+    private func applyProgress() {
+        for (item, row) in itemRows {
+            guard case .agent(let machine, let pane) = item, let row = row as? AgentRow else { continue }
+            row.progressBar.progress = progress[PaneKey(machine: machine, pane: pane)]
+        }
+    }
+
+    /// The inbox's agent rows, top to bottom (tests).
+    var agentRows: [AgentRow] { order.compactMap { itemRows[$0] as? AgentRow } }
 
     /// Everything the rows show, apart from which one is selected.
     private var lastSignature = ""

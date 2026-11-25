@@ -175,7 +175,7 @@ extension AppDelegate {
             guard let session = connections[key] else { continue }
             if key == Self.localKey {
                 guard let daemon = localDaemon else { continue }
-                Task { @MainActor in
+                Task { @MainActor [self] in
                     do {
                         try await Task.detached { try daemon.upgrade() }.value
                         log("clothod: switched this Mac's daemon to the installed build")

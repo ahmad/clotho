@@ -272,6 +272,188 @@ final class ChangesModelTests: XCTestCase {
         XCTAssertTrue(model.pollTick())
     }
 
+    // MARK: The change token (clothod 0.1.33, `git.changes.token`)
+
+    private let loginDiff = GitDiff(path: "src/login.rs", status: .modified, added: 12, removed: 2,
+                                    hunks: [.init(oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: [.init(kind: .context, old: 1, new: 1, text: "x")])])
+
+    /// A pane whose list and summary carry the token "t1", shown, with `login` selected and its diff loaded.
+    private func tokenPane() async throws -> PaneID {
+        let one = try await pane(root: "/one", files: [login])
+        fake.setDiff(one, path: "src/login.rs", group: .uncommitted, .success(loginDiff))
+        moveToken(one, to: "t1")
+        model.isVisible = true
+        model.setFocused(tokenTarget(one))
+        try await wait("the list") { self.loaded != nil }
+        model.select(login, group: .uncommitted)
+        try await wait("the diff") { self.model.diff == .loaded(self.loginDiff) }
+        XCTAssertEqual(model.listToken, "t1")
+        XCTAssertEqual(model.diffToken, "t1")
+        return one
+    }
+
+    private func tokenTarget(_ pane: PaneID) -> ChangesModel.Target {
+        var target = target(pane)
+        target.tokenOn = true
+        return target
+    }
+
+    /// The daemon's token moves: on the list it answers with, and (with `event`) in the pane's summary.
+    private func moveToken(_ pane: PaneID, to token: String, event: Bool = true) {
+        fake.moveChangesToken(pane, to: token)
+        if event { gits[pane]?.changes?.token = token }
+    }
+
+    private func quiet() async throws { try await Task.sleep(nanoseconds: 400_000_000) }
+
+    func testWithTheTokenNothingIsAskedByTheClock() async throws {
+        let one = try await tokenPane()
+        let lists = fake.gitChangesCalls.count, diffs = fake.gitDiffRequests.count
+        clock += 600
+        XCTAssertFalse(model.pollTick(), "no poll with the token")
+        model.setFocused(tokenTarget(one))
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists)
+        XCTAssertEqual(fake.gitDiffRequests.count, diffs)
+    }
+
+    func testAnotherTokenReloadsTheListAndTheOpenDiff() async throws {
+        let one = try await tokenPane()
+        let lists = fake.gitChangesCalls.count, diffs = fake.gitDiffRequests.count
+        // An edit that keeps every count: only the token says so.
+        moveToken(one, to: "t2")
+        model.setFocused(tokenTarget(one))
+        try await wait("the list read again") { self.fake.gitChangesCalls.count == lists + 1 }
+        try await wait("the diff asked again") { self.fake.gitDiffRequests.count == diffs + 1 }
+        try await wait("the tokens held") { self.model.listToken == "t2" && self.model.diffToken == "t2" }
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists + 1, "once")
+        XCTAssertEqual(fake.gitDiffRequests.count, diffs + 1, "once")
+    }
+
+    func testTheSameTokenWithOtherNewsOfThePaneAsksNothing() async throws {
+        let one = try await tokenPane()
+        let lists = fake.gitChangesCalls.count, diffs = fake.gitDiffRequests.count
+        gits[one]?.branch = "another"
+        gits[one]?.pr = .init(number: 7, state: .open, url: "https://example.invalid/7", title: "x")
+        model.setFocused(tokenTarget(one))
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists)
+        XCTAssertEqual(fake.gitDiffRequests.count, diffs)
+    }
+
+    /// The reply to a Refresh brings the new token before the pane's event does: the event then asks nothing.
+    func testAReplyThatAlreadyHasTheNewTokenMeansNoSecondAsk() async throws {
+        let one = try await tokenPane()
+        moveToken(one, to: "t2", event: false)
+        let lists = fake.gitChangesCalls.count, diffs = fake.gitDiffRequests.count
+        model.refresh()
+        try await wait("the refreshed list") { self.model.listToken == "t2" }
+        try await wait("its diff") { self.fake.gitDiffRequests.count == diffs + 1 && self.model.diffToken == "t2" }
+        gits[one]?.changes?.token = "t2"
+        model.setFocused(tokenTarget(one))
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists + 1, "the pane's event with the same token asks nothing")
+        XCTAssertEqual(fake.gitDiffRequests.count, diffs + 1)
+    }
+
+    func testTheOpenDiffAnsweringNotChangedReadsTheListOnce() async throws {
+        let one = try await tokenPane()
+        let lists = fake.gitChangesCalls.count
+        // The file went back to what it was: the token moved, the list no longer has it.
+        fake.setChanges(one, .success(GitChanges(root: "/one", uncommitted: .init(files: [renamed]), token: "t2")))
+        fake.setDiffNotChanged(one, path: "src/login.rs", group: .uncommitted)
+        gits[one]?.changes?.token = "t2"
+        model.setFocused(tokenTarget(one))
+        try await wait("the file gone from the list") { self.loaded?.uncommitted.files == [self.renamed] }
+        XCTAssertNil(model.selection)
+        try await quiet()
+        XCTAssertLessThanOrEqual(fake.gitChangesCalls.count, lists + 2, "the list isn't read in a loop")
+    }
+
+    func testNoSummaryKeepsNothingAsToday() async throws {
+        let one = try await tokenPane()
+        gits[one]?.changes = nil
+        gits[one]?.changesReason = "timeout"
+        model.setFocused(tokenTarget(one))
+        XCTAssertEqual(model.list, .unknown(GitText.reason("timeout", machine: "this Mac"), pending: false), "the reason shows, as without the token")
+    }
+
+    func testShownAgainReloadsTheListOnlyWhenTheTokenMoved() async throws {
+        let one = try await tokenPane()
+        model.isVisible = false
+        var lists = fake.gitChangesCalls.count, diffs = fake.gitDiffRequests.count
+        model.isVisible = true
+        try await wait("the open diff looked at again") { self.fake.gitDiffRequests.count == diffs + 1 }
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists, "the same token: the list stays")
+
+        model.isVisible = false
+        moveToken(one, to: "t2")
+        model.setFocused(tokenTarget(one))
+        try await quiet()
+        (lists, diffs) = (fake.gitChangesCalls.count, fake.gitDiffRequests.count)
+        model.isVisible = true
+        try await wait("the list read again as it shows") { self.fake.gitChangesCalls.count == lists + 1 }
+        try await wait("and the diff") { self.fake.gitDiffRequests.count == diffs + 1 }
+    }
+
+    func testComingBackLooksAgainButNotWhileARequestIsOut() async throws {
+        let one = try await tokenPane()
+        var lists = fake.gitChangesCalls.count, diffs = fake.gitDiffRequests.count
+        // The app or its window came back: the fallback for an event that never arrived.
+        model.revisit()
+        try await wait("the open diff asked again") { self.fake.gitDiffRequests.count == diffs + 1 }
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists, "the token is the list's: it stays")
+
+        // The pane's token moved and its event was missed by the model (it only sees it now).
+        moveToken(one, to: "t3", event: false)
+        fake.gitDelay = 0.3
+        (lists, diffs) = (fake.gitChangesCalls.count, fake.gitDiffRequests.count)
+        model.refresh()
+        model.revisit()
+        model.revisit()
+        try await wait("the list") { self.model.listToken == "t3" }
+        try await wait("the diff after it") { self.fake.gitDiffRequests.count == diffs + 1 }
+        try await quiet()
+        XCTAssertEqual(fake.gitChangesCalls.count, lists + 1, "nothing more was asked while the list was out")
+        fake.gitDelay = 0
+
+        // Hidden: nothing.
+        model.isVisible = false
+        diffs = fake.gitDiffRequests.count
+        model.revisit()
+        try await quiet()
+        XCTAssertEqual(fake.gitDiffRequests.count, diffs)
+    }
+
+    func testAnotherPaneClearsTheHeldTokens() async throws {
+        let one = try await tokenPane()
+        let two = try await pane(root: "/two", files: [renamed])
+        // The first pane is gone, so nothing pins the list to it.
+        gits[one] = nil
+        model.setFocused(tokenTarget(two))
+        XCTAssertNil(model.diffToken)
+        try await wait("the other list") { self.loaded?.root == "/two" }
+        XCTAssertNil(model.listToken, "that list had no token")
+        XCTAssertNil(model.selection)
+    }
+
+    /// A machine without the feature polls as before, whatever tokens there are.
+    func testWithoutTheFeatureATokenChangesNothing() async throws {
+        let one = try await pane(root: "/one", files: [login])
+        fake.setDiff(one, path: "src/login.rs", group: .uncommitted, .success(loginDiff))
+        model.isVisible = true
+        model.setFocused(target(one))
+        try await wait("the list") { self.loaded != nil }
+        model.select(login, group: .uncommitted)
+        try await wait("the diff") { self.model.diff == .loaded(self.loginDiff) }
+        try await wait("that reply") { self.model.nextPoll > self.clock }
+        clock += 5.1
+        XCTAssertTrue(model.pollTick(), "polls as today")
+    }
+
     func testPathsStayInsideTheWorkTree() {
         XCTAssertEqual(ChangesModel.absolutePath(root: "/repo", file: login), "/repo/src/login.rs")
         XCTAssertEqual(ChangesModel.absolutePath(root: "/repo/", file: login), "/repo/src/login.rs")

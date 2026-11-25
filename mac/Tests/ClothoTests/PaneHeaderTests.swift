@@ -125,7 +125,8 @@ final class PaneHeaderTests: XCTestCase {
         try await show(AgentInfo(kind: "claude", state: .done, source: "hook", since: since - 5, settling: true), in: host, pane)
         XCTAssertEqual(chip.text, "Claude · Done")
         XCTAssertNil(chip.mark, "a settling agent has no mark")
-        XCTAssertNil(chip.image)
+        XCTAssertEqual(chip.symbol, "sparkle", "the kind's symbol leads the name")
+        XCTAssertNotNil(chip.image)
 
         // Muted: a crossed bell.
         try await show(AgentInfo(kind: "claude", state: .waiting, source: "hook", since: since - 5, muted: true), in: host, pane)

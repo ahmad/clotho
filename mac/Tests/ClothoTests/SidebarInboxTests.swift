@@ -208,7 +208,8 @@ final class SidebarInboxTests: XCTestCase {
             let labels = row.subviews.compactMap { $0 as? NSTextField }
             XCTAssertEqual(labels.count, 2, "the title and what it says: no machine name, no time")
             XCTAssertTrue(row.subviews.compactMap { $0 as? NSButton }.isEmpty, "no buttons in the row itself")
-            XCTAssertTrue(row.subviews.compactMap { $0 as? NSImageView }.isEmpty, "the mark is the only icon")
+            XCTAssertEqual(row.subviews.compactMap { $0 as? NSImageView }, [row.kindGlyph], "the mark, and the kind's small glyph at the end")
+            XCTAssertNotNil(row.kindGlyph.image)
         }
         // The mark, then the title where workspace names start, then the text to the row's end.
         let row = agentRows[2]

@@ -401,8 +401,10 @@ extension AppDelegate {
             (animate ? tabBarTrailing.animator() : tabBarTrailing).constant = show ? 0 : -Self.fileToggleInset
             if animate { window.contentView?.layoutSubtreeIfNeeded() }
         }, completionHandler: { [weak self] in
-            guard let self, !isFileSidebarShown else { return }
-            fileSidebar.isHidden = true
+            MainActor.assumeIsolated {
+                guard let self, !self.isFileSidebarShown else { return }
+                self.fileSidebar.isHidden = true
+            }
         })
         if !animate, !show { fileSidebar.isHidden = true }
     }
@@ -417,7 +419,8 @@ extension AppDelegate {
         // Changes hears of every sync, shown or not: the centre diff reads the same model.
         changesModel.setFocused(pane.map {
             ChangesModel.Target(machine: session.key, machineName: session.title, pane: $0.id, git: git($0.id, in: store),
-                                featureOn: listsChanges, connected: store.isConnected)
+                                featureOn: listsChanges, connected: store.isConnected,
+                                tokenOn: store.features.contains(.gitChangesToken))
         })
         fileSidebar.setAvailable(listsChanges)
         guard isFileSidebarShown else { return }

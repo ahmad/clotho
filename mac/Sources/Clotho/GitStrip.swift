@@ -228,7 +228,10 @@ extension PaneHostView {
             return
         }
         let strip = gitStrip ?? {
-            let strip = GitStrip()
+            // With the frame the host's layout gives it (and room for its insets before the host has a
+            // size): a strip made with no frame can't hold them until the next layout pass, which logged
+            // "Conflicting constraints detected" for every pane in a repository.
+            let strip = GitStrip(frame: Self.gitStripFrame(in: bounds))
             addSubview(strip)
             gitStrip = strip
             return strip
@@ -237,6 +240,11 @@ extension PaneHostView {
         strip.show(git)
         strip.isHidden = !isFocusedPane
         needsLayout = true
+    }
+
+    /// Where the strip sits: along the pane's bottom. Before the pane has a size, a strip's width of room.
+    static func gitStripFrame(in bounds: NSRect) -> NSRect {
+        NSRect(x: 0, y: max(0, bounds.height - GitStrip.height), width: max(bounds.width, s(240)), height: GitStrip.height)
     }
 
     /// Room the strip takes at the bottom.

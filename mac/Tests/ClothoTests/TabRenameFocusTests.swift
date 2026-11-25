@@ -26,7 +26,7 @@ final class TabRenameFocusTests: XCTestCase {
     }
 
     private func show(_ titles: [String]) {
-        bar.update(tabs: titles.enumerated().map { (TabID($0.offset + 1), $0.element, nil, false, nil) }, selected: 1)
+        bar.update(tabs: titles.enumerated().map { (TabID($0.offset + 1), $0.element, nil, false, nil, nil) }, selected: 1)
         bar.layoutSubtreeIfNeeded()
     }
 

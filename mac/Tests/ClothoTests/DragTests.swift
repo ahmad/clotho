@@ -36,7 +36,7 @@ final class DragTests: XCTestCase {
         window.contentView!.addSubview(bar)
         bar.machine = "local"
         bar.workspace = 1
-        bar.update(tabs: ids.map { ($0, "tab \($0)", nil, false, nil) }, selected: selected)
+        bar.update(tabs: ids.map { ($0, "tab \($0)", nil, false, nil, nil) }, selected: selected)
         bar.layoutSubtreeIfNeeded()
         return bar
     }
@@ -66,12 +66,12 @@ final class DragTests: XCTestCase {
     func testSelectingKeepsTheTabViews() throws {
         let bar = bar([10, 11, 12], selected: 10)
         let before = bar.subviews.flatMap { $0.subviews }.compactMap { $0 as? ChromeItem }
-        bar.update(tabs: [10, 11, 12].map { ($0, "tab \($0)", nil, false, nil) }, selected: 11)
+        bar.update(tabs: [10, 11, 12].map { ($0, "tab \($0)", nil, false, nil, nil) }, selected: 11)
         let after = bar.subviews.flatMap { $0.subviews }.compactMap { $0 as? ChromeItem }
         XCTAssertEqual(before.map(ObjectIdentifier.init), after.map(ObjectIdentifier.init), "the same views")
         XCTAssertEqual(after.map(\.isSelected), [false, true, false])
         // A title change still rebuilds.
-        bar.update(tabs: [10, 11, 12].map { ($0, "renamed \($0)", nil, false, nil) }, selected: 11)
+        bar.update(tabs: [10, 11, 12].map { ($0, "renamed \($0)", nil, false, nil, nil) }, selected: 11)
         let rebuilt = bar.subviews.flatMap { $0.subviews }.compactMap { $0 as? ChromeItem }
         XCTAssertEqual(rebuilt.map(\.label.stringValue), ["renamed 10", "renamed 11", "renamed 12"])
     }

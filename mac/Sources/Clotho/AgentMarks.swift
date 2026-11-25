@@ -144,6 +144,36 @@ extension AppDelegate {
         guard monitorsAgents(machine), let state = connections[machine]?.store.state else { return nil }
         return AgentMark.summary(of: panes.compactMap { state.pane($0)?.agent })
     }
+
+    /// The agent whose mark `agentMark` gives: the most urgent among the panes' agents that have a mark.
+    func mostUrgentAgent(machine: MachineKey, panes: [PaneID]) -> AgentInfo? {
+        guard monitorsAgents(machine), let state = connections[machine]?.store.state else { return nil }
+        return panes.compactMap { state.pane($0)?.agent }.filter { $0.mark != nil }.min { $0.urgency < $1.urgency }
+    }
+
+    /// Each Tab's progress, on a machine whose daemon has `pane.progress`: `PaneProgress.forTab` over the
+    /// Tab's panes in layout order. Tabs with none aren't in it.
+    func tabProgress(_ tabs: [Tab], in store: ModelStore) -> [TabID: PaneProgress] {
+        guard store.features.contains(.paneProgress) else { return [:] }
+        var result: [TabID: PaneProgress] = [:]
+        for tab in tabs {
+            let all = tab.layout.panes.compactMap { store.state.pane($0) }.filter { $0.exited == nil }.compactMap(\.progress)
+            if let one = PaneProgress.forTab(all) { result[tab.id] = one }
+        }
+        return result
+    }
+
+    /// The progress of the panes these agents are in, for their rows and cards: only on machines whose
+    /// daemon has `pane.progress`.
+    func agentProgress(_ agents: [AgentEntry]) -> [PaneKey: PaneProgress] {
+        var result: [PaneKey: PaneProgress] = [:]
+        for entry in agents {
+            guard let store = connections[entry.machine]?.store, store.features.contains(.paneProgress),
+                  let progress = store.state.pane(entry.pane)?.progress else { continue }
+            result[PaneKey(machine: entry.machine, pane: entry.pane)] = progress
+        }
+        return result
+    }
 }
 
 /// An agent's mark, 8 pt: a dot in the mark's colour, or for a working agent a three-quarter ring that

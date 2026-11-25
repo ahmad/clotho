@@ -380,6 +380,8 @@ final class OverviewTests: XCTestCase {
         XCTAssertEqual(why(tab: nil, canMovePanes: false), "This agent\u{2019}s pane is in no Tab", "whatever the daemon can do")
         XCTAssertEqual(why(tab: 1), "Already in this Tab")
         XCTAssertEqual(why(canMovePanes: false), "Open Beside needs a newer clothod on this machine", "only a daemon without pane.move")
+        XCTAssertEqual(why(), "Can\u{2019}t open beside here", "no named reason, and the daemon can move panes: the neutral line")
+        XCTAssertEqual(why(), AppDelegate.besideCant)
         for sameMachine in [true, false] {
             for hasPane in [true, false] {
                 for tab in [nil, 1, 2] as [TabID?] {

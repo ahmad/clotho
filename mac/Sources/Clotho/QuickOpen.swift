@@ -552,6 +552,7 @@ extension AppDelegate {
                                        tier: entry.info.needsAttention ? 0 : here ? 1 : 2,
                                        mark: entry.info.mark, detail: request?.askText ?? Self.agentDetail(entry.info),
                                        path: ([entry.machineName] + [entry.workspace?.name, entry.tabTitle].compactMap { $0 }).joined(separator: " › "),
+                                       symbol: entry.info.kindSymbolName,
                                        branch: store.flatMap { git(entry.pane, in: $0) }?.branch, since: entry.info.since, request: request,
                                        changes: store.flatMap { changes(entry.pane, in: $0) }))
             actions[id] = { [weak self] in self?.openAgent(machine: entry.machine, pane: entry.pane) }
@@ -623,7 +624,8 @@ extension AppDelegate {
     /// A pane's change count, on a machine whose daemon counts changes.
     func changes(_ pane: PaneID, in store: ModelStore) -> PaneGit.Changes? {
         guard store.features.contains(.gitChanges) else { return nil }
-        return git(pane, in: store)?.changes
+        // The counts alone: an edit that only moves the change token is nothing to redraw.
+        return git(pane, in: store)?.changes?.counts
     }
 
     /// An agent in ⌘P's "Needs you": waiting for you, in error, or finished with a question for you
@@ -1605,13 +1607,14 @@ final class QuickOpenRow: NSView {
             lead = holder
         } else {
             let kindSymbol = switch entry.item.kind {
-            case .agent: "sparkles"
+            case .agent: AgentKind.genericSymbol
             case .workspace: "macwindow.on.rectangle"
             case .tab: "rectangle.topthird.inset.filled"
             case .machine: entry.item.id == "machine|\(AppDelegate.localKey)" ? "laptopcomputer" : "server.rack"
             }
             let symbol = entry.symbol ?? kindSymbol
-            let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+            let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+                ?? NSImage(systemSymbolName: kindSymbol, accessibilityDescription: nil) ?? NSImage())
             icon.contentTintColor = Theme.dimText
             lead = icon
         }

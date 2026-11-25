@@ -23,9 +23,10 @@ struct AgentEntry {
     /// The machine's daemon can mute agents (`agent.mute`).
     var canMute = false
 
-    /// Quick replies only when the agent itself (through its hooks) says it's waiting for the user.
-    /// Detected or idle agents aren't asking anything.
-    var offersReplies: Bool { canReply && info.state == .waiting && info.needsAttention && info.isHookSourced }
+    /// Quick replies only when a coding agent itself (through its hooks) says it's waiting for the user.
+    /// Detected or idle agents aren't asking anything, and a script's report or a program's terminal
+    /// notification (`source: "osc"`) has nobody to answer.
+    var offersReplies: Bool { canReply && info.state == .waiting && info.needsAttention && info.acceptsReplies }
 
     /// Needing the user first (waiting, then failed, then a finished turn that asks something, then one
     /// that only finished), then running, then the rest.
@@ -79,12 +80,19 @@ extension AgentInfo.State {
 }
 
 extension AgentInfo {
-    var kindName: String {
-        switch kind.lowercased() {
-        case "claude": return "Claude Code"
-        case "codex": return "Codex"
-        default: return kind.prefix(1).uppercased() + kind.dropFirst()
-        }
+    /// The kind's SF Symbol as an image (ClothoKit's `AgentKind` table), for a chip, a row or a card. The
+    /// name is always one of the table's literals; should the system not have it, the generic one.
+    func kindImage(pointSize: CGFloat, weight: NSFont.Weight = .regular) -> NSImage? {
+        let image = NSImage(systemSymbolName: kindSymbolName, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: AgentKind.genericSymbol, accessibilityDescription: nil)
+        return image?.withSymbolConfiguration(.init(pointSize: pointSize, weight: weight))
+    }
+
+    /// The agent's last message for a sheet or a window: Markdown made plain, except an osc agent's, which
+    /// is a program's output and stays as it was sent (no Markdown, no links).
+    var plainMessage: String? {
+        let text = message.map { isOscSourced ? AgentNotice.plainLine($0) : PlainText.fromMarkdown($0) }
+        return text.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// A finished turn that asks the user something (clothod 0.1.31's `needs_user`), not yet seen: it
@@ -247,7 +255,7 @@ extension AppDelegate {
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         let alert = NSAlert()
         alert.messageText = "Reply to \(agent.kindName) on \(session.title)"
-        alert.informativeText = agent.message.map(PlainText.fromMarkdown).flatMap { $0.isEmpty ? nil : $0 } ?? "Sends your text, then Enter."
+        alert.informativeText = agent.plainMessage ?? "Sends your text, then Enter."
         alert.addButton(withTitle: "Send")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: s(24)))
@@ -299,7 +307,9 @@ extension AppDelegate {
                 })
             }
         }
-        guard canReply else { return menu }
+        // Replies go to a coding agent that reports through its hooks: a script's report or a program's
+        // terminal notification has nobody to answer.
+        guard canReply, agent?.acceptsReplies != false else { return menu }
         menu.addItem(.separator())
         for reply in Self.quickReplies {
             menu.addItem(ClosureMenuItem(title: reply.help) { [weak self] in self?.reply(machine: machine, pane: pane, keys: reply.keys) })
@@ -315,7 +325,7 @@ extension AppDelegate {
         // The inspector's Activity, when it shows this pane's agent.
         fileSidebar?.activityView.agentChanged(machine: machine, pane: pane)
         log("agent \(machine)/\(pane): \(before?.state.rawValue ?? "none") → \(after.map { "\($0.kind) \($0.state.rawValue) (\($0.source ?? "?"))\($0.message.map { ": " + $0 } ?? "")" } ?? "none")")
-        if after?.isHookSourced == true { hookSourcedMachines.insert(machine) }
+        if let after, Self.showsHooksAreSetUp(after) { hookSourcedMachines.insert(machine) }
         // A notification held for its summary goes out once the summary lands (or the agent moved on).
         let paneKey = PaneKey(machine: machine, pane: pane)
         summaryHold.agentChanged(paneKey, to: after)
@@ -347,10 +357,27 @@ extension AppDelegate {
     /// Whether a rise is too soon after the last notification for its pane. Only for detected agents,
     /// whose state can flicker: one per pane and state a minute. An agent that reports through hooks rose
     /// for a real turn each time (clothod settles a done before raising it), so a second Done within the
-    /// minute is announced.
+    /// minute is announced; and a program's terminal notification (`source: "osc"`) is one the program
+    /// sent each time, which clothod already limits.
     nonisolated static func throttlesNotice(_ after: AgentInfo, last: (state: AgentInfo.State, date: Date)?, now: Date) -> Bool {
-        guard !after.isHookSourced, let last else { return false }
+        guard after.isDetected, let last else { return false }
         return last.state == after.state && now.timeIntervalSince(last.date) < 60
+    }
+
+    /// Whether seeing this agent says the machine's agent hooks are set up: a coding agent that reports
+    /// through them. A script's `clothod report --kind deploy` is hook-sourced too, and says nothing of it.
+    nonisolated static func showsHooksAreSetUp(_ agent: AgentInfo) -> Bool {
+        agent.isHookSourced && AgentKind.of(agent.kind).isCodingAgent
+    }
+
+    /// The notification category (its buttons) for an agent: Allow / Deny for a permission request the
+    /// daemon can answer; else, when the daemon can type for us, Approve / Deny / Reply for a waiting
+    /// coding agent and Reply for a finished one. None for a program's terminal notification or a
+    /// script's report: there is nobody to answer.
+    nonisolated static func noticeCategory(for agent: AgentInfo, canReply: Bool, hasRequest: Bool) -> String? {
+        if hasRequest { return permissionCategory }
+        guard canReply, !agent.isOscSourced, AgentKind.of(agent.kind).isCodingAgent else { return nil }
+        return agent.state == .waiting ? waitingCategory : finishedCategory
     }
 
     func postAgentNotice(machine: MachineKey, pane: PaneID, info after: AgentInfo) {
@@ -366,8 +393,7 @@ extension AppDelegate {
         let canReply = session.store.hello?.features.contains(.paneKeys) == true
         // A permission request the daemon can answer: Allow and Deny for that request.
         let request = session.store.features.contains(.agentDecide) && after.state == .waiting ? after.pendingRequests.first : nil
-        let category = request != nil ? Self.permissionCategory
-            : canReply ? (after.state == .waiting ? Self.waitingCategory : Self.finishedCategory) : nil
+        let category = Self.noticeCategory(for: after, canReply: canReply, hasRequest: request != nil)
         // A plain Done makes no sound (clothod 0.1.31's `needs_user`); anything that needs the user does.
         postNotification(notice, machine: machine, pane: pane, category: category, request: request?.id, sound: after.playsSound)
     }
@@ -411,11 +437,11 @@ extension AppDelegate {
         main.insertItem(item, at: index)
     }
 
-    static let waitingCategory = "agent.waiting"
+    nonisolated static let waitingCategory = "agent.waiting"
     /// A permission request the daemon can answer for us (`agent.decide`): Allow and Deny go to that
     /// request alone, whatever the terminal shows by then.
-    static let permissionCategory = "agent.permission"
-    static let finishedCategory = "agent.finished"
+    nonisolated static let permissionCategory = "agent.permission"
+    nonisolated static let finishedCategory = "agent.finished"
 
     /// Approve (1), Deny (Esc) and a typed Reply for a waiting agent; a typed Reply for a finished one.
     static func notificationCategories() -> Set<UNNotificationCategory> {
@@ -544,6 +570,17 @@ final class AgentRow: ChromeItem {
     private(set) var mute: ClosureButton?
     /// Mute and Resolve on their backing, floating over the row's trailing end on hover.
     private(set) var actions: ActionsOverlay?
+    /// The kind's symbol, small and dim at the row's trailing end (under the hover actions). Decorative:
+    /// the kind's name is in the tooltip and the accessibility label.
+    let kindGlyph = NSImageView()
+    /// The pane's progress, along the row's bottom edge from the title's inset. Hidden with none.
+    let progressBar = ProgressBarView()
+    static var glyphSlot: CGFloat { s(16) }
+    /// The narrowest row that shows the glyph: in a narrower sidebar its room goes to the title and the
+    /// text, which matter more.
+    static var glyphLeastRow: CGFloat { s(180) }
+    private var glyphWidth: NSLayoutConstraint!
+    private var glyphGaps: [NSLayoutConstraint] = []
 
     /// "Needs you: Claude Code, clotho › alerts on devbox. Allow Bash: cargo test".
     static func description(_ entry: AgentEntry) -> String {
@@ -582,19 +619,38 @@ final class AgentRow: ChromeItem {
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(Self.description(entry))
-        for view in [mark, summary] as [NSView] {
+        kindGlyph.image = entry.info.kindImage(pointSize: s(10))
+        kindGlyph.contentTintColor = Theme.dimText
+        kindGlyph.imageScaling = .scaleProportionallyDown
+        kindGlyph.setAccessibilityElement(false)
+        for view in [mark, summary, kindGlyph, progressBar] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             addSubview(view)
         }
         // The mark sits in the chevron's column and the title starts where workspace names do.
         let inset = MachineHeader.nameInset
         constraints.filter { $0.firstItem === label && $0.firstAttribute == .leading }.forEach { $0.constant = inset }
+        glyphWidth = kindGlyph.widthAnchor.constraint(equalToConstant: Self.glyphSlot)
+        // The text ends before the glyph; with no summary the title does too.
+        glyphGaps = [summary.trailingAnchor.constraint(equalTo: kindGlyph.leadingAnchor, constant: s(-4)),
+                     label.trailingAnchor.constraint(lessThanOrEqualTo: kindGlyph.leadingAnchor, constant: s(-4))]
+        NSLayoutConstraint.activate(glyphGaps)
+        // Below required: a row with no width yet gives the bar up, and breaks nothing.
+        let barTrailing = progressBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8))
+        barTrailing.priority = NSLayoutConstraint.Priority(999)
         NSLayoutConstraint.activate([
             mark.centerXAnchor.constraint(equalTo: leadingAnchor, constant: s(10) + DisclosureChevron.size / 2),
             mark.centerYAnchor.constraint(equalTo: centerYAnchor),
             summary.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: s(6)),
             summary.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
-            summary.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
+            kindGlyph.trailingAnchor.constraint(equalTo: trailingAnchor, constant: s(-8)),
+            kindGlyph.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyphWidth,
+            kindGlyph.heightAnchor.constraint(equalToConstant: Self.glyphSlot),
+            progressBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            barTrailing,
+            progressBar.bottomAnchor.constraint(equalTo: bottomAnchor, constant: s(-1)),
+            progressBar.heightAnchor.constraint(equalToConstant: ProgressBarView.height),
         ])
         if !said.isEmpty {
             // The title ends within its share of the row.
@@ -637,6 +693,21 @@ final class AgentRow: ChromeItem {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        fitGlyph()
+    }
+
+    /// The glyph only in a row wide enough for it beside the title and the text.
+    private func fitGlyph() {
+        guard let glyphWidth else { return }
+        let shows = bounds.width >= Self.glyphLeastRow
+        guard kindGlyph.isHidden == shows || glyphWidth.constant != (shows ? Self.glyphSlot : 0) else { return }
+        kindGlyph.isHidden = !shows
+        glyphWidth.constant = shows ? Self.glyphSlot : 0
+        glyphGaps.forEach { $0.constant = shows ? s(-4) : 0 }
+    }
 
     /// Fades the hover actions (Mute and Resolve, with their backing) in or out together. Hidden only by
     /// alpha: they keep their place and stay reachable to accessibility (the row's menu has both too).

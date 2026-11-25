@@ -17,6 +17,9 @@ struct PaneChrome: Equatable {
     var home: String?
     /// Whether the machine's daemon answers permission requests (`agent.decide`).
     var canDecide = false
+    /// How far the pane's program says it is (clothod 0.1.33's `pane.progress`), when the machine's daemon
+    /// has the feature: a bar along the header's bottom edge, with or without an agent.
+    var progress: PaneProgress?
 
     /// The program's name for a pane with no agent: the spawn command's, so a shell running vim still
     /// reads "zsh". A login shell's leading "-" is dropped.
@@ -85,6 +88,13 @@ final class PaneHeaderChip: NSButton {
     private(set) var mark: AgentMark?
     private(set) var isMuted = false
     private(set) var text = ""
+    /// The kind's SF Symbol (one of ClothoKit's `AgentKind` literals), leading the name.
+    private(set) var symbol = AgentKind.genericSymbol
+    /// Without the kind's symbol: the header sets it in a pane too narrow for the symbol and the whole
+    /// title, so the title is never the one cut. (A muted agent's crossed bell stays.)
+    var isCompact = false {
+        didSet { if isCompact != oldValue { apply() } }
+    }
 
     init() {
         super.init(frame: .zero)
@@ -101,9 +111,9 @@ final class PaneHeaderChip: NSButton {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(text: String, mark: AgentMark?, muted: Bool) {
-        guard text != self.text || mark != self.mark || muted != isMuted else { return }
-        (self.text, self.mark, isMuted) = (text, mark, muted)
+    func show(text: String, mark: AgentMark?, muted: Bool, symbol: String = AgentKind.genericSymbol) {
+        guard text != self.text || mark != self.mark || muted != isMuted || symbol != self.symbol else { return }
+        (self.text, self.mark, isMuted, self.symbol) = (text, mark, muted, symbol)
         apply()
     }
 
@@ -115,8 +125,13 @@ final class PaneHeaderChip: NSButton {
     /// Fonts and sizes again, after a zoom or a change.
     func apply() {
         attributedTitle = NSAttributedString(string: text, attributes: [.font: titleFont, .foregroundColor: textColor])
-        image = isMuted ? NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Muted")?
-            .withSymbolConfiguration(.init(pointSize: s(9), weight: .medium)) : nil
+        // The crossed bell for a muted agent, else the kind's symbol. Decorative: the name is in the title.
+        let glyph = (isMuted ? NSImage(systemSymbolName: "bell.slash", accessibilityDescription: "Muted")
+            : NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+                ?? NSImage(systemSymbolName: AgentKind.genericSymbol, accessibilityDescription: nil))?
+            .withSymbolConfiguration(.init(pointSize: s(9), weight: .medium))
+        fullWidth = Self.width(title: attributedTitle, image: glyph)
+        image = isMuted || !isCompact ? glyph : nil
         contentTintColor = textColor
         layer?.cornerRadius = s(5)
         layer?.cornerCurve = .continuous
@@ -134,11 +149,18 @@ final class PaneHeaderChip: NSButton {
         applyFill()
     }
 
-    /// The title, the crossed bell when there is one, and side padding.
+    /// The title, the symbol before it, and side padding.
     override var intrinsicContentSize: NSSize {
-        var width = attributedTitle.size().width.rounded(.up) + s(14)
+        NSSize(width: Self.width(title: attributedTitle, image: image), height: Self.height)
+    }
+
+    /// The chip's width with its symbol, compact or not: what the header asks before it decides.
+    private(set) var fullWidth: CGFloat = 0
+
+    private static func width(title: NSAttributedString, image: NSImage?) -> CGFloat {
+        var width = title.size().width.rounded(.up) + s(14)
         if let image { width += image.size.width.rounded(.up) + s(5) }
-        return NSSize(width: width, height: Self.height)
+        return width
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -179,6 +201,8 @@ final class PaneHeader: NSView {
     var now: () -> Date = { Date() }
     private(set) var chrome = PaneChrome()
     private let bottomLine = CALayer()
+    /// The pane's progress, over the bottom line: the header's height never changes for it.
+    let progressBar = ProgressBarView()
 
     override var isFlipped: Bool { true }
 
@@ -191,7 +215,7 @@ final class PaneHeader: NSView {
         folder.lineBreakMode = .byTruncatingHead
         // Its time is in the chip's description.
         elapsed.setAccessibilityElement(false)
-        for view in [chip, program, elapsed, folder] as [NSView] { addSubview(view) }
+        for view in [chip, program, elapsed, folder, progressBar] as [NSView] { addSubview(view) }
         applyScale()
         show(chrome)
     }
@@ -213,8 +237,9 @@ final class PaneHeader: NSView {
     func show(_ chrome: PaneChrome) {
         self.chrome = chrome
         if let agent = chrome.agent {
-            chip.show(text: chrome.chipTitle ?? "", mark: agent.mark, muted: agent.isMuted)
+            chip.show(text: chrome.chipTitle ?? "", mark: agent.mark, muted: agent.isMuted, symbol: agent.kindSymbolName)
         }
+        progressBar.progress = chrome.progress
         chip.isHidden = chrome.agent == nil
         program.isHidden = chrome.agent != nil
         program.stringValue = chrome.program
@@ -262,8 +287,15 @@ final class PaneHeader: NSView {
             let frame = NSRect(x: x, y: ((bounds.height - height) / 2).rounded(), width: width, height: height)
             if view.frame != frame { view.frame = frame }
         }
+        let barFrame = NSRect(x: 0, y: bounds.height - ProgressBarView.height, width: bounds.width, height: ProgressBarView.height)
+        if progressBar.frame != barFrame { progressBar.frame = barFrame }
         var x = s(8)
         let lead: NSView = chrome.agent == nil ? program : chip
+        if chrome.agent != nil {
+            // The symbol shows where the chip fits with it; a narrower pane keeps the whole title instead.
+            let compact = chip.fullWidth > limit - x
+            if chip.isCompact != compact { chip.isCompact = compact }
+        }
         let leadSize = chrome.agent == nil ? program.textSize : chip.intrinsicContentSize
         let leadWidth = min(leadSize.width.rounded(.up), max(0, limit - x))
         place(lead, x: x, width: leadWidth, height: leadSize.height)

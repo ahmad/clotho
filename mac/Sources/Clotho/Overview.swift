@@ -95,6 +95,7 @@ extension AppDelegate {
             }
         }
         overview.update(lanes: OverviewModel.lanes(agents, source: source))
+        overview.setProgress(agentProgress(agents))
         syncOverviewPeeks()
     }
 
@@ -117,6 +118,8 @@ extension AppDelegate {
     static let besideUnsupported = "Open Beside needs a newer clothod on this machine"
     static let besideNoPane = "No pane to open beside"
     static let besideNoTab = "This agent\u{2019}s pane is in no Tab"
+    /// The fallback when no named reason applies and the daemon can move panes.
+    static let besideCant = "Can\u{2019}t open beside here"
 
     /// Why Open Beside can't act, by what is missing: the machine in common, a pane focused under the
     /// Overview, a Tab the agent's pane is in, another Tab than the focused one. Only with all of those
@@ -126,8 +129,8 @@ extension AppDelegate {
         if !hasPane { return besideNoPane }
         guard let tab else { return besideNoTab }
         if tab == focusedTab { return besideSameTab }
-        // With a daemon that moves panes nothing above is left to refuse it: said as the plainest of them.
-        return canMovePanes ? besideNoPane : besideUnsupported
+        // With a daemon that moves panes nothing above is left to refuse it: a neutral line, not a named reason.
+        return canMovePanes ? besideCant : besideUnsupported
     }
 
     /// ⌘↩: the agent's whole Tab moves beside the pane that is focused under the Overview, by the command

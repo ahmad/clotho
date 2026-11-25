@@ -411,6 +411,21 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
         details.addArrangedSubview(section)
         section.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
 
+        // The agents' status hooks on this machine, each with its own Install, Update and Remove. The list
+        // follows the status on its own, so asking for it here never rebuilds these details.
+        let hooks: NSView
+        if hello != nil || (machine.isLocal && session != nil) {
+            hooks = AgentHooksListView(app: app, key: key, showsNotes: false)
+            app.refreshHookStatus(key)
+        } else {
+            let row = FormRow(unavailable ?? "Connect to \(name) to change this", control: nil)
+            row.titleLabel.textColor = .secondaryLabelColor
+            hooks = FormGroup([row])
+        }
+        let hooksSection = formSection("Agent status", hooks)
+        details.addArrangedSubview(hooksSection)
+        hooksSection.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
+
         if let error = errors[key] {
             footnote.stringValue = error
             footnote.textColor = .systemRed

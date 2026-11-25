@@ -134,6 +134,18 @@ final class OverviewCardView: NSView {
     let age: NSTextField = OverviewLabel(labelWithString: "")
     let message: NSTextField = OverviewLabel(wrappingLabelWithString: "")
     let sub: NSTextField = OverviewLabel(labelWithString: "")
+    /// The kind's symbol, before the sub line. Decorative: the card's one label names the agent.
+    let kindGlyph = NSImageView()
+    /// The pane's progress, along the footer's top edge, over its rule: clear of the card's outline and
+    /// its round corners, where a 2 pt bar would be lost. Hidden with none. It is
+    /// set from outside the card's own content (`OverviewView.setProgress`), so it never redraws a card.
+    let progressBar = ProgressBarView()
+    var progress: PaneProgress? {
+        get { progressBar.progress }
+        set { progressBar.progress = newValue }
+    }
+    /// The symbol's side: the sub line's height, at most.
+    static var glyphSide: CGFloat { min(subHeight, s(12).rounded(.up)) }
     /// The peek block: the last two rows of the pane's screen. Hidden on a machine that sends none.
     let peek = OverviewFlippedView()
     let peekRows: [NSTextField] = [OverviewLabel(labelWithString: ""), OverviewLabel(labelWithString: "")]
@@ -176,7 +188,10 @@ final class OverviewCardView: NSView {
         message.cell?.truncatesLastVisibleLine = true
         message.isSelectable = false
         for view in [peek, footer, peekRule, footerRule] { view.wantsLayer = true }
-        for view in [markView, place, age, message, sub, peek, footer] as [NSView] { body.addSubview(view) }
+        kindGlyph.imageScaling = .scaleProportionallyDown
+        kindGlyph.setAccessibilityElement(false)
+        progressBar.setAccessibilityElement(false)
+        for view in [markView, place, age, message, kindGlyph, sub, peek, footer, progressBar] as [NSView] { body.addSubview(view) }
         peek.addSubview(peekRule)
         peekRows.forEach(peek.addSubview)
         footer.addSubview(footerRule)
@@ -203,6 +218,7 @@ final class OverviewCardView: NSView {
         place.textColor = Theme.foreground
         message.textColor = Theme.foreground
         for label in [age, sub, branch] + peekRows { label.textColor = Theme.dimText }
+        kindGlyph.contentTintColor = Theme.dimText
         apply()
     }
 
@@ -215,7 +231,11 @@ final class OverviewCardView: NSView {
         message.toolTip = card.message
         message.isHidden = card.message == nil
         sub.stringValue = card.sub
-        sub.toolTip = card.sub
+        sub.toolTip = [card.sub, card.agentFullName].joined(separator: " · ")
+        // Always one of the table's literals; the generic one should the system not have it.
+        kindGlyph.image = (NSImage(systemSymbolName: card.agentSymbol, accessibilityDescription: nil)
+            ?? NSImage(systemSymbolName: AgentKind.genericSymbol, accessibilityDescription: nil))?
+            .withSymbolConfiguration(.init(pointSize: s(10), weight: .regular))
         peek.isHidden = !card.hasPeek
         // A branch's name is the repository's text: bidi and control characters show as what they are.
         branch.stringValue = card.branch.map { "⎇ " + DiffText.display($0) } ?? OverviewCard.noRepo
@@ -311,7 +331,10 @@ final class OverviewCardView: NSView {
             message.preferredMaxLayoutWidth = inner
             message.frame = CGRect(x: pad, y: messageY, width: inner, height: messageHeight)
         }
-        sub.frame = CGRect(x: pad, y: messageY + messageHeight + (messageHeight > 0 ? Self.pad(1) : 0), width: inner, height: Self.subHeight)
+        let subY = messageY + messageHeight + (messageHeight > 0 ? Self.pad(1) : 0)
+        let glyph = Self.glyphSide, glyphGap = Self.pad(4)
+        kindGlyph.frame = CGRect(x: pad, y: subY + ((Self.subHeight - glyph) / 2).rounded(), width: glyph, height: glyph)
+        sub.frame = CGRect(x: pad + glyph + glyphGap, y: subY, width: max(0, inner - glyph - glyphGap), height: Self.subHeight)
 
         let footerHeight = Self.footerHeight
         footer.frame = CGRect(x: 0, y: bounds.height - footerHeight, width: width, height: footerHeight)
@@ -322,6 +345,9 @@ final class OverviewCardView: NSView {
         let footerY = Self.pad(4)
         counts.frame = CGRect(x: width - pad - countsWidth, y: footerY, width: countsWidth, height: lineHeight)
         branch.frame = CGRect(x: pad, y: footerY, width: max(0, counts.frame.minX - (countsWidth > 0 ? s(8) : 0) - pad), height: lineHeight)
+
+        // Inside the 1 pt outline.
+        progressBar.frame = CGRect(x: 1, y: footer.frame.minY, width: max(0, width - 2), height: ProgressBarView.height)
 
         // The peek: a fixed block above the footer.
         let peekHeight = Self.peekHeight
@@ -357,6 +383,8 @@ final class OverviewCardView: NSView {
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .button }
     override func accessibilityLabel() -> String? { card.spoken }
+    /// "Progress 40 percent", while the pane's program says how far it is.
+    override func accessibilityValue() -> Any? { progress?.spokenText }
     override func accessibilityChildren() -> [Any]? { [] }
     override func isAccessibilitySelected() -> Bool { isSelected }
     override func accessibilityPerformPress() -> Bool {
@@ -541,6 +569,16 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
 
     // MARK: The cards
 
+    /// The progress of the cards' panes. Applied to the cards there are, never through `update`: it moves
+    /// up to once a second, and isn't part of a card's content. New cards pick it up from here.
+    private(set) var progress: [PaneKey: PaneProgress] = [:]
+
+    func setProgress(_ progress: [PaneKey: PaneProgress]) {
+        guard progress != self.progress else { return }
+        self.progress = progress
+        for (key, view) in cardViews { view.progress = progress[key] }
+    }
+
     /// Every lane's cards, before the filter. Runs on every model change while the Overview shows: a
     /// card's view is touched only when its card changed.
     func update(lanes new: [(lane: AgentStatusGroup, cards: [OverviewCard])]) {
@@ -589,6 +627,7 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
             for card in lane.cards {
                 let view = cardViews[card.key] ?? makeCard(card)
                 view.card = card
+                view.progress = progress[card.key]
                 if view.superview !== laneView { laneView.addSubview(view) }
                 view.isSelected = card.key == selected
             }

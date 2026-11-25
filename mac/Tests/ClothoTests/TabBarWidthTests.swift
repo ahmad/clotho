@@ -24,10 +24,10 @@ final class TabBarWidthTests: XCTestCase {
         window.close()
     }
 
-    private typealias TabSpec = (id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?)
+    private typealias TabSpec = (id: TabID, title: String, custom: String?, maximized: Bool, mark: AgentMark?, agent: String?)
 
     private func show(_ titles: [String], marks: [Int: AgentMark] = [:], selected: TabID = 1) -> [NSRect] {
-        let tabs: [TabSpec] = titles.enumerated().map { (TabID($0.offset + 1), $0.element, nil, false, marks[$0.offset]) }
+        let tabs: [TabSpec] = titles.enumerated().map { (TabID($0.offset + 1), $0.element, nil, false, marks[$0.offset], nil) }
         bar.update(tabs: tabs, selected: selected)
         bar.layoutSubtreeIfNeeded()
         return bar.tabFrames
