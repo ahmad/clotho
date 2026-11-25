@@ -226,7 +226,7 @@ unchanged.
 
 ## Notifications and status from pane output
 
-Features `agent.osc`, `agent.progress` and `agent.kinds` (after 0.1.32). Pane output can now
+Features `agent.osc`, `pane.progress` and `agent.kinds` (after 0.1.32). Pane output can now
 make a pane show as an agent that needs the user, and so reach the Agents list, a notification
 and the phone: OSC 9, 99, 777 and 7501 (docs/protocol.md, "Notifications from any program").
 Pane output is untrusted: `cat` of a hostile file, a shell on another machine, a program an
@@ -247,9 +247,21 @@ agent just built. What that text can and can't do:
   link is made from it, and nothing in it is a button or an action. OSC 99's action, button
   and icon keys are ignored.
 - **It is never sent to the model.** The rewrite that turns an agent's reply into a
-  notification (docs/protocol.md, "Notification text") is skipped for source `osc`. Text any
-  program can print never becomes a prompt for the user's Claude login, so it can't be used
-  for prompt injection or to spend the user's quota.
+  notification (docs/protocol.md, "Notification text") is skipped wherever the text came from
+  the pane's output: for source `osc`, and for a detected agent (an unhooked `claude`,
+  `gemini`, …) that took a notification or kept one from the `osc` agent it replaced. The
+  agent remembers where its message came from, not only its source, so a file or tool output
+  with an OSC 9 in it, shown in a detected agent's pane, alerts with that text and runs
+  nothing. Text any program can print never becomes a prompt for the user's Claude login, so
+  it can't be used for prompt injection or to spend the user's quota
+  (`a_detected_agents_notification_never_reaches_the_model` runs a fake summarizer and counts
+  zero runs). What the model can be sent is an agent's `kind`, `state`, `message`, `prompt`,
+  `tool`, `tool_input` and `tail`. From pane output only `message` can come (a notification's
+  text, an OSC 7501 `msg`), and that is what the flag covers; an OSC 7501 `app` becomes the
+  `kind` of an `osc` agent only, which is never sent; `title` (OSC 0/2 and OSC 7501's), `cwd`
+  and `progress` are not part of it; a BEL carries no text; `prompt`, `tool`, `tool_input` and
+  `tail` come only from `agent.report` (a process in the pane running `clothod report`, which
+  is code the user ran, not output).
 - **It is rate-limited per pane:** three alerts, then one every 20 s; the same text again
   while the alert is up does nothing; other text changes the message at most 3 times in 30 s;
   OSC 7501 state flips at most 10 in 10 s; progress events one a second. A file full of
@@ -268,7 +280,8 @@ agent just built. What that text can and can't do:
   `id`, a sub-task's, is ignored everywhere). Output that such an agent
   prints while it works (a file it shows, a tool's output, a web page) can't change the
   agent's state, replace its message, fake "Claude needs your permission" or raise an alert in
-  its name. Only `progress` is taken there, which draws a bar and alerts nobody. For a
+  its name. Only `progress` is taken there: it is the pane's own field, never an agent (in no
+  pane does it create one or reach an Agents list), it draws a bar and alerts nobody. For a
   detected agent (no hooks) a notification can raise an alert with its own text, as a BEL
   already could without text; the kind shown stays the detected one.
 - **It can't answer anything.** An `osc` agent never has `requests`: there is no permission to

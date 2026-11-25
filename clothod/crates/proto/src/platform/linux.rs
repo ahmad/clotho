@@ -60,6 +60,12 @@ pub fn linger() -> Option<bool> {
     Some(v == "yes")
 }
 
+/// Whether `pid` has exited and only waits for its parent to collect it (state `Z`).
+pub fn is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+    stat.rfind(')').and_then(|i| stat.get(i + 2..)).is_some_and(|rest| rest.starts_with('Z'))
+}
+
 /// The terminal's foreground process group, from `tpgid` in /proc/<pid>/stat.
 pub fn terminal_pgrp(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;

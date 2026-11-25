@@ -200,8 +200,8 @@ struct Sub {
 struct Agent {
     kind: String,
     state: String,
-    /// "hook", "detected" or "osc" (the pane's output: a notification, progress or status
-    /// sequence, `on_osc`).
+    /// "hook", "detected" or "osc" (the pane's output: a notification or status sequence,
+    /// `osc_state`).
     source: &'static str,
     message: Option<String>,
     /// Unix seconds when `state` last changed.
@@ -250,14 +250,6 @@ struct Agent {
     tail: Option<String>,
     /// The user was at the pane when the turn ended: the rise after the settle is quiet.
     present_at_done: bool,
-    /// What the program says about its progress (OSC 9;4, or OSC 7501 `progress`). Never an
-    /// alert, never stored.
-    progress: Option<clotho_vt::Progress>,
-    /// The foreground group that set `progress`: it is cleared when that group is gone.
-    progress_pid: Option<u32>,
-    /// It is there only to show `progress` (a pane without an agent whose program reports
-    /// progress): it goes when the progress does.
-    progress_only: bool,
     /// It belongs to the pane, not to an agent process: every `osc` agent, and a `clothod report`
     /// from something that is not a known agent (a script). Waiting, done and error stay after
     /// the reporter exited, until `agent.ack` (which removes it), a `clear` or another agent;
@@ -271,6 +263,9 @@ struct Agent {
     /// The reporter said whether its finished step needs the user (`agent.report` `needs_user`):
     /// it stands over the rewrite's label and the guess, for this `done` and its text.
     needs_user_fixed: Option<bool>,
+    /// `message` is text the pane's output gave (a notification taken by a detected agent, or
+    /// carried over from an `osc` one): like an `osc` agent's, it is never sent to the model.
+    message_from_output: bool,
 }
 
 /// A tool call the agent asks permission for, answerable from a client (`agent.decide`) while
@@ -412,14 +407,18 @@ impl Agent {
             settling: false,
             tail: None,
             present_at_done: false,
-            progress: None,
-            progress_pid: None,
-            progress_only: false,
             pane_bound: false,
             exit_clears: false,
             silent: false,
             needs_user_fixed: None,
+            message_from_output: false,
         }
+    }
+
+    /// Whether `message` came from the pane's output: any program can print it, so it is shown
+    /// as it came and never becomes a prompt for the model (docs/security.md).
+    fn untrusted_text(&self) -> bool {
+        self.source == "osc" || self.message_from_output
     }
 
     /// A hook-reported agent as `json` stored it in the pane meta. Its permission requests are
@@ -459,22 +458,11 @@ impl Agent {
     }
 
     fn json(&self) -> Value {
-        let mut v = self.json_base();
-        // Only while the program reports one.
-        if let Some(p) = &self.progress {
-            let state = match p.state {
-                clotho_vt::ProgressState::Running => "running",
-                clotho_vt::ProgressState::Error => "error",
-                clotho_vt::ProgressState::Indeterminate => "indeterminate",
-                clotho_vt::ProgressState::Paused => "paused",
-            };
-            v["progress"] = json!({"state": state, "percent": p.percent});
-        }
-        v
+        self.json_base()
     }
 
-    /// As stored in the pane meta (`from_saved`): what clients get, without the progress, and
-    /// with what only the daemon needs.
+    /// As stored in the pane meta (`from_saved`): what clients get, with what only the daemon
+    /// needs.
     fn saved(&self) -> Value {
         let mut v = self.json_base();
         v["pid"] = json!(self.pid);
@@ -616,6 +604,11 @@ struct Pane {
     rewrite_rx: Option<(f64, RewriteRx)>,
     /// Limits on what the pane's output may ask for (`on_osc`).
     osc: OscLimit,
+    /// What the pane's program says about its progress (OSC 9;4, or OSC 7501 `progress`). It is
+    /// the pane's, never an agent's: it makes no agent, alert or `agent` event.
+    progress: Option<clotho_vt::Progress>,
+    /// The foreground group that set `progress`: it is cleared when that group is gone.
+    progress_pid: Option<u32>,
 }
 
 /// What a notification, progress or status sequence in a pane's output asks for (`osc_state`).
@@ -631,6 +624,9 @@ struct OscReport {
     exit_clears: bool,
     /// Remove the pane's `osc` agent instead (OSC 7501 `clear`).
     clear: bool,
+    /// For a report the flip limit held back: the foreground job when it arrived (None: the
+    /// pane's own process). It is that job's report, not whatever runs when it is applied.
+    held_owner: Option<Option<u32>>,
 }
 
 /// Rises of `attention` a pane's output may cause in a row; one more is allowed every
@@ -665,11 +661,14 @@ struct OscLimit {
     /// Reports dropped since `dropped_since`: logged as a count, once per `osc_refill()`.
     dropped: u32,
     dropped_since: Option<Instant>,
+    /// Checks in a row (`detect_agent`, once a second) that found a status or progress without
+    /// an owner while the pane's shell had no job in the foreground.
+    unowned_checks: u8,
 }
 
 impl OscLimit {
     fn new() -> OscLimit {
-        OscLimit { rises: OSC_RISES, refilled: Instant::now(), updates: VecDeque::new(), flips: VecDeque::new(), held: None, progress_at: None, progress_dirty: false, dropped: 0, dropped_since: None }
+        OscLimit { rises: OSC_RISES, refilled: Instant::now(), updates: VecDeque::new(), flips: VecDeque::new(), held: None, progress_at: None, progress_dirty: false, dropped: 0, dropped_since: None, unowned_checks: 0 }
     }
 
     fn rise(&mut self) -> bool {
@@ -865,6 +864,8 @@ impl Pane {
             git: None,
             rewrite_rx: None,
             osc: OscLimit::new(),
+            progress: None,
+            progress_pid: None,
         }
     }
 
@@ -885,6 +886,15 @@ impl Pane {
             "exited": self.exited,
             "scrollback_lines": self.vt.scrollback(),
             "agent": self.agent.as_ref().map(Agent::json),
+            "progress": self.progress.map(|p| {
+                let state = match p.state {
+                    clotho_vt::ProgressState::Running => "running",
+                    clotho_vt::ProgressState::Error => "error",
+                    clotho_vt::ProgressState::Indeterminate => "indeterminate",
+                    clotho_vt::ProgressState::Paused => "paused",
+                };
+                json!({"state": state, "percent": p.percent})
+            }),
             "restored": self.restored,
             "git": self.git,
         })
@@ -1731,8 +1741,7 @@ impl Daemon {
                     "agent_muted": muted, "agent_history": p.history, "restored": p.restored,
                     // Its push is held at the Mac until then (unix seconds); see `restore_model`.
                     "push_held_until": self.push.held_until(*id),
-                    // A progress-only agent is not kept: the progress isn't.
-                    "agent": p.agent.as_ref().filter(|a| (a.source == "hook" && a.pid.is_some()) || (a.pane_bound && !a.progress_only)).map(Agent::saved)}))
+                    "agent": p.agent.as_ref().filter(|a| (a.source == "hook" && a.pid.is_some()) || a.pane_bound).map(Agent::saved)}))
             })
             .collect();
         if let Some(w) = &self.layout {
@@ -2207,6 +2216,7 @@ impl Daemon {
                         if a.state != "waiting" {
                             a.state = "waiting".into();
                             a.message = None;
+                            a.message_from_output = false;
                             a.guess = false;
                             self.set_agent(p, Some(a.clone()));
                         }
@@ -2277,7 +2287,8 @@ impl Daemon {
             }
             PspState::Done => OscReport { state: "done", message: s.msg, ..base },
             PspState::Error => OscReport { state: "error", message: s.msg, ..base },
-            PspState::Idle => OscReport { state: "done", silent: true, ..base },
+            // Idle is no news and nothing to acknowledge: it ends with its program.
+            PspState::Idle => OscReport { state: "done", silent: true, exit_clears: true, ..base },
             PspState::Clear => OscReport { clear: true, ..base },
         };
         self.osc_state(p, report);
@@ -2313,6 +2324,8 @@ impl Daemon {
                     p.osc.drop_one();
                     return;
                 }
+                // The text is the pane's output, whatever the agent: never for the model.
+                a.message_from_output = true;
                 if a.state != "waiting" {
                     a.state = "waiting".into();
                     a.message = r.message.clone();
@@ -2335,14 +2348,16 @@ impl Daemon {
             }
             return;
         }
-        if osc.as_ref().is_some_and(|a| !a.progress_only && a.state == r.state && a.message == r.message && a.silent == r.silent) {
+        if osc.as_ref().is_some_and(|a| a.state == r.state && a.message == r.message && a.silent == r.silent) {
             return;
         }
         let up = osc.as_ref().is_some_and(|a| a.attention);
         let alerts = matches!(r.state, "waiting" | "done" | "error") && !r.silent;
+        let was_held = r.held_owner.is_some();
+        let fg = r.held_owner.unwrap_or_else(|| platform::foreground(p.pid).map(|f| f.pgrp).filter(|g| *g != p.pid));
         if !alerts {
             if !p.osc.flip() {
-                p.osc.held = Some(r);
+                p.osc.held = Some(OscReport { held_owner: Some(fg), ..r });
                 return;
             }
         } else if !(if up { p.osc.update() } else { p.osc.rise() }) {
@@ -2350,7 +2365,12 @@ impl Daemon {
             return;
         }
         p.osc.held = None;
-        let fg = platform::foreground(p.pid).map(|f| f.pgrp).filter(|g| *g != p.pid);
+        // A held report of a state that ends with its program, whose program has exited since,
+        // is dropped. What the pane shows is left alone: that program's own status went with
+        // it (`detect_agent`), and an alert raised since is not this report's to remove.
+        if was_held && (r.exit_clears || r.state == "running") && fg.is_some_and(|g| !platform::process_running(g)) {
+            return;
+        }
         let mut a = osc.unwrap_or_else(|| Agent::blank("other", r.state, "osc"));
         if let Some(kind) = r.kind {
             a.kind = kind;
@@ -2359,35 +2379,26 @@ impl Daemon {
         a.message = r.message;
         a.pid = fg;
         a.pane_bound = true;
-        a.progress_only = false;
         a.exit_clears = r.exit_clears;
         a.silent = r.silent;
         a.needs_user_fixed = r.silent.then_some(false);
         self.set_agent(p, Some(a));
     }
 
-    /// The program in the pane reports progress (None: it ended). Shown on the pane's agent,
-    /// whatever its source; a pane without one gets an `osc` agent only for it. Never an alert,
-    /// an `agent` event or a history entry: a `pane` event, at most one per
-    /// `OSC_PROGRESS_EVERY` (the end at once).
+    /// The program in the pane reports progress (None: it ended). It is the pane's `progress`,
+    /// whatever agent the pane has, and makes none: clients that know nothing of it see
+    /// nothing. Never an alert, an `agent` event or a history entry: a `pane` event, at most
+    /// one per `OSC_PROGRESS_EVERY` (the end at once).
     fn osc_progress(&self, p: &mut Pane, progress: Option<clotho_vt::Progress>) {
-        let fg = |p: &Pane| platform::foreground(p.pid).map(|f| f.pgrp).filter(|g| *g != p.pid);
-        match p.agent.as_ref() {
-            None => {
-                let Some(pr) = progress else { return };
-                let pid = fg(p);
-                let mut a = Agent::blank("other", "running", "osc");
-                (a.progress, a.progress_pid, a.pid, a.pane_bound, a.progress_only) = (Some(pr), pid, pid, true, true);
-                p.agent = Some(a);
-            }
-            Some(a) if a.progress == progress => return,
-            Some(a) if progress.is_none() && a.progress_only => p.agent = None,
-            Some(a) => {
-                let pid = if a.progress.is_none() { fg(p) } else { a.progress_pid };
-                let a = p.agent.as_mut().unwrap();
-                a.progress = progress;
-                a.progress_pid = progress.and(pid);
-            }
+        if p.progress == progress {
+            return;
+        }
+        if p.progress.is_none() {
+            p.progress_pid = platform::foreground(p.pid).map(|f| f.pgrp).filter(|g| *g != p.pid);
+        }
+        p.progress = progress;
+        if progress.is_none() {
+            p.progress_pid = None;
         }
         if progress.is_none() || p.osc.progress_at.is_none_or(|t| t.elapsed() >= OSC_PROGRESS_EVERY) {
             self.progress_event(p);
@@ -2728,9 +2739,9 @@ impl Daemon {
             // be quiet), so the text and the label are there when it rises. The rise doesn't
             // start a second one for the same state, message and time.
             let entered = a.settling && !old.as_ref().is_some_and(|o| o.settling && o.since == a.since);
-            // Never for text from the pane's output (`osc`): it is shown as it came, and not
-            // sent to a model.
-            if ((rose && !a.quiet) || (entered && !a.present_at_done)) && !a.rewrite_tried && a.source != "osc" {
+            // Never for text from the pane's output (an `osc` agent's, or a notification a
+            // detected agent took): it is shown as it came, and not sent to a model.
+            if ((rose && !a.quiet) || (entered && !a.present_at_done)) && !a.rewrite_tried && !a.untrusted_text() {
                 started = self.summary.start(a.summary_input());
                 a.rewrite_pending = started.is_some();
                 a.rewrite_tried = started.is_some();
@@ -2913,13 +2924,57 @@ impl Daemon {
         self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": old.state}));
     }
 
+    /// A status that ends with its program (`running`, `starting`, an OSC 7501 `blocked` or
+    /// `idle`) or a progress, reported while no job was in the foreground, has no process to
+    /// end with. The job that is in the foreground now takes it (a shell that reports before it
+    /// starts the command). With none, in a pane whose own process is a shell, the shell is
+    /// back at its prompt and nothing is working: it goes at the second check in a row, so
+    /// about a second after the report. In a pane that runs a program directly, that program
+    /// reported, and it lasts until the pane closes.
+    fn settle_unowned(&self, p: &mut Pane, fg: Option<u32>) {
+        let state = |a: &Agent| a.pane_bound && a.pid.is_none() && (a.exit_clears || matches!(a.state.as_str(), "running" | "starting"));
+        let st = p.agent.as_ref().is_some_and(state);
+        let pr = p.progress.is_some() && p.progress_pid.is_none();
+        if !st && !pr {
+            p.osc.unowned_checks = 0;
+            return;
+        }
+        if let Some(job) = fg {
+            if st {
+                p.agent.as_mut().unwrap().pid = Some(job);
+            }
+            if pr {
+                p.progress_pid = Some(job);
+            }
+            p.osc.unowned_checks = 0;
+            return;
+        }
+        if !crate::layout::is_shell(&platform::process_names(p.pid)) {
+            p.osc.unowned_checks = 0;
+            return;
+        }
+        p.osc.unowned_checks += 1;
+        if p.osc.unowned_checks < 2 {
+            return;
+        }
+        p.osc.unowned_checks = 0;
+        if pr {
+            self.osc_progress(p, None);
+        }
+        if st && p.agent.as_ref().is_some_and(state) {
+            self.set_agent(p, None);
+        }
+    }
+
     /// Detection (no hooks): who is in the foreground of the pane's terminal, and is it busy.
     fn detect_agent(&self, p: &mut Pane) {
         if p.exited.is_some() {
             return;
         }
+        let fg = platform::foreground(p.pid).filter(|f| f.pgrp != p.pid);
+        self.settle_unowned(p, fg.as_ref().map(|f| f.pgrp));
         // Progress ends with the group that reported it.
-        if p.agent.as_ref().is_some_and(|a| a.progress.is_some() && a.progress_pid.is_some_and(|pid| !platform::process_alive(pid))) {
+        if p.progress.is_some() && p.progress_pid.is_some_and(|pid| !platform::process_running(pid)) {
             self.osc_progress(p, None);
         }
         // Hook-reported agents: only clear them once their process is gone.
@@ -2929,23 +2984,23 @@ impl Daemon {
             }
             return;
         }
-        let fg = platform::foreground(p.pid).filter(|f| f.pgrp != p.pid);
         let kind = fg.as_ref().and_then(|f| agent_kind(&f.names));
         // Agents that belong to the pane (`pane_bound`): what calls the user stays after the
         // reporter exited; work (and an OSC 7501 `blocked`) ends with the reporting group.
-        // A known agent in the foreground takes over from an `osc` one, unless that already
-        // names itself as that kind (its own reports are exact; detection would only guess).
+        // A known agent in the foreground takes over from one (a program's `osc` status, a
+        // script's report), unless that already names itself as that kind (its own reports are
+        // exact; detection would only guess).
         if let Some(a) = p.agent.as_ref().filter(|a| a.pane_bound) {
-            if !(a.source == "osc" && kind.is_some_and(|k| k != a.kind)) {
+            if !kind.is_some_and(|k| k != a.kind) {
                 let ends = a.exit_clears || matches!(a.state.as_str(), "running" | "starting");
-                if ends && a.pid.is_some_and(|pid| !platform::process_alive(pid)) {
+                if ends && a.pid.is_some_and(|pid| !platform::process_running(pid)) {
                     self.set_agent(p, None);
                 }
                 return;
             }
         }
-        // What an `osc` agent leaves to the detected one that replaces it.
-        let carried = p.agent.as_ref().filter(|a| a.source == "osc").cloned();
+        // What a pane-bound agent leaves to the detected one that replaces it.
+        let carried = p.agent.as_ref().filter(|a| a.pane_bound).cloned();
         match (kind, p.agent.clone()) {
             (None, Some(_)) => self.set_agent(p, None),
             (None, None) => {}
@@ -2954,7 +3009,6 @@ impl Daemon {
                 let mut a = current.filter(|a| a.kind == kind && a.source == "detected").unwrap_or(Agent { pid: fg.as_ref().map(|f| f.pgrp), ..Agent::blank(kind, "starting", "detected") });
                 if let Some(o) = &carried {
                     (a.attention, a.quiet, a.needs_user) = (o.attention, o.quiet, o.needs_user.filter(|_| o.attention));
-                    (a.progress, a.progress_pid) = (o.progress, o.progress_pid);
                 }
                 // Another process of that kind (quit and started again): not the same agent.
                 let pgrp = fg.as_ref().map(|f| f.pgrp);
@@ -2984,11 +3038,13 @@ impl Daemon {
                         // text) stays with it.
                         if !(guess && a.attention) {
                             a.message = None;
+                            a.message_from_output = false;
                         }
                     }
                     a.guess = guess;
                 }
                 if let Some(o) = carried.filter(|o| o.attention) {
+                    a.message_from_output = o.untrusted_text();
                     a.message = o.message;
                 }
                 self.set_agent(p, Some(a));
@@ -3103,6 +3159,17 @@ impl Daemon {
             || p.get("pid").and_then(Value::as_u64).map(|r| r as u32).is_some_and(|r| is_agent(r) || platform::ancestors(r, pp.pid).into_iter().any(is_agent));
         let kind = kind.or(prev.as_ref().map(|a| a.kind.clone())).unwrap_or_else(|| "other".into());
         let pane_bound = !by_agent && !crate::kinds::known(&kind) && !prev.as_ref().is_some_and(|a| !a.pane_bound && a.pid.is_some_and(platform::process_alive));
+        // A script's status ends with the script. That is the foreground job when the reporter
+        // is part of it (in its group, or started by it in a group of its own); otherwise the
+        // reporter's own job (`deploy.sh &`), whatever is in the foreground. The reporter is
+        // still there: it waits for this answer.
+        let reporter = p.get("pid").and_then(Value::as_u64).map(|r| r as u32);
+        let reporter_job = reporter.and_then(platform::process_group);
+        let in_foreground = |r: u32| fg.as_ref().is_some_and(|f| reporter_job == Some(f.pgrp) || platform::ancestors(r, pp.pid).contains(&f.pgrp));
+        let pid = match reporter {
+            Some(r) if pane_bound && !in_foreground(r) => reporter_job.or(pid),
+            _ => pid,
+        };
         // The turn: a prompt starts one (empty: one the user didn't type); so does work after the
         // agent stopped. A new session starts afresh. Bounded like every reported text.
         let text = |k: &str, max: usize| p.get(k).and_then(Value::as_str).map(|t| clotho_vt::printable(t, max));
@@ -3179,9 +3246,6 @@ impl Daemon {
             present_at_done,
             pane_bound,
             needs_user_fixed,
-            // What the pane's program says about its progress is its own.
-            progress: pp.agent.as_ref().and_then(|a| a.progress),
-            progress_pid: pp.agent.as_ref().and_then(|a| a.progress_pid),
             ..Agent::blank("", "", "hook")
         };
         self.set_agent(&mut pp, Some(a));
@@ -3812,7 +3876,7 @@ impl Daemon {
                     "protocol_max": PROTOCOL,
                     // What this build supports, since builds share a version number. Clients
                     // check these instead of probing.
-                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary", "alerts", "git.changes", "worktree", "peek", "agent.osc", "agent.progress", "agent.kinds", "git.changes.token"],
+                    "features": ["pane.keys", "agents", "agent.report.pid", "ping", "split.set_ratio", "fs", "push", "pane.clipboard", "settings", "service", "agent.mute", "pane.search", "agent.history", "agent.decide", "push.activity", "client.colors", "restore", "move", "git", "pane.move", "pane.focus", "summary", "alerts", "git.changes", "worktree", "peek", "agent.osc", "pane.progress", "agent.kinds", "git.changes.token"],
                     "daemon": "clothod",
                     "version": env!("CARGO_PKG_VERSION"),
                     "instance": self.instance,
@@ -3872,7 +3936,7 @@ impl Daemon {
                     a.settling = false;
                     // An agent that belongs to the pane has nothing left to show once seen
                     // (no process, no session): it goes. A muted one stays, with its mute.
-                    let gone = a.pane_bound && !a.progress_only && !a.muted && matches!(a.state.as_str(), "waiting" | "done" | "error");
+                    let gone = a.pane_bound && !a.muted && matches!(a.state.as_str(), "waiting" | "done" | "error");
                     self.set_agent(&mut pp, Some(a));
                     if gone {
                         self.set_agent(&mut pp, None);

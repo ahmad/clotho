@@ -146,7 +146,7 @@ printf '\033]9;Build finished\007'                                       # or ju
 With `--state`, `report` says what went wrong and exits non-zero (2 for a usage error, 1 when
 it isn't in a Clotho pane or reached no daemon); in the forms hooks use (a bare state word,
 `--claude-hook`, `--gemini-hook`, `--codex-notify`) it stays silent and exits 0. A waiting, done or error status stays on the pane after the script exits,
-until it is acknowledged in an app; a running one goes when the script does. OSC 9, 99, 777 and
+until it is acknowledged in an app; a running one goes when the script does, in the background too (`deploy.sh &`). OSC 9, 99, 777 and
 7501 are read from every pane, rate-limited and as plain text (spec: `../docs/protocol.md`,
 "Notifications from any program" and "Reporting from your own scripts"; `../docs/security.md`
 for what pane output can and can't do with it).

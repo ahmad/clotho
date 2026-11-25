@@ -78,6 +78,13 @@ fn bsdinfo(pid: u32) -> Option<libc::proc_bsdinfo> {
     (n == size).then_some(info)
 }
 
+/// Whether `pid` has exited and only waits for its parent to collect it (`SZOMB`). A process
+/// whose record can't be read (another user's) is not taken for one.
+pub fn is_zombie(pid: u32) -> bool {
+    const SZOMB: u32 = 5;
+    bsdinfo(pid).is_some_and(|i| i.pbi_status == SZOMB)
+}
+
 /// The terminal's foreground process group (`e_tpgid`).
 pub fn terminal_pgrp(pid: u32) -> Option<u32> {
     let info = bsdinfo(pid)?;

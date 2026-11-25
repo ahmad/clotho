@@ -233,8 +233,21 @@ pub fn ancestors(pid: u32, until: u32) -> Vec<u32> {
     out
 }
 
+/// The process group `pid` is in.
+pub fn process_group(pid: u32) -> Option<u32> {
+    let g = unsafe { libc::getpgid(pid as libc::pid_t) };
+    (g > 0).then_some(g as u32)
+}
+
 pub fn process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// Whether `pid` is still running: there, and not a process that has exited and waits for its
+/// parent to collect it. A shell at its prompt may leave a finished background job that way
+/// (dash collects it at the next command).
+pub fn process_running(pid: u32) -> bool {
+    process_alive(pid) && !os::is_zombie(pid)
 }
 
 /// Where each running daemon registers its socket (`<pid>` -> socket path), so `clothod report`

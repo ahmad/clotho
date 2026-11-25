@@ -29,8 +29,12 @@ fn interpreter(name: &str) -> bool {
 /// basenames).
 ///
 /// Claude and Codex match on any of the names (`node .../claude`, the native `claude.exe` and
-/// `codex-<target>`). The other kinds match the process's own name (the first), or a later name
-/// only after an interpreter's: `node .../gemini` is Gemini, `vim gemini` is not.
+/// `codex-<target>`). The other kinds match the process's own name (the first). A later name
+/// (the process name, argv[0] or the first argument) matches only when the process itself is
+/// an interpreter, that is when the first name, its executable, is one: `node .../gemini` is
+/// Gemini; `vim gemini`, `cat node gemini` and `sudo bash amp` are not. An interpreter's name
+/// further along the list unlocks nothing: there it is only an argument. (`env node gemini`
+/// needs no rule: `env` execs, so the process is `node`.)
 pub fn agent_kind(names: &[String]) -> Option<&'static str> {
     for n in names {
         let n = n.to_ascii_lowercase();
@@ -41,17 +45,12 @@ pub fn agent_kind(names: &[String]) -> Option<&'static str> {
             return Some("codex");
         }
     }
-    let mut interpreted = false;
-    for (i, n) in names.iter().enumerate() {
+    let interpreted = names.first().is_some_and(|n| interpreter(&n.to_ascii_lowercase()));
+    let own = if interpreted { names.len() } else { 1 };
+    names.iter().take(own).find_map(|n| {
         let n = n.to_ascii_lowercase();
-        if i == 0 || interpreted {
-            if let Some((_, kind)) = NAMED.iter().find(|(name, _)| *name == n) {
-                return Some(kind);
-            }
-        }
-        interpreted |= interpreter(&n);
-    }
-    None
+        NAMED.iter().find(|(name, _)| *name == n).map(|(_, kind)| *kind)
+    })
 }
 
 /// Whether `kind` is one of the agents clothod knows by name. A report that names one is that
@@ -143,7 +142,11 @@ mod tests {
         assert_eq!(kind(&["vim", "gemini"]), None);
         assert_eq!(kind(&["less", "aider"]), None);
         assert_eq!(kind(&["git", "amp"]), None);
-        assert_eq!(kind(&["cat", "node", "gemini"]), Some("gemini"));
+        // An interpreter's name among the arguments of another program unlocks nothing.
+        assert_eq!(kind(&["cat", "node", "gemini"]), None);
+        assert_eq!(kind(&["sudo", "bash", "amp"]), None);
+        assert_eq!(kind(&["less", "sh", "aider"]), None);
+        assert_eq!(kind(&["vim", "python3", "gemini"]), None);
         assert_eq!(kind(&["node", "server.js"]), None);
     }
 
