@@ -5,8 +5,9 @@ import ClothoKit
 // machine's name, its user@host, a status dot (connected, connecting, off, can't reach) and, for saved
 // machines, a switch that turns it off in Clotho (AppDelegate.setMachineEnabled). Under the list a +/−
 // control adds and removes machines; double-click (or the row's menu) edits one; drag reorders. Below
-// that, the selected machine's own settings: whether its agents show, clothod's scrollback and whether
-// clothod starts at login. Removing or switching off only changes Clotho; clothod and shells keep running.
+// that, the selected machine's own settings: whether its agents show, clothod's scrollback, whether
+// clothod starts at login, and its agents' status hooks (a summary, and a button for the sheet). Removing
+// or switching off only changes Clotho; clothod and shells keep running.
 
 /// What a machine's row says about it.
 enum MachineRowStatus: Equatable {
@@ -62,6 +63,11 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
     /// The last error per machine, shown in red in place of the footnote until the next change.
     private var errors: [MachineKey: String] = [:]
     private var shownSignature = ""
+    /// The shown machine's "Agent status" row (nil while the machine can't be asked): its caption follows
+    /// the hooks' status on its own, so a status that arrives never rebuilds the details.
+    private(set) var hooksRow: FormRow?
+    private var hooksKey: MachineKey?
+    private var hooksObserver: NSObjectProtocol?
     static let dragType = NSPasteboard.PasteboardType("app.clotho.desktop.machine-row")
     static let visibleRows = 4
 
@@ -143,6 +149,12 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
         view = root
         observer = NotificationCenter.default.addObserver(forName: Machine.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.reload() }
+        }
+        hooksObserver = NotificationCenter.default.addObserver(forName: AgentHooksState.changed, object: nil, queue: nil) { [weak self] note in
+            MainActor.assumeIsolated {
+                guard let self, let key = self.hooksKey, note.object as? MachineKey == key else { return }
+                self.hooksRow?.captionLabel?.stringValue = self.hooksCaption(key)
+            }
         }
         reload()
     }
@@ -407,24 +419,29 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
                                control: off)
         }
 
-        let section = formSection(machine.isLocal ? "\(name) (this Mac)" : name, FormGroup([agentsRow, scrollbackRow] + (rewriteRow.map { [$0] } ?? []) + [loginRow]))
+        // The agents' status hooks on this machine: one row that says how many are installed, and a button
+        // for the sheet with each agent's own Install, Update and Remove. One row whatever clothod lists, so
+        // the tab stays short enough for a small screen.
+        let canAsk = hello != nil || (machine.isLocal && session != nil)
+        let hooksButton = ClosureButton(title: "Agent Status…") { [weak self] in
+            guard let self, let window = self.view.window else { return }
+            self.app?.setUpAgentHooks(on: key, in: window)
+        }
+        hooksButton.bezelStyle = .rounded
+        hooksButton.controlSize = .small
+        hooksButton.isEnabled = canAsk
+        hooksButton.setAccessibilityLabel("Agent status on \(name)")
+        hooksButton.toolTip = "Install, update or remove the agents’ status hooks on \(name)"
+        let hooksRow = FormRow("Agent status", caption: canAsk ? hooksCaption(key) : (unavailable ?? "Connect to \(name) to change this"),
+                               control: hooksButton)
+        self.hooksRow = canAsk ? hooksRow : nil
+        hooksKey = key
+        if canAsk { app.refreshHookStatus(key) }
+
+        let section = formSection(machine.isLocal ? "\(name) (this Mac)" : name,
+                                  FormGroup([agentsRow, scrollbackRow] + (rewriteRow.map { [$0] } ?? []) + [loginRow, hooksRow]))
         details.addArrangedSubview(section)
         section.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
-
-        // The agents' status hooks on this machine, each with its own Install, Update and Remove. The list
-        // follows the status on its own, so asking for it here never rebuilds these details.
-        let hooks: NSView
-        if hello != nil || (machine.isLocal && session != nil) {
-            hooks = AgentHooksListView(app: app, key: key, showsNotes: false)
-            app.refreshHookStatus(key)
-        } else {
-            let row = FormRow(unavailable ?? "Connect to \(name) to change this", control: nil)
-            row.titleLabel.textColor = .secondaryLabelColor
-            hooks = FormGroup([row])
-        }
-        let hooksSection = formSection("Agent status", hooks)
-        details.addArrangedSubview(hooksSection)
-        hooksSection.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
 
         if let error = errors[key] {
             footnote.stringValue = error
@@ -433,6 +450,22 @@ final class MachinesSettingsController: NSViewController, NSTableViewDataSource,
             footnote.stringValue = "Drag to reorder. Switching a machine off or removing it leaves its clothod and shells running."
             footnote.textColor = .secondaryLabelColor
         }
+    }
+
+    /// The caption under "Agent status": how many agents' hooks are installed on the machine.
+    private func hooksCaption(_ key: MachineKey) -> String {
+        Self.hooksSummary(lines: app?.agentHooks.lines[key], unanswered: app?.agentHooks.unanswered.contains(key) == true)
+    }
+
+    /// "2 of 4 installed", with ", 1 update available" when hooks come from an older clothod (they count as
+    /// installed: they are there). Before clothod answered, "Checking…"; when it couldn't, that.
+    static func hooksSummary(lines: [HookLine]?, unanswered: Bool) -> String {
+        guard let lines, !lines.isEmpty else { return unanswered ? AgentHookRow.unanswered : AgentHookRow.checking }
+        let installed = lines.filter { $0.state != .notInstalled }.count
+        let outdated = lines.filter { $0.state == .outdated }.count
+        var text = "\(installed) of \(lines.count) installed"
+        if outdated > 0 { text += outdated == 1 ? ", 1 update available" : ", \(outdated) updates available" }
+        return text
     }
 
     /// The caption under "Summarize agent messages": what the switch does, or, on a daemon that reports

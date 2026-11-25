@@ -120,9 +120,39 @@ final class AgentStatusAppTests: XCTestCase {
         XCTAssertTrue(app.overview.cardViews[key] === card, "the same card")
         app.closeOverview()
 
+        // The machine goes away: the model still holds the pane's progress, and no bar stands still for it.
+        app.showOverview()
+        try await ChangesFixture.wait("the card again") { app.overview.cardViews[key]?.progress?.percent == 70 }
+        func bars() -> (tab: PaneProgress?, header: PaneProgress?, row: PaneProgress?, card: PaneProgress?) {
+            let tabBar = app.tabBar.progressBars[tab], rowBar = app.sidebar.agentRows.first?.progressBar
+            return (tabBar?.isHidden == false ? tabBar?.progress : nil, header.progressBar.isHidden ? nil : header.progressBar.progress,
+                    rowBar?.isHidden == false ? rowBar?.progress : nil, app.overview.cardViews[key]?.progress)
+        }
+        let paused = PaneProgress(state: .paused, percent: 70)
+        XCTAssertEqual(bars().tab, paused)
+        XCTAssertEqual(bars().header, paused)
+        XCTAssertEqual(bars().row, paused)
+        XCTAssertEqual(bars().card, paused)
+        fake.dropConnection()
+        try await ChangesFixture.wait("disconnected") { !app.store.isConnected }
+        try await ChangesFixture.wait("no bar on the tab, the header, the row or the card") {
+            bars().tab == nil && bars().header == nil && bars().row == nil && bars().card == nil
+        }
+        XCTAssertEqual(app.store.state.pane(pane)?.progress, paused, "the model keeps the last progress it heard")
+        XCTAssertEqual(app.sidebar.agentRows.count, 1, "the agent's row is still there, without its bar")
+        XCTAssertNotNil(app.overview.cardViews[key], "and so is its card")
+        XCTAssertNotNil(app.tabBar.progressBars[tab], "and the tab")
+        XCTAssertFalse(app.showsProgress(app.store))
+        fake.restoreConnection()
+        try await ChangesFixture.wait("connected again") { app.store.isConnected }
+        try await ChangesFixture.wait("the bars are back") {
+            bars().tab == paused && bars().header == paused && bars().row == paused && bars().card == paused
+        }
+        app.closeOverview()
+
         fake.setProgress(nil, for: pane)
         try await ChangesFixture.wait("cleared everywhere") {
-            header.progressBar.isHidden && row.progressBar.isHidden && app.tabBar.progressBars[tab]?.isHidden == true
+            header.progressBar.isHidden && app.sidebar.agentRows.first?.progressBar.isHidden == true && app.tabBar.progressBars[tab]?.isHidden == true
         }
     }
 

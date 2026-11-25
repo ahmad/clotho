@@ -69,6 +69,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         let features = Self.baseFeatures
         hello.featureNames = features + extraFeatures.filter { !features.contains($0) }
         locked {
+            lastHello = hello
             continuation.yield(.connected(hello))
             continuation.yield(.state(state))
         }
@@ -889,6 +890,23 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         defer { nextID += 1 }
         return nextID
     }
+
+    /// The connection is lost, as when a machine goes away: a `disconnected` event. The model keeps what
+    /// it last heard (a pane's progress too), and the panes go on in the fake.
+    public func dropConnection(reason: String = "connection lost") {
+        locked { _ = continuation.yield(.disconnected(reason)) }
+    }
+
+    /// The connection is back, to the same instance: `connected` with the same hello, then the state.
+    public func restoreConnection() {
+        locked {
+            guard let lastHello else { return }
+            continuation.yield(.connected(lastHello))
+            continuation.yield(.state(state))
+        }
+    }
+
+    private var lastHello: Hello?
 
     private func publishState() {
         if let w = state.workspaces.firstIndex(where: { $0.id == state.focus.workspace }) {

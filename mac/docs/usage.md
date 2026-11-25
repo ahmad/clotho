@@ -284,7 +284,7 @@ If a machine's shells were started by a clothod too old for the new one to take 
 
 Clotho detects coding agents from the terminal, which works without any setup. For exact status (the moment an agent waits for you, finishes or fails), an agent reports through its own hooks. clothod has hooks for four agents: **Claude Code**, **Codex**, **Gemini CLI** and **GitHub Copilot CLI**.
 
-Right-click a machine and choose **Set Up Agent Status…** (it reads **Agent Status…** once something is installed, and **Update Agent Status…** when a hook comes from an older clothod), or open **Settings › Machines** and look under **Agent status**. Both list the agents with what is installed, and each agent has its own buttons:
+Right-click a machine and choose **Set Up Agent Status…** (it reads **Agent Status…** once something is installed, and **Update Agent Status…** when a hook comes from an older clothod), or open **Settings › Machines**, where the machine's **Agent status** row says how many are installed ("2 of 4 installed") and its **Agent Status…** button opens the same sheet. The sheet lists the agents with what is installed, and each agent has its own buttons:
 
 - **Install** shows exactly what `clothod hooks install <agent>` would change on that machine (the agent's settings file, with a backup kept; anything of yours in it stays) and installs only when you confirm.
 - **Update** does the same for hooks left by an older clothod.

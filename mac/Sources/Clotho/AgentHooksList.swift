@@ -28,10 +28,8 @@ final class AgentHookRow: NSView {
     /// The room a row's words may take before they wrap, beside the icon and two buttons.
     static let textWidth: CGFloat = 300
 
-    /// `showsNote`: the Copilot note under its row (the sheet). Settings leaves it to the tooltip and to the
-    /// Install confirmation, which always says it.
     /// `unknown`: what the caption says while there is no line ("Checking…", or that clothod couldn't say).
-    init(agent: String, line: HookLine?, unknown: String = AgentHookRow.checking, busy: Bool, showsNote: Bool = true,
+    init(agent: String, line: HookLine?, unknown: String = AgentHookRow.checking, busy: Bool,
          onInstall: @escaping () -> Void, onRemove: @escaping () -> Void) {
         self.agent = agent
         let kind = AgentKind.of(agent)
@@ -49,8 +47,7 @@ final class AgentHookRow: NSView {
         titleLabel.font = SettingsStyle.titleFont
         titleLabel.lineBreakMode = .byTruncatingTail
         var texts: [NSView] = [titleLabel, captionLabel]
-        if agent == "copilot" { toolTip = Self.copilotNote }
-        if agent == "copilot", showsNote {
+        if agent == "copilot" {
             let note = SettingsStyle.caption(Self.copilotNote)
             note.preferredMaxLayoutWidth = Self.textWidth
             noteLabel = note
@@ -128,12 +125,9 @@ final class AgentHooksListView: NSView {
     private var group: NSView?
     private var observer: NSObjectProtocol?
 
-    private let showsNotes: Bool
-
-    init(app: AppDelegate, key: MachineKey, showsNotes: Bool = true) {
+    init(app: AppDelegate, key: MachineKey) {
         self.app = app
         self.key = key
-        self.showsNotes = showsNotes
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         observer = NotificationCenter.default.addObserver(forName: AgentHooksState.changed, object: nil, queue: nil) { [weak self] note in
@@ -155,7 +149,8 @@ final class AgentHooksListView: NSView {
         guard let app else { return }
         group?.removeFromSuperview()
         rows = app.hookRows(key).map { agent, line in
-            AgentHookRow(agent: agent, line: line, unknown: app.agentHooks.unanswered.contains(key) ? AgentHookRow.unanswered : AgentHookRow.checking, busy: app.agentHooks.busy.contains("\(key)/\(agent)"), showsNote: showsNotes,
+            AgentHookRow(agent: agent, line: line, unknown: app.agentHooks.unanswered.contains(key) ? AgentHookRow.unanswered : AgentHookRow.checking,
+                         busy: app.agentHooks.busy.contains("\(key)/\(agent)"),
                          onInstall: { [weak self] in self?.act(agent, install: true) },
                          onRemove: { [weak self] in self?.act(agent, install: false) })
         }

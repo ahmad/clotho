@@ -151,14 +151,14 @@ final class ClearerAlertsTests: XCTestCase {
 final class ResolveHoverTests: XCTestCase {
     override func setUp() { _ = NSApplication.shared }
 
-    private func row(resolvable: Bool, canMute: Bool = true) -> AgentRow {
+    private func row(resolvable: Bool, canMute: Bool = true, width: CGFloat = 260) -> AgentRow {
         var entry = AgentEntry(machine: "local", machineName: "Mac", pane: 1, workspace: Workspace(id: 1, name: "Platform", tabs: []),
                                tab: nil, paneTitle: nil, tabTitle: "alerts",
                                info: AgentInfo(kind: "claude", state: .done, message: "A long reply that will certainly be cut off before the end of the row",
                                                since: Date().timeIntervalSince1970 - 600, attention: true), canReply: false)
         entry.canMute = canMute
         let row = AgentRow(entry, onResolve: resolvable ? {} : nil, onMute: resolvable && canMute ? {} : nil)
-        row.frame = NSRect(x: 0, y: 0, width: 260, height: AgentRow.height)
+        row.frame = NSRect(x: 0, y: 0, width: width, height: AgentRow.height)
         row.layoutSubtreeIfNeeded()
         return row
     }
@@ -176,12 +176,22 @@ final class ResolveHoverTests: XCTestCase {
         XCTAssertEqual(actions.alphaValue, 0)
     }
 
-    func testTheTextRunsToTheRowsEndWithOrWithoutActions() {
+    /// The text ends at the same place with or without the hover actions: before the kind's glyph at the
+    /// row's end, or at the row's end itself in a sidebar too narrow for the glyph.
+    func testTheTextRunsToTheKindGlyphWithOrWithoutActions() {
         let with = row(resolvable: true), without = row(resolvable: false)
         XCTAssertEqual(with.summary.frame, without.summary.frame)
         XCTAssertEqual(with.label.frame, without.label.frame)
         // Constraints place the label's alignment rect; its frame adds the text field's own padding.
-        XCTAssertEqual(with.summary.alignmentRect(forFrame: with.summary.frame).maxX, 260 - s(8), accuracy: 0.5)
+        XCTAssertFalse(with.kindGlyph.isHidden)
+        XCTAssertEqual(with.kindGlyph.frame.maxX, 260 - s(8), accuracy: 0.5, "the glyph is what ends the row")
+        XCTAssertEqual(with.summary.alignmentRect(forFrame: with.summary.frame).maxX, 260 - s(8) - AgentRow.glyphSlot - s(4), accuracy: 0.5)
+        XCTAssertEqual(with.summary.alignmentRect(forFrame: with.summary.frame).maxX, with.kindGlyph.frame.minX - s(4), accuracy: 0.5)
+        let narrowWidth = AgentRow.glyphLeastRow - 10
+        let narrow = row(resolvable: true, width: narrowWidth)
+        XCTAssertTrue(narrow.kindGlyph.isHidden, "no room for the glyph")
+        XCTAssertEqual(narrow.summary.alignmentRect(forFrame: narrow.summary.frame).maxX, narrowWidth - s(8), accuracy: 0.5,
+                       "and the text has the row to its end")
         XCTAssertLessThanOrEqual(with.label.alignmentRect(forFrame: with.label.frame).maxX,
                                  with.summary.alignmentRect(forFrame: with.summary.frame).minX, "the title stops before the text")
     }

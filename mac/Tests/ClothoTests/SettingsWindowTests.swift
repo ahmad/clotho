@@ -113,8 +113,15 @@ final class SettingsWindowTests: XCTestCase {
     }
 }
 
+/// A value a test's `@Sendable` closure reads while the test changes it, both on the main actor.
+private final class UncheckedBox<Value>: @unchecked Sendable {
+    var value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// Settings › Machines › "Summarize agent messages" says when the rewrite doesn't work on a machine
-/// (clothod 0.1.31, feature `alerts`), in a caption that never grows past two lines.
+/// (clothod 0.1.31, feature `alerts`), in a caption that never grows past two lines. And the selected
+/// machine's rows together: agent status is one of them, and the window fits a small screen.
 @MainActor
 final class RewriteHealthTests: XCTestCase {
     private typealias Health = DaemonSettings.RewriteHealth
@@ -230,6 +237,11 @@ final class RewriteHealthTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
             XCTAssertEqual(settings.window?.contentLayoutRect.height ?? 0, tab.fittingSize.height, accuracy: 1,
                            "the window is exactly as tall as its contents")
+            // Every row is there (its agents, scrollback, the summaries, start at login, agent status), and
+            // the window still fits a small screen: 1440 x 900 with the Dock showing leaves about 795 pt.
+            let titles = tab.descendants(of: FormRow.self).map(\.titleLabel.stringValue)
+            XCTAssertEqual(titles, ["Show its agents", "Scrollback", "Summarize agent messages", "Start clothod at login", "Agent status"])
+            XCTAssertLessThanOrEqual(settings.window?.frame.height ?? .infinity, Self.smallScreenBudget, "the \(name) window fits a small screen")
             guard let folder = ProcessInfo.processInfo.environment["CLOTHO_SNAPSHOT_DIR"] else { continue }
             for (mode, look) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
                 NSApp.appearance = NSAppearance(named: look)
@@ -252,6 +264,106 @@ final class RewriteHealthTests: XCTestCase {
         // Working again: the plain caption is back.
         fake.setRewriteHealth(Health(state: .ok, at: 1))
         try await wait("the plain caption") { row()?.captionLabel?.stringValue == Self.plain }
+    }
+
+    /// The tallest the Machines tab's window may be, title bar and toolbar included.
+    private static let smallScreenBudget: CGFloat = 700
+
+    /// Agent status in Settings is one row, however many agents clothod lists: a summary that follows the
+    /// status on its own, and a button for the sheet with each agent's Install, Update and Remove.
+    func testAgentStatusIsOneRowWithASummaryAndTheSheetsButton() async throws {
+        let keys = ["Backend", "AgentNotifications", OnboardingController.doneKey, "LaunchInBackground", "FakeRewriteHealth"]
+        var saved: [String: Any] = [:]
+        for key in keys { saved[key] = UserDefaults.standard.object(forKey: key) }
+        let suite = TestDefaults.name("agent-status-row"), machines = Machine.store
+        Machine.store = UserDefaults(suiteName: suite)!
+        defer {
+            for key in keys { UserDefaults.standard.set(saved[key], forKey: key) }
+            TestDefaults.remove(suite)
+            Machine.store = machines
+        }
+        UserDefaults.standard.set("fake", forKey: "Backend")
+        UserDefaults.standard.set(false, forKey: "AgentNotifications")
+        UserDefaults.standard.set(true, forKey: OnboardingController.doneKey)
+        UserDefaults.standard.set(true, forKey: "LaunchInBackground")
+        UserDefaults.standard.set("failing", forKey: "FakeRewriteHealth")
+
+        let app = AppDelegate()
+        app.applicationDidFinishLaunching(Notification(name: NSApplication.didFinishLaunchingNotification))
+        defer {
+            if let window = app.settingsWindow?.window, let sheet = window.attachedSheet { window.endSheet(sheet) }
+            app.settingsWindow?.window?.close()
+            app.window?.orderOut(nil)
+            app.connections.values.forEach { $0.store.stop() }
+            UserPresence.shared?.stop()
+        }
+        func wait(_ what: String, _ done: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(10)
+            while !done() {
+                guard Date() < deadline else { return XCTFail("timed out waiting for \(what)") }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        try await wait("the fake's hello") { app.store.hello?.features.contains(.alerts) == true }
+        // A later clothod with six agents: the tab is no taller for them.
+        let status = "claude: installed\ncodex: outdated\ngemini: not installed\ncopilot: not installed\nopencode: not installed\namp: installed\n"
+        let answer = UncheckedBox(status)
+        app.agentHooks.runner = { _, arguments in
+            arguments == ["hooks", "status"] ? RemoteCommandResult(status: 0, stdout: answer.value, stderr: "")
+                : RemoteCommandResult(status: 1, stdout: "", stderr: "not in this test")
+        }
+        app.showMachineManager(nil)
+        let settings = try XCTUnwrap(app.settingsWindow), tab = settings.machines.view
+        func hooks() -> FormRow? { settings.machines.hooksRow }
+        try await wait("every row") { tab.descendants(of: FormRow.self).contains { $0.titleLabel.stringValue == "Summarize agent messages" } && hooks() != nil }
+        try await wait("the summary") { hooks()?.captionLabel?.stringValue == "3 of 6 installed, 1 update available" }
+        let row = try XCTUnwrap(hooks())
+        XCTAssertEqual(row.titleLabel.stringValue, "Agent status")
+        XCTAssertTrue(tab.descendants(of: AgentHookRow.self).isEmpty, "no agent has a row of its own here")
+        XCTAssertEqual(tab.descendants(of: FormRow.self).filter { $0.titleLabel.stringValue == "Agent status" }.count, 1)
+        let button = try XCTUnwrap(row.control as? NSButton)
+        XCTAssertEqual(button.title, "Agent Status\u{2026}")
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertEqual(button.bezelStyle, .rounded, "a native push button")
+
+        // As tall as its contents and inside the small-screen budget, with the failing caption's two lines.
+        settings.fitWindowToTab(animate: false)
+        tab.layoutSubtreeIfNeeded()
+        XCTAssertEqual(tab.descendants(of: FormRow.self).count, 5, "every row a machine can have")
+        XCTAssertEqual(settings.window?.contentLayoutRect.height ?? 0, tab.fittingSize.height, accuracy: 1)
+        XCTAssertLessThanOrEqual(settings.window?.frame.height ?? .infinity, Self.smallScreenBudget)
+        XCTAssertEqual(tab.descendants(of: NSScrollView.self).count, 1, "only the machine list scrolls")
+        XCTAssertTrue(row.bounds.contains(button.convert(button.bounds, to: row)), "the button is inside its row")
+
+        // A status that changes reaches the caption in place: the same row, nothing rebuilt for it.
+        let shown = try XCTUnwrap(hooks())
+        app.agentHooks.lines[AppDelegate.localKey] = AppDelegate.parseHookLines("claude: installed\ncodex: not installed")
+        app.agentHooks.announce(AppDelegate.localKey)
+        XCTAssertEqual(shown.captionLabel?.stringValue, "1 of 2 installed")
+        XCTAssertTrue(hooks() === shown, "the same row")
+        // And clothod's next answer does too.
+        answer.value = "claude: installed\ncodex: installed\ngemini: installed\ncopilot: installed\n"
+        app.refreshHookStatus(AppDelegate.localKey)
+        try await wait("the new summary") { hooks()?.captionLabel?.stringValue == "4 of 4 installed" }
+
+        // The button opens the machine's sheet on the Settings window.
+        try XCTUnwrap(hooks()?.control as? NSButton).performClick(nil)
+        let sheet = try XCTUnwrap(settings.window?.attachedSheet as? AgentHooksSheet)
+        XCTAssertEqual(sheet.list.rows.map(\.titleLabel.stringValue), ["Claude Code", "Codex", "Gemini CLI", "GitHub Copilot CLI"])
+        XCTAssertNil(app.window.attachedSheet, "on Settings, not on the main window")
+    }
+
+    func testTheSummaryCountsWhatIsInstalled() {
+        let summary = MachinesSettingsController.hooksSummary
+        func lines(_ states: [HookLine.State]) -> [HookLine] { states.enumerated().map { HookLine(agent: "a\($0.offset)", state: $0.element) } }
+        XCTAssertEqual(summary(nil, false), "Checking\u{2026}")
+        XCTAssertEqual(summary(nil, true), AgentHookRow.unanswered)
+        XCTAssertEqual(summary([], false), "Checking\u{2026}")
+        XCTAssertEqual(summary(lines([.notInstalled, .notInstalled]), false), "0 of 2 installed")
+        XCTAssertEqual(summary(lines([.installed, .notInstalled, .installed, .notInstalled]), false), "2 of 4 installed")
+        XCTAssertEqual(summary(lines([.installed, .outdated, .notInstalled, .notInstalled]), false), "2 of 4 installed, 1 update available")
+        XCTAssertEqual(summary(lines([.outdated, .outdated]), false), "2 of 2 installed, 2 updates available")
+        XCTAssertEqual(summary(lines([.installed]), true), "1 of 1 installed", "an answer it has outlives a later failure")
     }
 }
 
