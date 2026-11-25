@@ -267,15 +267,30 @@ pub fn process_group_running(pgrp: u32) -> bool {
     (process_running(pgrp) && process_group(pgrp) == Some(pgrp)) || os::group_has_running(pgrp, None)
 }
 
-/// Whether a running process other than `leader` itself is in `leader`'s own process group
-/// (`own_group`) or anywhere in the session it leads: "is anything but the pane's shell running
-/// in the pane". Always a listing (see `process_group_running`).
-pub fn session_peer_running(leader: u32, own_group: bool) -> bool {
+/// Whether anything but a shell at its prompt runs: a process other than `shell` in `shell`'s
+/// own process group (`own_group`), or a process other than `waiting` (the shell, and the
+/// processes that wait for it) anywhere in `session`. Always a listing (see
+/// `process_group_running`).
+pub fn prompt_peer_running(session: u32, shell: u32, own_group: bool, waiting: &[u32]) -> bool {
     if own_group {
-        os::group_has_running(leader, Some(leader))
+        os::group_has_running(shell, Some(shell))
     } else {
-        os::session_has_running(leader, leader)
+        os::session_has_running(session, waiting)
     }
+}
+
+/// The whole argv of `pid`; empty when it can't be read (another user's process on macOS, a
+/// process that has exited).
+pub fn process_args(pid: u32) -> Vec<String> {
+    os::process_args(pid)
+}
+
+/// Whether `pid` runs a program it was started for (it has called exec), rather than being a
+/// forked copy of its parent that never did: a shell's subshell (`( ... )`, a function or a
+/// group in a pipeline or in the background) is such a copy, with its parent's executable and
+/// argv. `None` when it can't be told (the process is gone).
+pub fn process_execed(pid: u32) -> Option<bool> {
+    os::process_execed(pid)
 }
 
 /// Where each running daemon registers its socket (`<pid>` -> socket path), so `clothod report`

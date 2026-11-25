@@ -87,9 +87,19 @@ pub fn group_has_running(pgrp: u32, except: Option<u32>) -> bool {
     any_running(|pid, g, _| g == pgrp && Some(pid) != except)
 }
 
-/// Whether a running process other than `except` is in session `sid`.
-pub fn session_has_running(sid: u32, except: u32) -> bool {
-    any_running(|pid, _, s| s == sid && pid != except)
+/// Whether a running process other than those in `except` is in session `sid`.
+pub fn session_has_running(sid: u32, except: &[u32]) -> bool {
+    any_running(|pid, _, s| s == sid && !except.contains(&pid))
+}
+
+/// Whether `pid` has called exec since it was forked: `PF_FORKNOEXEC` (0x40) is not set in
+/// `flags` of /proc/<pid>/stat.
+pub fn process_execed(pid: u32) -> Option<bool> {
+    const PF_FORKNOEXEC: u64 = 0x40;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields after the parenthesized comm: state ppid pgrp session tty_nr tpgid flags ...
+    let flags: u64 = stat[stat.rfind(')')? + 2..].split_whitespace().nth(6)?.parse().ok()?;
+    Some(flags & PF_FORKNOEXEC == 0)
 }
 
 /// The terminal's foreground process group, from `tpgid` in /proc/<pid>/stat.

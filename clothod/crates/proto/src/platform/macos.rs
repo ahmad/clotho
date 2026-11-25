@@ -107,9 +107,15 @@ pub fn group_has_running(pgrp: u32, except: Option<u32>) -> bool {
     pids.into_iter().filter(|&p| p > 0 && Some(p as u32) != except).any(|p| running(p as u32).is_some_and(|i| i.pbi_pgid == pgrp))
 }
 
-/// Whether a running process other than `except` is in session `sid`. The kernel has no list
-/// by session: every process is asked for its session (one cheap call each).
-pub fn session_has_running(sid: u32, except: u32) -> bool {
+/// Whether `pid` has called exec since it was forked (`PROC_FLAG_EXEC`, the kernel's `P_EXEC`).
+pub fn process_execed(pid: u32) -> Option<bool> {
+    const PROC_FLAG_EXEC: u32 = 0x4000;
+    bsdinfo(pid).map(|i| i.pbi_flags & PROC_FLAG_EXEC != 0)
+}
+
+/// Whether a running process other than those in `except` is in session `sid`. The kernel has
+/// no list by session: every process is asked for its session (one cheap call each).
+pub fn session_has_running(sid: u32, except: &[u32]) -> bool {
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if n <= 0 {
         return false;
@@ -118,7 +124,7 @@ pub fn session_has_running(sid: u32, except: u32) -> bool {
     let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
     let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
     pids.truncate(n.max(0) as usize);
-    pids.into_iter().filter(|&p| p > 0 && p as u32 != except).any(|p| unsafe { libc::getsid(p) } == sid as libc::pid_t && running(p as u32).is_some())
+    pids.into_iter().filter(|&p| p > 0 && !except.contains(&(p as u32))).any(|p| unsafe { libc::getsid(p) } == sid as libc::pid_t && running(p as u32).is_some())
 }
 
 /// The terminal's foreground process group (`e_tpgid`).

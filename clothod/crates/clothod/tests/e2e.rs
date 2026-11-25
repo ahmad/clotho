@@ -8503,10 +8503,43 @@ struct OwnerCase {
     /// Stop the job (Ctrl-Z) 1.5 s after it reported, and kill it 2.5 s later: that is its end.
     stop: bool,
     stopped: bool,
+    /// Its program waits in `read` (a builtin: no other process): a line is typed 3.5 s after
+    /// it reported.
+    feed: bool,
+    fed: bool,
+    /// How many interactive shells are started in the pane's shell, one in the other, before
+    /// the line is typed.
+    nest: usize,
     start: Option<Instant>,
     end: Option<Instant>,
     /// (when, shown).
     samples: Vec<(Instant, bool)>,
+}
+
+/// How a case of the matrix is driven (see `OwnerCase`).
+#[derive(Clone, Copy, Default)]
+struct How {
+    stop: bool,
+    feed: bool,
+    nest: usize,
+}
+
+/// What a case is made of: the scripts written for it, the words that report, and the files
+/// that mark its start and its end.
+struct Parts {
+    /// The worker: reports, lives on (and reports once more half way), and ends.
+    w: String,
+    /// The reporter: reports and exits.
+    r: String,
+    /// The leader: reports and exits while a process of its group lives on.
+    o: String,
+    /// The reader, run by the matrix's shell: reports, then waits in `read` and ends.
+    d: String,
+    /// The reader's lines, for `-c` or to be typed.
+    read: String,
+    say: String,
+    s: String,
+    e: String,
 }
 
 /// How long the programs of the matrix live after they reported: several one-second checks.
@@ -8525,30 +8558,36 @@ async fn owner_matrix(shell_name: &str, shell: Vec<String>) {
     let has_disown = shell_name != "sh";
     let has_setsid = have("setsid");
     let perl = which("perl");
+    // What runs a script of this shell (zsh without the user's startup files).
+    let script_shell: Vec<String> = if shell_name == "zsh" { vec![shell[0].clone(), "-f".into()] } else { vec![shell[0].clone()] };
+    let nested = shell.join(" ");
     let shell_pane = || json!({"command": shell, "env": {"PS1": "$ ", "ENV": "", "HISTFILE": "/dev/null", "BASH_SILENCE_DEPRECATION_WARNING": "1"}, "cwd": dir.display().to_string(), "cols": 80, "rows": 24});
     let mut cases: Vec<OwnerCase> = Vec::new();
     for rep in Rep::ALL {
         let say = rep.snippet(&b);
-        let mut add = async |name: &str, life: Life, make: &dyn Fn(&str, &str, &str, &str) -> (Option<String>, Option<Vec<String>>), stop: bool| {
+        let mut add = async |name: &str, life: Life, make: &dyn Fn(&Parts) -> (Option<String>, Option<Vec<String>>), how: How| {
             let id = format!("{name}-{rep:?}").to_lowercase();
             let pre = dir.join(&id);
             let e = format!("{}.end", pre.display());
             let s = format!("{}.start", pre.display());
             // The worker reports, lives on (and reports once more half way), and ends.
-            let (w, r, o) = (format!("{}.w", pre.display()), format!("{}.r", pre.display()), format!("{}.o", pre.display()));
-            let rest = if stop { "30" } else { "2" };
+            let (w, r, o, d) = (format!("{}.w", pre.display()), format!("{}.r", pre.display()), format!("{}.o", pre.display()), format!("{}.d", pre.display()));
+            let rest = if how.stop { "30" } else { "2" };
             script_file(std::path::Path::new(&w), &format!("#!/bin/sh\n{say}\n: > '{s}'\nsleep 1.5\n{say}\nsleep {rest}\n: > '{e}'\n"));
             // The reporter reports and exits.
             script_file(std::path::Path::new(&r), &format!("#!/bin/sh\n{say}\n: > '{s}'\n"));
             // The leader reports and exits while a process of its group lives on.
             script_file(std::path::Path::new(&o), &format!("#!/bin/sh\n(sleep {OWNER_HOLD}; : > '{e}') &\n{say}\n: > '{s}'\n"));
-            let (line, command) = make(&w, &r, &o, &e);
+            // The reader reports and waits for a line, in the shell itself.
+            let read = format!("{say}\n: > '{s}'\nread x\n: > '{e}'\n");
+            script_file(std::path::Path::new(&d), &format!("#!{}\n{read}", script_shell.join(" ")));
+            let (line, command) = make(&Parts { w, r, o, d, read, say: say.clone(), s, e });
             let params = match command {
                 Some(command) => json!({"command": command, "cwd": dir.display().to_string(), "cols": 80, "rows": 24}),
                 None => shell_pane(),
             };
             let pane = new_pane(&c, params).await;
-            cases.push(OwnerCase { name: id, rep, life, pane, pre, line, stop, stopped: false, start: None, end: None, samples: Vec::new() });
+            cases.push(OwnerCase { name: id, rep, life, pane, pre, line, stop: how.stop, stopped: false, feed: how.feed, fed: false, nest: how.nest, start: None, end: None, samples: Vec::new() });
         };
         let typed = |l: String| (Some(l), None);
         // Typed at the prompt: a `clothod report` is its own job and exits; a printf is the
@@ -8558,41 +8597,71 @@ async fn owner_matrix(shell_name: &str, shell: Vec<String>) {
             Rep::Osc7501 => r"printf '\033]7501;state=working:app=build\033\\'".to_string(),
             Rep::Osc94 => r"printf '\033]9;4;1;40\007'".to_string(),
         };
-        add("prompt", Life::Brief, &|_, _, _, e| typed(format!("{at_prompt}; : > '{e}'")), false).await;
-        add("script", Life::WithProgram, &|w, _, _, _| typed(w.to_string()), false).await;
-        add("background", Life::WithProgram, &|w, _, _, _| typed(format!("{w} &")), false).await;
-        add("pipe-late", Life::WithProgram, &|w, _, _, _| typed(format!("true | {w}")), false).await;
-        add("pipe-first", Life::WithProgram, &|_, r, _, e| typed(format!("{r} | sleep {OWNER_HOLD}; : > '{e}'")), false).await;
-        add("cmdsub", Life::Brief, &|_, r, _, e| typed(format!("echo sub$({r}); : > '{e}'")), false).await;
-        add("cmdsub-long", Life::WithProgram, &|w, _, _, _| typed(format!("echo sub$({w})")), false).await;
-        add("subshell", Life::WithProgram, &|w, _, _, _| typed(format!("( {w} )")), false).await;
-        add("nohup", Life::WithProgram, &|w, _, _, _| typed(format!("nohup {w} > /dev/null &")), false).await;
+        let plain = How::default();
+        add("prompt", Life::Brief, &|p| typed(format!("{at_prompt}; : > '{}'", p.e)), plain).await;
+        add("script", Life::WithProgram, &|p| typed(p.w.clone()), plain).await;
+        add("background", Life::WithProgram, &|p| typed(format!("{} &", p.w)), plain).await;
+        add("pipe-late", Life::WithProgram, &|p| typed(format!("true | {}", p.w)), plain).await;
+        add("pipe-first", Life::WithProgram, &|p| typed(format!("{} | sleep {OWNER_HOLD}; : > '{}'", p.r, p.e)), plain).await;
+        add("cmdsub", Life::Brief, &|p| typed(format!("echo sub$({}); : > '{}'", p.r, p.e)), plain).await;
+        add("cmdsub-long", Life::WithProgram, &|p| typed(format!("echo sub$({})", p.w)), plain).await;
+        add("subshell", Life::WithProgram, &|p| typed(format!("( {} )", p.w)), plain).await;
+        add("nohup", Life::WithProgram, &|p| typed(format!("nohup {} > /dev/null &", p.w)), plain).await;
         if has_disown {
-            add("disown", Life::WithProgram, &|w, _, _, _| typed(format!("{w} & disown")), false).await;
+            add("disown", Life::WithProgram, &|p| typed(format!("{} & disown", p.w)), plain).await;
         }
         if has_setsid {
             // It left the pane's session: its report is refused, and what it prints has no
             // owner (gone at the second check after each report, whatever it does after).
             let life = if rep == Rep::Report { Life::Never } else { Life::Brief };
-            add("setsid", life, &|w, _, _, _| typed(format!("setsid {w} &")), false).await;
+            add("setsid", life, &|p| typed(format!("setsid {} &", p.w)), plain).await;
         }
-        add("leader-exits", Life::WithProgram, &|_, _, o, _| typed(o.to_string()), false).await;
-        add("stopped", Life::WithProgram, &|w, _, _, _| typed(w.to_string()), true).await;
+        add("leader-exits", Life::WithProgram, &|p| typed(p.o.clone()), plain).await;
+        add("stopped", Life::WithProgram, &|p| typed(p.w.clone()), How { stop: true, ..plain }).await;
+        // A subshell is a copy of the interactive shell, with its argv, and is a job all the
+        // same: in the foreground waiting in a builtin, and a function in the background.
+        let feed = How { feed: true, ..plain };
+        add("subshell-read", Life::WithProgram, &|p| typed(format!("( {}; : > '{}'; read x; : > '{}' )", p.say, p.s, p.e)), feed).await;
+        add("function-bg", Life::WithProgram, &|p| typed(format!("f() {{ {}; : > '{}'; sleep {OWNER_HOLD}; : > '{}'; }}; f &", p.say, p.s, p.e)), plain).await;
         // The pane's command is the program: a shell script, and a program that is no shell.
-        add("direct-script", Life::WithProgram, &|w, _, _, _| (None, Some(vec![w.to_string()])), false).await;
+        add("direct-script", Life::WithProgram, &|p| (None, Some(vec![p.w.clone()])), plain).await;
+        // A script, and a `-c`, that wait in a builtin: for seconds nothing but the pane's own
+        // process runs, and it is no shell at a prompt.
+        add("direct-read", Life::WithProgram, &|p| (None, Some(vec![p.d.clone()])), feed).await;
+        add("direct-c", Life::WithProgram, &|p| (None, Some(script_shell.iter().cloned().chain(["-c".to_string(), p.read.clone()]).collect())), feed).await;
         if let Some(perl) = &perl {
             let prog = dir.join(format!("direct-{rep:?}.pl"));
             script_file(&prog, &format!("{}\nopen(F, '>', $ARGV[0] . '.start'); close(F);\nsleep 3; select(undef, undef, undef, 0.5);\nopen(F, '>', $ARGV[0] . '.end'); close(F);\n", rep.perl(&b)));
             let pre = dir.join(format!("direct-program-{rep:?}").to_lowercase());
-            add("direct-program", Life::WithProgram, &|_, _, _, _| (None, Some(vec![perl.clone(), prog.display().to_string(), pre.display().to_string()])), false).await;
+            add("direct-program", Life::WithProgram, &|_| (None, Some(vec![perl.clone(), prog.display().to_string(), pre.display().to_string()])), plain).await;
         }
+        // An interactive shell started in the pane's shell is a shell at its prompt too, not
+        // a job: what is reported at its prompt ends as it does in the pane's own shell.
+        let in1 = How { nest: 1, ..plain };
+        add("nested-prompt", Life::Brief, &|p| typed(format!("{at_prompt}; : > '{}'", p.e)), in1).await;
+        add("nested-cmdsub", Life::Brief, &|p| typed(format!("echo sub$({}); : > '{}'", p.r, p.e)), in1).await;
+        add("nested-cmdsub-long", Life::WithProgram, &|p| typed(format!("echo sub$({})", p.w)), in1).await;
+        add("nested-script", Life::WithProgram, &|p| typed(p.w.clone()), in1).await;
+        add("nested-background", Life::WithProgram, &|p| typed(format!("{} &", p.w)), in1).await;
+        // And one started in that.
+        let in2 = How { nest: 2, ..plain };
+        add("nested2-prompt", Life::Brief, &|p| typed(format!("{at_prompt}; : > '{}'", p.e)), in2).await;
+        add("nested2-cmdsub", Life::Brief, &|p| typed(format!("echo sub$({}); : > '{}'", p.r, p.e)), in2).await;
+        add("nested2-script", Life::WithProgram, &|p| typed(p.w.clone()), in2).await;
+        add("nested2-background", Life::WithProgram, &|p| typed(format!("{} &", p.w)), in2).await;
     }
-    // Every shell is at its prompt before anything is typed.
-    for case in cases.iter().filter(|k| k.line.is_some()) {
-        let deadline = Instant::now() + T;
-        while !daemon_text(&c, case.pane).await.0.iter().any(|l| l.starts_with('$')) {
-            assert!(Instant::now() < deadline, "{shell_name}: no prompt in the pane of {}", case.name);
-            tokio::time::sleep(Duration::from_millis(30)).await;
+    // Every shell is at its prompt before anything is typed: the pane's own, then each shell
+    // started in it (one more prompt on the screen for each).
+    for depth in 0..=2 {
+        for case in cases.iter().filter(|k| k.line.is_some() && k.nest >= depth) {
+            let deadline = Instant::now() + T;
+            while daemon_text(&c, case.pane).await.0.iter().filter(|l| l.starts_with('$')).count() <= depth {
+                assert!(Instant::now() < deadline, "{shell_name}: no prompt {depth} deep in the pane of {}", case.name);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            if case.nest > depth {
+                c.input(case.pane, format!("{nested}\r").as_bytes());
+            }
         }
     }
     for case in &cases {
@@ -8611,6 +8680,12 @@ async fn owner_matrix(shell_name: &str, shell: Vec<String>) {
             }
             if k.end.is_none() && !k.stop && seen("end") {
                 k.end = Some(Instant::now());
+            }
+            if let (true, false, Some(start)) = (k.feed, k.fed, k.start) {
+                if start.elapsed() >= Duration::from_millis(3500) {
+                    c.input(k.pane, b"go\r");
+                    k.fed = true;
+                }
             }
             if let (true, Some(start)) = (k.stop, k.start) {
                 if !k.stopped && start.elapsed() >= Duration::from_millis(1500) {

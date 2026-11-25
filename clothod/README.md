@@ -153,6 +153,44 @@ pipeline or script has exited, in the background too (`deploy.sh &`), and never 
 "Notifications from any program" and "Reporting from your own scripts"; `../docs/security.md`
 for what pane output can and can't do with it).
 
+### Who it ends with
+
+The rule is in `src/owner.rs`, and in full in `../docs/protocol.md` ("Who it ends with"):
+
+- The owner of a running status or a progress is a **process group**: it lasts while any
+  process of that group runs or is stopped.
+- An **interactive shell** is never an owner and never a job, at any depth (the pane's shell,
+  a `bash` or `nix-shell` typed in it, a shell typed in that). That is a process whose
+  executable or `argv[0]` is a known shell, whose argv has no script operand and no `-c`, and
+  which has called exec (a subshell is a forked copy with the same argv: a job). The
+  foreground job is the terminal's foreground process group unless such a shell leads it.
+- `clothod report` is owned by the foreground job when the reporter is part of it, else by the
+  reporter's own group. Output (OSC) is owned by the foreground job.
+- With no owner (reported from a shell's own group, or printed with no foreground job): the
+  next foreground job takes it; in a pane whose first process is not an interactive shell (a
+  program, a script, `sh -c '…'`) it lasts with that program, until the pane closes, whatever
+  the program waits in; at an interactive shell's prompt it lasts while another process that
+  could have reported it runs, and is removed at the second one-second look that finds none.
+- A process that cannot be read (argv of another user's process on macOS, a process that has
+  exited) counts as a program: the status is kept rather than removed.
+
+Limits (cases the rule cannot tell apart):
+
+- A background job that prints while another job is in the foreground is taken for that job.
+- A status printed at a prompt lasts while any other process runs in the pane (an unrelated
+  background job).
+- A shell under a program that stays in front of it, on a terminal of its own (`ssh`, `tmux`,
+  `script`, `poetry shell`, a `sudo -s` that gives it one) or without job control in that
+  program's group: a status reported at that inner prompt lasts as long as that program runs.
+- At an interactive prompt, the shell's own builtins are not a job: after
+  `printf '…working…'; read x` the status is removed in 1 to 2 s. So is one from a shell that
+  reads its script from its input (`sh < build.sh`).
+- A shell with an option value the rule does not know, or with an unreadable argv (on macOS, a
+  shell running as another user: `su`, `sudo -s`), counts as a program: a status at its prompt
+  lasts while it is in the foreground.
+- In a pane that runs its program directly, a status a short helper reported lasts until the
+  pane closes, or the program reports again or clears it.
+
 ## Start at login
 
 `clothod service install|uninstall|status` (and the `service.*` requests the apps use for their

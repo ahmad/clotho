@@ -1214,47 +1214,92 @@ not to a process:
      stay until it is continued and ends, or is killed. The group's first process may exit
      before the rest (`true | worker`, a wrapper that starts a child and exits): that ends
      nothing while another process of the group runs.
-  2. **Which group**, decided when the report arrives:
-     - for `clothod report`: the pane's foreground process group when the reporter is part of
-       it (in that group, or started by its first process), else the reporter's own process
-       group (a script in the background, `deploy.sh &`, also under `nohup` or after
-       `disown`: its status ends with it, whatever runs in the foreground);
-     - for an OSC sequence, and for an `agent.report` without a `pid`: the pane's foreground
-       process group when it arrived. Output does not say who wrote it. With no job in the
-       foreground, a report that updates the pane's status (or its progress) keeps the owner
-       that already has; a new one has no owner.
-  3. **The pane's own process group is never an owner.** The pane's first process (its
-     shell) lives as long as the pane, so nothing would ever end. A reporter that ran in
-     that group (a command substitution, `echo $(clothod report …)`; a prompt hook; a shell
-     script that is the pane's command) leaves the status without an owner.
+  2. **An interactive shell is never an owner, and never a job.** It sits at its prompt for as
+     long as the user stays in it, so nothing it owned would ever end. A process is an
+     interactive shell when all three hold:
+     - its executable, or its `argv[0]`, is a known shell (`sh`, `bash`, `zsh`, `fish`,
+       `dash`, `ksh`, `mksh`, `tcsh`, `csh`, `nu`, `elvish`, `xonsh`; a leading `-` is a login
+       shell);
+     - its argv has no script operand and no `-c` (or `--command`). Login and interactive
+       flags and other options are fine (`bash --norc`, `zsh -il`, `bash --rcfile FILE`);
+     - it was started as that: it has called exec. A subshell (`( … )`, a function or a `{ … }`
+       in a pipeline or in the background) is a forked copy of its shell with the same argv:
+       it is a job, not an interactive shell.
+
+     This holds at any depth: the pane's own shell, a `bash` typed in it (`nix-shell`, a
+     virtualenv shell), a shell typed in that. The **foreground job** below is the terminal's
+     foreground process group, unless an interactive shell leads it: then that shell is at
+     its prompt and there is no foreground job. A shell running a script or `-c` is a program
+     like any other.
+  3. **Which group**, decided when the report arrives:
+     - for `clothod report`: the foreground job when the reporter is part of it (in that
+       group, or started by its first process), else the reporter's own process group (a
+       script in the background, `deploy.sh &`, also under `nohup` or after `disown`, also
+       started from a shell typed in the pane's shell: its status ends with it, whatever runs
+       in the foreground);
+     - for an OSC sequence, and for an `agent.report` without a `pid`: the foreground job when
+       it arrived. Output does not say who wrote it. With no foreground job, a report that
+       updates the pane's status (or its progress) keeps the owner that already has; a new
+       one has no owner;
+     - a reporter whose process group is the pane's own (the group of the pane's first
+       process), or is led by an interactive shell, leaves the status without an owner: a
+       command substitution (`echo $(clothod report …)`), a prompt hook, a shell script that
+       is the pane's command.
   4. **Without an owner**, the daemon looks once a second:
-     - a job is in the foreground: it becomes the owner (a shell that reports `working`
-       before it starts a command has that command as its program);
-     - else, in a pane whose own process is not a shell (the pane runs the program
-       directly), that program reported: the status lasts until the pane closes;
-     - else the shell is at its prompt, and the status lasts only while something that could
-       have reported it still runs: when the reporter ran in the shell's own group, another
-       process of that group (the rest of the command substitution, or of the script that is
-       the pane's command); when nothing says who reported (output with no job in the
-       foreground), any other process of the pane's session, so a background job that prints
+     - there is a foreground job: it becomes the owner (a shell that reports `working` before
+       it starts a command has that command as its program);
+     - else, when the pane's first process is in the foreground and is not an interactive
+       shell (a program, or a shell running a script or `-c`), the pane runs its program
+       directly and that program reported: the status lasts with it, until the pane closes.
+       What the program does meanwhile is not asked: a script may wait in `read` for hours;
+     - else an interactive shell is at its prompt, and the status lasts only while something
+       that could have reported it still runs: when the reporter ran in a shell's own group,
+       another process in the group of the shell now at its prompt (the rest of the command
+       substitution); when nothing says who reported (output with no foreground job), any
+       process of the pane's session other than that shell and the processes waiting for it
+       (its parents, up to the pane's first process), so a background job that prints
        `working` or a progress keeps it while it runs. At the second look in a row that
        finds none it is removed: 1 to 2 s after the report, or after the last such process
        exited.
-  - What follows from it: a status or progress is never removed while its program runs, and
-    is gone at most about 2 s after the last process that owned it exited (the daemon looks
-    once a second; twice for one without an owner).
-  - What the rule cannot tell, because output carries no sender: a background job that
-    prints while another job is in the foreground is taken for that job (its status ends
-    with the foreground job, and comes back with its next report); and a status printed with
-    no job in the foreground, in a shell that has other processes in its session (an
-    unrelated background job, a prompt helper), lasts until they exit or the next foreground
-    job takes it and ends.
+  - When a process cannot be read, it is taken for a program, not for an interactive shell:
+    its argv on macOS when it runs as another user, and anything once it has exited. That
+    fails toward keeping: such a status may last as long as that process stays in the
+    foreground, and is not removed while it runs.
+  - What follows from it: a status or progress is not removed while its program runs, and is
+    gone at most about 2 s after the last process that owned it exited (the daemon looks
+    once a second; twice for one without an owner). The limits below are where "its program"
+    cannot be told.
+  - **Limits.** Cases the rule cannot tell apart, and what happens in each:
+    - Output carries no sender. A background job that prints while another job is in the
+      foreground is taken for that job: its status ends with the foreground job, and comes
+      back with its next report.
+    - A status printed with no foreground job, in a shell that has other processes in its
+      session (an unrelated background job, a prompt helper), lasts until they exit, or
+      until the next foreground job takes it and ends.
+    - A shell under a program that stays in front of it is not seen as a shell at its
+      prompt, because that program is the foreground job: a shell on a terminal of its own
+      (`ssh`, `tmux`, `script`, `poetry shell`, a `sudo -s` that gives it one), or a shell
+      without job control that stays in that program's process group. A status reported at
+      that inner prompt lasts as long as that program runs.
+    - At an interactive prompt, what the shell does itself is not a job: after
+      `printf '…working…'; read x`, or in a function that only uses builtins, the status is
+      removed 1 to 2 s after the report although the line still runs. (Run it as a script or
+      in a subshell, or use `clothod report` from a job.) The same holds for a shell that
+      reads its script from its input (`sh < build.sh`): its argv is an interactive shell's.
+    - A shell with an option whose value this rule does not know (the value reads as a script
+      operand), or whose argv cannot be read (on macOS, a shell running as another user:
+      `su`, `sudo -s`), counts as a program: a status at its prompt lasts while it is in the
+      foreground, or until the pane closes when it is the pane's first process.
+    - In a pane that runs its program directly, a status with no owner lasts until the pane
+      closes, the program reports again or clears it: also when a short helper reported it
+      and the program has long moved on to something else.
   - A process that left the pane's session (`setsid`) is not the pane's: its `clothod report`
     is refused (`wrong_pane`), and what it prints has no owner (step 4).
 - They go away through **`agent.ack`** on a `waiting`, `done` or `error` one:
-  - When the program that reported it is gone, or not known (no owner, in a pane whose own
-    process is a shell), the agent is removed: the pane's `agent` is `null` after it, and an
-    `agent` event with `agent: null` says so. With the user's answer nothing is left to show.
+  - When the program that reported it is gone, or not known (no owner, unless the pane runs
+    its program directly: step 4), the agent is removed: the pane's `agent` is `null` after
+    it, and an `agent` event with `agent: null` says so. With the user's answer nothing is
+    left to show.
   - When that program still runs (its owner is alive, or it is the pane's own program in a
     pane that runs it directly), the agent **stays** as it is with `attention` false (and
     `settling` false): the ack's `pane` event carries it, as for any other agent, and no
