@@ -115,6 +115,20 @@ extension AppDelegate {
     static let besideOtherMachine = "Open Beside works within one machine"
     static let besideSameTab = "Already in this Tab"
     static let besideUnsupported = "Open Beside needs a newer clothod on this machine"
+    static let besideNoPane = "No pane to open beside"
+    static let besideNoTab = "This agent\u{2019}s pane is in no Tab"
+
+    /// Why Open Beside can't act, by what is missing: the machine in common, a pane focused under the
+    /// Overview, a Tab the agent's pane is in, another Tab than the focused one. Only with all of those
+    /// is it the daemon's doing (its hello has no `pane.move`).
+    static func besideRefusal(sameMachine: Bool, hasPane: Bool, tab: TabID?, focusedTab: TabID?, canMovePanes: Bool) -> String {
+        if !sameMachine { return besideOtherMachine }
+        if !hasPane { return besideNoPane }
+        guard let tab else { return besideNoTab }
+        if tab == focusedTab { return besideSameTab }
+        // With a daemon that moves panes nothing above is left to refuse it: said as the plainest of them.
+        return canMovePanes ? besideNoPane : besideUnsupported
+    }
 
     /// ⌘↩: the agent's whole Tab moves beside the pane that is focused under the Overview, by the command
     /// bar's rule (`canOpenBeside`): the same machine, a daemon with `pane.move`, another Tab. Otherwise
@@ -123,14 +137,8 @@ extension AppDelegate {
         let origin = (machine: focusedMachine, pane: store.focusedPane?.id, tab: store.focusedTab?.id)
         let context = commandBarContext(.agent(machine: key.machine, pane: key.pane), origin: origin)
         guard context.canOpenBeside, let tab = context.tab, let pane = origin.pane, let store = connections[key.machine]?.store else {
-            let why: String
-            if key.machine != origin.machine {
-                why = Self.besideOtherMachine
-            } else if context.tab != nil, context.tab == origin.tab {
-                why = Self.besideSameTab
-            } else {
-                why = Self.besideUnsupported
-            }
+            let why = Self.besideRefusal(sameMachine: key.machine == origin.machine, hasPane: origin.pane != nil, tab: context.tab, focusedTab: origin.tab,
+                                         canMovePanes: connections[key.machine]?.store.hello?.features.contains(.paneMove) == true)
             log("overview: no open beside for \(key.machine)/\(key.pane): \(why)")
             OverviewView.beep()
             overview.showNote(why)

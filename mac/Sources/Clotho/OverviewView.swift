@@ -263,7 +263,7 @@ final class OverviewCardView: NSView {
         let messageY = s(27)
         var messageHeight: CGFloat = 0
         if !message.isHidden, let cell = message.cell {
-            let two = ceil(2 * NSLayoutManager().defaultLineHeight(for: message.font ?? .systemFont(ofSize: s(12))))
+            let two = Self.twoLineHeight(of: message, width: inner)
             messageHeight = min(ceil(cell.cellSize(forBounds: CGRect(x: 0, y: 0, width: inner, height: 10000)).height), two)
             message.preferredMaxLayoutWidth = inner
             message.frame = CGRect(x: pad, y: messageY, width: inner, height: messageHeight)
@@ -286,6 +286,15 @@ final class OverviewCardView: NSView {
         for (index, row) in peekRows.enumerated() {
             row.frame = CGRect(x: pad, y: s(4) + CGFloat(index) * s(14), width: inner, height: s(14))
         }
+    }
+
+    /// The height a wrapping label's own cell needs for two lines at this width, in its font. Not twice a
+    /// line's height: the cell rounds each line up, so at some zooms twice a line's height is short of
+    /// two lines, and a label that short shows only its first.
+    static func twoLineHeight(of label: NSTextField, width: CGFloat) -> CGFloat {
+        guard let cell = label.cell?.copy() as? NSCell else { return 0 }
+        cell.stringValue = "A\nA"
+        return ceil(cell.cellSize(forBounds: CGRect(x: 0, y: 0, width: width, height: 10000)).height)
     }
 
     /// The room a one-line label's words take, with the label's own margins.
@@ -330,7 +339,8 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
 
     let titleBar = NSView()
     let titleLabel = NSTextField(labelWithString: "")
-    /// A short line after the title when a key couldn't act ("Already in this Tab").
+    /// A short line when a key couldn't act ("Already in this Tab"): after the title, or on a row of its
+    /// own under the title row when it doesn't fit there whole.
     let noteLabel = NSTextField(labelWithString: "")
     let filterField = NSSearchField()
     let backButton = NSButton()
@@ -629,10 +639,19 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
         let titleWidth = min(OverviewCardView.width(of: titleLabel), textRoom)
         titleLabel.frame = CGRect(x: lead, y: ((height - titleSize.height) / 2).rounded(), width: titleWidth, height: titleSize.height)
         let noteHeight = noteLabel.intrinsicContentSize.height
-        noteLabel.frame = CGRect(x: titleLabel.frame.maxX + s(14), y: ((height - noteHeight) / 2).rounded(),
-                                 width: max(0, lead + textRoom - titleLabel.frame.maxX - s(14)), height: noteHeight)
+        let noteRoom = max(0, lead + textRoom - titleLabel.frame.maxX - s(14))
+        var top = height + 1
+        if noteLabel.isHidden || OverviewCardView.width(of: noteLabel) <= noteRoom {
+            noteLabel.frame = CGRect(x: titleLabel.frame.maxX + s(14), y: ((height - noteHeight) / 2).rounded(), width: noteRoom, height: noteHeight)
+        } else {
+            // No room for the whole line after the title: it has the row under the title row, and the
+            // cards start below it while it shows.
+            let inset = grid.sideInset
+            noteLabel.frame = CGRect(x: inset, y: top + s(6), width: max(0, bounds.width - 2 * inset), height: noteHeight)
+            top = noteLabel.frame.maxY + s(2)
+        }
 
-        let body = CGRect(x: 0, y: height + 1, width: bounds.width, height: max(0, bounds.height - height - 1))
+        let body = CGRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - top))
         if scrollView.frame != body { scrollView.frame = body }
         place()
 
@@ -697,6 +716,8 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
         noteTimer?.invalidate()
         noteTimer = nil
         noteLabel.stringValue = text ?? ""
+        // The whole line, should a narrow window still cut it.
+        noteLabel.toolTip = text
         noteLabel.isHidden = text == nil
         needsLayout = true
         guard let text else { return }

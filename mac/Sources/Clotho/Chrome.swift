@@ -495,13 +495,16 @@ final class TabBarView: NSView {
         withAppearance { layer?.backgroundColor = Theme.sidebar.cgColor }
     }
 
-    /// Re-applies the app zoom to what's built once; the tabs themselves are rebuilt by update.
+    /// Re-applies the app zoom to what's built once, and builds the tabs again: their fonts, insets and
+    /// agent marks are made at the zoom of the moment, and `update` leaves tabs that didn't change alone.
     func applyScale() {
         for (constraint, points) in scaled { constraint.constant = s(points) }
         stack.spacing = s(4)
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Tab")?
             .withSymbolConfiguration(.init(pointSize: s(12), weight: .medium))
         applyBreadcrumb()
+        lastShape = nil
+        latest?()
     }
 
     override init(frame: NSRect) {

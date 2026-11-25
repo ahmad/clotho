@@ -164,7 +164,12 @@ final class OverviewRenderTests: XCTestCase {
                 OverviewView.beep = beep
                 XCTAssertEqual(overview.note, "Open Beside works within one machine")
                 try await settle()
-                XCTAssertLessThanOrEqual(overview.noteLabel.frame.maxX, overview.filterField.frame.minX, "the line ends before the filter")
+                XCTAssertGreaterThanOrEqual(overview.noteLabel.frame.width, OverviewCardView.width(of: overview.noteLabel), "the whole line shows, \(size)")
+                if overview.noteLabel.frame.minY < OverviewView.titleHeight {
+                    XCTAssertLessThanOrEqual(overview.noteLabel.frame.maxX, overview.filterField.frame.minX, "the line ends before the filter")
+                } else {
+                    XCTAssertGreaterThanOrEqual(overview.scrollView.frame.minY, overview.noteLabel.frame.maxY, "the cards start under the line")
+                }
                 saveSnapshot(of: app.container, to: "\(name)-beside-refused.png")
                 overview.showNote(nil)
 
@@ -177,6 +182,41 @@ final class OverviewRenderTests: XCTestCase {
                 app.closeOverview()
             }
         }
+
+        // View ▸ Zoom, every step: the card whose message takes two lines ("notes › plan") shows both.
+        let savedScale = UIScale.factor, savedScaleDefault = UserDefaults.standard.object(forKey: UIScale.defaultsKey)
+        defer {
+            app.setUIScale(savedScale)
+            UserDefaults.standard.set(savedScaleDefault, forKey: UIScale.defaultsKey)
+        }
+        app.setAppearance(.light)
+        for (size, width, height) in [("narrow", 760, 520), ("wide", 1280, 800)] as [(String, CGFloat, CGFloat)] {
+            app.window.setContentSize(NSSize(width: width, height: height))
+            for percent in stride(from: 80, through: 160, by: 10) {
+                app.setUIScale(CGFloat(percent) / 100)
+                try await settle()
+                app.appearanceChanged()
+                app.showOverview()
+                try await ChangesFixture.wait("the peeks, \(size) at \(percent) %") {
+                    card(notes.pane)?.peekRows.last?.stringValue == "  switch. Which should I build?"
+                }
+                try await settle()
+                let view = try XCTUnwrap(card(notes.pane))
+                let message = view.message
+                let oneLine = NSTextField(labelWithString: "A")
+                oneLine.font = message.font
+                XCTAssertGreaterThan(message.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: message.frame.width, height: 10000)).height ?? 0,
+                                     oneLine.cell?.cellSize.height ?? .infinity, "the message takes more than a line, \(size) at \(percent) %")
+                XCTAssertGreaterThanOrEqual(message.frame.height, OverviewCardView.twoLineHeight(of: message, width: message.frame.width),
+                                            "room for two lines, \(size) at \(percent) %")
+                XCTAssertLessThanOrEqual(message.frame.maxY, view.sub.frame.minY)
+                XCTAssertLessThanOrEqual(view.sub.frame.maxY, view.peek.frame.minY)
+                saveSnapshot(of: app.container, to: "\(folder)/overview-scale-\(size)-\(percent).png")
+                app.closeOverview()
+            }
+        }
+        app.setUIScale(savedScale)
+        try await settle()
 
         // A machine whose clothod sends no peek (older than 0.1.32): its cards have no peek block.
         let old = FakeBackend()

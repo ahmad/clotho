@@ -367,6 +367,100 @@ final class OverviewTests: XCTestCase {
         }
     }
 
+    /// Each reason Open Beside can't act has its own line; the one about clothod is only for a daemon
+    /// that can't move panes.
+    func testOpenBesideSaysWhyItCant() {
+        func why(sameMachine: Bool = true, hasPane: Bool = true, tab: TabID? = 2, focusedTab: TabID? = 1, canMovePanes: Bool = true) -> String {
+            AppDelegate.besideRefusal(sameMachine: sameMachine, hasPane: hasPane, tab: tab, focusedTab: focusedTab, canMovePanes: canMovePanes)
+        }
+        XCTAssertEqual(why(sameMachine: false, canMovePanes: false), "Open Beside works within one machine")
+        XCTAssertEqual(why(hasPane: false, focusedTab: nil), "No pane to open beside", "no pane focused under the Overview")
+        XCTAssertEqual(why(hasPane: false, focusedTab: nil, canMovePanes: false), "No pane to open beside", "whatever the daemon can do")
+        XCTAssertEqual(why(tab: nil), "This agent\u{2019}s pane is in no Tab")
+        XCTAssertEqual(why(tab: nil, canMovePanes: false), "This agent\u{2019}s pane is in no Tab", "whatever the daemon can do")
+        XCTAssertEqual(why(tab: 1), "Already in this Tab")
+        XCTAssertEqual(why(canMovePanes: false), "Open Beside needs a newer clothod on this machine", "only a daemon without pane.move")
+        for sameMachine in [true, false] {
+            for hasPane in [true, false] {
+                for tab in [nil, 1, 2] as [TabID?] {
+                    XCTAssertFalse(why(sameMachine: sameMachine, hasPane: hasPane, tab: tab).contains("clothod"), "the daemon can move panes")
+                }
+            }
+        }
+    }
+
+    /// The line saying why a key did nothing shows whole: after the title where it fits, on the row under
+    /// the title row in a narrow window. Its tooltip is the whole line.
+    func testTheRefusalLineShowsWholeInANarrowWindow() async throws {
+        let world = try await launch()
+        let app = world.app, overview = world.overview
+        defer { ChangesFixture.quit(app) }
+        let line = AppDelegate.besideOtherMachine
+        let note = overview.noteLabel
+        func lay() { app.window.contentView?.layoutSubtreeIfNeeded() }
+
+        app.window.setContentSize(NSSize(width: 760, height: 520))
+        app.showOverview()
+        lay()
+        let cardsTop = overview.scrollView.frame.minY
+        XCTAssertEqual(cardsTop, OverviewView.titleHeight + 1)
+        overview.showNote(line)
+        lay()
+        XCTAssertEqual(overview.note, line)
+        XCTAssertEqual(note.toolTip, line)
+        XCTAssertGreaterThanOrEqual(note.frame.width, OverviewCardView.width(of: note), "the whole line, 760 wide")
+        XCTAssertGreaterThanOrEqual(note.frame.width, note.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10000, height: 100)).width ?? .infinity)
+        XCTAssertGreaterThan(note.frame.minY, OverviewView.titleHeight, "on the row under the title row")
+        XCTAssertGreaterThanOrEqual(overview.scrollView.frame.minY, note.frame.maxY, "the cards start below it")
+        XCTAssertTrue(overview.bounds.contains(note.frame))
+        // The line gone: the cards are back where they were.
+        overview.showNote(nil)
+        lay()
+        XCTAssertNil(note.toolTip)
+        XCTAssertEqual(overview.scrollView.frame.minY, cardsTop)
+
+        // Wide enough: after the title, before the filter, and the cards stay where they are.
+        app.window.setContentSize(NSSize(width: 1280, height: 800))
+        overview.showNote(line)
+        lay()
+        XCTAssertGreaterThanOrEqual(note.frame.width, OverviewCardView.width(of: note), "the whole line, 1280 wide")
+        XCTAssertLessThan(note.frame.maxY, OverviewView.titleHeight, "in the title row")
+        XCTAssertGreaterThan(note.frame.minX, overview.titleLabel.frame.maxX)
+        XCTAssertLessThanOrEqual(note.frame.maxX, overview.filterField.frame.minX)
+        XCTAssertEqual(overview.scrollView.frame.minY, cardsTop)
+        overview.showNote(nil)
+    }
+
+    /// View ▸ Zoom: the tab bar's agent marks and titles are drawn at the zoom of the moment, going up and
+    /// coming back.
+    func testTabBarMarksFollowTheZoom() async throws {
+        let world = try await launch()
+        let app = world.app
+        let savedFactor = UIScale.factor, savedDefault = UserDefaults.standard.object(forKey: UIScale.defaultsKey)
+        defer {
+            app.setUIScale(savedFactor)
+            UserDefaults.standard.set(savedDefault, forKey: UIScale.defaultsKey)
+            ChangesFixture.quit(app)
+        }
+        func items() -> [ChromeItem] { app.tabBar.subviews.flatMap(\.subviews).compactMap { $0 as? ChromeItem } }
+        func marks() -> [AgentMarkView] { items().flatMap { $0.subviews.compactMap { $0 as? AgentMarkView } } }
+        func followsTheZoom() -> Bool {
+            app.window.contentView?.layoutSubtreeIfNeeded()
+            return marks().count == 3
+                // A mark's frame is on whole points: within one of its side.
+                && marks().allSatisfy { abs($0.frame.width - AgentMarkView.side) < 1 && abs($0.frame.height - AgentMarkView.side) < 1 }
+                && items().allSatisfy { abs(($0.label.font?.pointSize ?? 0) - s(13)) < 0.01 }
+        }
+        app.setUIScale(1)
+        try await ChangesFixture.wait("the three Tabs' marks", seconds: 3) { followsTheZoom() }
+        XCTAssertEqual(marks().map(\.mark), [.needsYou, .working, .done])
+        for factor in [1.6, 1, 0.8, 1] as [CGFloat] {
+            app.setUIScale(factor)
+            XCTAssertEqual(AgentMarkView.side, 8 * factor, accuracy: 0.001)
+            try await ChangesFixture.wait("the marks at \(Int(factor * 100)) %", seconds: 3) { followsTheZoom() }
+        }
+    }
+
     // MARK: Peeks
 
     func testPeeksFollowTheCardsOnScreen() async throws {
