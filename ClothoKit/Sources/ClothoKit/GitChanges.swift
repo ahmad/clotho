@@ -24,6 +24,10 @@ public struct GitChanges: Codable, Equatable, Sendable {
     /// "no_base" (on the base branch, no base, or an unborn HEAD), "no_merge_base", or what failed
     /// ("timeout", "too_large", "partial_clone", "error"). See `GitText.branchReason`.
     public var branchReason: String?
+    /// The change token of exactly this list (feature `git.changes.token`, clothod 0.1.33): the value the
+    /// panes' `changes.token` has while nothing changed since. Opaque: compare for equality only. Nil
+    /// on a daemon without the feature.
+    public var token: String?
 
     /// One group's files, sorted by path and cut at the request's limit. `total`, `added` and `removed`
     /// are for the whole group.
@@ -108,21 +112,22 @@ public struct GitChanges: Codable, Equatable, Sendable {
     }
 
     public init(root: String, branch: String? = nil, head: String? = nil, uncommitted: Group, branchChanges: BranchGroup? = nil,
-                branchReason: String? = nil) {
+                branchReason: String? = nil, token: String? = nil) {
         self.root = root
         self.branch = branch
         self.head = head
         self.uncommitted = uncommitted
         self.branchChanges = branchChanges
         self.branchReason = branchReason
+        self.token = token
     }
 
     enum CodingKeys: String, CodingKey {
-        case root, branch, head, uncommitted, branchChanges = "branch_changes", branchReason = "branch_reason"
+        case root, branch, head, uncommitted, branchChanges = "branch_changes", branchReason = "branch_reason", token
     }
 
     /// The same counts as a pane's `git.changes` summary: the reply becomes the panes' summary on the
-    /// daemon, so a list and the count beside it agree.
+    /// daemon, so a list and the count beside it agree. It carries the reply's `token` too.
     public var summary: PaneGit.Changes {
         var branch: PaneGit.Changes.BranchCount?
         if let group = branchChanges {
@@ -132,7 +137,7 @@ public struct GitChanges: Codable, Equatable, Sendable {
         let reason: String? = branch == nil && branchReason != "no_base" && branchReason != "no_merge_base" ? branchReason : nil
         return PaneGit.Changes(
             uncommitted: PaneGit.Changes.Count(files: uncommitted.total, added: uncommitted.added, removed: uncommitted.removed),
-            branch: branch, reason: reason)
+            branch: branch, reason: reason, token: token)
     }
 }
 

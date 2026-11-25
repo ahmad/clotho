@@ -118,6 +118,17 @@ public struct Hello: Codable, Equatable, Sendable {
         /// `peek.subscribe` / `peek.unsubscribe` and `peek` events: the last lines of panes' screens as
         /// plain text, without subscribing to the panes (0.1.32).
         case peek
+        /// More agent kinds: `opencode`, `gemini`, `copilot`, `aider`, `amp`, `cursor`, and any name a
+        /// reporter gave (`clothod report --kind deploy`); show an unknown one by its name (0.1.33).
+        case agentKinds = "agent.kinds"
+        /// Agents with `source: "osc"`: a program in the pane sent a terminal notification or status
+        /// sequence (OSC 9, 99, 777, 7501). Their text is plain, and an ack may remove them (0.1.33).
+        case agentOsc = "agent.osc"
+        /// A pane's `progress`, from OSC 9;4 and OSC 7501 (0.1.33).
+        case paneProgress = "pane.progress"
+        /// `changes.token` in a pane's `git` and `token` in the `git.changes` reply: it moves whenever
+        /// the list or a diff would differ, so a client reloads on a difference and doesn't poll (0.1.33).
+        case gitChangesToken = "git.changes.token"
     }
 
     /// The daemon's executable. After an upgrade it can differ from the holder's.

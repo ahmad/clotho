@@ -32,9 +32,13 @@ public struct AgentNotice: Equatable, Sendable {
     ///
     /// With a `tab` (the tab's display name) the title is the place's, when `placeTitle` has one: "Needs
     /// you · Platform › cargo test". Without a tab the title is as above.
+    ///
+    /// `plainText` is for an agent with `source: "osc"` (clothod 0.1.33): its text is any program's
+    /// output, plain by contract. Then `result`, `summary` and `fallback` go through `plainLine`, never
+    /// through Markdown, the result is preferred to the summary, and nothing reads as a permission ask.
     public init(kind: String, state: String, machine: String, workspace: String?, project: String?, duration: TimeInterval?,
                 result: String?, tool: String?, toolInput: String?, fallback: String? = nil, summary: String? = nil,
-                needsUser: Bool? = nil, tab: String? = nil) {
+                needsUser: Bool? = nil, tab: String? = nil, plainText: Bool = false) {
         let rawState = state
         let state = AgentInfo.State(rawValue: state) ?? .unknown
         let what = "\(AgentInfo.shortName(ofKind: kind)) \(state.alertVerb(needsUser: needsUser))"
@@ -48,6 +52,12 @@ public struct AgentNotice: Equatable, Sendable {
         }
         if let tab, let placed = Self.placeTitle(state: rawState, needsUser: needsUser, workspace: workspace, tab: tab) {
             title = placed
+        }
+        if plainText {
+            let text = result.map(Self.plainLine)?.nonEmpty ?? summary.map(Self.plainLine)?.nonEmpty
+                ?? fallback.map(Self.plainLine)?.nonEmpty ?? ""
+            body = Self.clip(text, to: Self.bodyLimit)
+            return
         }
         let summary = summary.map(PlainText.oneLine)?.nonEmpty
         if let ask = Self.permissionAsk(state: state, message: result, tool: tool, toolInput: toolInput) {
@@ -68,7 +78,7 @@ public struct AgentNotice: Equatable, Sendable {
                   project: cwd.flatMap(Self.project), duration: info.turnDuration, result: info.message,
                   tool: info.pendingRequests.first?.tool ?? info.tool,
                   toolInput: info.pendingRequests.first.map(\.summary) ?? info.toolInput, fallback: info.prompt,
-                  summary: info.summary, needsUser: info.needsUser, tab: tab)
+                  summary: info.summary, needsUser: info.needsUser, tab: tab, plainText: info.isOscSourced)
     }
 
     /// A title that leads with what the notification asks and says where: "Needs you · Platform › cargo
@@ -129,6 +139,24 @@ public struct AgentNotice: Equatable, Sendable {
         }
     }
 
+    /// Text that is plain by contract (an agent with `source: "osc"`), on one line: runs of whitespace
+    /// become one space, control characters are dropped, and the ends are trimmed. Nothing else changes:
+    /// no Markdown is read ("**bold**" stays as typed) and nothing becomes a link.
+    public static func plainLine(_ text: String) -> String {
+        var line = String.UnicodeScalarView()
+        var gap = false
+        for scalar in text.unicodeScalars {
+            if scalar.properties.isWhitespace {
+                gap = true
+            } else if scalar.properties.generalCategory != .control {
+                if gap, !line.isEmpty { line.append(" ") }
+                gap = false
+                line.append(scalar)
+            }
+        }
+        return String(line)
+    }
+
     /// The text on one paragraph (runs of whitespace become one space), cut at a word to `limit` characters.
     public static func clip(_ text: String, to limit: Int) -> String {
         let flat = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
@@ -140,21 +168,36 @@ public struct AgentNotice: Equatable, Sendable {
 }
 
 extension AgentInfo {
-    /// "Claude", "Codex": the agent's short name, for notification titles.
+    /// "Claude", "Codex": the agent's short name, for notification titles (`AgentKind`).
     public var shortKindName: String { Self.shortName(ofKind: kind) }
 
-    public static func shortName(ofKind kind: String) -> String {
-        switch kind.lowercased() {
-        case "claude": return "Claude"
-        case "codex": return "Codex"
-        case "": return "Agent"
-        default: return kind.prefix(1).uppercased() + kind.dropFirst()
-        }
-    }
+    /// The kind's short name from the `AgentKind` table. "other" and "" read "Agent"; a kind the table
+    /// doesn't know reads as its own text, made safe and not capitalised.
+    public static func shortName(ofKind kind: String) -> String { AgentKind.of(kind).shortName }
+
+    /// "Claude Code", "GitHub Copilot CLI": the kind's full name.
+    public var kindName: String { AgentKind.of(kind).name }
+
+    /// The kind's SF Symbol; the generic one for a kind the table doesn't know.
+    public var kindSymbolName: String { AgentKind.of(kind).symbolName }
+
+    /// A program in the pane sent a terminal notification or status sequence (`source: "osc"`, clothod
+    /// 0.1.33, feature `agent.osc`). Its text is that program's output: plain, never Markdown.
+    public var isOscSourced: Bool { source == "osc" }
+
+    /// Inferred from the pane's processes and output (`source: "detected"`, or no source at all).
+    public var isDetected: Bool { source == nil || source == "detected" }
+
+    /// Whether a reply typed in an app can go to it: a coding agent that reports through its hooks. A
+    /// script's report or a program's notification has nobody to answer.
+    public var acceptsReplies: Bool { isHookSourced && AgentKind.of(kind).isCodingAgent }
 
     /// What the agent came to (see `AgentNotice.result`): "Allow Bash: npm test?" for a permission wait,
-    /// else its message.
-    public var result: String? { AgentNotice.result(state: state, message: message, tool: tool, toolInput: toolInput) }
+    /// else its message. An osc agent's message stays plain text (`AgentNotice.plainLine`).
+    public var result: String? {
+        if isOscSourced { return message.map(AgentNotice.plainLine).flatMap { $0.isEmpty ? nil : $0 } }
+        return AgentNotice.result(state: state, message: message, tool: tool, toolInput: toolInput)
+    }
 
     /// Whether a notification about this agent plays its sound: not for a plain Done (done, with
     /// `needsUser` false). Anything that needs the user keeps it, and so does everything from an older
@@ -163,8 +206,15 @@ extension AgentInfo {
 
     /// What the agent is at, on one line, for rows and subtitles: a permission ask ("Allow Bash: npm
     /// test?") exactly, else the daemon's summary, else the message as plain text. Nil when there's none.
+    ///
+    /// An osc agent's is its message, else its summary, through `AgentNotice.plainLine` only. The
+    /// message goes first: clothod 0.1.33 strips Markdown from an osc summary, which the text isn't.
     public var headline: String? {
-        AgentNotice.permissionAsk(state: state, message: message, tool: tool, toolInput: toolInput)
+        if isOscSourced {
+            return message.map(AgentNotice.plainLine).flatMap { $0.isEmpty ? nil : $0 }
+                ?? summary.map(AgentNotice.plainLine).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        return AgentNotice.permissionAsk(state: state, message: message, tool: tool, toolInput: toolInput)
             ?? summary.map(PlainText.oneLine).flatMap { $0.isEmpty ? nil : $0 }
             ?? message.map(PlainText.oneLine).flatMap { $0.isEmpty ? nil : $0 }
     }

@@ -222,6 +222,114 @@ final class FakeBackendTests: XCTestCase {
         XCTAssertNotEqual(now, true, "working again clears it")
     }
 
+    /// `agent.ack` in clothod 0.1.33: a coding agent stays (above, and the default here); a pane-bound
+    /// agent whose program still runs stays with only a `pane` event; one whose program ended is removed.
+    func testAckOutcomes() async throws {
+        let backend = FakeBackend()
+        let collector = Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh"]))
+        let pane = created.pane
+        // The pane's agent in each `agent` event so far, and the pane as its latest `pane` event has it.
+        let agentEvents: () -> [AgentInfo?] = {
+            collector.all.compactMap { event -> AgentInfo?? in
+                if case let .agent(p, info) = event, p == pane { return .some(info) }
+                return nil
+            }
+        }
+        let latestPane: () -> Pane? = {
+            for event in collector.all.reversed() {
+                if case let .pane(found, _) = event, found.id == pane { return found }
+            }
+            return nil
+        }
+        XCTAssertTrue(backend.ackOutcomes.isEmpty, "every pane stays by default")
+
+        // Stays, as ever: an `agent` event and a `pane` event, both with attention false.
+        backend.setAgent(pane, AgentInfo(kind: "claude", state: .waiting, source: "hook"))
+        try await waitFor("the hook agent") { agentEvents().count == 1 && latestPane()?.agent?.attention == true }
+        try await backend.ackAgent(pane)
+        try await waitFor("the ack's events") { agentEvents().count == 2 && latestPane()?.agent?.attention == false }
+        XCTAssertEqual(agentEvents()[1]?.attention, false)
+        XCTAssertEqual(agentEvents()[1]?.kind, "claude")
+        XCTAssertEqual(latestPane()?.agent?.kind, "claude", "still there")
+
+        // Stays without an `agent` event: the program that reported still runs.
+        backend.ackOutcomes[pane] = .staysWithoutAgentEvent
+        backend.setAgent(pane, AgentInfo(kind: "other", state: .waiting, source: "osc", message: "hi"))
+        try await waitFor("the osc agent") { agentEvents().count == 3 && latestPane()?.agent?.attention == true }
+        try await backend.ackAgent(pane)
+        try await waitFor("the ack's pane event") { latestPane()?.agent?.attention == false }
+        XCTAssertEqual(latestPane()?.agent?.source, "osc", "still there")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(agentEvents().count, 3, "no agent event for it")
+        // A second ack, with nothing to clear, changes nothing.
+        try await backend.ackAgent(pane)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(agentEvents().count, 3)
+        XCTAssertEqual(latestPane()?.agent?.source, "osc")
+
+        // Removes: the agent is nil after, in an `agent` event and in the pane.
+        backend.ackOutcomes[pane] = .removes
+        backend.setAgent(pane, AgentInfo(kind: "deploy", state: .waiting, source: "hook", message: "Deploy needs approval"))
+        try await waitFor("the script's agent") { agentEvents().count == 4 && latestPane()?.agent?.kind == "deploy" }
+        try await backend.ackAgent(pane)
+        try await waitFor("the removal") { agentEvents().count == 5 && latestPane() != nil && latestPane()?.agent == nil }
+        XCTAssertEqual(agentEvents().count, 5)
+        XCTAssertNil(agentEvents()[4], "agent(pane, nil)")
+        let state = try await backend.getState()
+        XCTAssertNotNil(state.pane(pane), "the pane stays")
+        XCTAssertNil(state.pane(pane)?.agent)
+        // With no agent, an ack does nothing.
+        try await backend.ackAgent(pane)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(agentEvents().count, 5)
+
+        // One already acknowledged (attention false) is removed too, once its program has ended.
+        backend.setAgent(pane, AgentInfo(kind: "other", state: .waiting, source: "osc", attention: false))
+        try await backend.ackAgent(pane)
+        let after = try await backend.getState()
+        XCTAssertNil(after.pane(pane)?.agent)
+    }
+
+    /// `setProgress`: a `pane` event, and nothing about the agent.
+    func testFakeProgress() async throws {
+        let backend = FakeBackend()
+        let collector = Collector()
+        let reader = Task { for await event in backend.events { collector.add(event) } }
+        defer { backend.stop(); reader.cancel() }
+        try await backend.start()
+        let created = try await backend.createWorkspace(name: nil, spawn: SpawnOptions(command: ["/bin/sh"]))
+        let pane = created.pane
+        // The progress of each `pane` event so far, without repeats in a row (a title or a cwd also makes one).
+        let progresses: () -> [PaneProgress?] = {
+            var seen: [PaneProgress?] = []
+            for event in collector.all {
+                if case let .pane(found, _) = event, found.id == pane, seen.isEmpty || seen[seen.count - 1] != found.progress {
+                    seen.append(found.progress)
+                }
+            }
+            return seen
+        }
+        let running = PaneProgress(state: .running, percent: 40), failed = PaneProgress(state: .error, percent: 55)
+
+        backend.setProgress(running, for: pane)
+        backend.setProgress(running, for: pane)
+        backend.setProgress(failed, for: pane)
+        try await waitFor("the error") { progresses().last == .some(failed) }
+        XCTAssertEqual(Array(progresses().suffix(2)), [running, failed])
+        let state = try await backend.getState()
+        XCTAssertEqual(state.pane(pane)?.progress, failed)
+        XCTAssertNil(state.pane(pane)?.agent, "a progress is never an agent")
+        backend.setProgress(nil, for: pane)
+        try await waitFor("the clear") { progresses().count >= 3 && progresses().last == .some(nil) }
+        XCTAssertEqual(Array(progresses().suffix(3)), [running, failed, nil])
+        XCTAssertFalse(collector.all.contains { if case .agent = $0 { return true }; return false }, "and makes no agent event")
+        backend.setProgress(PaneProgress(state: .paused), for: 9999)
+    }
+
     /// A muted agent stays quiet through new done/waiting/error until unmuted; a new agent starts unmuted.
     func testMutedAgentsStayQuiet() async throws {
         let backend = FakeBackend()
@@ -561,7 +669,11 @@ final class AlertsTests: XCTestCase {
         try await plain.start()
         let hello = { (c: FakeBackendTests.Collector) in c.all.compactMap { e -> Hello? in if case .connected(let h) = e { return h }; return nil }.first }
         try await waitFor("hello") { hello(plainEvents) != nil }
-        XCTAssertEqual(hello(plainEvents)?.featureNames, ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move"], "the same hello as ever")
+        XCTAssertEqual(hello(plainEvents)?.featureNames, ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move",
+                                                          "agent.kinds", "agent.osc", "pane.progress", "git.changes.token"],
+                       "the fake's usual features, with clothod 0.1.33's four")
+        XCTAssertEqual(hello(plainEvents)?.featureNames, FakeBackend.baseFeatures)
+        XCTAssertEqual(hello(plainEvents)?.features.isSuperset(of: [.agentKinds, .agentOsc, .paneProgress, .gitChangesToken]), true)
 
         let backend = FakeBackend(extraFeatures: ["settings", "summary", "alerts", "agents"])
         let collector = FakeBackendTests.Collector()

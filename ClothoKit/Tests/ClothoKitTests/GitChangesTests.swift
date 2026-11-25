@@ -78,6 +78,24 @@ final class GitChangesTests: XCTestCase {
         XCTAssertEqual(try decode(GitChanges.self, String(decoding: JSONEncoder().encode(changes), as: UTF8.self)), changes)
     }
 
+    /// The reply's top-level `token` (feature `git.changes.token`, clothod 0.1.33), which `summary` carries.
+    func testDecodesTheToken() throws {
+        let without = try decode(GitChanges.self, Self.changesJSON)
+        XCTAssertNil(without.token, "a daemon without the feature")
+        XCTAssertNil(without.summary.token)
+
+        let json = Self.changesJSON.replacingOccurrences(of: #""branch_reason": null}"#, with: #""branch_reason": null, "token": "9c1e5b0a77d2f431"}"#)
+        XCTAssertNotEqual(json, Self.changesJSON)
+        let with = try decode(GitChanges.self, json)
+        XCTAssertEqual(with.token, "9c1e5b0a77d2f431")
+        XCTAssertEqual(with.summary.token, "9c1e5b0a77d2f431", "the summary is the pane's, token included")
+        XCTAssertEqual(with.summary.counts, without.summary, "and the same counts")
+        XCTAssertNotEqual(with, without)
+        XCTAssertEqual(try decode(GitChanges.self, String(decoding: JSONEncoder().encode(with), as: UTF8.self)).token, with.token)
+        XCTAssertNil(GitChanges(root: "/r", uncommitted: .init(files: [])).token, "the init's default")
+        XCTAssertEqual(GitChanges(root: "/r", uncommitted: .init(files: []), token: "t").summary.token, "t")
+    }
+
     func testChangesWithoutABranchGroupAndOddFiles() throws {
         let changes = try decode(GitChanges.self, """
         {"root": "/repo", "branch": null, "head": null,
@@ -351,6 +369,64 @@ final class FakeBackendGitTests: XCTestCase {
         XCTAssertEqual(fake.gitDiffRequests.map(\.path), ["src/login.rs", "src/login.rs", "big.bin", "a"])
         XCTAssertEqual(fake.gitDiffRequests[0], FakeBackend.DiffRequest(pane: pane, path: "src/login.rs", group: .uncommitted, oldPath: nil, context: 3))
         XCTAssertEqual(fake.gitDiffRequests[2].oldPath, "old.bin")
+    }
+
+    /// The fake's change token: on the list and on the pane together, moved on request, and a diff
+    /// that answers `not_changed`.
+    func testChangeTokenAndNotChanged() async throws {
+        let (fake, created) = try await started(["git.changes"])
+        defer { fake.stop() }
+        let pane = created.pane
+        let collector = FakeBackendTests.Collector()
+        let reader = Task { for await event in fake.events { collector.add(event) } }
+        defer { reader.cancel() }
+
+        var changes = try JSONDecoder().decode(GitChanges.self, from: Data(GitChangesTests.changesJSON.utf8))
+        changes.token = "1111111111111111"
+        fake.setChanges(pane, .success(changes))
+        fake.setGit(pane, PaneGit(repo: "clotho", root: changes.root, branch: changes.branch, head: changes.head, changes: changes.summary))
+        var state = try await fake.getState()
+        XCTAssertEqual(state.pane(pane)?.git?.changes?.token, "1111111111111111")
+        var listed = try await fake.gitChanges(pane, limit: nil)
+        XCTAssertEqual(listed.token, state.pane(pane)?.git?.changes?.token, "the list's token is the pane's")
+
+        // Moved: a new token on both, the counts as they were, and a `pane` event.
+        let moved = fake.moveChangesToken(pane)
+        XCTAssertNotEqual(moved, "1111111111111111")
+        XCTAssertEqual(moved.count, 16)
+        state = try await fake.getState()
+        listed = try await fake.gitChanges(pane, limit: nil)
+        XCTAssertEqual(state.pane(pane)?.git?.changes?.token, moved)
+        XCTAssertEqual(listed.token, moved)
+        XCTAssertEqual(state.pane(pane)?.git?.changes?.counts, changes.summary.counts, "only the token moved")
+        XCTAssertEqual(listed.uncommitted, changes.uncommitted)
+        let deadline = Date().addingTimeInterval(5)
+        func tokens() -> [String?] {
+            collector.all.compactMap { event -> String?? in
+                if case let .pane(found, _) = event, found.id == pane { return .some(found.git?.changes?.token) }
+                return nil
+            }
+        }
+        while tokens().last != .some(moved), Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(tokens().last, .some(moved), "a pane event brings it")
+
+        // Again, and to a token of the caller's.
+        XCTAssertNotEqual(fake.moveChangesToken(pane), moved)
+        XCTAssertEqual(fake.moveChangesToken(pane, to: "2222222222222222"), "2222222222222222")
+        state = try await fake.getState()
+        XCTAssertEqual(state.pane(pane)?.git?.changes?.token, "2222222222222222")
+        // A pane with no changes set takes no harm.
+        XCTAssertEqual(fake.moveChangesToken(9999, to: "x"), "x")
+
+        // `not_changed` on request, for a file that had a diff.
+        let diff = try JSONDecoder().decode(GitDiff.self, from: Data(GitChangesTests.diffJSON.utf8))
+        fake.setDiff(pane, path: "src/login.rs", group: .uncommitted, .success(diff))
+        let got = try await fake.gitDiff(pane, path: "src/login.rs", group: .uncommitted, oldPath: nil, context: nil)
+        XCTAssertEqual(got, diff)
+        fake.setDiffNotChanged(pane, path: "src/login.rs", group: .uncommitted)
+        await expect("not_changed", "the file went back to what it was") {
+            _ = try await fake.gitDiff(pane, path: "src/login.rs", group: .uncommitted, oldPath: nil, context: nil)
+        }
     }
 
     func testGitDelay() async throws {

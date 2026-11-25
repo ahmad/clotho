@@ -58,3 +58,87 @@ extension ClothodBackendTests {
         XCTAssertEqual(got.notificationRewrite, false)
     }
 }
+
+/// Text from an agent with `source: "osc"` (clothod 0.1.33, feature `agent.osc`): any program's output,
+/// plain by contract. It is shown as typed, never read as Markdown; a hook agent's still is.
+final class OscTextTests: XCTestCase {
+    static let message = "**bold** [x](http://example.invalid)"
+
+    func testPlainLine() {
+        XCTAssertEqual(AgentNotice.plainLine(Self.message), Self.message, "no Markdown, no links")
+        XCTAssertEqual(AgentNotice.plainLine("  Build \t finished\n\nin  3 s \n"), "Build finished in 3 s")
+        XCTAssertEqual(AgentNotice.plainLine("a\u{1b}[31mb\u{07}c\u{0}d\u{7f}\u{9b}"), "a[31mbcd", "control characters dropped")
+        XCTAssertEqual(AgentNotice.plainLine("# Title\n- `one`\n- _two_"), "# Title - `one` - _two_")
+        XCTAssertEqual(AgentNotice.plainLine("<b>x</b> & https://example.invalid"), "<b>x</b> & https://example.invalid")
+        XCTAssertEqual(AgentNotice.plainLine(" \n\t "), "")
+        XCTAssertEqual(AgentNotice.plainLine(""), "")
+    }
+
+    func testAnOscAgentsTextStaysAsTyped() {
+        // 0.1.33 sends a Markdown-stripped `summary` for an osc agent; the message is what was printed.
+        let osc = AgentInfo(kind: "other", state: .waiting, source: "osc", message: Self.message, attention: true,
+                            summary: "bold x", needsUser: true)
+        XCTAssertEqual(osc.headline, Self.message)
+        XCTAssertEqual(osc.result, Self.message)
+        let notice = AgentNotice(info: osc, machine: "devbox", workspace: "Platform")
+        XCTAssertEqual(notice.body, Self.message)
+        XCTAssertEqual(notice.title, "Platform · Agent needs you")
+
+        // Without a message, the summary, as typed too; then the fallback.
+        var only = osc
+        only.message = nil
+        only.summary = "*done*  `x`"
+        XCTAssertEqual(only.headline, "*done* `x`")
+        XCTAssertEqual(AgentNotice(info: only, machine: "devbox").body, "*done* `x`")
+        only.summary = nil
+        XCTAssertNil(only.headline)
+        XCTAssertNil(only.result)
+        XCTAssertEqual(AgentNotice(info: only, machine: "devbox").body, "")
+
+        // Never a permission ask, whatever the words: nothing an osc program prints is one.
+        var asking = osc
+        asking.message = "Need permission to deploy"
+        asking.tool = "Bash"
+        asking.toolInput = "rm -rf /"
+        XCTAssertEqual(asking.headline, "Need permission to deploy")
+        XCTAssertEqual(AgentNotice(info: asking, machine: "devbox").body, "Need permission to deploy")
+
+        // A long one is cut like any body, and whitespace and control characters go.
+        var long = osc
+        long.message = String(repeating: "word ", count: 100) + "\u{1b}]8;;http://example.invalid\u{07}"
+        XCTAssertLessThanOrEqual(AgentNotice(info: long, machine: "devbox").body.count, AgentNotice.bodyLimit)
+        XCTAssertFalse(long.headline?.unicodeScalars.contains { $0.properties.generalCategory == .control } ?? true)
+    }
+
+    func testTheInitsPlainTextFlag() {
+        func body(plain: Bool, result: String? = nil, summary: String? = nil, fallback: String? = nil) -> String {
+            AgentNotice(kind: "other", state: "waiting", machine: "devbox", workspace: nil, project: nil, duration: nil,
+                        result: result, tool: nil, toolInput: nil, fallback: fallback, summary: summary, needsUser: true,
+                        plainText: plain).body
+        }
+        XCTAssertEqual(body(plain: true, result: Self.message, summary: "bold x"), Self.message, "the result before the summary")
+        XCTAssertEqual(body(plain: true, summary: "**s**"), "**s**")
+        XCTAssertEqual(body(plain: true, fallback: "`f`\n"), "`f`")
+        XCTAssertEqual(body(plain: false, result: Self.message, summary: "bold x"), "bold x", "as before: the summary first")
+        XCTAssertEqual(body(plain: false, result: Self.message), AgentNotice.clip(PlainText.oneLine(Self.message), to: AgentNotice.bodyLimit),
+                       "as before: Markdown is read")
+    }
+
+    func testAHookAgentsIsStillConverted() {
+        let hook = AgentInfo(kind: "claude", state: .done, source: "hook", message: Self.message, attention: true)
+        func flat(_ text: String?) -> String? { text.map { AgentNotice.clip($0, to: AgentNotice.bodyLimit) } }
+        let converted = AgentNotice.clip(PlainText.oneLine(Self.message), to: AgentNotice.bodyLimit)
+        XCTAssertNotEqual(converted, Self.message)
+        XCTAssertFalse(converted.contains("**") || converted.contains("]("), converted)
+        XCTAssertTrue(converted.contains("bold"), converted)
+        XCTAssertEqual(flat(hook.headline), converted)
+        XCTAssertEqual(flat(hook.result), converted)
+        XCTAssertEqual(AgentNotice(info: hook, machine: "devbox").body, converted)
+        // A detected agent's too (no source, or "detected").
+        var detected = hook
+        detected.source = nil
+        XCTAssertEqual(flat(detected.headline), converted)
+        detected.source = "detected"
+        XCTAssertEqual(AgentNotice(info: detected, machine: "devbox").body, converted)
+    }
+}

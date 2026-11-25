@@ -132,6 +132,49 @@ final class PaneGitTests: XCTestCase {
         XCTAssertNil(state.pane(3)?.git?.changes)
     }
 
+    // MARK: the change token (feature `git.changes.token`, clothod 0.1.33)
+
+    func testDecodesTheToken() throws {
+        let git = try gitWith("""
+        "changes": {"uncommitted": {"files": 3, "added": 40, "removed": 2},
+                    "branch": {"base": "origin/main", "commits": 4, "files": 7, "added": 120, "removed": 30},
+                    "reason": null, "token": "9c1e5b0a77d2f431"},
+        "changes_reason": null
+        """)
+        let changes = try XCTUnwrap(git.changes)
+        XCTAssertEqual(changes.token, "9c1e5b0a77d2f431")
+        XCTAssertEqual(changes.uncommitted, PaneGit.Changes.Count(files: 3, added: 40, removed: 2))
+        XCTAssertEqual(changes.branch?.files, 7)
+
+        // A daemon without the feature: no token, and the rest as before.
+        let older = try XCTUnwrap(try gitWith(#""changes": {"uncommitted": {"files": 3, "added": 40, "removed": 2}}"#).changes)
+        XCTAssertNil(older.token)
+        XCTAssertNil(try XCTUnwrap(try gitWith(#""changes": {"uncommitted": {"files": 1}, "token": null}"#).changes).token)
+        XCTAssertNil(PaneGit.Changes(uncommitted: .init(files: 1)).token, "the init's default")
+
+        // Round trip, as the cached model stores it.
+        let again = try JSONDecoder().decode(PaneGit.Changes.self, from: JSONEncoder().encode(changes))
+        XCTAssertEqual(again, changes)
+        XCTAssertEqual(again.token, "9c1e5b0a77d2f431")
+    }
+
+    /// The token is part of `==` (a moved token is a change); `counts` is what is drawn, without it.
+    func testCountsIgnoreTheToken() {
+        let branch = Branch(base: "origin/main", commits: 3, files: 4, added: 100, removed: 30)
+        let one = PaneGit.Changes(uncommitted: .init(files: 2, added: 28, removed: 2), branch: branch, token: "aaaaaaaaaaaaaaaa")
+        let two = PaneGit.Changes(uncommitted: .init(files: 2, added: 28, removed: 2), branch: branch, token: "bbbbbbbbbbbbbbbb")
+        let none = PaneGit.Changes(uncommitted: .init(files: 2, added: 28, removed: 2), branch: branch)
+        XCTAssertNotEqual(one, two)
+        XCTAssertNotEqual(one, none)
+        XCTAssertEqual(one.counts, two.counts)
+        XCTAssertEqual(one.counts, none)
+        XCTAssertNil(one.counts.token)
+        XCTAssertEqual(none.counts, none)
+        XCTAssertEqual(ChangeCountText.strip(one), ChangeCountText.strip(two), "the same is drawn")
+        let more = PaneGit.Changes(uncommitted: .init(files: 3, added: 28, removed: 2), branch: branch, token: "aaaaaaaaaaaaaaaa")
+        XCTAssertNotEqual(one.counts, more.counts, "a count that differs still does")
+    }
+
     func testTotalIsEmptyAndTheCountForms() {
         // A fresh worktree: a branch group of zeros, not nil.
         let fresh = PaneGit.Changes(uncommitted: .init(files: 0, added: 0, removed: 0),

@@ -42,7 +42,8 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     private var activeCalls = 0
 
     /// `extraFeatures`: more names for hello's `features` ("settings", "summary", "alerts", "peek"), for
-    /// building and testing what a client gates on them. Without any, hello is what it always was.
+    /// building and testing what a client gates on them. Without any, hello has the fake's usual ones
+    /// (`baseFeatures`).
     public init(extraFeatures: [String] = []) {
         self.extraFeatures = extraFeatures
         (events, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
@@ -65,7 +66,7 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         var hello = Hello(protocol: 1, protocolMin: 1, protocolMax: 1, daemon: "clotho-fake", version: "0.1.0",
                           instance: String(UInt64.random(in: 0...UInt64.max), radix: 16),
                           pid: getpid(), machine: Hello.Machine(hostname: Self.hostname, os: "macos", arch: "aarch64"))
-        let features = ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move"]
+        let features = Self.baseFeatures
         hello.featureNames = features + extraFeatures.filter { !features.contains($0) }
         locked {
             continuation.yield(.connected(hello))
@@ -78,6 +79,12 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         timer.resume()
         locked { cwdTimer = timer }
     }
+
+    /// What every fake announces. The last four are clothod 0.1.33's: any `kind` is kept as given
+    /// (`setAgent`), an agent may have `source: "osc"` and an ack may remove it (`ackOutcomes`), a pane
+    /// has a `progress` (`setProgress`), and canned changes carry a `token` (`moveChangesToken`).
+    public static let baseFeatures = ["pane.keys", "agents", "fs", "restore", "move", "git", "pane.move",
+                                      "agent.kinds", "agent.osc", "pane.progress", "git.changes.token"]
 
     public func stop() {
         let all: [FakePane] = locked {
@@ -450,11 +457,49 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
         fake?.resize(cols: cols, rows: rows)
     }
 
+    /// What `agent.ack` does to a pane's agent (clothod 0.1.33; protocol.md, "Agents", Clearing).
+    public enum AckOutcome: Sendable {
+        /// The agent stays, with `attention` false, and an `agent` event and a `pane` event say so: a
+        /// coding agent, as ever.
+        case stays
+        /// The same, told by the `pane` event alone: a pane-bound agent acknowledged while the program
+        /// that reported it still runs.
+        case staysWithoutAgentEvent
+        /// The agent is removed (`agent` is nil after), whatever its attention was: a pane-bound agent
+        /// whose program has ended.
+        case removes
+    }
+
+    /// What `ackAgent` does, by pane. A pane that isn't here gets `.stays`.
+    public var ackOutcomes: [PaneID: AckOutcome] {
+        get { locked { outcomes } }
+        set { locked { outcomes = newValue } }
+    }
+    private var outcomes: [PaneID: AckOutcome] = [:]
+
     public func ackAgent(_ pane: PaneID) async throws {
         locked {
-            guard let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].agent?.attention == true else { return }
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].agent != nil else { return }
+            let outcome = outcomes[pane] ?? .stays
+            if outcome == .removes {
+                state.panes[p].agent = nil
+                continuation.yield(.agent(pane, nil))
+                publishPane(at: p)
+                return
+            }
+            guard state.panes[p].agent?.attention == true else { return }
             state.panes[p].agent?.attention = false
-            continuation.yield(.agent(pane, state.panes[p].agent))
+            if outcome == .stays { continuation.yield(.agent(pane, state.panes[p].agent)) }
+            publishPane(at: p)
+        }
+    }
+
+    /// Sets a pane's progress (nil clears it), as OSC 9;4 does on clothod: a `pane` event, and nothing
+    /// about its agent.
+    public func setProgress(_ progress: PaneProgress?, for pane: PaneID) {
+        locked {
+            guard let p = state.panes.firstIndex(where: { $0.id == pane }), state.panes[p].progress != progress else { return }
+            state.panes[p].progress = progress
             publishPane(at: p)
         }
     }
@@ -657,6 +702,35 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     /// What `gitDiff` answers for a file of a pane. Unset, it fails with `not_changed`.
     public func setDiff(_ pane: PaneID, path: String, group: GitChangeGroup, _ result: Result<GitDiff, BackendError>) {
         locked { cannedDiffs[DiffKey(pane: pane, path: path, group: group)] = result }
+    }
+
+    /// Gives a pane's changes a token (feature `git.changes.token`), as clothod does when something
+    /// changed: on the canned `gitChanges` answer, when that is a list, and on the pane's own
+    /// `git.changes`, with a `pane` event when it has one and the token differs. Nil makes a new token
+    /// that differs from every earlier one. Returns the token set.
+    @discardableResult
+    public func moveChangesToken(_ pane: PaneID, to token: String? = nil) -> String {
+        locked { () -> String in
+            tokenCount += 1
+            let hex = String(tokenCount, radix: 16)
+            let moved = token ?? "fa4e" + String(repeating: "0", count: max(12 - hex.count, 0)) + hex
+            if case .success(var changes)? = cannedChanges[pane] {
+                changes.token = moved
+                cannedChanges[pane] = .success(changes)
+            }
+            if let p = state.panes.firstIndex(where: { $0.id == pane }), let shown = state.panes[p].git?.changes, shown.token != moved {
+                state.panes[p].git?.changes?.token = moved
+                publishPane(at: p)
+            }
+            return moved
+        }
+    }
+    private var tokenCount = 0
+
+    /// Makes `gitDiff` answer `not_changed` for a file of a pane, as clothod does once the file is back
+    /// to what it was (also what an unset diff answers).
+    public func setDiffNotChanged(_ pane: PaneID, path: String, group: GitChangeGroup) {
+        setDiff(pane, path: path, group: group, .failure(BackendError(code: "not_changed", message: "\(path) has no \(group.rawValue) changes")))
     }
 
     public func gitChanges(_ pane: PaneID, limit: Int?) async throws -> GitChanges {

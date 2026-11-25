@@ -272,10 +272,14 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
     public var restored: PaneRestore?
     /// The git work tree the pane's folder is in (feature `git`); nil outside one.
     public var git: PaneGit?
+    /// How far the pane's program says it is (feature `pane.progress`, clothod 0.1.33); nil when it
+    /// says nothing. Also nil for a shape this client can't read. It is the pane's, with or without an
+    /// agent, and only for drawing.
+    public var progress: PaneProgress?
 
     public init(id: PaneID, cols: Int, rows: Int, pid: Int32? = nil, command: [String]? = nil, title: String? = nil,
                 cwd: String? = nil, seq: UInt64 = 0, exited: PaneExit? = nil, agent: AgentInfo? = nil, restored: PaneRestore? = nil,
-                git: PaneGit? = nil) {
+                git: PaneGit? = nil, progress: PaneProgress? = nil) {
         self.id = id
         self.cols = cols
         self.rows = rows
@@ -288,6 +292,30 @@ public struct Pane: Codable, Equatable, Sendable, Identifiable {
         self.agent = agent
         self.restored = restored
         self.git = git
+        self.progress = progress
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, cols, rows, pid, command, title, cwd, seq, exited, agent, restored, git, progress
+    }
+
+    /// As the synthesized one, except `progress`: a shape this client can't read becomes nil, and never
+    /// fails the pane or the `state` it arrives in (a decode error drops the whole event).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(PaneID.self, forKey: .id)
+        cols = try c.decode(Int.self, forKey: .cols)
+        rows = try c.decode(Int.self, forKey: .rows)
+        pid = try c.decodeIfPresent(Int32.self, forKey: .pid)
+        command = try c.decodeIfPresent([String].self, forKey: .command)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+        seq = try c.decode(UInt64.self, forKey: .seq)
+        exited = try c.decodeIfPresent(PaneExit.self, forKey: .exited)
+        agent = try c.decodeIfPresent(AgentInfo.self, forKey: .agent)
+        restored = try c.decodeIfPresent(PaneRestore.self, forKey: .restored)
+        git = try c.decodeIfPresent(PaneGit.self, forKey: .git)
+        progress = try? c.decodeIfPresent(PaneProgress.self, forKey: .progress)
     }
 }
 
@@ -326,6 +354,10 @@ public struct PaneGit: Codable, Equatable, Sendable {
         public var branch: BranchCount?
         /// Why `branch` is nil although there is a base: "timeout", "too_large", "partial_clone", "error".
         public var reason: String?
+        /// Stands for what the list and the diffs would show now (feature `git.changes.token`, clothod
+        /// 0.1.33): it moves whenever any of that changes, also when every count stays. Opaque: compare
+        /// for equality only. Nil on a daemon without the feature. It is part of `==`; see `counts`.
+        public var token: String?
 
         /// Files and lines. The lines are nil when they weren't counted; `files` is still right.
         public struct Count: Codable, Equatable, Sendable {
@@ -358,10 +390,19 @@ public struct PaneGit: Codable, Equatable, Sendable {
             }
         }
 
-        public init(uncommitted: Count, branch: BranchCount? = nil, reason: String? = nil) {
+        public init(uncommitted: Count, branch: BranchCount? = nil, reason: String? = nil, token: String? = nil) {
             self.uncommitted = uncommitted
             self.branch = branch
             self.reason = reason
+            self.token = token
+        }
+
+        /// The same without the token: what is drawn. For callers that compare or cache what they
+        /// show, so an edit that leaves every count as it was doesn't read as a change to redraw.
+        public var counts: Changes {
+            var copy = self
+            copy.token = nil
+            return copy
         }
 
         /// Both groups added up (a file changed in both counts twice). The lines are nil when either
