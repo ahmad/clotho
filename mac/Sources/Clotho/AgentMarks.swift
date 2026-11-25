@@ -151,10 +151,16 @@ extension AppDelegate {
         return panes.compactMap { state.pane($0)?.agent }.filter { $0.mark != nil }.min { $0.urgency < $1.urgency }
     }
 
+    /// Whether a machine's progress is drawn: its daemon has `pane.progress`, and it is connected (the
+    /// model keeps the last progress it heard of, and a bar must not stand still for a machine that is gone).
+    func showsProgress(_ store: ModelStore) -> Bool {
+        store.isConnected && store.features.contains(.paneProgress)
+    }
+
     /// Each Tab's progress, on a machine whose daemon has `pane.progress`: `PaneProgress.forTab` over the
     /// Tab's panes in layout order. Tabs with none aren't in it.
     func tabProgress(_ tabs: [Tab], in store: ModelStore) -> [TabID: PaneProgress] {
-        guard store.features.contains(.paneProgress) else { return [:] }
+        guard showsProgress(store) else { return [:] }
         var result: [TabID: PaneProgress] = [:]
         for tab in tabs {
             let all = tab.layout.panes.compactMap { store.state.pane($0) }.filter { $0.exited == nil }.compactMap(\.progress)
@@ -168,7 +174,7 @@ extension AppDelegate {
     func agentProgress(_ agents: [AgentEntry]) -> [PaneKey: PaneProgress] {
         var result: [PaneKey: PaneProgress] = [:]
         for entry in agents {
-            guard let store = connections[entry.machine]?.store, store.features.contains(.paneProgress),
+            guard let store = connections[entry.machine]?.store, showsProgress(store),
                   let progress = store.state.pane(entry.pane)?.progress else { continue }
             result[PaneKey(machine: entry.machine, pane: entry.pane)] = progress
         }

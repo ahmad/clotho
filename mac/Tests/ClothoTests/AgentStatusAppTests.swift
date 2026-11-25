@@ -244,6 +244,14 @@ final class AgentStatusAppTests: XCTestCase {
         app.agentHooks.lines[local] = AppDelegate.parseHookLines("claude: installed\ncodex: installed")
         app.agentHooks.announce(local)
         XCTAssertEqual(list.rows.map(\.titleLabel.stringValue), ["Claude Code", "Codex"], "it follows the status on its own")
+        // A clothod that can't say (an old one): the rows say so, with nothing to press.
+        app.agentHooks.lines[local] = nil
+        app.agentHooks.runner = { _, _ in RemoteCommandResult(status: 2, stdout: "", stderr: "unknown command") }
+        app.refreshHookStatus(local)
+        try await ChangesFixture.wait("the answer that it can't say") { list.rows.first?.captionLabel.stringValue == AgentHookRow.unanswered }
+        XCTAssertEqual(list.rows.count, 4)
+        XCTAssertTrue(list.rows.allSatisfy { $0.installButton == nil && $0.removeButton == nil })
+        app.agentHooks.runner = nil
         // A name that isn't a kind's never reaches a command line.
         app.installHooks(agent: "x; rm -rf ~", on: local, in: app.window)
         app.removeHooks(agent: "-rf", on: local, in: app.window)

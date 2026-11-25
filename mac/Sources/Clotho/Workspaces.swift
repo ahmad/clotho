@@ -126,7 +126,7 @@ extension AppDelegate {
             let pane = state.pane(id)
             host.chrome = PaneChrome(agent: monitorsAgents(focusedMachine) ? pane?.agent : nil, command: pane?.command, cwd: pane?.cwd,
                                      home: store.hello?.machine?.home, canDecide: store.features.contains(.agentDecide),
-                                     progress: store.features.contains(.paneProgress) ? pane?.progress : nil)
+                                     progress: showsProgress(store) ? pane?.progress : nil)
             // The 30 s clock (`agentClock`) lands here, so the header's time moves on.
             host.refreshElapsed()
         }

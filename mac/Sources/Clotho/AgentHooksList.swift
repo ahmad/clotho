@@ -23,16 +23,20 @@ final class AgentHookRow: NSView {
 
     /// The words under the Copilot row: its hook format has not met a running Copilot CLI yet.
     static let copilotNote = "The GitHub Copilot CLI hook format was checked against GitHub\u{2019}s documentation, not yet against a running Copilot CLI."
+    static let checking = "Checking\u{2026}"
+    static let unanswered = "clothod on this machine couldn\u{2019}t say"
     /// The room a row's words may take before they wrap, beside the icon and two buttons.
     static let textWidth: CGFloat = 300
 
     /// `showsNote`: the Copilot note under its row (the sheet). Settings leaves it to the tooltip and to the
     /// Install confirmation, which always says it.
-    init(agent: String, line: HookLine?, busy: Bool, showsNote: Bool = true, onInstall: @escaping () -> Void, onRemove: @escaping () -> Void) {
+    /// `unknown`: what the caption says while there is no line ("Checking…", or that clothod couldn't say).
+    init(agent: String, line: HookLine?, unknown: String = AgentHookRow.checking, busy: Bool, showsNote: Bool = true,
+         onInstall: @escaping () -> Void, onRemove: @escaping () -> Void) {
         self.agent = agent
         let kind = AgentKind.of(agent)
         titleLabel = NSTextField(labelWithString: kind.name)
-        captionLabel = SettingsStyle.caption(line?.caption ?? "Checking\u{2026}")
+        captionLabel = SettingsStyle.caption(line?.caption ?? unknown)
         super.init(frame: .zero)
 
         // The symbol is one of the table's literals, chosen by a known kind; never made from the name.
@@ -151,7 +155,7 @@ final class AgentHooksListView: NSView {
         guard let app else { return }
         group?.removeFromSuperview()
         rows = app.hookRows(key).map { agent, line in
-            AgentHookRow(agent: agent, line: line, busy: app.agentHooks.busy.contains("\(key)/\(agent)"), showsNote: showsNotes,
+            AgentHookRow(agent: agent, line: line, unknown: app.agentHooks.unanswered.contains(key) ? AgentHookRow.unanswered : AgentHookRow.checking, busy: app.agentHooks.busy.contains("\(key)/\(agent)"), showsNote: showsNotes,
                          onInstall: { [weak self] in self?.act(agent, install: true) },
                          onRemove: { [weak self] in self?.act(agent, install: false) })
         }

@@ -32,6 +32,8 @@ struct HookLine: Equatable {
 final class AgentHooksState {
     /// `hooks status` per machine, in clothod's order. No entry: not asked yet, or it couldn't say.
     var lines: [MachineKey: [HookLine]] = [:]
+    /// Machines whose clothod couldn't say (it is too old, or the command failed): nothing to press there.
+    var unanswered: Set<MachineKey> = []
     /// The agents a command is running for, as "machine/agent": their buttons are off meanwhile.
     var busy: Set<String> = []
     /// Tests put their own clothod here: every `clothod` command of the app goes through it instead.
@@ -132,10 +134,17 @@ extension AppDelegate {
     /// Asks the machine's clothod which agents have hooks (`hooks status`: "claude: installed" lines).
     /// Read-only.
     func refreshHookStatus(_ key: MachineKey) {
+        // Asked again: "couldn't say" was the last try's answer, not this one's.
+        if agentHooks.unanswered.remove(key) != nil { agentHooks.announce(key) }
         Task { @MainActor in
-            guard let result = try? await runClothod(on: key, ["hooks", "status"]), result.status == 0 else { return }
+            guard let result = try? await runClothod(on: key, ["hooks", "status"]), result.status == 0 else {
+                // Said in the list, which otherwise would go on "Checking…" for good.
+                if agentHooks.lines[key] == nil, agentHooks.unanswered.insert(key).inserted { agentHooks.announce(key) }
+                return
+            }
             let lines = Self.parseHookLines(result.stdout)
-            guard agentHooks.lines[key] != lines else { return }
+            guard agentHooks.lines[key] != lines || agentHooks.unanswered.contains(key) else { return }
+            agentHooks.unanswered.remove(key)
             agentHooks.lines[key] = lines
             agentHooks.announce(key)
             onboarding?.refreshHooks()
