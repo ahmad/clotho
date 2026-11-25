@@ -281,6 +281,23 @@ final class AgentStatusAppTests: XCTestCase {
         try await ChangesFixture.wait("the answer that it can't say") { list.rows.first?.captionLabel.stringValue == AgentHookRow.unanswered }
         XCTAssertEqual(list.rows.count, 4)
         XCTAssertTrue(list.rows.allSatisfy { $0.installButton == nil && $0.removeButton == nil })
+        // An answer that exits 0 with no line the app can read says as little: not "Checking…" for good.
+        app.agentHooks.unanswered.remove(local)
+        app.agentHooks.announce(local)
+        XCTAssertEqual(list.rows.first?.captionLabel.stringValue, AgentHookRow.checking)
+        app.agentHooks.runner = { _, _ in RemoteCommandResult(status: 0, stdout: "no agents here\n\n", stderr: "") }
+        app.refreshHookStatus(local)
+        try await ChangesFixture.wait("the answer with nothing in it") { list.rows.first?.captionLabel.stringValue == AgentHookRow.unanswered }
+        XCTAssertNil(app.agentHooks.lines[local])
+        XCTAssertEqual(list.rows.count, 4)
+        XCTAssertTrue(list.rows.allSatisfy { $0.installButton == nil && $0.removeButton == nil })
+        XCTAssertEqual(MachinesSettingsController.hooksSummary(lines: app.agentHooks.lines[local], unanswered: app.agentHooks.unanswered.contains(local)), AgentHookRow.unanswered)
+        // A real answer after it clears that.
+        app.agentHooks.runner = { _, _ in RemoteCommandResult(status: 0, stdout: "claude: installed\ncodex: not installed\n", stderr: "") }
+        app.refreshHookStatus(local)
+        try await ChangesFixture.wait("the real answer") { list.rows.first?.captionLabel.stringValue == "Installed" }
+        XCTAssertFalse(app.agentHooks.unanswered.contains(local))
+        app.agentHooks.lines[local] = nil
         app.agentHooks.runner = nil
         // A name that isn't a kind's never reaches a command line.
         app.installHooks(agent: "x; rm -rf ~", on: local, in: app.window)

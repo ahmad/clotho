@@ -137,12 +137,14 @@ extension AppDelegate {
         // Asked again: "couldn't say" was the last try's answer, not this one's.
         if agentHooks.unanswered.remove(key) != nil { agentHooks.announce(key) }
         Task { @MainActor in
-            guard let result = try? await runClothod(on: key, ["hooks", "status"]), result.status == 0 else {
+            // An answer with no line the parser accepts (exit 0, nothing it knows) says as little as a
+            // failed call.
+            guard let result = try? await runClothod(on: key, ["hooks", "status"]), result.status == 0,
+                  case let lines = Self.parseHookLines(result.stdout), !lines.isEmpty else {
                 // Said in the list, which otherwise would go on "Checking…" for good.
-                if agentHooks.lines[key] == nil, agentHooks.unanswered.insert(key).inserted { agentHooks.announce(key) }
+                if agentHooks.lines[key]?.isEmpty != false, agentHooks.unanswered.insert(key).inserted { agentHooks.announce(key) }
                 return
             }
-            let lines = Self.parseHookLines(result.stdout)
             guard agentHooks.lines[key] != lines || agentHooks.unanswered.contains(key) else { return }
             agentHooks.unanswered.remove(key)
             agentHooks.lines[key] = lines
