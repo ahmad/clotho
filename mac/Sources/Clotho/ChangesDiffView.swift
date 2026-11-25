@@ -356,7 +356,7 @@ extension AppDelegate {
 
     /// The same, for one pane's terminal (its find bar closing).
     func returnKeyboard(to terminal: PaneTerminalView?) {
-        window.makeFirstResponder(isOverviewShown ? overview : isChangesDiffShown ? changesDiff : terminal)
+        _ = window.makeFirstResponder(isOverviewShown ? overview : isChangesDiffShown ? changesDiff : terminal)
     }
 
     // The rule for what a cover is over. Two views cover: the centre diff, over the pane area, and the

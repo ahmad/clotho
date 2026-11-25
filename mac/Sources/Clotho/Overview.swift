@@ -7,8 +7,10 @@ import ClothoKit
 // It covers the sidebar, the tab bar, the panes and the inspector, and the rule for what is covered is the
 // centre diff's, made general (ChangesDiffView.swift): nothing under it acts or takes the keyboard.
 //
-// Peeks: while it shows, each machine with `peek` (clothod 0.1.32) is asked for the last lines of the
-// panes whose cards are on screen, and nothing is asked once it closes.
+// Peeks: while it shows and the window can be seen, each machine with `peek` (clothod 0.1.32) is asked for
+// the last lines of the panes whose cards are on screen. Nothing is asked once it closes, or while the
+// window is minimised, the app is hidden or the window is fully covered. Each machine's requests go on
+// their own: one that doesn't answer holds up no other.
 
 extension AppDelegate {
     var isOverviewShown: Bool { overview?.isHidden == false }
@@ -31,6 +33,17 @@ extension AppDelegate {
         }
         container.addSubview(view)
         overview = view
+        // The window going out of sight, or coming back: the peeks stop, or start again.
+        let center = NotificationCenter.default
+        let windowNames = [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification]
+        let appNames = [NSApplication.didHideNotification, NSApplication.didUnhideNotification]
+        for (names, object) in [(windowNames, window as AnyObject), (appNames, NSApp as AnyObject)] {
+            for name in names {
+                overviewSeenObservers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.overviewSeenChanged() }
+                })
+            }
+        }
         return view
     }
 
@@ -53,7 +66,7 @@ extension AppDelegate {
         window.contentView?.layoutSubtreeIfNeeded()
         // The command bar, the shortcuts card or the file browser, when one is up, is above it and keeps
         // the keyboard; it gives it to the Overview when it closes (`returnKeyboardToPanes`).
-        if quickOpen == nil, shortcutsOverlay == nil, fileBrowser == nil { window.makeFirstResponder(overview) }
+        if quickOpen == nil, shortcutsOverlay == nil, fileBrowser == nil { _ = window.makeFirstResponder(overview) }
     }
 
     /// Back to the window (Back, Esc, ⇧⌘0, ⌘W, or a command for what it covers). The peeks end, what was
@@ -128,11 +141,33 @@ extension AppDelegate {
 
     // MARK: Peeks
 
+    /// Whether anyone can see the window: it isn't minimised, the app isn't hidden, and some of it is on
+    /// screen (not fully covered, not on another Space, the display not asleep). Tests set their own.
+    static var windowIsSeen: @MainActor (NSWindow) -> Bool = AppDelegate.windowIsOnScreen
+    static let windowIsOnScreen: @MainActor (NSWindow) -> Bool = { window in
+        !NSApp.isHidden && !window.isMiniaturized && window.occlusionState.contains(.visible)
+    }
+
+    /// The window was minimised, hidden or covered, or is back: with the Overview left up, the peeks end
+    /// while nobody can see it and start again when someone can.
+    func overviewSeenChanged() {
+        guard isOverviewShown else { return }
+        let seen = Self.windowIsSeen(window)
+        if seen == overviewPeeks.isEmpty { log("overview: the window is \(seen ? "seen again" : "out of sight")") }
+        syncOverviewPeeks()
+    }
+
     /// Each machine's peek subscription follows the cards on screen: sent when the panes change (a new
     /// card, one gone, the filter) or the daemon is another instance (its old lines are dropped), and
-    /// ended when no card of the machine is left or the machine is gone.
+    /// ended when no card of the machine is left or the machine is gone. All of them end while the window
+    /// can't be seen; the next sync that finds it seen (`overviewSeenChanged`, or the Overview's tick)
+    /// sends them again.
     func syncOverviewPeeks() {
         guard isOverviewShown else { return }
+        guard Self.windowIsSeen(window) else {
+            if !overviewPeeks.isEmpty { endOverviewPeeks() }
+            return
+        }
         let wanted = OverviewModel.peekWanted(cards: overview.shownCards)
         for (machine, panes) in wanted {
             guard let store = connections[machine]?.store else { continue }
@@ -145,7 +180,7 @@ extension AppDelegate {
             overviewPeeks[machine] = (panes, instance)
             dropOverviewPeekLines(machine: machine, keeping: Set(panes))
             let backend = store.backend
-            sendOverviewPeek {
+            sendOverviewPeek(machine) {
                 // The lines come as `peek` events (`overviewPeek`), never from this reply.
                 do { _ = try await backend.peekSubscribe(panes: panes, lines: PeekLines.requested) } catch {
                     log("overview: peek.subscribe on \(machine) failed: \(error.localizedDescription)")
@@ -155,13 +190,20 @@ extension AppDelegate {
         for machine in Array(overviewPeeks.keys) where wanted[machine] == nil { endOverviewPeek(machine) }
     }
 
-    /// Sends a peek request after the ones before it have been answered.
-    private func sendOverviewPeek(_ request: @escaping @MainActor () async -> Void) {
-        let before = overviewPeekRequests
-        overviewPeekRequests = Task { @MainActor in
+    /// Sends a peek request after the ones sent to the same machine before it have been answered, so a
+    /// later subscription is never overtaken by an earlier one. Each machine has its own line: one that
+    /// doesn't answer (a request has no timeout) holds up only itself.
+    private func sendOverviewPeek(_ machine: MachineKey, _ request: @escaping @MainActor () async -> Void) {
+        let before = overviewPeekRequests[machine]?.task
+        overviewPeekSerial += 1
+        let serial = overviewPeekSerial
+        let task = Task { @MainActor [weak self] in
             await before?.value
             await request()
+            // The last of its line: nothing is kept for a machine with nothing on its way.
+            if let self, overviewPeekRequests[machine]?.serial == serial { overviewPeekRequests[machine] = nil }
         }
+        overviewPeekRequests[machine] = (serial, task)
     }
 
     /// Ends one machine's subscription and forgets its lines.
@@ -169,14 +211,15 @@ extension AppDelegate {
         overviewPeeks[machine] = nil
         dropOverviewPeekLines(machine: machine, keeping: [])
         guard let backend = connections[machine]?.store.backend else { return }
-        sendOverviewPeek {
+        sendOverviewPeek(machine) {
             do { try await backend.peekUnsubscribe() } catch {
                 log("overview: peek.unsubscribe on \(machine) failed: \(error.localizedDescription)")
             }
         }
     }
 
-    /// The Overview closes: nothing is asked of any daemon for a view nobody sees.
+    /// The Overview closes, or its window goes out of sight: nothing is asked of any daemon for a view
+    /// nobody sees.
     private func endOverviewPeeks() {
         for machine in Array(overviewPeeks.keys) { endOverviewPeek(machine) }
         overviewPeekLines.removeAll()

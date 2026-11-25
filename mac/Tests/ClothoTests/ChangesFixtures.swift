@@ -16,6 +16,9 @@ enum ChangesFixture {
     /// Saves the defaults a launch touches and sets them for a quiet in-process app. Returns what to restore.
     static func prepare(features: String) -> [String: Any] {
         _ = NSApplication.shared
+        // A test's window is never on screen: the Overview's peeks go on as if it were seen, and a test
+        // of that rule sets its own.
+        AppDelegate.windowIsSeen = { _ in true }
         let defaults = UserDefaults.standard
         var saved: [String: Any] = [:]
         for key in keys { saved[key] = defaults.object(forKey: key) }
@@ -37,6 +40,7 @@ enum ChangesFixture {
 
     static func restore(_ saved: [String: Any]) {
         for key in keys { UserDefaults.standard.set(saved[key], forKey: key) }
+        AppDelegate.windowIsSeen = AppDelegate.windowIsOnScreen
     }
 
     static func launch() -> AppDelegate {

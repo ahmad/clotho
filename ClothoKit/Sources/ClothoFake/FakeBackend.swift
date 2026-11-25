@@ -323,12 +323,26 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     /// What each pane's subscriber was last sent, so only a change is an event (as clothod does it).
     private var peekSent: [PaneID: [String]] = [:]
 
+    /// While true, `peekSubscribe` and `peekUnsubscribe` are noted in `peekCalls` and then neither take
+    /// effect nor answer, as with a machine that has stopped answering. Set false, they go on (in no
+    /// set order, if more than one was waiting).
+    public var peeksHeld: Bool {
+        get { locked { peekHold } }
+        set { locked { peekHold = newValue } }
+    }
+    private var peekHold = false
+
+    private func waitWhilePeeksHeld() async throws {
+        while locked({ peekHold }) { try await Task.sleep(nanoseconds: 5_000_000) }
+    }
+
     /// With "peek" among `extraFeatures`, as the real backend: the reply's lines are also yielded as
     /// `.peek` events, ids that name no pane are skipped, and `lines` is brought into 1...8. Without
     /// it, `unknown_method`.
     public func peekSubscribe(panes: [PaneID]?, lines: Int) async throws -> [PanePeek] {
-        try locked {
-            peekAsks.append(.subscribe(panes: panes, lines: lines))
+        locked { peekAsks.append(.subscribe(panes: panes, lines: lines)) }
+        try await waitWhilePeeksHeld()
+        return try locked {
             guard extraFeatures.contains("peek") else {
                 throw BackendError(code: "unknown_method", message: "this fake wasn't made with the peek feature")
             }
@@ -346,8 +360,9 @@ public final class FakeBackend: SessionBackend, @unchecked Sendable {
     }
 
     public func peekUnsubscribe() async throws {
+        locked { peekAsks.append(.unsubscribe) }
+        try await waitWhilePeeksHeld()
         locked {
-            peekAsks.append(.unsubscribe)
             peekSubscription = nil
             peekSent.removeAll()
         }

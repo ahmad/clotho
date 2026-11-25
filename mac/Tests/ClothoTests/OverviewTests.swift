@@ -445,6 +445,122 @@ final class OverviewTests: XCTestCase {
         XCTAssertEqual(world.remote.peekCalls, [])
     }
 
+    /// A machine that has stopped answering holds up only its own peek requests.
+    func testAStalledMachineHoldsUpNoOthersPeeks() async throws {
+        let world = try await launch(remoteFeatures: ["peek"])
+        let app = world.app, overview = world.overview, fake = world.fake, remote = world.remote
+        defer { ChangesFixture.quit(app) }
+        remote.peeksHeld = true
+        fake.setPeek(world.working, lines: ["✓ agent object: needs_user"])
+
+        app.showOverview()
+        let all = [world.asking, world.working, world.done].sorted()
+        try await ChangesFixture.wait("the stalled machine asked") { remote.peekCalls == [.subscribe(panes: [world.far], lines: 8)] }
+        try await ChangesFixture.wait("this machine's subscription") { self.subscribed(fake, all) }
+        try await ChangesFixture.wait("this machine's rows") { world.card(world.working)?.peekRows.first?.stringValue == "✓ agent object: needs_user" }
+
+        // Every later request of this machine goes out too, each after the one before it. The stalled
+        // machine's own next one (its card is filtered away) waits for its first.
+        overview.query = "needs"
+        XCTAssertEqual(overview.shownCards.map(\.key), [world.key(world.asking)])
+        try await ChangesFixture.wait("the subscription for the filter") { self.subscribed(fake, [world.asking]) }
+        overview.query = ""
+        try await ChangesFixture.wait("the subscription again") { self.subscribed(fake, all) }
+        app.closeOverview()
+        try await ChangesFixture.wait("the unsubscription on close") { fake.peekCalls.last == .unsubscribe }
+        XCTAssertEqual(fake.peekCalls, [.subscribe(panes: all, lines: 8), .subscribe(panes: [world.asking], lines: 8), .subscribe(panes: all, lines: 8), .unsubscribe])
+        XCTAssertEqual(remote.peekCalls, [.subscribe(panes: [world.far], lines: 8)], "still not answered")
+        try await ChangesFixture.wait("nothing of this machine on its way") { app.overviewPeekRequests[AppDelegate.localKey] == nil }
+        XCTAssertNotNil(app.overviewPeekRequests[Self.devbox])
+
+        // It answers: its requests follow in the order they were made.
+        remote.peeksHeld = false
+        let far: [FakeBackend.PeekCall] = [.subscribe(panes: [world.far], lines: 8), .unsubscribe, .subscribe(panes: [world.far], lines: 8), .unsubscribe]
+        try await ChangesFixture.wait("the stalled machine's requests") { remote.peekCalls == far && app.overviewPeekRequests.isEmpty }
+    }
+
+    /// Left up in a window nobody can see (minimised, the app hidden, fully covered), it asks no daemon
+    /// for peeks, and asks again when the window is back.
+    func testPeeksStopWhileTheWindowIsOutOfSight() async throws {
+        let world = try await launch()
+        let app = world.app, overview = world.overview, fake = world.fake
+        defer { ChangesFixture.quit(app) }
+        final class Seen: @unchecked Sendable { var value = true }
+        let seen = Seen()
+        AppDelegate.windowIsSeen = { _ in seen.value }
+        fake.setPeek(world.asking, lines: ["● Bash(cargo test -p clothod)"])
+        let all = [world.asking, world.working, world.done].sorted()
+        func rows() -> String? { world.card(world.asking)?.peekRows.first?.stringValue }
+
+        app.showOverview()
+        try await ChangesFixture.wait("the subscription") { self.subscribed(fake, all) }
+        try await ChangesFixture.wait("the rows") { rows() == "● Bash(cargo test -p clothod)" }
+
+        let window: AnyObject = app.window, application: AnyObject = NSApp
+        let ways: [(what: String, out: Notification.Name, back: Notification.Name, object: AnyObject)] = [
+            ("minimised", NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, window),
+            ("hidden", NSApplication.didHideNotification, NSApplication.didUnhideNotification, application),
+            ("covered", NSWindow.didChangeOcclusionStateNotification, NSWindow.didChangeOcclusionStateNotification, window),
+        ]
+        for way in ways {
+            seen.value = false
+            NotificationCenter.default.post(name: way.out, object: way.object)
+            XCTAssertEqual(app.overviewPeeks.count, 0, way.what)
+            XCTAssertEqual(app.overviewPeekLines.count, 0, way.what)
+            XCTAssertEqual(rows(), "", way.what)
+            try await ChangesFixture.wait("the unsubscription, \(way.what)") { fake.peekCalls.last == .unsubscribe && app.overviewPeekRequests.isEmpty }
+            XCTAssertTrue(app.isOverviewShown, "it stays up")
+
+            // Out of sight, nothing asks: not the tick, not the filter, not a new card's sync.
+            let count = fake.peekCalls.count
+            overview.onTick?()
+            overview.query = "working"
+            overview.query = ""
+            app.overviewSeenChanged()
+            try await Task.sleep(nanoseconds: 100_000_000)
+            XCTAssertEqual(fake.peekCalls.count, count, way.what)
+            XCTAssertEqual(app.overviewPeeks.count, 0, way.what)
+
+            seen.value = true
+            NotificationCenter.default.post(name: way.back, object: way.object)
+            try await ChangesFixture.wait("the subscription again, \(way.what)") { self.subscribed(fake, all) }
+            XCTAssertEqual(fake.peekCalls.count, count + 1, way.what)
+            try await ChangesFixture.wait("the rows again, \(way.what)") { rows() == "● Bash(cargo test -p clothod)" }
+        }
+
+        // A change nobody told it of: the next tick finds the window seen and asks again.
+        seen.value = false
+        overview.onTick?()
+        try await ChangesFixture.wait("the unsubscription by the tick") { fake.peekCalls.last == .unsubscribe }
+        seen.value = true
+        overview.onTick?()
+        try await ChangesFixture.wait("the subscription by the tick") { self.subscribed(fake, all) }
+
+        // Shown while out of sight, it asks nothing until the window is seen; closed, the window coming
+        // back asks nothing.
+        app.closeOverview()
+        try await ChangesFixture.wait("the unsubscription on close") { fake.peekCalls.last == .unsubscribe && app.overviewPeekRequests.isEmpty }
+        let count = fake.peekCalls.count
+        seen.value = false
+        app.showOverview()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(fake.peekCalls.count, count)
+        seen.value = true
+        NotificationCenter.default.post(name: NSWindow.didDeminiaturizeNotification, object: window)
+        try await ChangesFixture.wait("the subscription once seen") { self.subscribed(fake, all) }
+        app.closeOverview()
+        try await ChangesFixture.wait("the last unsubscription") { fake.peekCalls.last == .unsubscribe && app.overviewPeekRequests.isEmpty }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(fake.peekCalls.count, count + 2)
+    }
+
+    func testTheWindowIsSeenRule() {
+        // The app's own rule reads the window: one that was never put on screen isn't seen.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: true)
+        XCTAssertFalse(AppDelegate.windowIsOnScreen(window))
+    }
+
     // MARK: The covered rule
 
     func testNothingUnderTheOverviewTakesTheKeyboard() async throws {

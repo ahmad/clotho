@@ -393,8 +393,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var overviewPeeks: [MachineKey: (panes: [PaneID], instance: String?)] = [:]
     /// The last lines each pane's daemon sent while the Overview shows, as sent.
     var overviewPeekLines: [PaneKey: [String]] = [:]
-    /// The peek requests, one after another: a subscription sent later is never overtaken by an earlier one.
-    var overviewPeekRequests: Task<Void, Never>?
+    /// Each machine's peek requests still on their way, one after another (`sendOverviewPeek`): the last
+    /// one's task and number. Machines don't wait for each other.
+    var overviewPeekRequests: [MachineKey: (serial: Int, task: Task<Void, Never>)] = [:]
+    var overviewPeekSerial = 0
+    var overviewSeenObservers: [NSObjectProtocol] = []
     /// Where the focus was when the inspector's list took the keyboard: it keeps it only while the focus
     /// stays there (`inspectorKeepsKeyboard`).
     var inspectorHold: FocusPlace?

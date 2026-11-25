@@ -106,7 +106,7 @@ A card shows:
 - the agent's mark, where it runs (Workspace › Tab) and for how long (**2 min**; **23 min ago** for a finished one);
 - what it asks or last said, on at most two lines (hover for all of it). A permission request reads as the request itself (**Allow Bash: cargo test**);
 - the machine and the agent (**devbox · Claude**), how long a finished turn took, and **muted**;
-- a live peek: the last two lines of its pane's screen, without the input box an agent's screen ends with. (This needs clothod 0.1.32 or later on that machine; without it the card has no peek.)
+- a live peek: the last two lines of its pane's screen, without the input box an agent's screen ends with. (This needs clothod 0.1.32 or later on that machine; without it the card has no peek. Peeks pause while the window is minimised, hidden or fully covered, and come back with it.)
 - its branch and the lines added and removed in the work tree, or **no repo**.
 
 With the keyboard in the cards:
