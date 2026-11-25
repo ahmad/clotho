@@ -133,7 +133,7 @@ hooks). `clothod hooks print|install|uninstall claude|codex|gemini|copilot` mana
 and `clothod hooks status` says what is installed. `install` edits the user's agent configuration, so apps
 run it only after the user confirms.
 
-Any other program can mark its pane too, with nothing installed:
+Any other program can mark its pane too, with nothing installed (since 0.1.33):
 
 ```sh
 clothod report --state waiting --message "Deploy needs approval"         # "Needs you", pushed to the phone
@@ -185,9 +185,16 @@ Limits (cases the rule cannot tell apart):
 - At an interactive prompt, the shell's own builtins are not a job: after
   `printf '…working…'; read x` the status is removed in 1 to 2 s. So is one from a shell that
   reads its script from its input (`sh < build.sh`).
+- A `clothod report` typed at an interactive prompt, or run by a script sourced into it
+  (`. ./build.sh`), ends with the reporter itself: a running status goes within about a
+  second. Report from a job or a script that goes on running.
 - A shell with an option value the rule does not know, or with an unreadable argv (on macOS, a
   shell running as another user: `su`, `sudo -s`), counts as a program: a status at its prompt
   lasts while it is in the foreground.
+- A shell started with an option the rule misreads is taken for a prompt or for a program,
+  with that one's lifetime: `bash -C script` (`-C` is read as taking a value, so the shell
+  reads as one at its prompt) and a single-dash long option with a `c` in it, `elvish -norc`
+  (read as `-c`, so the shell counts as a program).
 - In a pane that runs its program directly, a status a short helper reported lasts until the
   pane closes, or the program reports again or clears it.
 

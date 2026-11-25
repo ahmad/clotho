@@ -156,7 +156,8 @@ The first request on a connection must be `hello`. Any other request gets `hands
   `kind`, `agent.report`'s `needs_user`, and reports from scripts, see
   [Reporting from your own scripts](#reporting-from-your-own-scripts)) and `git.changes.token`
   (`changes.token` in a pane's `git` and `token` in the `git.changes` reply, see
-  [Changes](#changes)). The last four came after 0.1.32 without a version of their own.
+  [Changes](#changes)). The last four are since 0.1.33; see
+  [What changes for clients in 0.1.33](#what-changes-for-clients-in-0133).
   Builds share version numbers, so check
   `features` rather than `version`, and treat a missing list as none of them.
 - `protocol` is an integer. The daemon accepts protocol versions in `[protocol_min,
@@ -214,7 +215,7 @@ instance (the default runtime dir).
    - **The wait follows the serve that is starting**, not a fixed time. A serve takes
      `clothod.lock` in the runtime dir, writes its pid into it, recovers its panes and only
      then answers on the socket; with many panes, or on a loaded machine, that takes a while.
-     (Before, `start` gave up after 10 s and the upgrade after 30 s, and then started or rolled
+     (Since 0.1.33. Before, `start` gave up after 10 s and the upgrade after 30 s, and then started or rolled
      back next to a serve that was merely slow.)
      - `start` gives a serve 10 s to appear. After that it waits for as long as one is alive
        (the one it started, or the one that holds the lock), and never starts a second one next
@@ -328,7 +329,7 @@ the life of the object and never reused within an `instance`.
   - `restored` is `null`, or `{"at", "agent", "session"}` for a pane brought back after a
     restart; see [Restore after restart](#restore-after-restart).
   - `git` is `null` outside a git work tree; see [Git](#git).
-  - `progress` (feature `pane.progress`) is `null`, or what the pane's program says about how
+  - `progress` (feature `pane.progress`, since 0.1.33) is `null`, or what the pane's program says about how
     far it is: `{"state": "running" | "error" | "indeterminate" | "paused", "percent": 0..100 |
     null}`. `percent` is a whole number, `null` when the program gave none (always for
     `indeterminate`). Treat an unknown `state` as `running`.
@@ -540,7 +541,7 @@ tree, and two requests list the files and give one file's diff.
   files, 1 MiB each and 8 MiB in all per run; the ones past that add nothing.
 - `changes.reason` is `null`, or says why `branch` is `null` although there is a base: git
   failed on that part (`timeout`, `too_large`, `partial_clone`, `error`). `uncommitted` stands.
-- `changes.token` (feature `git.changes.token`) is 16 hex characters that stand for what the
+- `changes.token` (feature `git.changes.token`, since 0.1.33) is 16 hex characters that stand for what the
   list and the diffs would show now. It changes whenever any of that changes, also when the
   counts stay the same (a line edited in place, one file renamed to another name). See
   "The change token" below. Absent on a daemon without the feature.
@@ -572,7 +573,7 @@ once in the whole daemon, these requests included. So an edit made in a pane sho
 seconds, and one made elsewhere (an editor outside Clotho) within 15 s. A new summary comes as
 a `pane` event, and only when its numbers or its `token` changed.
 
-**The change token.** Feature `git.changes.token`. The counts can't tell a client that its list
+**The change token.** Feature `git.changes.token`, since 0.1.33. The counts can't tell a client that its list
 or its open diff is stale: editing a changed file again often leaves `files`, `added` and
 `removed` as they were. `token` can.
 
@@ -646,7 +647,7 @@ What a client does with it:
   `merge_base` are 7-character shas.
 - The reply also becomes the panes' `changes` summary, so the list a client shows and the
   counts on the pane agree.
-- `token` (top-level, feature `git.changes.token`) is the change token of this list: the value
+- `token` (top-level, feature `git.changes.token`, since 0.1.33) is the change token of this list: the value
   the panes' `changes.token` has while nothing changed since. See "The change token" above.
 - Errors: `not_found` (no such pane), `not_a_repo` (the pane's cwd is in no work tree),
   `no_git`, `git_unsupported`, `timeout`, `git_failed` (git's first line as the message; also
@@ -878,8 +879,8 @@ frame.
 
 | `agent.decide` | `pane`, `request` (an id from the agent's `requests`), `decision` (`"allow"` or `"deny"`), `message?` (for deny: told to the agent, at most 300 chars) | `{}`. Answers that request only, once: `stale` if it was already answered, retired (answered in the terminal, the turn ended, its hook went away) or never existed. See [Permission requests](#permission-requests) |
 | `agent.permission` | `pane`, `pid`, `tool`, `tool_input?`, `key`, `kind?`, `session?` | Sent by `clothod report --claude-permission` (Claude Code's PermissionRequest hook), not by apps. The reply waits until a client decides: `{"decision": "allow"\|"deny", "message"?}`, or `{"retired": true}` |
-| `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both), `tail?` (the end of the agent's last reply, at most 600 chars; since 0.1.31, feature `alerts`), `needs_user?` (a bool: the reporter's own answer to "does the user have to act"; feature `agent.kinds`). `kind` is any name: it is lowercased and kept when it is 1 to 32 of `a-z 0-9 . _ -`, and is `other` otherwise | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
-| `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it). During a settle window (`settling`) it cancels the pending rise instead. A pane-bound agent (every `source: "osc"` agent, and a report from a script) in `waiting`, `done` or `error` is removed by it (the pane's `agent` is `null` after) unless the program that reported it still runs: then it stays, with `attention` false, until that program exits. See [Agents](#agents), Clearing |
+| `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both), `tail?` (the end of the agent's last reply, at most 600 chars; since 0.1.31, feature `alerts`), `needs_user?` (a bool: the reporter's own answer to "does the user have to act"; since 0.1.33, feature `agent.kinds`). `kind` is any name (since 0.1.33; before, a name other than `claude` or `codex` became `other`): it is lowercased and kept when it is 1 to 32 of `a-z 0-9 . _ -`, and is `other` otherwise | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
+| `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it). During a settle window (`settling`) it cancels the pending rise instead. Since 0.1.33: a pane-bound agent (every `source: "osc"` agent, and a report from a script) in `waiting`, `done` or `error` is removed by it (the pane's `agent` is `null` after) unless the program that reported it still runs: then it stays, with `attention` false, until that program exits. Every other agent stays after an ack, as before. See [Agents](#agents), Clearing |
 | `agent.history` | `pane`; optional `limit` (1–200, default 200), `since` (unix seconds: entries after it), `session` | `{"pane", "entries": [..], "max": 200}`, oldest first; see [Agent history](#agent-history) |
 | `agent.mute` | `pane`, `muted` (bool) | `{"agent": <agent>}`: mutes or unmutes the pane's agent; see [Agents](#agents). `not_found` if the pane has no agent |
 
@@ -1164,9 +1165,9 @@ otherwise:
 
 | field | |
 |---|---|
-| `kind` | which agent it is: `"claude"`, `"codex"`, `"opencode"`, `"gemini"`, `"copilot"`, `"aider"`, `"amp"`, `"cursor"`, `"other"`, **or any name a reporter gave** (`clothod report --kind deploy`, OSC 7501's `app`): lowercase, 1 to 32 of `a-z 0-9 . _ -`, anything else becomes `"other"`. `"other"` is also a program that only sent a notification. **Clients show a kind they don't know by its name** (as text, with a generic icon), never hide it or fail on it. Before the `agent.kinds` feature only `claude`, `codex` and `other` occur |
+| `kind` | which agent it is: `"claude"`, `"codex"`, `"opencode"`, `"gemini"`, `"copilot"`, `"aider"`, `"amp"`, `"cursor"`, `"other"`, **or any name a reporter gave** (`clothod report --kind deploy`, OSC 7501's `app`): lowercase, 1 to 32 of `a-z 0-9 . _ -`, anything else becomes `"other"`. `"other"` is also a program that only sent a notification. **Clients show a kind they don't know by its name** (as text, with a generic icon), never hide it or fail on it. Before the `agent.kinds` feature (since 0.1.33) only `claude`, `codex` and `other` occur |
 | `state` | `"starting"`, `"running"`, `"waiting"` (needs the user: a permission prompt, a question, idle after being asked something), `"done"` (the turn finished), `"error"`. Clients treat unknown values as unknown |
-| `source` | `"hook"` (the agent reports through `clothod report`), `"detected"` (inferred from the pane's processes and output) or `"osc"` (a program in the pane sent a terminal notification or status sequence: OSC 9, 99, 777 or 7501; feature `agent.osc`, see [Notifications from any program](#notifications-from-any-program)). Since 0.1.22 a hook-reported agent, with its session, state and turn, is kept across serve restarts and upgrades while its process lives, without new events; before, it reappeared only with its next hook report. Its `requests` are not kept: their hooks were connected to the previous process |
+| `source` | `"hook"` (the agent reports through `clothod report`), `"detected"` (inferred from the pane's processes and output) or `"osc"` (a program in the pane sent a terminal notification or status sequence: OSC 9, 99, 777 or 7501; since 0.1.33, feature `agent.osc`, see [Notifications from any program](#notifications-from-any-program)). Since 0.1.22 a hook-reported agent, with its session, state and turn, is kept across serve restarts and upgrades while its process lives, without new events; before, it reappeared only with its next hook report. Its `requests` are not kept: their hooks were connected to the previous process |
 | `message` | what the agent says, or `null`. For `waiting`, the prompt it shows ("Claude needs your permission to use Bash"); for `done`, the start of the reply its turn ended with (Claude Code's `last_assistant_message`, Codex's `last-assistant-message`: whitespace collapsed to one line, at most 300 chars); for `error`, the error |
 | `prompt` | the first line of the prompt the user typed for the current turn (at most 120 chars), or `null`: no prompt yet, or a turn the user didn't type (started by another agent's message or a finished background task; the wrapper text is never shown) |
 | `tool`, `tool_input` | the last tool the agent used in this turn (`"Bash"`) and its key input (`"npm test"`, at most 160 chars: Bash's command, the file of Read/Write/Edit, the pattern of Glob/Grep, the URL, the query, a task's description, else the first text field), or `null`. Cleared by a new turn and by a wait that isn't a permission prompt, so while `waiting` they say what the permission is for |
@@ -1192,7 +1193,7 @@ event too, with `from` equal to the state.
 **Clearing:** the field goes back to `null` when the agent reports that its session ended, when
 the agent's process exits (it's watched by pid), or when the pane closes.
 
-**Pane-bound agents** (feature `agent.osc` or `agent.kinds`) are the exception to "watched by
+**Pane-bound agents** (since 0.1.33, feature `agent.osc` or `agent.kinds`) are the exception to "watched by
 pid". A notification usually comes from a program that is about to exit: a build script prints
 "Build finished" and ends, and the alert must outlive it. So these agents belong to the pane,
 not to a process:
@@ -1286,10 +1287,20 @@ not to a process:
       removed 1 to 2 s after the report although the line still runs. (Run it as a script or
       in a subshell, or use `clothod report` from a job.) The same holds for a shell that
       reads its script from its input (`sh < build.sh`): its argv is an interactive shell's.
+    - A `clothod report` typed at an interactive prompt, or run by a script sourced into it
+      (`. ./build.sh`), is a foreground job of its own, and that job is the reporter. What
+      ends with its owner ends with the reporter: a `running` status goes within about a
+      second. Report from a job or a script that goes on running (`./build.sh`).
     - A shell with an option whose value this rule does not know (the value reads as a script
       operand), or whose argv cannot be read (on macOS, a shell running as another user:
       `su`, `sudo -s`), counts as a program: a status at its prompt lasts while it is in the
       foreground, or until the pane closes when it is the pane's first process.
+    - A shell started with an option this rule misreads is taken for the wrong one of the
+      two, with that one's lifetime. `bash -C script`: `-C` is read as taking a value (it
+      does in fish), so the script reads as that value and the shell as one at its prompt,
+      and a status from that script can be removed after 1 to 2 s although the script
+      runs. `elvish -norc`: a single-dash word with a `c` in it reads as `-c`, so the shell
+      counts as a program, and a status at its prompt lasts while it is in the foreground.
     - In a pane that runs its program directly, a status with no owner lasts until the pane
       closes, the program reports again or clears it: also when a short helper reported it
       and the program has long moved on to something else.
@@ -1322,7 +1333,7 @@ not to a process:
 
 ### Notifications from any program
 
-Feature `agent.osc`. Terminals have long had escape sequences with which a program says "tell
+Feature `agent.osc`, since 0.1.33. Terminals have long had escape sequences with which a program says "tell
 the user": a finished build, a prompt that waits. The daemon reads four of them from every
 pane's output, and the pane shows as an agent that needs the user. Nothing is installed, and the
 program doesn't have to know Clotho. Each ends with BEL or ST, like any OSC.
@@ -1332,7 +1343,7 @@ program doesn't have to know Clotho. Each ends with BEL or ST, like any OSC.
 | sequence | read as |
 |---|---|
 | `OSC 9 ; <text>` | a notification with that text (iTerm2's form). The text may hold `;` |
-| `OSC 9 ; 4 ; <st> [; <percent>]` | progress (ConEmu's form): `st` 1 running, 2 error, 3 indeterminate, 4 paused, each with the percent when given (0 to 100, more reads as 100; never for 3); `st` 0 clears it. It sets the pane's `progress` (see [state.get](#stateget) pane fields), not an agent |
+| `OSC 9 ; 4 ; <st> [; <percent>]` | progress (ConEmu's form): `st` 1 running, 2 error, 3 indeterminate, 4 paused, each with the percent when given (0 to 100, more reads as 100; never for 3); `st` 0 clears it. It sets the pane's `progress` (see the pane fields under [Model](#model)), not an agent |
 | `OSC 777 ; notify ; <title> ; <body>` | a notification (rxvt-unicode's form). The body may hold `;` |
 | `OSC 99 ; <metadata> ; <payload>` | a notification (kitty's form), see below |
 | `OSC 7501 ; <fields>` | a status report (the Program Status Protocol), see [OSC 7501](#osc-7501) |
@@ -1389,7 +1400,7 @@ Claude.
 
 `progress` (OSC 9;4, OSC 7501 `progress`) is not in this table: it is taken in every pane and
 sets the pane's `progress`, never an agent (see the pane fields under
-[state.get](#stateget)).
+[Model](#model)).
 
 The rule in the last row is "the hook wins". An agent that reports through hooks says exactly
 what it does, and Claude Code and others also print a notification sequence for the same
@@ -1486,7 +1497,7 @@ What a report becomes:
 
 ### Reporting from your own scripts
 
-Feature `agent.kinds`. A script, a deploy, a long test run can put itself in the Agents list and
+Feature `agent.kinds`, since 0.1.33. A script, a deploy, a long test run can put itself in the Agents list and
 on the phone, in two ways. Both work in any Clotho pane, on any machine, with nothing installed.
 
 With `clothod report`, when the script should say exactly what it means (the binary is on the
@@ -1615,13 +1626,13 @@ reported, so the answer is usually there when the settle window ends
     set on a normal instance, that variable replaces `claude` too.
 - **Off switch:** the `notification_rewrite` setting (see [Settings](#settings)). Off, `summary`
   is the cleaned original, `needs_user` is the heuristic's, and nothing runs.
-- **Never for text from a pane's output:** text from a terminal notification or OSC 7501 is
+- **Never for text from a pane's output** (since 0.1.33): text from a terminal notification or OSC 7501 is
   not sent to the model. That is every agent with `source: "osc"`, and a `detected` agent
   whose `message` is a notification's text (one it took, or one it kept from the `osc` agent
   it replaced), until a guess or a hook report replaces that message. `summary` is the cleaned
   message and `needs_user` comes from the state and the heuristic
   ([Notifications from any program](#notifications-from-any-program)).
-- **A reporter's own label:** an `agent.report` with `needs_user` (`clothod report --needs-user
+- **A reporter's own label** (since 0.1.33, feature `agent.kinds`): an `agent.report` with `needs_user` (`clothod report --needs-user
   yes|no`) fixes the label of a `done`: neither the model's label nor the heuristic replaces
   it. It holds until the next report that has other text and doesn't send `needs_user`; then
   the label is decided as usual. The rewrite of the text still runs for a hook-sourced report.
@@ -1713,12 +1724,12 @@ The rules:
   known), inside the ciphertext. The `/v1/push` body gets `"silent": true`, in the clear, only
   for state `done` with `needs_user` false, so the relay can leave the sound out; it is never
   sent as false. docs/push.md has the record and the relay's side.
-  The record's `tb` is now the Tab's title **as the apps show it**, and is always there: the
+  Since 0.1.33 the record's `tb` is the Tab's title **as the apps show it**, and is always there: the
   name the user gave the Tab; else its active pane's title, without a leading status glyph
   (Claude Code's ✳, a spinner) and with a bare "Claude Code" replaced by the folder's name;
   else the name of the pane's folder; else "Shell". It is cut to the record's cap for names
   (96 bytes). Earlier daemons sent `tb` only for a Tab the user had named, so a phone's title
-  lacked the Tab where the app's own banner had it. `k` may now be any kind name.
+  lacked the Tab where the app's own banner had it. Since 0.1.33 `k` may be any kind name.
 - **Decision log.** Every push decision is one line in `clothod.log`:
   `push <sent|held|dropped> pane=<id> agent=<kind> state=<state>
   label=<needs-you|done|unknown> [silent] [devices=<n>] [reason=<why>]`. `<kind>` may be a
@@ -1765,7 +1776,7 @@ What a client does:
   `$CLOTHOD_REPORT` overrides the binary, for tests and dev builds.
 - Without hooks, the daemon detects agents by looking at the pane's foreground process group (the
   terminal's `tpgid`, with the process name and argv from `/proc` or `libproc`): a process of a
-  known agent (`claude`, `codex`, and with `agent.kinds` `opencode`, `gemini`, `copilot`,
+  known agent (`claude`, `codex`, and with `agent.kinds`, since 0.1.33, `opencode`, `gemini`, `copilot`,
   `aider`, `amp`, `cursor`; see the table below) means an agent of that `kind` with
   `source: "detected"`. `claude` and `codex` match on any of the process's names (the
   executable, the process name, the first arguments). The others match the process's own name
@@ -1816,14 +1827,14 @@ clothod report --codex-notify JSON # Codex's notify payload (agent-turn-complete
   still works). The daemon normalises it: lowercase, 1 to 32 of `a-z 0-9 . _ -`, and anything
   else becomes `other`. Without one the kind is that of the
   pane's current hook-reported agent, else `other`.
-- `--needs-user yes|no` is the report's `needs_user` (see `agent.report` and
+- `--needs-user yes|no` (since 0.1.33) is the report's `needs_user` (see `agent.report` and
   [Notification text](#notification-text)): for a `done`, whether it shows as "Needs you" or
   as a plain "Done". `--tail` is `agent.report`'s `tail`.
 - **Hooks never fail an agent.** Without `--state` (a bare state word, `--claude-hook`,
   `--gemini-hook`, `--codex-notify`, `--claude-permission`) it prints nothing and exits 0
   whatever happens, as before, and skips what it can't read: an installed hook must keep
   working whatever a newer agent passes it.
-- **With `--state` it says what went wrong.** That is the form to type or to put in a script.
+- **With `--state` (since 0.1.33) it says what went wrong.** That is the form to type or to put in a script.
   It prints nothing and exits 0 when the pane's daemon took the report. Otherwise it prints
   `clothod report: <why>` on stderr and exits:
   - **2** for a usage error, with the usage line after it: `unknown state `<word>``,
@@ -1881,7 +1892,7 @@ clothod hooks status                                  # installed or not, per ag
 | `gemini` | `~/.gemini/settings.json` (its `hooks` object has Claude Code's shape) |
 | `copilot` | `$COPILOT_HOME/hooks/clotho.json`, by default `~/.copilot/hooks/clotho.json`: a file of clotho's own, since Copilot CLI loads every `*.json` there |
 
-Gemini CLI and Copilot CLI (feature `agent.kinds`):
+Gemini CLI and Copilot CLI (feature `agent.kinds`, since 0.1.33):
 
 - **Gemini CLI.** The hooks run `clothod report --gemini-hook`, which reads Gemini's hook JSON
   on stdin: `SessionStart` → starting; `BeforeAgent` → running, with its `prompt`;
@@ -2414,3 +2425,40 @@ A PTY has one size, but several clients may show a pane. The rules:
 - `protocol` goes up only for breaking changes.
 - The daemon may add fields to the model (for example `agent` status on panes) without a version
   bump.
+
+### What changes for clients in 0.1.33
+
+Everything here is behind a feature in `hello`'s `features`. `protocol` did not change, and a
+client that knows none of it keeps working against 0.1.33.
+
+- **More agent kinds** (`agent.kinds`). An agent's `kind` may also be `opencode`, `gemini`,
+  `copilot`, `aider`, `amp`, `cursor`, or any name a reporter chose (lowercase, 1 to 32 of
+  `a-z 0-9 . _ -`). Show a kind you have no name for as its own text with a generic icon;
+  never hide the agent or fail on it. Only `claude` agents have `requests`.
+  [Agents](#agents) has the table.
+- **`source: "osc"`** (`agent.osc`). A third value beside `hook` and `detected`: any program
+  in the pane sent a terminal notification or a status. Treat it like any agent: notify and
+  badge on `attention`, word it by `needs_user`, acknowledge with `agent.ack`. Its `message`
+  and `summary` are plain text from the pane's output: no Markdown, no links. A client that
+  answers terminal queries itself must not answer `OSC 7501 ; ?`. See
+  [Notifications from any program](#notifications-from-any-program).
+- **`agent.ack` may leave the agent in place.** On a pane-bound agent (every `osc` agent, and a
+  script's `clothod report`) the ack removes the agent when its program is gone, and leaves
+  it with `attention` false while that program still runs. Show what the events after the
+  ack carry; don't remove the row yourself, and don't assume `null`. See [Agents](#agents),
+  Clearing.
+- **`progress` on a pane** (`pane.progress`). `null`, or `{"state", "percent"}`. Draw it (a bar
+  or ring on the pane's Tab, and on the agent's row when the pane has an agent). It is not an
+  agent and never an alert, and arrives in `pane` events at most once a second. See the pane
+  fields under [Model](#model).
+- **The change token** (`git.changes.token`). `changes.token` in a pane's `git`, and `token` in
+  the `git.changes` reply. With the feature, stop refreshing `git.changes` and `git.diff` on a
+  timer: hold the token of what is shown and reload when a `pane` event brings another. See
+  [Changes](#changes), "The change token".
+- **`needs_user` on `agent.report`**, and `clothod report --needs-user yes|no`. For reporters,
+  not for apps: it fixes whether a `done` shows as "Needs you" or "Done". Apps read the agent's
+  `needs_user` as before.
+- **Push records.** `tb` is always there and is the Tab's title as the apps show it (before,
+  only a name the user gave the Tab), and `k` may be any kind name. A phone that builds its
+  title from `tb` needs no change beyond not expecting it to be absent. docs/push.md has the
+  record.
