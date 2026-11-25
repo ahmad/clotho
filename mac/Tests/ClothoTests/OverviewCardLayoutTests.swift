@@ -113,23 +113,127 @@ final class OverviewCardLayoutTests: XCTestCase {
             let two = OverviewCardView.twoLineHeight(of: view.message, width: view.message.frame.width)
             XCTAssertGreaterThan(view.message.frame.height, 0)
             XCTAssertLessThan(view.message.frame.height, two, "\(factor)")
-            XCTAssertEqual(view.sub.frame.minY, view.message.frame.maxY + s(1), accuracy: 0.01)
+            XCTAssertEqual(view.sub.frame.minY, view.message.frame.maxY + OverviewCardView.pad(1))
         }
     }
 
+    /// How many pixel rows of the label have something drawn in them.
+    private func inkedRows(_ label: NSView) throws -> Int {
+        let rep = try XCTUnwrap(label.bitmapImageRepForCachingDisplay(in: label.bounds))
+        label.cacheDisplay(in: label.bounds, to: rep)
+        let data = try XCTUnwrap(rep.bitmapData)
+        let bytes = rep.bitsPerPixel / 8
+        return (0..<rep.pixelsHigh).filter { y in (0..<(rep.pixelsWide * bytes)).contains { data[y * rep.bytesPerRow + $0] != 0 } }.count
+    }
+
+    /// The label draws every pixel row of its glyphs: as many as it draws with room to spare under it
+    /// (the same label in the same place, made taller for the count).
+    private func assertNothingCut(_ label: NSTextField, _ what: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertEqual(label.superview?.isFlipped, true, "its top stays where it is", file: file, line: line)
+        let frame = label.frame
+        let drawn = try inkedRows(label)
+        label.frame.size.height = frame.height + 40
+        let whole = try inkedRows(label)
+        label.frame = frame
+        XCTAssertGreaterThan(whole, 0, what, file: file, line: line)
+        XCTAssertEqual(drawn, whole, "glyph rows drawn of \u{201C}\(label.stringValue)\u{201D}, \(what)", file: file, line: line)
+    }
+
     /// The one-line labels (the place, the age, the dim line, the peek's two rows, the branch, the counts)
-    /// have their line's height at every zoom.
+    /// are as tall as their cells need at every zoom and both widths, and sit whole inside their blocks.
     func testOneLineLabelsHaveTheirLinesHeightAtEveryZoom() throws {
         for factor in steps {
             UIScale.factor = factor
-            let view = show(try card(message: Self.long), width: s(250))
-            XCTAssertFalse(view.peek.isHidden)
-            for label in [view.place, view.age, view.sub, view.branch, view.counts] + view.peekRows {
-                XCTAssertFalse(label.stringValue.isEmpty)
-                let needs = try XCTUnwrap(label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10000, height: 10000)).height)
-                // Within a point: one line can't lose a line (the dim line is 0.4 pt under its cell's height at 90 %).
-                XCTAssertGreaterThan(label.frame.height, needs - 1, "\u{201C}\(label.stringValue)\u{201D} at \(Int((factor * 100).rounded())) %")
+            for width in [s(250), s(420)] {
+                let view = show(try card(message: Self.long), width: width)
+                let what = "\(Int((factor * 100).rounded())) % at \(width)"
+                XCTAssertFalse(view.peek.isHidden)
+                XCTAssertEqual(view.frame.height, OverviewCardView.height)
+                XCTAssertEqual(OverviewCardView.height, OverviewCardView.height.rounded(), "whole points, \(what)")
+                for label in [view.place, view.age, view.sub, view.branch, view.counts] + view.peekRows {
+                    XCTAssertFalse(label.stringValue.isEmpty)
+                    let needs = try XCTUnwrap(label.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10000, height: 10000)).height)
+                    XCTAssertGreaterThanOrEqual(label.frame.height, needs, "\u{201C}\(label.stringValue)\u{201D}, \(what)")
+                    XCTAssertEqual(label.frame.minY, label.frame.minY.rounded(), "on a whole point, \(what)")
+                    XCTAssertTrue(label.superview?.bounds.contains(label.frame) == true, "\u{201C}\(label.stringValue)\u{201D} inside its block, \(what)")
+                }
+                // The two lines the card keeps room for are the message's own.
+                XCTAssertLessThanOrEqual(OverviewCardView.twoLineHeight(of: view.message, width: view.message.frame.width),
+                                         OverviewCardView.textHeight(OverviewCardView.messageFont, lines: 2), what)
+                // The blocks: one under the other, inside the card.
+                XCTAssertLessThanOrEqual(view.place.frame.maxY, view.message.frame.minY, what)
+                XCTAssertLessThanOrEqual(view.message.frame.maxY, view.sub.frame.minY, what)
+                XCTAssertLessThanOrEqual(view.sub.frame.maxY, view.peek.frame.minY, what)
+                XCTAssertLessThanOrEqual(view.peekRows[0].frame.maxY, view.peekRows[1].frame.minY, what)
+                XCTAssertEqual(view.peek.frame.maxY, view.footer.frame.minY, what)
+                XCTAssertEqual(view.footer.frame.maxY, view.bounds.maxY, what)
+                XCTAssertTrue(view.bounds.contains(view.peek.frame) && view.bounds.contains(view.footer.frame), what)
             }
+        }
+    }
+
+    /// Drawn: no pixel row of a glyph is cut in the title row, the dim line, the peek's rows or the
+    /// footer, at every zoom (80 % and 90 % were where rows were short).
+    func testNoGlyphRowIsCutAtAnyZoom() throws {
+        for factor in steps {
+            UIScale.factor = factor
+            for width in [s(250), s(420)] {
+                // Two lines and no more at either width, so a taller label draws nothing else.
+                let view = show(try card(message: "Asks which (gjpqy) option to build, A or B [gjpqy]?"), width: width)
+                view.message.maximumNumberOfLines = 2
+                // Letters with tails and tall ones. No box-drawing characters: those fill a terminal's
+                // row and past it by design.
+                view.setPeek(["  gjpqy (Which) [should] I build?", "  Updated with 9 additions, gjpqy"])
+                view.layoutSubtreeIfNeeded()
+                let what = "\(Int((factor * 100).rounded())) % at \(width)"
+                for label in [view.place, view.age, view.sub, view.branch, view.counts] + view.peekRows {
+                    try assertNothingCut(label, what)
+                }
+                try assertNothingCut(view.message, what)
+                let short = show(try card(message: "Both pages build, gjpqy."), width: width)
+                XCTAssertEqual(short.message.frame.height, OverviewCardView.textHeight(OverviewCardView.messageFont), what)
+                try assertNothingCut(short.message, what)
+            }
+        }
+    }
+
+    /// The Overview's own lines the same way: the title, the line saying why a key did nothing, the
+    /// filter, Back and a lane's header are as tall as their cells need, inside their rows, and drawn whole.
+    func testTheTitleRowAndLaneHeadersHaveTheirHeightAtEveryZoom() throws {
+        window.setContentSize(NSSize(width: 1500, height: 500))
+        let overview = OverviewView(frame: NSRect(x: 0, y: 0, width: 1500, height: 500))
+        window.contentView?.addSubview(overview)
+        defer { overview.showNote(nil) }
+        let card = try card(message: Self.long)
+        overview.update(lanes: [(lane: card.lane, cards: [card])])
+        func needs(_ control: NSControl) throws -> CGFloat {
+            try XCTUnwrap(control.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10000, height: 10000)).height)
+        }
+        for factor in steps {
+            UIScale.factor = factor
+            let what = "\(Int((factor * 100).rounded())) %"
+            overview.applyScale()
+            overview.showNote(AppDelegate.besideSameTab)
+            overview.layoutSubtreeIfNeeded()
+            for control in [overview.titleLabel, overview.noteLabel, overview.filterField, overview.backButton] as [NSControl] {
+                XCTAssertGreaterThanOrEqual(control.frame.height, try needs(control), "\(type(of: control)) \u{201C}\(control.stringValue)\u{201D}, \(what)")
+                XCTAssertGreaterThanOrEqual(control.frame.minY, 0, what)
+                XCTAssertLessThanOrEqual(control.frame.maxY, OverviewView.titleHeight, "in the title row, \(what)")
+            }
+            XCTAssertGreaterThanOrEqual(overview.filterField.frame.height, overview.filterField.intrinsicContentSize.height, what)
+            XCTAssertLessThan(overview.noteLabel.frame.maxY, OverviewView.titleHeight, "the line fits after the title here")
+            try assertNothingCut(overview.titleLabel, what)
+            try assertNothingCut(overview.noteLabel, what)
+
+            let lane = try XCTUnwrap(overview.laneViews[card.lane])
+            let view = try XCTUnwrap(overview.cardViews[card.key])
+            XCTAssertGreaterThanOrEqual(lane.header.frame.height, try needs(lane.header), "the lane's header, \(what)")
+            XCTAssertTrue(lane.bounds.contains(lane.header.frame), what)
+            XCTAssertLessThanOrEqual(lane.header.frame.maxY, view.frame.minY, what)
+            XCTAssertEqual(view.frame.minY, view.frame.minY.rounded(), "the card starts on a whole point, \(what)")
+            XCTAssertEqual(lane.frame.minY, lane.frame.minY.rounded(), what)
+            XCTAssertEqual(view.frame.height, OverviewCardView.height, what)
+            try assertNothingCut(lane.header, what)
         }
     }
 }

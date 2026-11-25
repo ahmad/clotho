@@ -495,7 +495,7 @@ final class OverviewTests: XCTestCase {
         try await ChangesFixture.wait("the override shown") { world.card(world.done)?.peekRows.first?.stringValue == "abc<U+202E>def" }
         XCTAssertEqual(world.card(world.done)?.peekRows.last?.stringValue, "")
         for row in world.card(world.done)?.peekRows ?? [] {
-            XCTAssertTrue(row.usesSingleLineMode)
+            XCTAssertEqual(row.maximumNumberOfLines, 1)
             XCTAssertEqual(row.lineBreakMode, .byTruncatingTail)
         }
         // The input box an agent's screen ends with, and its hints, aren't shown.

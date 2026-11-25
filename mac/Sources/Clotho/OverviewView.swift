@@ -66,9 +66,48 @@ final class OverviewLaneView: OverviewFlippedView {
 
 /// One agent's card. One element for VoiceOver: a button whose label is the whole card.
 final class OverviewCardView: NSView {
-    static var height: CGFloat { s(136) }
-    static var peekHeight: CGFloat { s(36) }
-    static var footerHeight: CGFloat { s(22) }
+    // The card's fonts at the app's zoom.
+    static var placeFont: NSFont { .systemFont(ofSize: s(12), weight: .semibold) }
+    static var ageFont: NSFont { .systemFont(ofSize: s(11)) }
+    static var messageFont: NSFont { .systemFont(ofSize: s(12)) }
+    static var subFont: NSFont { .systemFont(ofSize: s(11)) }
+    static var peekFont: NSFont { AppDelegate.terminalFont(size: s(10)) }
+    static var footerFont: NSFont { AppDelegate.terminalFont(size: s(10.5)) }
+
+    /// Padding at the app's zoom, in whole points: nothing on a card sits between two pixels.
+    static func pad(_ points: CGFloat) -> CGFloat { max(1, s(points).rounded()) }
+
+    /// The height a label needs for this many lines of a font: what its cell asks for, and never less
+    /// than the lines' own height (for a fixed-width font the cell asks for less than a line, and a label
+    /// shorter than its line draws it cut). Every line on a card has this height, never a constant times
+    /// the zoom: each line is rounded up, so at some zooms a scaled constant is short of the text.
+    static func textHeight(_ font: NSFont, lines: Int = 1) -> CGFloat {
+        let key = "\(font.fontName) \(font.pointSize) \(lines)"
+        if let known = textHeights[key] { return known }
+        let label = lines > 1 ? NSTextField(wrappingLabelWithString: Array(repeating: "Ag", count: lines).joined(separator: "\n")) : NSTextField(labelWithString: "Ag")
+        label.font = font
+        // A line as it is drawn: its ascent and its descent, each on whole pixels.
+        let line = max(ceil(NSLayoutManager().defaultLineHeight(for: font)), ceil(font.ascender) + ceil(-font.descender) + ceil(max(0, font.leading)))
+        let height = max(ceil(label.cell?.cellSize(forBounds: CGRect(x: 0, y: 0, width: 10000, height: 10000)).height ?? 0), line * CGFloat(lines))
+        textHeights[key] = height
+        return height
+    }
+    private static var textHeights: [String: CGFloat] = [:]
+
+    /// The place and the age, on one row.
+    static var titleRowHeight: CGFloat { max(textHeight(placeFont), textHeight(ageFont), AgentMarkView.side.rounded(.up)) }
+    static var messageY: CGFloat { pad(7) + titleRowHeight + pad(4) }
+    static var subHeight: CGFloat { textHeight(subFont) }
+    static var peekRowHeight: CGFloat { textHeight(peekFont) }
+    /// The peek block: two rows of the pane's screen.
+    static var peekHeight: CGFloat { pad(4) + 2 * peekRowHeight + pad(4) }
+    static var footerRowHeight: CGFloat { textHeight(footerFont) }
+    static var footerHeight: CGFloat { pad(4) + footerRowHeight + pad(4) }
+    /// The card: the title row, two lines of the message, the dim line, the peek block and the footer,
+    /// each as tall as its text's cell needs, with the padding between.
+    static var height: CGFloat {
+        messageY + textHeight(messageFont, lines: 2) + pad(1) + subHeight + pad(6) + peekHeight + footerHeight
+    }
     static var cornerRadius: CGFloat { s(8) }
     /// How far outside the card its selection ring is drawn.
     static var ringOutset: CGFloat { s(3) }
@@ -125,9 +164,10 @@ final class OverviewCardView: NSView {
         // The mark is part of the card's one element.
         markView.setAccessibilityElement(false)
         for label in [place, age, sub, branch, counts] + peekRows {
+            // One line, drawn from the label's top. Not `usesSingleLineMode`: that moves the line up or
+            // down with the label's height, and cuts its glyphs in a label as tall as its line.
             label.lineBreakMode = .byTruncatingTail
-            label.usesSingleLineMode = true
-            label.cell?.truncatesLastVisibleLine = true
+            label.maximumNumberOfLines = 1
         }
         age.alignment = .right
         counts.alignment = .right
@@ -153,13 +193,13 @@ final class OverviewCardView: NSView {
     func applyScale() {
         body.layer?.cornerRadius = Self.cornerRadius
         body.layer?.cornerCurve = .continuous
-        place.font = .systemFont(ofSize: s(12), weight: .semibold)
-        age.font = .systemFont(ofSize: s(11))
-        message.font = .systemFont(ofSize: s(12))
-        sub.font = .systemFont(ofSize: s(11))
-        let mono = AppDelegate.terminalFont(size: s(10))
+        place.font = Self.placeFont
+        age.font = Self.ageFont
+        message.font = Self.messageFont
+        sub.font = Self.subFont
+        let mono = Self.peekFont
         peekRows.forEach { $0.font = mono }
-        branch.font = AppDelegate.terminalFont(size: s(10.5))
+        branch.font = Self.footerFont
         place.textColor = Theme.foreground
         message.textColor = Theme.foreground
         for label in [age, sub, branch] + peekRows { label.textColor = Theme.dimText }
@@ -190,7 +230,7 @@ final class OverviewCardView: NSView {
     /// counted. Nil when nothing changed or nothing is known.
     static func countsTitle(_ changes: PaneGit.Changes?) -> NSAttributedString? {
         guard let total = changes?.total, total.files > 0 else { return nil }
-        let font = AppDelegate.terminalFont(size: s(10.5))
+        let font = footerFont
         guard let lines = ChangeCountText.lines(added: total.added, removed: total.removed), let space = lines.firstIndex(of: " ") else {
             return NSAttributedString(string: ChangeCountText.files(total.files), attributes: [.font: font, .foregroundColor: Theme.dimText])
         }
@@ -251,31 +291,35 @@ final class OverviewCardView: NSView {
         let pad = s(9), width = bounds.width
         let inner = max(0, width - 2 * pad)
         let side = AgentMarkView.side
-        let rowHeight = s(16)
-        markView.frame = CGRect(x: pad, y: s(7) + ((rowHeight - side) / 2).rounded(), width: side, height: side)
+        // Every line is as tall as its cell needs (`textHeight`), on whole points.
+        let top = Self.pad(7), rowHeight = Self.titleRowHeight
+        markView.frame = CGRect(x: pad, y: top + ((rowHeight - side) / 2).rounded(), width: side, height: side)
         // Measured from its words: a label's own fitting size can lag behind a change of them.
         let ageWidth = min(Self.width(of: age), inner / 2)
-        age.frame = CGRect(x: width - pad - ageWidth, y: s(7), width: ageWidth, height: rowHeight)
+        age.frame = CGRect(x: width - pad - ageWidth, y: top, width: ageWidth, height: rowHeight)
         let placeX = pad + side + s(7)
-        place.frame = CGRect(x: placeX, y: s(7), width: max(0, age.frame.minX - s(7) - placeX), height: rowHeight)
+        place.frame = CGRect(x: placeX, y: top, width: max(0, age.frame.minX - s(7) - placeX), height: rowHeight)
 
         // At most two lines of the message, then the dim line right under it.
-        let messageY = s(27)
+        let messageY = Self.messageY
         var messageHeight: CGFloat = 0
         if !message.isHidden, let cell = message.cell {
-            let two = Self.twoLineHeight(of: message, width: inner)
-            messageHeight = min(ceil(cell.cellSize(forBounds: CGRect(x: 0, y: 0, width: inner, height: 10000)).height), two)
+            // One line or two, by what the cell says the words take; the height is the lines' own.
+            let wanted = ceil(cell.cellSize(forBounds: CGRect(x: 0, y: 0, width: inner, height: 10000)).height)
+            let wraps = wanted >= Self.twoLineHeight(of: message, width: inner)
+            messageHeight = Self.textHeight(Self.messageFont, lines: wraps ? 2 : 1)
             message.preferredMaxLayoutWidth = inner
             message.frame = CGRect(x: pad, y: messageY, width: inner, height: messageHeight)
         }
-        sub.frame = CGRect(x: pad, y: messageY + messageHeight + (messageHeight > 0 ? s(1) : 0), width: inner, height: s(14))
+        sub.frame = CGRect(x: pad, y: messageY + messageHeight + (messageHeight > 0 ? Self.pad(1) : 0), width: inner, height: Self.subHeight)
 
         let footerHeight = Self.footerHeight
         footer.frame = CGRect(x: 0, y: bounds.height - footerHeight, width: width, height: footerHeight)
         footerRule.frame = CGRect(x: 0, y: 0, width: width, height: 1)
-        let countsWidth = min(ceil(counts.attributedStringValue.size().width) + (counts.attributedStringValue.length > 0 ? s(4) : 0), inner / 2)
-        let lineHeight = s(14)
-        let footerY = ((footerHeight - lineHeight) / 2).rounded()
+        // A label keeps 2 pt each side of its words at any zoom.
+        let countsWidth = min(ceil(counts.attributedStringValue.size().width) + (counts.attributedStringValue.length > 0 ? max(4, s(4)) : 0), inner / 2)
+        let lineHeight = Self.footerRowHeight
+        let footerY = Self.pad(4)
         counts.frame = CGRect(x: width - pad - countsWidth, y: footerY, width: countsWidth, height: lineHeight)
         branch.frame = CGRect(x: pad, y: footerY, width: max(0, counts.frame.minX - (countsWidth > 0 ? s(8) : 0) - pad), height: lineHeight)
 
@@ -284,7 +328,7 @@ final class OverviewCardView: NSView {
         peek.frame = CGRect(x: 0, y: footer.frame.minY - peekHeight, width: width, height: peekHeight)
         peekRule.frame = CGRect(x: 0, y: 0, width: width, height: 1)
         for (index, row) in peekRows.enumerated() {
-            row.frame = CGRect(x: pad, y: s(4) + CGFloat(index) * s(14), width: inner, height: s(14))
+            row.frame = CGRect(x: pad, y: Self.pad(4) + CGFloat(index) * Self.peekRowHeight, width: inner, height: Self.peekRowHeight)
         }
     }
 
@@ -432,12 +476,13 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
 
     /// The grid at the app's zoom.
     var grid: OverviewLayout {
-        OverviewLayout(sideInset: s(18), gap: s(10), minCardWidth: s(250), cardHeight: OverviewCardView.height,
-                       headerHeight: s(28), laneGap: s(14))
+        // Down the grid everything is on whole points, so no card starts between two pixels.
+        OverviewLayout(sideInset: s(18).rounded(), gap: s(10).rounded(), minCardWidth: s(250), cardHeight: OverviewCardView.height,
+                       headerHeight: s(28).rounded(), laneGap: s(14).rounded())
     }
     static var titleHeight: CGFloat { TabBarView.height }
     /// Above the first lane and under the last.
-    static var topInset: CGFloat { s(8) }
+    static var topInset: CGFloat { s(8).rounded() }
     static var bottomInset: CGFloat { s(20) }
 
     // MARK: Looks
@@ -607,7 +652,7 @@ final class OverviewView: NSView, NSSearchFieldDelegate {
             let header = frames.headers[index], cards = frames.cards[index]
             let frame = CGRect(x: 0, y: top + header.minY, width: width, height: (cards.last?.maxY ?? header.maxY) - header.minY + ringRoom)
             if laneView.frame != frame { laneView.frame = frame }
-            let headerFrame = CGRect(x: header.minX, y: s(8), width: header.width, height: header.height - s(8))
+            let headerFrame = CGRect(x: header.minX, y: s(8).rounded(), width: header.width, height: header.height - s(8).rounded())
             if laneView.header.frame != headerFrame { laneView.header.frame = headerFrame }
             for (card, rect) in zip(lane.cards, cards) {
                 let frame = rect.offsetBy(dx: 0, dy: -header.minY)
