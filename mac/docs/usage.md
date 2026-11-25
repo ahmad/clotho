@@ -93,7 +93,7 @@ The same mark shows everywhere an agent does: on its inbox row, its tab, its wor
 
 You can answer an agent that's asking you something without opening its pane. Its notification has **Approve (1)**, **Deny (Esc)** and **Reply**, and when its hooks report it waiting for you, right-clicking its row (or clicking its pane's chip) offers **1**, **2**, **3**, **Return**, **Esc** and **Reply…** (type a line, sent with Return). Each answer is typed into the agent's pane as its terminal expects, and marks the agent seen. (This needs clothod 0.1.1 or later on that machine.)
 
-Clotho sends a notification when an agent needs you: when it starts waiting for you, finishes, or fails, as reported by its hooks, or when it rings the terminal bell. The notification says whether you're needed: a finished turn that asks you something reads **Needs you**, and one that only finished reads **Done** and makes no sound. Clotho waits until the agent has really stopped before it alerts, so a turn that carries straight on doesn't interrupt you. While you're using Clotho on the Mac, your phone is left alone. An agent detected only from the terminal that has gone quiet shows as idle and doesn't alert, since that may just be a slow reply or a long build. Opening the pane, or typing in it, marks it seen on every device. You don't get a notification for the pane you're looking at. Click it to open the pane. The **Agents** menu in the menu bar turns each kind of notification on or off (so does a right-click on an inbox section's header); a finished turn that asks you something follows **Notify When Waiting for You**, not **Notify When Done**. Right-click a machine and turn off **Monitor Agents** to leave its agents out of the inbox, the marks, the notifications and the dock count. A machine that can't be reached says so on its own row in the sidebar (**Can't reach**, with **Reconnect**), so its agents are never silently missing.
+Clotho sends a notification when an agent needs you: when it starts waiting for you, finishes, or fails, as reported by its hooks, or when it rings the terminal bell. The notification's title says whether you're needed and where: **Needs you · workspace › tab** for a turn that waits for you or finished by asking you something, and **Done · workspace › tab** for one that only finished, which makes no sound. Under it are the machine, the project and how long the turn took. Clotho waits until the agent has really stopped before it alerts, so a turn that carries straight on doesn't interrupt you. While you're using Clotho on the Mac, your phone is left alone. An agent detected only from the terminal that has gone quiet shows as idle and doesn't alert, since that may just be a slow reply or a long build. Opening the pane, or typing in it, marks it seen on every device. You don't get a notification for the pane you're looking at. Click it to open the pane. The **Agents** menu in the menu bar turns each kind of notification on or off (so does a right-click on an inbox section's header); a finished turn that asks you something follows **Notify When Waiting for You**, not **Notify When Done**. Right-click a machine and turn off **Monitor Agents** to leave its agents out of the inbox, the marks, the notifications and the dock count. A machine that can't be reached says so on its own row in the sidebar (**Can't reach**, with **Reconnect**), so its agents are never silently missing.
 
 ### Overview
 
@@ -180,8 +180,8 @@ Resizing moves the nearest divider toward the arrow. A maximized pane fills its 
 | Clear the terminal screen | ⌘K |
 | Toggle file browser | ⇧⌘O |
 | Choose files or folders to upload | ⇧⌘U |
-| Increase / decrease font size | ⌘+ or ⌘= / ⌘- |
-| Reset font size | ⌘0 |
+| Zoom in / zoom out (the whole app) | ⌘+ or ⌘= / ⌘- |
+| Actual size | ⌘0 |
 | Command bar: go to a tab, workspace or agent | ⌘P |
 | Toggle sidebar | ⌘/ (or ⌃⌘S) |
 | Toggle inspector (Changes, Files, Activity) | ⌥⌘B |
