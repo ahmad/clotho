@@ -195,6 +195,11 @@ pub struct Foreground {
     pub names: Vec<String>,
 }
 
+/// The foreground process group alone (no names: one small read).
+pub fn foreground_group(pid: u32) -> Option<u32> {
+    os::terminal_pgrp(pid)
+}
+
 pub fn foreground(pid: u32) -> Option<Foreground> {
     let pgrp = os::terminal_pgrp(pid)?;
     Some(Foreground { pgrp, names: process_names(pgrp) })
@@ -248,6 +253,29 @@ pub fn process_alive(pid: u32) -> bool {
 /// (dash collects it at the next command).
 pub fn process_running(pid: u32) -> bool {
     process_alive(pid) && !os::is_zombie(pid)
+}
+
+/// Whether process group `pgrp` still has a running member: any process in it that is there and
+/// not a zombie. The group's leader may exit before the rest (`true | worker`: the group is
+/// `true`'s, and `worker` runs on in it), so the leader is only the cheap first look: the
+/// members are listed (Linux: one pass over /proc; macOS: `proc_listpgrppids`) only once the
+/// leader is gone or has moved to another group.
+pub fn process_group_running(pgrp: u32) -> bool {
+    if pgrp == 0 {
+        return false;
+    }
+    (process_running(pgrp) && process_group(pgrp) == Some(pgrp)) || os::group_has_running(pgrp, None)
+}
+
+/// Whether a running process other than `leader` itself is in `leader`'s own process group
+/// (`own_group`) or anywhere in the session it leads: "is anything but the pane's shell running
+/// in the pane". Always a listing (see `process_group_running`).
+pub fn session_peer_running(leader: u32, own_group: bool) -> bool {
+    if own_group {
+        os::group_has_running(leader, Some(leader))
+    } else {
+        os::session_has_running(leader, leader)
+    }
 }
 
 /// Where each running daemon registers its socket (`<pid>` -> socket path), so `clothod report`

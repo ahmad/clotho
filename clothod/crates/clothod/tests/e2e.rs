@@ -8076,12 +8076,14 @@ async fn osc_7501_states_drive_the_panes_agent() {
     assert!(pane_progress(&c, p).await.is_null(), "done ends the progress");
     let a = wait_agent(&c, p, "the rise", |a| a["attention"] == true).await;
     assert_eq!((a["needs_user"].clone(), a["message"].clone(), a["summary_pending"].clone()), (json!(false), json!("All done."), json!(false)), "{a}");
+    // Seen while its program (the printer) still runs: it stays listed, without attention.
     ack(&c, p).await;
-    assert!(pane_agent(&c, p).await.is_null());
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["state"].clone(), a["attention"].clone(), a["message"].clone()), (json!("done"), json!(false), json!("All done.")), "{a}");
 
     // Idle raises nothing; error does at once; clear removes it.
     send("state=idle:app=mytool");
-    let a = wait_agent(&c, p, "idle", |a| a["state"] == "done").await;
+    let a = wait_agent(&c, p, "idle", |a| a["state"] == "done" && a["message"].is_null()).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let b = pane_agent(&c, p).await;
     assert_eq!((b["attention"].clone(), b["settling"].clone(), b["needs_user"].clone(), b["since"].clone()), (json!(false), json!(false), json!(false), a["since"].clone()), "{b}");
@@ -8175,8 +8177,9 @@ async fn report_by_hand_from_any_script() {
         run(args);
         let a = wait_agent(&c, p, "waiting", |a| a["state"] == "waiting").await;
         assert_eq!((a["kind"].clone(), a["attention"].clone(), a["needs_user"].clone(), a["message"].clone()), (json!("mytool"), json!(true), json!(true), json!("Approve?")), "{a}");
+        // Seen right as the reporting script exits: gone at once, or with the script.
         ack(&c, p).await;
-        assert!(pane_agent(&c, p).await.is_null());
+        wait_agent(&c, p, "gone once seen", |a| a.is_null()).await;
     }
     // A kind that is no name is `other`.
     run(r#"--state error --kind "x y=z" --message Broke"#);
@@ -8427,4 +8430,358 @@ async fn upgrade_gives_up_on_a_serve_that_never_comes_up_and_rolls_back() {
     assert_eq!((c.hello["build"].clone(), c.hello["holder"]["build"].clone()), (json!(id1), json!(id1)), "the old build runs again: {stderr}");
     assert_eq!(holder_pid(&env), holder, "same holder: shells were never at risk");
     assert_shell_alive(&c, p, &shell).await;
+}
+
+// ---- Who a pane-bound status or progress ends with (crate::owner, docs/protocol.md "Clearing") ----
+
+/// The three things a program can report that end with it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Rep {
+    /// `clothod report --state running --kind build`.
+    Report,
+    /// OSC 7501 `working`.
+    Osc7501,
+    /// OSC 9;4 progress.
+    Osc94,
+}
+
+impl Rep {
+    const ALL: [Rep; 3] = [Rep::Report, Rep::Osc7501, Rep::Osc94];
+
+    /// The shell words that report it, from anywhere: a prompt, a script, a pipeline stage, a
+    /// command substitution (stdout is not the terminal there), a job without a terminal
+    /// (`setsid`: no /dev/tty, stderr still is the pane).
+    fn snippet(self, bin: &str) -> String {
+        let osc = |seq: &str| format!("{{ printf '{seq}' > /dev/tty; }} 2>/dev/null || printf '{seq}' >&2");
+        match self {
+            Rep::Report => format!("\"{bin}\" report --state running --kind build"),
+            Rep::Osc7501 => osc(r"\033]7501;state=working:app=build\033\\"),
+            Rep::Osc94 => osc(r"\033]9;4;1;40\007"),
+        }
+    }
+
+    /// The same from a Perl program (a pane that runs its program directly, no shell).
+    fn perl(self, bin: &str) -> String {
+        match self {
+            Rep::Report => format!("system('{bin}', 'report', '--state', 'running', '--kind', 'build');"),
+            Rep::Osc7501 => r#"$| = 1; print "\e]7501;state=working:app=build\e\\";"#.to_string(),
+            Rep::Osc94 => r#"$| = 1; print "\e]9;4;1;40\a";"#.to_string(),
+        }
+    }
+
+    /// Whether the pane (as `state.get` gives it) shows what was reported.
+    fn shown(self, pane: &Value) -> bool {
+        let a = &pane["agent"];
+        match self {
+            Rep::Report => a["kind"] == "build" && a["state"] == "running" && a["source"] == "hook",
+            Rep::Osc7501 => a["kind"] == "build" && a["state"] == "running" && a["source"] == "osc",
+            Rep::Osc94 => pane["progress"].is_object(),
+        }
+    }
+}
+
+/// What a way of reporting must show.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Life {
+    /// From the report until its program has ended, without a gap; gone within 3 s after.
+    WithProgram,
+    /// Nothing is behind it by the time the command returns: gone within 3 s of that.
+    Brief,
+    /// The report is refused: nothing ever shows.
+    Never,
+}
+
+struct OwnerCase {
+    name: String,
+    rep: Rep,
+    life: Life,
+    pane: u64,
+    /// Where its scripts leave `.start` (reported) and `.end` (the program is over).
+    pre: PathBuf,
+    /// Typed at the prompt once the shell is up (None: the pane's command is the program).
+    line: Option<String>,
+    /// Stop the job (Ctrl-Z) 1.5 s after it reported, and kill it 2.5 s later: that is its end.
+    stop: bool,
+    stopped: bool,
+    start: Option<Instant>,
+    end: Option<Instant>,
+    /// (when, shown).
+    samples: Vec<(Instant, bool)>,
+}
+
+/// How long the programs of the matrix live after they reported: several one-second checks.
+const OWNER_HOLD: &str = "3.5";
+
+/// Every way a status or a progress can be reported from a pane of `shell`, each in its own
+/// pane, all at once: sampled ten times a second, each must show for exactly as long as its
+/// program runs (never a gap while it does, gone within 3 s after), or not at all where nothing
+/// is behind it. Prints one line per way with what was seen.
+async fn owner_matrix(shell_name: &str, shell: Vec<String>) {
+    let env = Env::new();
+    let c = env.client().await;
+    let b = test_bin();
+    let dir = env.dir.path().join("m");
+    std::fs::create_dir_all(&dir).unwrap();
+    let has_disown = shell_name != "sh";
+    let has_setsid = have("setsid");
+    let perl = which("perl");
+    let shell_pane = || json!({"command": shell, "env": {"PS1": "$ ", "ENV": "", "HISTFILE": "/dev/null", "BASH_SILENCE_DEPRECATION_WARNING": "1"}, "cwd": dir.display().to_string(), "cols": 80, "rows": 24});
+    let mut cases: Vec<OwnerCase> = Vec::new();
+    for rep in Rep::ALL {
+        let say = rep.snippet(&b);
+        let mut add = async |name: &str, life: Life, make: &dyn Fn(&str, &str, &str, &str) -> (Option<String>, Option<Vec<String>>), stop: bool| {
+            let id = format!("{name}-{rep:?}").to_lowercase();
+            let pre = dir.join(&id);
+            let e = format!("{}.end", pre.display());
+            let s = format!("{}.start", pre.display());
+            // The worker reports, lives on (and reports once more half way), and ends.
+            let (w, r, o) = (format!("{}.w", pre.display()), format!("{}.r", pre.display()), format!("{}.o", pre.display()));
+            let rest = if stop { "30" } else { "2" };
+            script_file(std::path::Path::new(&w), &format!("#!/bin/sh\n{say}\n: > '{s}'\nsleep 1.5\n{say}\nsleep {rest}\n: > '{e}'\n"));
+            // The reporter reports and exits.
+            script_file(std::path::Path::new(&r), &format!("#!/bin/sh\n{say}\n: > '{s}'\n"));
+            // The leader reports and exits while a process of its group lives on.
+            script_file(std::path::Path::new(&o), &format!("#!/bin/sh\n(sleep {OWNER_HOLD}; : > '{e}') &\n{say}\n: > '{s}'\n"));
+            let (line, command) = make(&w, &r, &o, &e);
+            let params = match command {
+                Some(command) => json!({"command": command, "cwd": dir.display().to_string(), "cols": 80, "rows": 24}),
+                None => shell_pane(),
+            };
+            let pane = new_pane(&c, params).await;
+            cases.push(OwnerCase { name: id, rep, life, pane, pre, line, stop, stopped: false, start: None, end: None, samples: Vec::new() });
+        };
+        let typed = |l: String| (Some(l), None);
+        // Typed at the prompt: a `clothod report` is its own job and exits; a printf is the
+        // shell itself.
+        let at_prompt = match rep {
+            Rep::Report => say.clone(),
+            Rep::Osc7501 => r"printf '\033]7501;state=working:app=build\033\\'".to_string(),
+            Rep::Osc94 => r"printf '\033]9;4;1;40\007'".to_string(),
+        };
+        add("prompt", Life::Brief, &|_, _, _, e| typed(format!("{at_prompt}; : > '{e}'")), false).await;
+        add("script", Life::WithProgram, &|w, _, _, _| typed(w.to_string()), false).await;
+        add("background", Life::WithProgram, &|w, _, _, _| typed(format!("{w} &")), false).await;
+        add("pipe-late", Life::WithProgram, &|w, _, _, _| typed(format!("true | {w}")), false).await;
+        add("pipe-first", Life::WithProgram, &|_, r, _, e| typed(format!("{r} | sleep {OWNER_HOLD}; : > '{e}'")), false).await;
+        add("cmdsub", Life::Brief, &|_, r, _, e| typed(format!("echo sub$({r}); : > '{e}'")), false).await;
+        add("cmdsub-long", Life::WithProgram, &|w, _, _, _| typed(format!("echo sub$({w})")), false).await;
+        add("subshell", Life::WithProgram, &|w, _, _, _| typed(format!("( {w} )")), false).await;
+        add("nohup", Life::WithProgram, &|w, _, _, _| typed(format!("nohup {w} > /dev/null &")), false).await;
+        if has_disown {
+            add("disown", Life::WithProgram, &|w, _, _, _| typed(format!("{w} & disown")), false).await;
+        }
+        if has_setsid {
+            // It left the pane's session: its report is refused, and what it prints has no
+            // owner (gone at the second check after each report, whatever it does after).
+            let life = if rep == Rep::Report { Life::Never } else { Life::Brief };
+            add("setsid", life, &|w, _, _, _| typed(format!("setsid {w} &")), false).await;
+        }
+        add("leader-exits", Life::WithProgram, &|_, _, o, _| typed(o.to_string()), false).await;
+        add("stopped", Life::WithProgram, &|w, _, _, _| typed(w.to_string()), true).await;
+        // The pane's command is the program: a shell script, and a program that is no shell.
+        add("direct-script", Life::WithProgram, &|w, _, _, _| (None, Some(vec![w.to_string()])), false).await;
+        if let Some(perl) = &perl {
+            let prog = dir.join(format!("direct-{rep:?}.pl"));
+            script_file(&prog, &format!("{}\nopen(F, '>', $ARGV[0] . '.start'); close(F);\nsleep 3; select(undef, undef, undef, 0.5);\nopen(F, '>', $ARGV[0] . '.end'); close(F);\n", rep.perl(&b)));
+            let pre = dir.join(format!("direct-program-{rep:?}").to_lowercase());
+            add("direct-program", Life::WithProgram, &|_, _, _, _| (None, Some(vec![perl.clone(), prog.display().to_string(), pre.display().to_string()])), false).await;
+        }
+    }
+    // Every shell is at its prompt before anything is typed.
+    for case in cases.iter().filter(|k| k.line.is_some()) {
+        let deadline = Instant::now() + T;
+        while !daemon_text(&c, case.pane).await.0.iter().any(|l| l.starts_with('$')) {
+            assert!(Instant::now() < deadline, "{shell_name}: no prompt in the pane of {}", case.name);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }
+    for case in &cases {
+        if let Some(line) = &case.line {
+            c.input(case.pane, format!("{line}\r").as_bytes());
+        }
+    }
+    let after_end = Duration::from_millis(3000);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        // Files first: an end is known here before the state that may already show it gone.
+        for k in cases.iter_mut() {
+            let seen = |ext: &str| std::path::Path::new(&format!("{}.{ext}", k.pre.display())).exists();
+            if k.start.is_none() && seen("start") {
+                k.start = Some(Instant::now());
+            }
+            if k.end.is_none() && !k.stop && seen("end") {
+                k.end = Some(Instant::now());
+            }
+            if let (true, Some(start)) = (k.stop, k.start) {
+                if !k.stopped && start.elapsed() >= Duration::from_millis(1500) {
+                    c.input(k.pane, b"\x1a");
+                    k.stopped = true;
+                } else if k.end.is_none() && start.elapsed() >= Duration::from_millis(4000) {
+                    c.input(k.pane, b"kill -9 %1\r");
+                    k.end = Some(Instant::now());
+                }
+            }
+        }
+        let state = c.request("state.get", json!({})).await.unwrap();
+        let now = Instant::now();
+        for k in cases.iter_mut() {
+            let shown = state["panes"].as_array().unwrap().iter().find(|p| p["id"] == k.pane).is_some_and(|p| k.rep.shown(p));
+            k.samples.push((now, shown));
+        }
+        if cases.iter().all(|k| k.end.is_some_and(|e| e.elapsed() >= after_end + Duration::from_millis(900))) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let open: Vec<_> = cases.iter().filter(|k| k.end.is_none()).map(|k| (&k.name, k.start.is_some())).collect();
+            panic!("{shell_name}: these never ended (name, reported): {open:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut failures = Vec::new();
+    for k in &cases {
+        let end = k.end.unwrap();
+        let first = k.samples.iter().find(|s| s.1).map(|s| s.0);
+        let last = k.samples.iter().rev().find(|s| s.1).map(|s| s.0);
+        let ms = |t: Option<Instant>, from: Instant| t.map(|t| if t >= from { format!("+{}", (t - from).as_millis()) } else { format!("-{}", (from - t).as_millis()) }).unwrap_or_else(|| "never".into());
+        eprintln!("owner matrix {shell_name:5} {:28} {:?}: lived {} ms, last shown {} ms from its end", k.name, k.life, k.start.map(|s| (end - s).as_millis()).unwrap_or(0), ms(last, end));
+        let mut fail = |why: String| failures.push(format!("{}: {why} (first shown {}, last shown {} ms from its end)", k.name, ms(first, end), ms(last, end)));
+        // Gone within 3 s of its end, and for good.
+        if let Some(late) = k.samples.iter().find(|s| s.1 && s.0 >= end + after_end) {
+            fail(format!("still shown {} ms after its end", (late.0 - end).as_millis()));
+        }
+        match k.life {
+            Life::WithProgram => {
+                let Some(start) = k.start else {
+                    fail("it never reported".into());
+                    continue;
+                };
+                // Shown from half a second after the report (the daemon has read it by then)
+                // until its end was seen (less the sampling step).
+                let (from, to) = (start + Duration::from_millis(500), end - Duration::from_millis(250));
+                let gaps: Vec<_> = k.samples.iter().filter(|s| s.0 >= from && s.0 <= to && !s.1).map(|s| (s.0 - start).as_millis()).collect();
+                if !gaps.is_empty() {
+                    fail(format!("not shown while its program ran, at {gaps:?} ms after the report"));
+                }
+                if !k.samples.iter().any(|s| s.0 >= from && s.0 <= to) {
+                    fail("no sample while it ran".into());
+                }
+            }
+            Life::Brief => {}
+            Life::Never => {
+                if k.start.is_none() {
+                    fail("its program never ran".into());
+                }
+                if first.is_some() {
+                    fail("a refused report showed".into());
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{shell_name}:\n{}", failures.join("\n"));
+}
+
+fn which(cmd: &str) -> Option<String> {
+    let out = Command::new("/bin/sh").arg("-c").arg(format!("command -v {cmd}")).output().ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && path.starts_with('/')).then_some(path)
+}
+
+#[tokio::test]
+async fn owner_matrix_sh() {
+    owner_matrix("sh", vec!["/bin/sh".into()]).await;
+}
+
+#[tokio::test]
+async fn owner_matrix_bash() {
+    let Some(bash) = which("bash") else {
+        eprintln!("skipped: no bash");
+        return;
+    };
+    owner_matrix("bash", vec![bash, "--norc".into(), "--noprofile".into()]).await;
+}
+
+#[tokio::test]
+async fn owner_matrix_zsh() {
+    let Some(zsh) = which("zsh") else {
+        eprintln!("skipped: no zsh");
+        return;
+    };
+    owner_matrix("zsh", vec![zsh, "-f".into()]).await;
+}
+
+/// `agent.ack` on a pane-bound alert: with its program gone the agent is removed; while the
+/// program that reported it still runs it stays listed without attention, ends with that
+/// program, and the same alert again is news again.
+#[tokio::test]
+async fn an_acknowledged_status_stays_listed_while_its_program_runs() {
+    let env = env_with(&[("CLOTHOD_TEST_OSC_REFILL_MS", "50")]);
+    let c = env.client().await;
+    let mut ev = watching(&env).await;
+    let p = new_pane(&c, sh()).await;
+    let b = test_bin();
+    let nulls = |ev: &[(String, Value)]| named(ev, "agent", p).into_iter().filter(|e| e["agent"].is_null()).count();
+
+    // A program that stays (the printer) raises an alert; seen, it stays listed.
+    osc_printer(&env, &c, p).await;
+    c.input(p, b"9;Build finished\r");
+    wait_agent(&c, p, "the alert", |a| a["attention"] == true).await;
+    events(&mut ev);
+    ack(&c, p).await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["state"].clone(), a["source"].clone(), a["attention"].clone(), a["message"].clone()), (json!("waiting"), json!("osc"), json!(false), json!("Build finished")), "{a}");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["state"].clone(), a["attention"].clone()), (json!("waiting"), json!(false)), "it stays while its program runs: {a}");
+    let seen = events(&mut ev);
+    assert_eq!(nulls(&seen), 0, "{seen:?}");
+    // As for any agent, the ack shows in a `pane` event; it carries the agent, not null.
+    assert!(named(&seen, "pane", p).iter().any(|e| e["agent"]["attention"] == false && e["agent"]["state"] == "waiting"), "the ack's event carries the agent: {seen:?}");
+    assert!(named(&seen, "pane", p).iter().all(|e| !e["agent"].is_null()), "{seen:?}");
+    // The same alert again is news again: the seen one goes, a new one comes and rises.
+    c.input(p, b"9;Build finished\r");
+    wait_agent(&c, p, "the same alert again", |a| a["attention"] == true).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let again = events(&mut ev);
+    assert_eq!(nulls(&again), 1, "{again:?}");
+    assert!(named(&again, "agent", p).iter().any(|e| e["agent"]["attention"] == true && e["from"].is_null()), "{again:?}");
+    // Seen again, it ends with its program.
+    ack(&c, p).await;
+    assert_eq!(pane_agent(&c, p).await["attention"], false);
+    end_osc_printer(&c, p).await;
+    let t = Instant::now();
+    wait_agent(&c, p, "gone with its program", |a| a.is_null()).await;
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+
+    // The same for a script's own report.
+    c.input(p, format!("sh -c '\"{b}\" report --state waiting --kind build --message Approve?; sleep 3; echo script-over'\r").as_bytes());
+    wait_agent(&c, p, "the script waits", |a| a["attention"] == true && a["kind"] == "build").await;
+    ack(&c, p).await;
+    let a = pane_agent(&c, p).await;
+    assert_eq!((a["kind"].clone(), a["state"].clone(), a["attention"].clone()), (json!("build"), json!("waiting"), json!(false)), "{a}");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(pane_agent(&c, p).await["kind"], "build", "it stays while the script runs");
+    wait_for_text(&c, p, T, |l| has_line(l, "script-over")).await.unwrap();
+    let t = Instant::now();
+    wait_agent(&c, p, "gone with the script", |a| a.is_null()).await;
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+
+    // Its program gone when it is seen: removed at once.
+    run_script(&env, &c, p, "notify", r"printf '\033]9;Tests failed\007'");
+    wait_agent(&c, p, "the alert", |a| a["attention"] == true).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    ack(&c, p).await;
+    assert!(pane_agent(&c, p).await.is_null(), "nothing is left once seen");
+
+    // A pane that runs its program directly: the program is the pane's own process.
+    if let Some(perl) = which("perl") {
+        let prog = env.dir.path().join("direct.pl");
+        script_file(&prog, "$| = 1; print \"\\e]9;Needs you\\a\"; sleep 4;\n");
+        let q = new_pane(&c, json!({"command": [perl, prog.display().to_string()], "cols": 80, "rows": 24})).await;
+        wait_agent(&c, q, "the program's alert", |a| a["attention"] == true).await;
+        ack(&c, q).await;
+        let a = pane_agent(&c, q).await;
+        assert_eq!((a["state"].clone(), a["attention"].clone()), (json!("waiting"), json!(false)), "{a}");
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(pane_agent(&c, q).await["state"], "waiting", "it stays while the program runs");
+    }
 }

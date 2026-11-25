@@ -208,8 +208,12 @@ struct Agent {
     since: f64,
     attention: bool,
     session: Option<String>,
-    /// The agent's process (group), watched to clear the agent when it exits.
+    /// The agent's process (group), watched to clear the agent when it exits. For a pane-bound
+    /// agent: its owner (`crate::owner`), a process group that is never the pane's own.
     pid: Option<u32>,
+    /// A pane-bound agent without an owner (`pid` None) whose reporter ran in the pane's own
+    /// process group (`Owner::Pane`); otherwise nothing says who reported (`Owner::Unknown`).
+    in_pane_group: bool,
     /// `state` is detection's guess from output alone (busy = running, quiet = waiting), not
     /// a hook's report or Claude's title. A guess never raises or clears `attention`: opening
     /// a pane resizes it, and the app's redraw would read as "running".
@@ -252,12 +256,17 @@ struct Agent {
     present_at_done: bool,
     /// It belongs to the pane, not to an agent process: every `osc` agent, and a `clothod report`
     /// from something that is not a known agent (a script). Waiting, done and error stay after
-    /// the reporter exited, until `agent.ack` (which removes it), a `clear` or another agent;
-    /// running and starting go when the reporting group exits.
+    /// the reporter exited, until `agent.ack` (which removes it unless its owner still runs), a
+    /// `clear` or another agent; running and starting end with their owner (`crate::owner`).
     pane_bound: bool,
-    /// Gone with its reporting group in any state (an OSC 7501 `blocked`, which the protocol
+    /// Ends with its owner in any state (an OSC 7501 `blocked` or `idle`, which the protocol
     /// ends at the program's exit).
     exit_clears: bool,
+    /// The user has seen it (`agent.ack` on a pane-bound waiting, done or error) while the
+    /// program that reported it still ran: it stays listed, without attention, and ends with
+    /// that program. It is over as a status: the next report in the pane starts afresh, as if
+    /// the pane had no agent (the same alert again is news again).
+    seen: bool,
     /// This state raises nothing and doesn't settle (an OSC 7501 `idle`).
     silent: bool,
     /// The reporter said whether its finished step needs the user (`agent.report` `needs_user`):
@@ -379,6 +388,7 @@ fn nested_agent(pid: u32, leader: u32) -> bool {
 }
 
 use crate::kinds::agent_kind;
+use crate::owner::{self, Owner};
 
 impl Agent {
     /// An agent with nothing known but these.
@@ -392,6 +402,7 @@ impl Agent {
             attention: false,
             session: None,
             pid: None,
+            in_pane_group: false,
             guess: false,
             muted: false,
             quiet: false,
@@ -409,10 +420,26 @@ impl Agent {
             present_at_done: false,
             pane_bound: false,
             exit_clears: false,
+            seen: false,
             silent: false,
             needs_user_fixed: None,
             message_from_output: false,
         }
+    }
+
+    /// Who a pane-bound agent ends with.
+    fn owner(&self) -> Owner {
+        Owner::from_parts(self.pid, self.in_pane_group)
+    }
+
+    fn set_owner(&mut self, owner: Owner) {
+        self.pid = owner.group();
+        self.in_pane_group = owner == Owner::Pane;
+    }
+
+    /// A pane-bound agent in a state that lasts only as long as its owner does.
+    fn ends_with_owner(&self) -> bool {
+        self.pane_bound && (self.exit_clears || self.seen || matches!(self.state.as_str(), "running" | "starting"))
     }
 
     /// Whether `message` came from the pane's output: any program can print it, so it is shown
@@ -434,6 +461,7 @@ impl Agent {
             attention: flag("attention"),
             session: text("session").filter(|s| crate::layout::safe_session(s)),
             pid: v.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()),
+            in_pane_group: pane_bound && flag("in_pane_group"),
             muted: flag("muted"),
             quiet: flag("quiet"),
             prompt: text("prompt"),
@@ -444,6 +472,7 @@ impl Agent {
             settling: flag("settling"),
             pane_bound,
             exit_clears: flag("exit_clears"),
+            seen: pane_bound && flag("seen"),
             silent: flag("silent"),
             needs_user_fixed: v.get("needs_user_fixed").and_then(Value::as_bool),
             // The kind is printed in the decision log: held to a name here too.
@@ -469,6 +498,8 @@ impl Agent {
         if self.pane_bound {
             v["pane_bound"] = json!(true);
             v["exit_clears"] = json!(self.exit_clears);
+            v["in_pane_group"] = json!(self.in_pane_group);
+            v["seen"] = json!(self.seen);
             v["silent"] = json!(self.silent);
         }
         if let Some(n) = self.needs_user_fixed {
@@ -607,8 +638,8 @@ struct Pane {
     /// What the pane's program says about its progress (OSC 9;4, or OSC 7501 `progress`). It is
     /// the pane's, never an agent's: it makes no agent, alert or `agent` event.
     progress: Option<clotho_vt::Progress>,
-    /// The foreground group that set `progress`: it is cleared when that group is gone.
-    progress_pid: Option<u32>,
+    /// Who `progress` ends with (`crate::owner`).
+    progress_owner: Owner,
 }
 
 /// What a notification, progress or status sequence in a pane's output asks for (`osc_state`).
@@ -624,9 +655,9 @@ struct OscReport {
     exit_clears: bool,
     /// Remove the pane's `osc` agent instead (OSC 7501 `clear`).
     clear: bool,
-    /// For a report the flip limit held back: the foreground job when it arrived (None: the
-    /// pane's own process). It is that job's report, not whatever runs when it is applied.
-    held_owner: Option<Option<u32>>,
+    /// For a report the flip limit held back: its owner as resolved when it arrived. It is that
+    /// program's report, not whatever runs when it is applied.
+    held_owner: Option<Owner>,
 }
 
 /// Rises of `attention` a pane's output may cause in a row; one more is allowed every
@@ -661,14 +692,15 @@ struct OscLimit {
     /// Reports dropped since `dropped_since`: logged as a count, once per `osc_refill()`.
     dropped: u32,
     dropped_since: Option<Instant>,
-    /// Checks in a row (`detect_agent`, once a second) that found a status or progress without
-    /// an owner while the pane's shell had no job in the foreground.
-    unowned_checks: u8,
+    /// Looks in a row (`detect_agent`, once a second) that found nothing to own the pane's
+    /// status, and its progress (`owner::still_owned`).
+    agent_idle: u8,
+    progress_idle: u8,
 }
 
 impl OscLimit {
     fn new() -> OscLimit {
-        OscLimit { rises: OSC_RISES, refilled: Instant::now(), updates: VecDeque::new(), flips: VecDeque::new(), held: None, progress_at: None, progress_dirty: false, dropped: 0, dropped_since: None, unowned_checks: 0 }
+        OscLimit { rises: OSC_RISES, refilled: Instant::now(), updates: VecDeque::new(), flips: VecDeque::new(), held: None, progress_at: None, progress_dirty: false, dropped: 0, dropped_since: None, agent_idle: 0, progress_idle: 0 }
     }
 
     fn rise(&mut self) -> bool {
@@ -865,7 +897,7 @@ impl Pane {
             rewrite_rx: None,
             osc: OscLimit::new(),
             progress: None,
-            progress_pid: None,
+            progress_owner: Owner::Unknown,
         }
     }
 
@@ -2307,7 +2339,12 @@ impl Daemon {
     /// detected agent takes a notification the way it takes a BEL. Otherwise the pane gets, or
     /// keeps, an agent of source `osc`.
     fn osc_state(&self, p: &mut Pane, r: OscReport) {
-        let cur = p.agent.clone();
+        // A status the user has seen (`seen`) is over: this report starts afresh. Its program
+        // is most likely the one reporting again, so its owner is kept when nothing better is
+        // known.
+        let seen = p.agent.clone().filter(|a| a.seen);
+        let seen_owner = seen.as_ref().filter(|a| a.source == "osc").map(Agent::owner);
+        let cur = p.agent.clone().filter(|a| !a.seen);
         match cur.as_ref().map(|a| a.source) {
             Some("hook") => return,
             Some("detected") => {
@@ -2343,7 +2380,7 @@ impl Daemon {
         let osc = cur.filter(|a| a.source == "osc");
         if r.clear {
             p.osc.held = None;
-            if osc.is_some() {
+            if osc.is_some() || seen_owner.is_some() {
                 self.set_agent(p, None);
             }
             return;
@@ -2354,10 +2391,10 @@ impl Daemon {
         let up = osc.as_ref().is_some_and(|a| a.attention);
         let alerts = matches!(r.state, "waiting" | "done" | "error") && !r.silent;
         let was_held = r.held_owner.is_some();
-        let fg = r.held_owner.unwrap_or_else(|| platform::foreground(p.pid).map(|f| f.pgrp).filter(|g| *g != p.pid));
+        let owner = r.held_owner.unwrap_or_else(|| owner::resolve(p.pid, None, osc.as_ref().map(Agent::owner).or(seen_owner)));
         if !alerts {
             if !p.osc.flip() {
-                p.osc.held = Some(OscReport { held_owner: Some(fg), ..r });
+                p.osc.held = Some(OscReport { held_owner: Some(owner), ..r });
                 return;
             }
         } else if !(if up { p.osc.update() } else { p.osc.rise() }) {
@@ -2368,7 +2405,7 @@ impl Daemon {
         // A held report of a state that ends with its program, whose program has exited since,
         // is dropped. What the pane shows is left alone: that program's own status went with
         // it (`detect_agent`), and an alert raised since is not this report's to remove.
-        if was_held && (r.exit_clears || r.state == "running") && fg.is_some_and(|g| !platform::process_running(g)) {
+        if was_held && (r.exit_clears || r.state == "running") && owner.group().is_some_and(|g| !platform::process_group_running(g)) {
             return;
         }
         let mut a = osc.unwrap_or_else(|| Agent::blank("other", r.state, "osc"));
@@ -2377,11 +2414,15 @@ impl Daemon {
         }
         a.state = r.state.into();
         a.message = r.message;
-        a.pid = fg;
+        a.set_owner(owner);
+        p.osc.agent_idle = 0;
         a.pane_bound = true;
         a.exit_clears = r.exit_clears;
         a.silent = r.silent;
         a.needs_user_fixed = r.silent.then_some(false);
+        if seen.is_some() {
+            self.set_agent(p, None);
+        }
         self.set_agent(p, Some(a));
     }
 
@@ -2393,13 +2434,12 @@ impl Daemon {
         if p.progress == progress {
             return;
         }
-        if p.progress.is_none() {
-            p.progress_pid = platform::foreground(p.pid).map(|f| f.pgrp).filter(|g| *g != p.pid);
-        }
+        p.progress_owner = match progress {
+            Some(_) => owner::resolve(p.pid, None, p.progress.map(|_| p.progress_owner)),
+            None => Owner::Unknown,
+        };
+        p.osc.progress_idle = 0;
         p.progress = progress;
-        if progress.is_none() {
-            p.progress_pid = None;
-        }
         if progress.is_none() || p.osc.progress_at.is_none_or(|t| t.elapsed() >= OSC_PROGRESS_EVERY) {
             self.progress_event(p);
         } else {
@@ -2924,58 +2964,18 @@ impl Daemon {
         self.broadcast("agent", json!({"pane": p.id, "agent": p.agent.as_ref().map(Agent::json), "from": old.state}));
     }
 
-    /// A status that ends with its program (`running`, `starting`, an OSC 7501 `blocked` or
-    /// `idle`) or a progress, reported while no job was in the foreground, has no process to
-    /// end with. The job that is in the foreground now takes it (a shell that reports before it
-    /// starts the command). With none, in a pane whose own process is a shell, the shell is
-    /// back at its prompt and nothing is working: it goes at the second check in a row, so
-    /// about a second after the report. In a pane that runs a program directly, that program
-    /// reported, and it lasts until the pane closes.
-    fn settle_unowned(&self, p: &mut Pane, fg: Option<u32>) {
-        let state = |a: &Agent| a.pane_bound && a.pid.is_none() && (a.exit_clears || matches!(a.state.as_str(), "running" | "starting"));
-        let st = p.agent.as_ref().is_some_and(state);
-        let pr = p.progress.is_some() && p.progress_pid.is_none();
-        if !st && !pr {
-            p.osc.unowned_checks = 0;
-            return;
-        }
-        if let Some(job) = fg {
-            if st {
-                p.agent.as_mut().unwrap().pid = Some(job);
-            }
-            if pr {
-                p.progress_pid = Some(job);
-            }
-            p.osc.unowned_checks = 0;
-            return;
-        }
-        if !crate::layout::is_shell(&platform::process_names(p.pid)) {
-            p.osc.unowned_checks = 0;
-            return;
-        }
-        p.osc.unowned_checks += 1;
-        if p.osc.unowned_checks < 2 {
-            return;
-        }
-        p.osc.unowned_checks = 0;
-        if pr {
-            self.osc_progress(p, None);
-        }
-        if st && p.agent.as_ref().is_some_and(state) {
-            self.set_agent(p, None);
-        }
-    }
-
     /// Detection (no hooks): who is in the foreground of the pane's terminal, and is it busy.
     fn detect_agent(&self, p: &mut Pane) {
         if p.exited.is_some() {
             return;
         }
         let fg = platform::foreground(p.pid).filter(|f| f.pgrp != p.pid);
-        self.settle_unowned(p, fg.as_ref().map(|f| f.pgrp));
-        // Progress ends with the group that reported it.
-        if p.progress.is_some() && p.progress_pid.is_some_and(|pid| !platform::process_running(pid)) {
+        // Progress ends with its owner (`crate::owner` has the rule).
+        if p.progress.is_some() && !owner::still_owned(p.pid, &mut p.progress_owner, &mut p.osc.progress_idle) {
             self.osc_progress(p, None);
+        }
+        if !p.agent.as_ref().is_some_and(Agent::ends_with_owner) {
+            p.osc.agent_idle = 0;
         }
         // Hook-reported agents: only clear them once their process is gone.
         if let Some(a) = p.agent.as_ref().filter(|a| a.source == "hook" && !a.pane_bound) {
@@ -2986,15 +2986,21 @@ impl Daemon {
         }
         let kind = fg.as_ref().and_then(|f| agent_kind(&f.names));
         // Agents that belong to the pane (`pane_bound`): what calls the user stays after the
-        // reporter exited; work (and an OSC 7501 `blocked`) ends with the reporting group.
+        // reporter exited; work (and an OSC 7501 `blocked`, and what the user has seen) ends
+        // with its owner.
         // A known agent in the foreground takes over from one (a program's `osc` status, a
         // script's report), unless that already names itself as that kind (its own reports are
         // exact; detection would only guess).
         if let Some(a) = p.agent.as_ref().filter(|a| a.pane_bound) {
             if !kind.is_some_and(|k| k != a.kind) {
-                let ends = a.exit_clears || matches!(a.state.as_str(), "running" | "starting");
-                if ends && a.pid.is_some_and(|pid| !platform::process_running(pid)) {
-                    self.set_agent(p, None);
+                if a.ends_with_owner() {
+                    let mut owner = a.owner();
+                    if !owner::still_owned(p.pid, &mut owner, &mut p.osc.agent_idle) {
+                        self.set_agent(p, None);
+                    } else if let Some(a) = p.agent.as_mut().filter(|a| a.owner() != owner) {
+                        // A job took it: stored with the pane at the next save, no event.
+                        a.set_owner(owner);
+                    }
                 }
                 return;
             }
@@ -3145,6 +3151,11 @@ impl Daemon {
         // Bounded: these go into every agent event, the history and push records.
         // A name, whatever was sent: it is also printed in the decision log.
         let kind = p.get("kind").and_then(Value::as_str).map(crate::kinds::normalise);
+        // A status the user has seen (`seen`) is over: this report starts afresh.
+        let seen_owner = pp.agent.as_ref().filter(|a| a.seen && a.source == "hook").map(Agent::owner);
+        if pp.agent.as_ref().is_some_and(|a| a.seen) {
+            self.set_agent(&mut pp, None);
+        }
         let prev = pp.agent.clone().filter(|a| a.source == "hook");
         // The agent is whatever owns the terminal while it reports.
         let fg = platform::foreground(pp.pid).filter(|f| f.pgrp != pp.pid);
@@ -3159,17 +3170,17 @@ impl Daemon {
             || p.get("pid").and_then(Value::as_u64).map(|r| r as u32).is_some_and(|r| is_agent(r) || platform::ancestors(r, pp.pid).into_iter().any(is_agent));
         let kind = kind.or(prev.as_ref().map(|a| a.kind.clone())).unwrap_or_else(|| "other".into());
         let pane_bound = !by_agent && !crate::kinds::known(&kind) && !prev.as_ref().is_some_and(|a| !a.pane_bound && a.pid.is_some_and(platform::process_alive));
-        // A script's status ends with the script. That is the foreground job when the reporter
-        // is part of it (in its group, or started by it in a group of its own); otherwise the
-        // reporter's own job (`deploy.sh &`), whatever is in the foreground. The reporter is
-        // still there: it waits for this answer.
+        // A script's status ends with its owner (`crate::owner` has the rule): a process group,
+        // never the pane's own.
         let reporter = p.get("pid").and_then(Value::as_u64).map(|r| r as u32);
-        let reporter_job = reporter.and_then(platform::process_group);
-        let in_foreground = |r: u32| fg.as_ref().is_some_and(|f| reporter_job == Some(f.pgrp) || platform::ancestors(r, pp.pid).contains(&f.pgrp));
-        let pid = match reporter {
-            Some(r) if pane_bound && !in_foreground(r) => reporter_job.or(pid),
-            _ => pid,
+        let owner = pane_bound.then(|| owner::resolve(pp.pid, reporter, prev.as_ref().filter(|a| a.pane_bound).map(Agent::owner).or(seen_owner)));
+        let pid = match owner {
+            Some(o) => o.group(),
+            None => pid,
         };
+        if pane_bound {
+            pp.osc.agent_idle = 0;
+        }
         // The turn: a prompt starts one (empty: one the user didn't type); so does work after the
         // agent stopped. A new session starts afresh. Bounded like every reported text.
         let text = |k: &str, max: usize| p.get(k).and_then(Value::as_str).map(|t| clotho_vt::printable(t, max));
@@ -3223,6 +3234,7 @@ impl Daemon {
             // kept; anything else is as if none was sent.
             session: p.get("session").and_then(Value::as_str).filter(|s| crate::layout::safe_session(s)).map(String::from).or(prev.and_then(|a| a.session)),
             pid,
+            in_pane_group: owner == Some(Owner::Pane),
             guess: false,
             muted: false,
             quiet: false,
@@ -3935,10 +3947,17 @@ impl Daemon {
                     }
                     a.settling = false;
                     // An agent that belongs to the pane has nothing left to show once seen
-                    // (no process, no session): it goes. A muted one stays, with its mute.
-                    let gone = a.pane_bound && !a.muted && matches!(a.state.as_str(), "waiting" | "done" | "error");
+                    // (no session to go back to): it goes, unless the program that reported it
+                    // is known and still runs. Then it stays listed (`seen`) and ends with that
+                    // program. A muted one stays, with its mute.
+                    let seen = a.pane_bound && !a.muted && matches!(a.state.as_str(), "waiting" | "done" | "error");
+                    let stays = seen && owner::known_alive(pp.pid, a.owner());
+                    if stays {
+                        a.seen = true;
+                        pp.osc.agent_idle = 0;
+                    }
                     self.set_agent(&mut pp, Some(a));
-                    if gone {
+                    if seen && !stays {
                         self.set_agent(&mut pp, None);
                     }
                 }

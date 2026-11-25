@@ -343,11 +343,10 @@ the life of the object and never reused within an `instance`.
       `agent` event or history entry. Its changes come as `pane` events, at most one a second
       per pane (the clear always arrives).
     - Cleared by the program (OSC 9;4 with state 0, or an OSC 7501 report of a state other
-      than `working` or `blocked`), and when the foreground process group that set it exits,
-      so a crashed build doesn't leave a bar behind. Set with no job in the foreground (the
-      shell itself printed it), it goes to the next job that takes the foreground, or is
-      cleared 1 to 2 s later when there is none (in a pane whose own process is not a shell
-      it lasts until cleared). Not kept across a daemon restart.
+      than `working` or `blocked`), and when its **owner** is gone, so a crashed build doesn't
+      leave a bar behind. The owner is the process group that reported it, and the rule is
+      the one for a pane-bound agent's `running`: see [Agents](#agents), "Who it ends with".
+      Not kept across a daemon restart.
 - When a tab's active pane closes or exits, the new `active_pane` is the first pane of the
   sibling subtree that takes its place (as in tmux).
 - A pane is removed from the layout when its process exits. A tab with no panes closes, but a
@@ -880,7 +879,7 @@ frame.
 | `agent.decide` | `pane`, `request` (an id from the agent's `requests`), `decision` (`"allow"` or `"deny"`), `message?` (for deny: told to the agent, at most 300 chars) | `{}`. Answers that request only, once: `stale` if it was already answered, retired (answered in the terminal, the turn ended, its hook went away) or never existed. See [Permission requests](#permission-requests) |
 | `agent.permission` | `pane`, `pid`, `tool`, `tool_input?`, `key`, `kind?`, `session?` | Sent by `clothod report --claude-permission` (Claude Code's PermissionRequest hook), not by apps. The reply waits until a client decides: `{"decision": "allow"\|"deny", "message"?}`, or `{"retired": true}` |
 | `agent.report` | `pane`, `state` (or `"clear"`), `kind?`, `message?`, `session?`, `pid?`, `prompt?` (starts a turn; `""` for one the user didn't type), `tool?` and `tool_input?` (`tool: ""` clears both), `tail?` (the end of the agent's last reply, at most 600 chars; since 0.1.31, feature `alerts`), `needs_user?` (a bool: the reporter's own answer to "does the user have to act"; feature `agent.kinds`). `kind` is any name: it is lowercased and kept when it is 1 to 32 of `a-z 0-9 . _ -`, and is `other` otherwise | `{}`, or `{"ignored": "nested"}` for a report from an agent the pane's agent runs; see [Agents](#agents). With `pid`, the daemon checks that the process runs in that pane (same session as the pane's process, or a descendant) and otherwise answers `wrong_pane` |
-| `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it). During a settle window (`settling`) it cancels the pending rise instead. A pane-bound agent (every `source: "osc"` agent, and a report from a script) is removed by it: the pane's `agent` is `null` after, see [Agents](#agents), Clearing |
+| `agent.ack` | `pane` | `{}`: clears the agent's `attention` (the user resolved it; the only way a client clears it). During a settle window (`settling`) it cancels the pending rise instead. A pane-bound agent (every `source: "osc"` agent, and a report from a script) in `waiting`, `done` or `error` is removed by it (the pane's `agent` is `null` after) unless the program that reported it still runs: then it stays, with `attention` false, until that program exits. See [Agents](#agents), Clearing |
 | `agent.history` | `pane`; optional `limit` (1–200, default 200), `since` (unix seconds: entries after it), `session` | `{"pane", "entries": [..], "max": 200}`, oldest first; see [Agent history](#agent-history) |
 | `agent.mute` | `pane`, `muted` (bool) | `{"agent": <agent>}`: mutes or unmutes the pane's agent; see [Agents](#agents). `not_found` if the pane has no agent |
 
@@ -1205,30 +1204,76 @@ not to a process:
   that names a known kind (`claude`, `codex`, the other kinds above) is that agent's, through
   its hooks, and is watched by pid as before; so is one that continues a live agent's reports.
 - `waiting`, `done` and `error` stay when the program that reported them exits.
-- `running` and `starting` are cleared when the program that reported them exits: nothing is
-  working any more. An OSC 7501 `blocked` and `idle` end the same way. The program is:
-  - for an OSC sequence, the pane's foreground process group when it arrived;
-  - for `clothod report`, the foreground process group when the reporter is part of it, else
-    the reporter's own process group (a script in the background, `deploy.sh &`: its status
-    ends with it, whatever runs in the foreground).
-  - With no job in the foreground (the shell itself printed the sequence, or an `agent.report`
-    came without a `pid`), the next job to take the foreground owns it, so a shell that
-    reports `working` before it starts a command has that command as its program. When there
-    is still none about a second later, the shell is back at its prompt and the status is
-    removed (1 to 2 s after the report). Only in a pane whose own process is not a shell (the
-    pane runs the program directly) does it last until the pane closes.
-  - A process that has exited but has not been collected by its shell yet (a zombie) counts
-    as exited.
-- They go away through **`agent.ack`** on a `waiting`, `done` or `error` one, which removes the
-  agent (the pane's `agent` is `null` after it, and an `agent` event with `agent: null` says
-  so: with the user's answer nothing is left to show). A muted one is the exception: it stays,
-  with its mute, so that the next notification from that pane stays quiet too. Also
-  through `clothod report clear` or OSC 7501 `clear`; when another agent replaces them (a hook
-  report, a known agent appearing in the pane's foreground); or when the pane closes.
-- They are saved and come back after a daemon restart or upgrade as they were, without a check
-  for a process.
-- Clients need nothing special: acknowledge as for any agent, and expect `null` after it.
-  There is no flag for it on the agent object.
+- `running` and `starting` end with the program that reported them: nothing is working any
+  more. So do an OSC 7501 `blocked` and `idle`, a `waiting`, `done` or `error` the user has
+  acknowledged while its program still ran (below), and a pane's `progress`.
+- **Who it ends with** (the owner). One rule, for every one of those:
+  1. **The owner is a process group, not a process.** It is alive while any process in it is
+     there and has not exited. A process that has exited but was not collected by its parent
+     yet (a zombie) has exited. A stopped job (Ctrl-Z) is alive: its status and its progress
+     stay until it is continued and ends, or is killed. The group's first process may exit
+     before the rest (`true | worker`, a wrapper that starts a child and exits): that ends
+     nothing while another process of the group runs.
+  2. **Which group**, decided when the report arrives:
+     - for `clothod report`: the pane's foreground process group when the reporter is part of
+       it (in that group, or started by its first process), else the reporter's own process
+       group (a script in the background, `deploy.sh &`, also under `nohup` or after
+       `disown`: its status ends with it, whatever runs in the foreground);
+     - for an OSC sequence, and for an `agent.report` without a `pid`: the pane's foreground
+       process group when it arrived. Output does not say who wrote it. With no job in the
+       foreground, a report that updates the pane's status (or its progress) keeps the owner
+       that already has; a new one has no owner.
+  3. **The pane's own process group is never an owner.** The pane's first process (its
+     shell) lives as long as the pane, so nothing would ever end. A reporter that ran in
+     that group (a command substitution, `echo $(clothod report …)`; a prompt hook; a shell
+     script that is the pane's command) leaves the status without an owner.
+  4. **Without an owner**, the daemon looks once a second:
+     - a job is in the foreground: it becomes the owner (a shell that reports `working`
+       before it starts a command has that command as its program);
+     - else, in a pane whose own process is not a shell (the pane runs the program
+       directly), that program reported: the status lasts until the pane closes;
+     - else the shell is at its prompt, and the status lasts only while something that could
+       have reported it still runs: when the reporter ran in the shell's own group, another
+       process of that group (the rest of the command substitution, or of the script that is
+       the pane's command); when nothing says who reported (output with no job in the
+       foreground), any other process of the pane's session, so a background job that prints
+       `working` or a progress keeps it while it runs. At the second look in a row that
+       finds none it is removed: 1 to 2 s after the report, or after the last such process
+       exited.
+  - What follows from it: a status or progress is never removed while its program runs, and
+    is gone at most about 2 s after the last process that owned it exited (the daemon looks
+    once a second; twice for one without an owner).
+  - What the rule cannot tell, because output carries no sender: a background job that
+    prints while another job is in the foreground is taken for that job (its status ends
+    with the foreground job, and comes back with its next report); and a status printed with
+    no job in the foreground, in a shell that has other processes in its session (an
+    unrelated background job, a prompt helper), lasts until they exit or the next foreground
+    job takes it and ends.
+  - A process that left the pane's session (`setsid`) is not the pane's: its `clothod report`
+    is refused (`wrong_pane`), and what it prints has no owner (step 4).
+- They go away through **`agent.ack`** on a `waiting`, `done` or `error` one:
+  - When the program that reported it is gone, or not known (no owner, in a pane whose own
+    process is a shell), the agent is removed: the pane's `agent` is `null` after it, and an
+    `agent` event with `agent: null` says so. With the user's answer nothing is left to show.
+  - When that program still runs (its owner is alive, or it is the pane's own program in a
+    pane that runs it directly), the agent **stays** as it is with `attention` false (and
+    `settling` false): the ack's `pane` event carries it, as for any other agent, and no
+    `agent` event with `null` follows it. It is removed when that program exits (an `agent`
+    event with `agent: null`, within about a second).
+    Until then it is over as a status: the next report in that pane, the same alert again
+    included, replaces it like a first report (an `agent` event with `agent: null`, then the
+    new agent's, whose `from` is `null`; `attention` rises again by the usual rules).
+  - A muted one always stays, with its mute, so that the next notification from that pane
+    stays quiet too.
+- Also through `clothod report clear` or OSC 7501 `clear`; when another agent replaces them (a
+  hook report, a known agent appearing in the pane's foreground); or when the pane closes.
+- They are saved and come back after a daemon restart or upgrade as they were, owner included:
+  what ends with its owner is checked against it again from then on.
+- Clients need nothing special: acknowledge as for any agent, and show what the events after
+  it carry. That is `null` when the reporting program is gone (the usual case: a script that
+  printed and exited), and the same agent with `attention` false while it still runs; a
+  client must not assume `null`, or remove the row itself. There is no flag for it on the
+  agent object.
 
 ### Notifications from any program
 
@@ -1323,7 +1368,8 @@ the user is at the Mac, the per-pane push interval and the decision log
 `s` and the cleaned text as both `msg` and `sm`.
 
 **How long it stays.** An `osc` agent is pane-bound (see Clearing above): the alert stays after
-the program exits, and `agent.ack` removes it.
+the program exits, and `agent.ack` removes it (while the program still runs, the agent stays
+listed without `attention` until it exits).
 
 **Rate limits**, per pane, for these sequences only (hook reports are not limited). A program
 in a loop, or `cat` of a file full of them, must not flood the phone or the event stream:
@@ -1377,11 +1423,11 @@ What a report becomes:
 | `progress=<n>` | – | only with `working` or `blocked`: sets the pane's `progress` to `{"state": "running", "percent": <n>}`. A `working` or `blocked` report without it leaves the progress as it is (OSC 9;4 may be setting it); a report of any other state clears it, and so does the reporting program's exit |
 
 - `title` is read and not used: the message is `msg` alone.
-- `running` (from `working`), `blocked` and `idle` are cleared when the program that reported
-  them exits (which program that is, and what happens to a report the shell itself printed:
-  see Clearing above); `done` and `error` stay, like a notification's alert. A `working`,
-  `blocked` or `idle` report the rate limit held back belongs to the program that was in the
-  foreground when it arrived: if that has exited by the time the report would be applied, the
+- `running` (from `working`), `blocked` and `idle` end with the program that reported them
+  (its process group: see "Who it ends with" under Clearing above, also for a report the
+  shell itself printed); `done` and `error` stay, like a notification's alert. A `working`,
+  `blocked` or `idle` report the rate limit held back belongs to the owner it had when it
+  arrived: if that process group has ended by the time the report would be applied, the
   report is dropped (the pane's agent is left as it is then).
 - The table under "What happens" applies: for a pane whose agent is hook-reported only
   `progress` is taken (it is the pane's).
@@ -1429,13 +1475,19 @@ command, 1 when it isn't in a Clotho pane or reached no daemon), so a script can
 **How long it stays.** The status belongs to the pane, not to the script:
 
 - `waiting`, `done` and `error` stay after the script exits, until the user acknowledges the
-  alert in an app (then it is gone from the list), until `clothod report --state clear`, until
-  something else reports in that pane, or until the pane closes. They also survive a restart of
-  the daemon.
-- `running` and `starting` go away by themselves when the script that reported exits (within
-  about a second), so a script that crashes doesn't stay "running". That holds for a script in
-  the background too (`deploy.sh &`): its status ends with it, not with whatever is in the
-  foreground.
+  alert in an app (then it is gone from the list; acknowledged while the script still runs,
+  it stays listed without the alert until the script exits), until `clothod report --state
+  clear`, until something else reports in that pane, or until the pane closes. They also
+  survive a restart of the daemon.
+- `running` and `starting` go away by themselves when the script that reported has ended
+  (within about a second), so a script that crashes doesn't stay "running". "The script" is
+  its whole process group: a pipeline (`true | deploy.sh`), or a script whose first process
+  exits and leaves a child working, counts as running until the last of them exits. That
+  holds for a script in the background too (`deploy.sh &`, `nohup deploy.sh &`): its status
+  ends with it, not with whatever is in the foreground. A stopped script (Ctrl-Z) is still
+  running. Reported from a command substitution (`echo $(clothod report --state running)`),
+  where the reporter runs inside the shell itself, it goes 1 to 2 s after the substitution
+  has ended. The exact rule: "Who it ends with" under [Agents](#agents), Clearing.
 - In a pane where a hooked agent (Claude Code, Codex) is the pane's agent, a printed
   notification is ignored: the agent's own report wins.
 - `--kind` with the name of a known agent (`claude`, `codex`, `gemini`, …) is taken as that

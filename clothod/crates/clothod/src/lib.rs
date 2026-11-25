@@ -17,6 +17,7 @@ pub mod launchd;
 pub mod layout;
 pub mod log;
 pub mod model;
+pub mod owner;
 pub mod worktree;
 
 use std::io::Write;

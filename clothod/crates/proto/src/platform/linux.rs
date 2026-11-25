@@ -66,6 +66,32 @@ pub fn is_zombie(pid: u32) -> bool {
     stat.rfind(')').and_then(|i| stat.get(i + 2..)).is_some_and(|rest| rest.starts_with('Z'))
 }
 
+/// Whether any process matching `pick(pid, process group, session)` is running (there, and not
+/// a zombie): one pass over /proc, a small read per process, stopping at the first match.
+fn any_running(pick: impl Fn(u32, u32, u32) -> bool) -> bool {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return false };
+    dir.flatten().any(|e| {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { return false };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+        // Fields after the parenthesized comm: state ppid pgrp session ...
+        let Some(rest) = stat.rfind(')').and_then(|i| stat.get(i + 2..)) else { return false };
+        let mut f = rest.split_whitespace();
+        let zombie = f.next().is_none_or(|s| s.starts_with('Z') || s.starts_with('X'));
+        let (Some(pgrp), Some(sid)) = (f.nth(1).and_then(|v| v.parse::<u32>().ok()), f.next().and_then(|v| v.parse::<u32>().ok())) else { return false };
+        !zombie && pick(pid, pgrp, sid)
+    })
+}
+
+/// Whether a running process other than `except` is in process group `pgrp`.
+pub fn group_has_running(pgrp: u32, except: Option<u32>) -> bool {
+    any_running(|pid, g, _| g == pgrp && Some(pid) != except)
+}
+
+/// Whether a running process other than `except` is in session `sid`.
+pub fn session_has_running(sid: u32, except: u32) -> bool {
+    any_running(|pid, _, s| s == sid && pid != except)
+}
+
 /// The terminal's foreground process group, from `tpgid` in /proc/<pid>/stat.
 pub fn terminal_pgrp(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
