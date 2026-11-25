@@ -2,8 +2,9 @@ import ClothoKit
 @testable import Clotho
 import XCTest
 
-/// The line under a machine's "Summarize agent messages" switch (`SettingsView.healthCaption`): only a rewrite
-/// that isn't working says anything, and only on a daemon with the `alerts` feature.
+/// The line under a machine's "Summarize agent messages" switch (`SettingsView.healthCaption`): ClothoKit's
+/// `RewriteHealth.problemCaption`, so only a rewrite that isn't working says anything, and only on a daemon with
+/// the `alerts` feature.
 final class RewriteHealthTests: XCTestCase {
     private func health(_ state: RewriteHealth.State, reason: String? = nil, alerts: Bool = true) -> (text: String, failing: Bool)? {
         SettingsView.healthCaption(RewriteHealth(state: state, reason: reason, at: 1761512345), alerts: alerts)
@@ -40,6 +41,18 @@ final class RewriteHealthTests: XCTestCase {
             XCTAssertNil(health(state, reason: "left over"), "\(state)")
         }
         XCTAssertNil(SettingsView.healthCaption(nil, alerts: true))
+    }
+
+    /// The words are ClothoKit's, for every state: the phone adds only the `alerts` guard.
+    func testTheCaptionIsClothoKits() {
+        for state in RewriteHealth.State.allCases {
+            for reason in [nil, "", "exit 1:\n Not logged in"] as [String?] {
+                let health = RewriteHealth(state: state, reason: reason, at: 1761512345)
+                let ours = SettingsView.healthCaption(health, alerts: true), shared = health.problemCaption
+                XCTAssertEqual(ours?.text, shared?.text, "\(state)")
+                XCTAssertEqual(ours?.failing, shared?.failing, "\(state)")
+            }
+        }
     }
 
     func testNothingWithoutTheAlertsFeature() {

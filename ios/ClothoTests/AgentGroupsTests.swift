@@ -2,7 +2,7 @@ import ClothoKit
 import XCTest
 @testable import Clotho
 
-/// The Agents list's three groups (AgentGroup): which group an agent is in, the order inside each, and what a
+/// The Agents list's three groups (ClothoKit's AgentStatusGroup): which group an agent is in, the order inside each, and what a
 /// row's caption and VoiceOver text say.
 @MainActor
 final class AgentGroupsTests: XCTestCase {
@@ -63,7 +63,7 @@ final class AgentGroupsTests: XCTestCase {
         XCTAssertEqual(row(1, .done).status, "Done")
         XCTAssertEqual(row(1, .running, attention: nil).status, "Running")
         XCTAssertEqual(row(1, .error, attention: false).status, "Error", "a resolved error")
-        XCTAssertEqual(AgentGroup.allCases.map(\.title), ["Needs you", "Done", "Working"])
+        XCTAssertEqual(AgentStatusGroup.allCases.map(\.title), ["Needs you", "Done", "Working"])
     }
 
     func testOrderInsideEachGroup() {
@@ -80,8 +80,13 @@ final class AgentGroupsTests: XCTestCase {
         XCTAssertEqual(groups.done.map(\.pane), [5, 6, 4], "the newest first")
         XCTAssertEqual(groups.working.map(\.pane), [9, 7, 11, 10, 8], "idle, running, starting, then finished ones, newest first")
         XCTAssertEqual(groups.needsYou.count + groups.done.count + groups.working.count, rows.count, "every agent is in one group")
-        // The badge's count (needsAttention) is Needs you plus Done.
-        XCTAssertEqual(rows.filter(\.wantsAttention).count, groups.needsYou.count + groups.done.count)
+        // The badge counts Needs you only: a turn that only finished (Done) isn't in it, though it has attention.
+        XCTAssertEqual(AgentRow.needsYouCount(rows), groups.needsYou.count)
+        XCTAssertEqual(AgentRow.needsYouCount(rows), 3)
+        XCTAssertEqual(AgentRow.needsYouCount(groups.done), 0, "Done isn't counted")
+        XCTAssertEqual(AgentRow.needsYouCount(groups.working), 0)
+        XCTAssertEqual(AgentRow.needsYouCount([]), 0)
+        XCTAssertEqual(rows.filter(\.wantsAttention).count, groups.needsYou.count + groups.done.count, "both have attention")
     }
 
     func testCaptionWithAndWithoutChanges() {

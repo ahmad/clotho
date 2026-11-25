@@ -149,7 +149,7 @@ export async function handle(request, env, { deliver = apnsDeliver, now = Date.n
     if (!body || typeof body.handle !== "string" || !COLLAPSE.test(body.collapse_id ?? "")
         || typeof body.ciphertext !== "string" || body.ciphertext.length > MAX_CIPHERTEXT
         || !CIPHERTEXT.test(body.ciphertext)
-        || (body.silent !== undefined && typeof body.silent !== "boolean")) {
+        || (body.silent != null && typeof body.silent !== "boolean")) {
       return json(400, { error: "bad_request" });
     }
     const target = await openHandle(env, body.handle);

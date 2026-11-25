@@ -84,6 +84,35 @@ final class AgentBannerTests: XCTestCase {
         XCTAssertNotNil(try XCTUnwrap(banner(nil, failed)).content.sound, "only done is ever silent")
     }
 
+    /// An osc agent's text is a program's output: the banner shows it as typed, never read as Markdown.
+    func testOscBannerIsPlainText() throws {
+        let osc = try agent(#"{"kind":"other","state":"waiting","source":"osc","attention":true,"needs_user":true,"message":"**Build**  finished:\n see [log](http://x)","summary":"Build finished: see log"}"#)
+        let request = try XCTUnwrap(banner(nil, osc))
+        XCTAssertEqual(request.content.body, "**Build** finished: see [log](http://x)", "stars and link syntax as typed, on one line")
+        XCTAssertNotEqual(request.content.categoryIdentifier, AlertActions.replyCategory, "a program's notification takes no reply")
+        XCTAssertNotEqual(request.content.categoryIdentifier, AlertActions.permissionCategory)
+        // The same text from a coding agent is Markdown, made plain as before.
+        let claude = try agent(#"{"kind":"claude","state":"waiting","source":"hook","attention":true,"needs_user":true,"message":"**Build** finished: see [log](http://x)"}"#)
+        XCTAssertEqual(try XCTUnwrap(banner(nil, claude)).content.body, "Build finished: see log")
+    }
+
+    /// Reply is on the banner only for an agent that takes one (AgentInfo.acceptsReplies), as on its row.
+    func testReplyCategoryOnlyForAnAgentThatTakesReplies() throws {
+        func category(_ json: String) throws -> String {
+            try XCTUnwrap(banner(nil, try agent(json))).content.categoryIdentifier
+        }
+        XCTAssertEqual(try category(#"{"kind":"claude","state":"waiting","source":"hook","attention":true,"message":"Which database?"}"#),
+                       AlertActions.replyCategory)
+        XCTAssertEqual(try category(#"{"kind":"gemini","state":"waiting","source":"hook","attention":true}"#), AlertActions.replyCategory)
+        XCTAssertNotEqual(try category(#"{"kind":"deploy","state":"waiting","source":"hook","attention":true,"message":"Approve the release?"}"#),
+                          AlertActions.replyCategory, "a script's report")
+        XCTAssertNotEqual(try category(#"{"kind":"deploy","state":"done","source":"hook","attention":true}"#), AlertActions.replyCategory)
+        XCTAssertNotEqual(try category(#"{"kind":"other","state":"done","source":"osc","attention":true,"message":"done"}"#),
+                          AlertActions.replyCategory)
+        XCTAssertNotEqual(try category(#"{"kind":"claude","state":"waiting","source":"detected","attention":true}"#),
+                          AlertActions.replyCategory, "a detected agent (its bell): no Reply, as on its row")
+    }
+
     /// A turn in the daemon's settle window hasn't asked for the user yet: no banner until attention rises.
     func testSettlingShowsNoBanner() throws {
         let running = try agent(#"{"kind":"claude","state":"running","source":"hook","attention":false}"#)

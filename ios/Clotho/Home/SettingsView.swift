@@ -167,20 +167,11 @@ struct SettingsView: View {
 extension SettingsView {
     /// The line under a machine's "Summarize agent messages" switch when its rewrite isn't working, on a daemon
     /// that reports the rewrite's health (feature `alerts`): why it fails, or that the machine has no Claude Code
-    /// to run it. Nil for ok, off, not yet known and no health: the switch alone. The wording is the Mac's
-    /// (`MachinesSettings.rewriteCaption`).
+    /// to run it. Nil for ok, off, not yet known and no health: the switch alone. The wording is ClothoKit's
+    /// (`RewriteHealth.problemCaption`), shared with the Mac.
     static func healthCaption(_ health: DaemonSettings.RewriteHealth?, alerts: Bool) -> (text: String, failing: Bool)? {
         guard alerts, let health else { return nil }
-        switch health.state {
-        case .failing:
-            // On one line, whatever the daemon sent.
-            let reason = health.reason.map { $0.split(whereSeparator: \.isWhitespace).joined(separator: " ") }.flatMap { $0.isEmpty ? nil : $0 }
-            return (reason.map { "Not working: \($0)" } ?? "Not working", true)
-        case .unavailable:
-            return ("Claude Code wasn't found on this machine", false)
-        case .ok, .unknown, .off:
-            return nil
-        }
+        return health.problemCaption
     }
 }
 

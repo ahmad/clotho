@@ -374,7 +374,15 @@ private struct SidebarMachine: View {
                         Label(store.displayTitle(of: tab),
                               systemImage: tab.layout.panes.count > 1 ? "rectangle.split.2x1" : "terminal")
                             .lineLimit(1)
+                            // The Tab's progress under its name, across the row; the row keeps its height.
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .overlay(alignment: .bottom) {
+                                if let progress = store.tabProgress(tab) {
+                                    ProgressStrip(progress: progress).offset(y: 5).accessibilityHidden(true)
+                                }
+                            }
                     }
+                    .accessibilityValue(store.tabProgress(tab)?.spokenText ?? "")
                     .contextMenu {
                         Button(role: .destructive) { connection.run("Close tab") { try await $0.closeTab(tab.id) } } label: {
                             Label("Close Tab", systemImage: "xmark")

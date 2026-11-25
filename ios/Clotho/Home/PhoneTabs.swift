@@ -9,7 +9,8 @@ struct PhoneTabs: View {
     @EnvironmentObject private var connections: Connections
     @EnvironmentObject private var navigator: Navigator
 
-    private var needingYou: Int { connections.agentRows.filter(\.wantsAttention).count }
+    /// The badge, and what a launch goes by: only agents in Needs you. A turn that only finished isn't counted.
+    private var needingYou: Int { AgentRow.needsYouCount(connections.agentRows) }
 
     var body: some View {
         TabView(selection: $navigator.tab) {
@@ -62,8 +63,8 @@ struct AgentsTab: View {
                         Label("No agents", systemImage: "sparkles")
                     } description: {
                         Text(machines.all.isEmpty
-                             ? "Add a machine, then run Claude Code or Codex in one of its panes."
-                             : "Claude Code and Codex show here while they run in a pane, and come to the top when they need you.")
+                             ? "Add a machine, then run a coding agent in one of its panes."
+                             : "Coding agents, and any program that reports its status, show here while they run in a pane, and come to the top when they need you.")
                     }
                 }
             }

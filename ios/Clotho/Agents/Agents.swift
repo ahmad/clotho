@@ -16,12 +16,18 @@ struct AgentRow: Identifiable, Hashable {
     /// How much changed in the pane's work tree, when the machine counts it (feature `git.changes`); the
     /// caption shows it.
     var changes: PaneGit.Changes? = nil
+    /// How far the pane's program says it is (feature `pane.progress`), only from a machine that is connected
+    /// now (`AgentRow.progress(of:features:live:)`): a thin bar under the caption. Only drawn and spoken on the
+    /// row: no alert, banner, badge or widget entry reads it, and it has no part in the order.
+    var progress: PaneProgress? = nil
 
     var id: String { "\(machineID.uuidString)/\(pane)" }
 
-    /// Only an agent that reported through its hook that it's waiting on the user, and hasn't been answered
-    /// yet, takes a quick reply. Idle, detected (quiet output read as waiting) or acknowledged agents don't.
-    var acceptsReply: Bool { info.state == .waiting && info.isHookSourced && wantsAttention }
+    /// Only a coding agent that reported through its hook that it's waiting on the user, and hasn't been
+    /// answered yet, takes a quick reply (`AgentInfo.acceptsReplies`). Idle, detected (quiet output read as
+    /// waiting) or acknowledged agents don't, and neither does a script's report or a program's notification
+    /// (`source: "osc"`): nobody there reads a reply.
+    var acceptsReply: Bool { info.state == .waiting && info.acceptsReplies && wantsAttention }
 
     /// The daemon's `attention`: set when an agent reports it needs the user (or rings the bell), cleared when
     /// the agent starts working again or the user resolves it (agent.ack, on any device). Viewing, opening or
@@ -54,16 +60,19 @@ struct AgentRow: Identifiable, Hashable {
         }
     }
 
-    /// Agents with the daemon's `attention` (Needs you and Done together, as the tab's badge counts them) and
-    /// the rest. The list itself shows `groups` (AgentGroups). Resolving on any device clears attention
-    /// everywhere; the agent comes back to the top when attention is raised again.
+    /// Agents with the daemon's `attention` (Needs you and Done together) and the rest. The list itself shows
+    /// `groups` (AgentGroups), and the tab's badge counts Needs you only (`needsYouCount`). Resolving on any
+    /// device clears attention everywhere; the agent comes back to the top when attention is raised again.
     static func split(_ rows: [AgentRow]) -> (attention: [AgentRow], quiet: [AgentRow]) {
         let sorted = sorted(rows)
         return (sorted.filter(\.wantsAttention), sorted.filter { !$0.wantsAttention })
     }
 
+    /// What the row draws. The change counts compare without their token (`counts`): an edit that leaves every
+    /// count as it was is no reason to redraw.
     static func == (a: AgentRow, b: AgentRow) -> Bool {
-        a.id == b.id && a.info == b.info && a.title == b.title && a.changes == b.changes
+        a.id == b.id && a.info == b.info && a.title == b.title && a.changes?.counts == b.changes?.counts
+            && a.progress == b.progress
     }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
@@ -74,6 +83,8 @@ extension MachineConnection {
     var agentRows: [AgentRow] {
         let state = store.state
         let features = store.hello?.features
+        // Progress is live or nothing: never from a saved model, or while the machine is away.
+        let live = store.isConnected && !store.isSaved
         var rows: [AgentRow] = []
         for workspace in state.workspaces {
             for tab in workspace.tabs {
@@ -81,8 +92,11 @@ extension MachineConnection {
                     guard let pane = state.pane(id), let info = pane.agent ?? fakeAgent(for: pane) else { continue }
                     // A made-up agent gets made-up counts; a real one its pane's, from a daemon that counts them.
                     let changes = pane.agent == nil ? MachineConnection.fakeChanges(info) : AgentRow.changes(of: pane.git, features: features)
+                    let progress = pane.agent == nil ? FakeAgents.progress(info, pane: id)
+                        : AgentRow.progress(of: pane.progress, features: store.features, live: live)
                     rows.append(AgentRow(machineID: machine.id, machineName: machine.displayName, pane: id, tab: tab.id,
-                                         workspace: workspace.name, title: store.displayTitle(of: tab), info: info, changes: changes))
+                                         workspace: workspace.name, title: store.displayTitle(of: tab), info: info, changes: changes,
+                                         progress: progress))
                 }
             }
         }
@@ -171,7 +185,10 @@ extension MachineConnection {
         case .done: needsUser = pane.id % 2 == 1
         default: needsUser = nil
         }
-        return AgentInfo(kind: pane.id % 2 == 0 ? "codex" : "claude", state: state, source: "hook", message: messages[state],
+        // With `-FakeAgentKinds YES` the other kinds, a script's report and a program's notification stand in.
+        let made = FakeAgents.kinds ? FakeAgents.kind(for: pane.id) : nil
+        return AgentInfo(kind: made?.kind ?? (pane.id % 2 == 0 ? "codex" : "claude"), state: state, source: made?.source ?? "hook",
+                         message: made?.message ?? messages[state],
                          since: Date().timeIntervalSince1970 - Double(pane.id) * 90,
                          attention: state != .running && state != .starting && !fakeAcked.contains(pane.id)
                             && !fakeMuted.contains(pane.id),
@@ -191,6 +208,32 @@ extension MachineConnection {
 enum FakeAgents {
     /// Off unless asked for (`-FakeAgents YES` as a launch argument), so made-up agents never sit next to real ones.
     static var enabled: Bool { UserDefaults.standard.bool(forKey: "FakeAgents") }
+
+    /// With `-FakeAgentKinds YES` as well, the made-up agents are of every kind and the running ones show a
+    /// progress, so screenshots need no typing. Off by default: the plain fakes stay Claude and Codex.
+    static var kinds: Bool { enabled && UserDefaults.standard.bool(forKey: "FakeAgentKinds") }
+
+    /// What `kinds` cycles through, by pane id: the other coding agents, a script's own kind reported through
+    /// the hook, and a program's notification (`source: "osc"`), whose text is plain and reads as typed.
+    static let made: [(kind: String, source: String, message: String?)] = [
+        ("gemini", "hook", nil), ("opencode", "hook", nil), ("copilot", "hook", nil), ("aider", "hook", nil),
+        ("amp", "hook", nil), ("cursor", "hook", nil), ("deploy", "hook", nil),
+        ("other", "osc", "**Build** finished: see [log](http://x)"),
+    ]
+
+    static func kind(for pane: PaneID) -> (kind: String, source: String, message: String?) {
+        made[Int(pane % UInt64(made.count))]
+    }
+
+    /// A made-up progress for a made-up running agent (only with `kinds`). The running fakes are every fifth
+    /// pane, so the turn is counted in fives: every other one is at 40 percent (ten panes in a row always show
+    /// one), and those between are indeterminate and an error in turn.
+    static func progress(_ info: AgentInfo, pane: PaneID, kinds: Bool = FakeAgents.kinds) -> PaneProgress? {
+        guard kinds, info.state == .running else { return nil }
+        let turn = pane / 5
+        if turn % 2 == 0 { return PaneProgress(state: .running, percent: 40) }
+        return (turn / 2) % 2 == 0 ? PaneProgress(state: .indeterminate) : PaneProgress(state: .error, percent: 55)
+    }
 }
 
 // MARK: - Notifications
@@ -328,6 +371,7 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     /// those still badge and show in the Agents list, which follow `needsAttention`. Nor for a settling one,
     /// whose attention hasn't risen yet. It reads like the push for the same rise (AlertText), which it
     /// replaces (same identifier), and like it a turn that only finished (done, `needsUser` false) is silent.
+    /// Reply is offered only for an agent that takes one (`AgentInfo.acceptsReplies`), as on its row.
     static func banner(machine: Machine, pane: PaneID, place: Place, before: AgentInfo?, after: AgentInfo?) -> UNNotificationRequest? {
         guard let after, after.notifiesRise(from: before) else { return nil }
         let content = UNMutableNotificationContent()
@@ -339,19 +383,22 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
         let request = after.state == .waiting ? after.pendingRequests.first?.id : nil
         if let request { info["request"] = request }
         content.userInfo = info
-        content.categoryIdentifier = AlertActions.category(state: after.state.rawValue, request: request)
+        content.categoryIdentifier = AlertActions.category(state: after.state.rawValue, request: request,
+                                                                  acceptsReplies: after.acceptsReplies)
         let label = PushLabel.make(machine: machine.id, name: machine.displayName)
         return UNNotificationRequest(identifier: PushLabel.collapseID(label: label, pane: pane), content: content, trigger: nil)
     }
 
-    /// As the push for the same rise reads; the tab title is the last fallback for the body, as before.
+    /// As the push for the same rise reads; the tab title is the last fallback for the body, as before. An osc
+    /// agent's text is a program's output, plain by contract: it is shown as typed, never read as Markdown.
     static func notice(machine: Machine, place: Place, agent: AgentInfo) -> AgentNotice {
         AgentNotice(kind: agent.kind, state: agent.state.rawValue, machine: machine.displayName, workspace: place.workspace,
                     project: place.cwd.flatMap(AgentNotice.project), duration: agent.turnDuration, result: agent.message,
                     // The oldest pending request, as the push for this wait describes it (and AgentNotice(info:)).
                     tool: agent.pendingRequests.first?.tool ?? agent.tool,
                     toolInput: agent.pendingRequests.first.map { $0.summary } ?? agent.toolInput,
-                    fallback: agent.prompt ?? place.tab, summary: agent.summary, needsUser: agent.needsUser)
+                    fallback: agent.prompt ?? place.tab, summary: agent.summary, needsUser: agent.needsUser,
+                    plainText: agent.isOscSourced)
     }
 
     /// Removes delivered agent notifications (local or pushed) for a machine's panes that no longer want attention.

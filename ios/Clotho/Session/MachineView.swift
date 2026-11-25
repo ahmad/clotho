@@ -35,9 +35,16 @@ struct MachineView: View {
                     } else {
                         Button { show(tab.id) } label: { TabRow(store: store, tab: tab) }
                             .tint(.primary)
+                            .accessibilityValue(store.tabProgress(tab)?.spokenText ?? "")
                     }
                 }
-                    .listRowBackground(SelectionBackground(selected: store.state.focus.tab == tab.id))
+                    // The Tab's progress along the row's bottom edge, in its background: the row keeps its height.
+                    .listRowBackground(SelectionBackground(selected: store.state.focus.tab == tab.id)
+                        .overlay(alignment: .bottom) {
+                            if let progress = store.tabProgress(tab) {
+                                ProgressStrip(progress: progress).accessibilityHidden(true)
+                            }
+                        })
                     .swipeActions(allowsFullSwipe: false) {
                         Button(role: .destructive) {
                             connection.run("Close tab") { try await $0.closeTab(tab.id) }

@@ -2,7 +2,7 @@ import ClothoKit
 import SwiftUI
 import UIKit
 
-/// The agents on every connected machine, in three groups (AgentGroup): those that need the user ("Needs you",
+/// The agents on every connected machine, in three groups (ClothoKit's AgentStatusGroup): those that need the user ("Needs you",
 /// the longest wait first), those that just finished ("Done"), and the rest ("Working": running, idle, resolved,
 /// muted), folded away under its header until the user opens it. Pinned agents have their own section on top,
 /// always shown. Rows are compact; Resolve, Mute, Reply and History are swipe actions and the long-press menu.
@@ -41,7 +41,7 @@ struct AgentsSection: View {
                         attentionRow(row, openID: "needsYouAgent")
                     }
                 } header: {
-                    SectionCount(title: AgentGroup.needsYou.title, count: groups.needsYou.count)
+                    SectionCount(title: AgentStatusGroup.needsYou.title, count: groups.needsYou.count)
                 }
             }
             if !groups.done.isEmpty {
@@ -50,7 +50,7 @@ struct AgentsSection: View {
                         attentionRow(row, openID: "doneAgent")
                     }
                 } header: {
-                    SectionCount(title: AgentGroup.done.title, count: groups.done.count)
+                    SectionCount(title: AgentStatusGroup.done.title, count: groups.done.count)
                 }
             }
             if !groups.working.isEmpty {
@@ -72,7 +72,7 @@ struct AgentsSection: View {
 
     /// "Working, 3 agents": what VoiceOver reads for the Working group's header.
     static func workingLabel(count: Int) -> String {
-        "\(AgentGroup.working.title), \(count) \(count == 1 ? "agent" : "agents")"
+        "\(AgentStatusGroup.working.title), \(count) \(count == 1 ? "agent" : "agents")"
     }
 
     /// A row as its group shows it (the pinned section mixes the groups).
@@ -165,7 +165,8 @@ struct AgentsSection: View {
         }
     }
 
-    /// `agent.ack`: the daemon clears attention for every client; the row moves to Working.
+    /// `agent.ack`: only asks the daemon. The row follows the daemon's events, on every client: it may stay where
+    /// it is, lose attention (and move to Working), or go.
     private func resolve(_ row: AgentRow) {
         connections.existing(row.machineID)?.ackAgent(row.pane)
     }
@@ -176,12 +177,14 @@ struct AgentsSection: View {
 ///     Platform › api-server
 ///     Ran the tests; two failures in push.rs. Wants
 ///     to know whether to fix them now.
-///     devbox · Claude · 4m
+///     devbox · ✦ Claude · 4m
 ///
-/// The caption ends with how much the pane's work tree changed, when the machine counts it ("· +128 −32 · 6
+/// The kind has its symbol before its name (`AgentInfo.kindSymbolName`, from ClothoKit's table only: a kind's
+/// text never names a symbol). The caption ends with how much the pane's work tree changed, when the machine counts it ("· +128 −32 · 6
 /// files"). The sections say whether it needs the user, so the row doesn't repeat a status; only an error says
 /// so, in red. A muted agent has a crossed-out bell in its caption (Mute and Unmute are in the swipe and the menu).
-/// A Done row has a lighter title; Working rows are dimmer, with one line of summary.
+/// A Done row has a lighter title; Working rows are dimmer, with one line of summary. A pane whose program
+/// reports progress has a thin bar under the caption.
 struct AgentRowView: View {
     let row: AgentRow
     /// Pinned on this phone (AgentPins): a pin in the caption.
@@ -220,9 +223,12 @@ struct AgentRowView: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 // The age is compact, as on the Mac ("1m", "2h"), and updated each minute.
-                // One text with the error mark, so a caption that wraps (the accessibility sizes) keeps its order.
+                // One text with the kind's symbol and the error mark, so a caption that wraps (the accessibility
+                // sizes) keeps its order. The symbol is decorative: VoiceOver reads the name (accessibilityText).
                 TimelineView(.everyMinute) { context in
-                    (Text(Self.caption(row, now: context.date))
+                    (Text(verbatim: "\(row.machineName) · ")
+                        + Text(Image(systemName: row.info.kindSymbolName))
+                        + Text(verbatim: " " + Self.captionTail(row, now: context.date))
                         + Text(row.info.state == .error ? " · Error" : "").foregroundStyle(.red).fontWeight(.medium))
                         .monospacedDigit()
                 }
@@ -238,13 +244,17 @@ struct AgentRowView: View {
             // Where it doesn't fit on one line (the iPad's sidebar, the larger text sizes) the caption wraps
             // instead of losing its end, the change counts.
             .lineLimit(2)
+            // Drawn only: the row's VoiceOver text says it (accessibilityText).
+            if let progress = row.progress {
+                ProgressStrip(progress: progress).accessibilityHidden(true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 
     /// Needs you stands out, Done is plain, Working as before.
-    private static func titleWeight(_ group: AgentGroup) -> Font.Weight {
+    private static func titleWeight(_ group: AgentStatusGroup) -> Font.Weight {
         switch group {
         case .needsYou: return .semibold
         case .done: return .regular
@@ -253,9 +263,15 @@ struct AgentRowView: View {
     }
 
     /// The row's last line: "devbox · Claude · 4m", and with the pane's change counts "devbox · Claude · 4m ·
-    /// +128 −32 · 6 files" (ClothoKit's `ChangeCountText.strip`; nothing when nothing changed).
+    /// +128 −32 · 6 files" (ClothoKit's `ChangeCountText.strip`; nothing when nothing changed). The text only:
+    /// the row draws the kind's symbol before its name.
     static func caption(_ row: AgentRow, now: Date = Date()) -> String {
-        var parts = [row.machineName, row.info.shortKindName]
+        "\(row.machineName) · \(captionTail(row, now: now))"
+    }
+
+    /// The caption from the kind's name on ("Claude · 4m · +128 −32 · 6 files"): what follows the kind's symbol.
+    static func captionTail(_ row: AgentRow, now: Date = Date()) -> String {
+        var parts = [row.info.shortKindName]
         if let since = row.info.sinceDate { parts.append(age(since, now: now)) }
         if let changes = ChangeCountText.strip(row.changes) { parts.append(changes) }
         return parts.joined(separator: " · ")
@@ -263,7 +279,7 @@ struct AgentRowView: View {
 
     /// What VoiceOver (and the UI tests) read: the lines, then the status ("Needs you", "Done", else the state;
     /// an error that needs the user says both), the changes as said ("128 lines added, 32 removed, in 6 files"),
-    /// "Pinned" and "Muted".
+    /// the pane's progress ("Progress 40 percent"), "Pinned" and "Muted".
     static func accessibilityText(_ row: AgentRow, pinned: Bool = false) -> String {
         var parts = ["\(row.workspace) › \(row.title)"]
         if let summary = row.summary { parts.append(summary) }
@@ -271,6 +287,7 @@ struct AgentRowView: View {
         let error = AgentInfo.State.error.label
         if row.info.state == .error, row.status != error { parts.append(error) }
         if let changes = ChangeCountText.spoken(row.changes) { parts.append(changes) }
+        if let progress = row.progress { parts.append(progress.spokenText) }
         if pinned { parts.append("Pinned") }
         if row.isMuted { parts.append("Muted") }
         return parts.joined(separator: ", ")
@@ -308,7 +325,7 @@ private struct WorkingHeader: View {
                 Image(systemName: "chevron.right")
                     .imageScale(.small)
                     .rotationEffect(.degrees(expanded ? 90 : 0))
-                Text(AgentGroup.working.title)
+                Text(AgentStatusGroup.working.title)
                 Text("\(count)").foregroundStyle(.secondary).monospacedDigit()
             }
             .font(.footnote.weight(.semibold))

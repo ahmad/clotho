@@ -25,14 +25,15 @@ final class PushUITests: XCTestCase {
 
     /// The real path: the deployed relay, APNs's sandbox, and the notification service extension decrypting
     /// the alert in the simulator. Needs the network and Apple, so it runs only when asked
-    /// (`touch /tmp/clotho-ios-push-e2e`).
+    /// (`touch /tmp/clotho-ios-push-e2e`, which also makes build.sh keep the relay URL in the test build).
+    /// `-PushRealRelay YES` lets this launch use the built-in relay; no other test launch does.
     func testRealSandboxPushIsDecrypted() throws {
         guard FileManager.default.fileExists(atPath: "/tmp/clotho-ios-push-e2e") else {
             throw XCTSkip("real push test not requested (touch /tmp/clotho-ios-push-e2e)")
         }
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let app = XCUIApplication()
-        app.launchArguments = ["-UITesting", "-PushSelfTest", "YES"]
+        app.launchArguments = ["-UITesting", "-PushSelfTest", "YES", "-PushRealRelay", "YES"]
         app.launch()
         let allow = springboard.buttons["Allow"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }
@@ -53,7 +54,7 @@ final class PushUITests: XCTestCase {
         }
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let app = XCUIApplication()
-        app.launchArguments = ["-UITesting"]
+        app.launchArguments = ["-UITesting", "-PushRealRelay", "YES"]
         app.launch()
         let allow = springboard.buttons["Allow"]
         if allow.waitForExistence(timeout: 5) { allow.tap() }

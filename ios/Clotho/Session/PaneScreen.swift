@@ -54,6 +54,10 @@ struct PaneScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // The Tab's progress, right under the navigation bar (whose title is the Tab's). Its room is always
+            // there, so progress coming and going never resizes the pane.
+            ProgressStrip(reserving: tab.flatMap { store.tabProgress($0) })
+                .accessibilityIdentifier("tabProgress")
             if panes.count > 1 { paneStrip }
             if finding {
                 FindBar(find: find, machine: connection.machine.displayName) { stopFinding() }
@@ -152,14 +156,23 @@ struct PaneScreen: View {
             HStack(spacing: 6) {
                 ForEach(Array(panes.enumerated()), id: \.element) { index, id in
                     let selected = id == currentPane
+                    let name = "\(index + 1) \(paneTitle(id))"
+                    let progress = store.paneProgress(id)
                     Button { select(pane: id) } label: {
-                        Text("\(index + 1) \(paneTitle(id))")
+                        Text(name)
                             .font(.caption.weight(selected ? .semibold : .regular))
                             .foregroundStyle(selected ? Color.primary : Color.secondary)
                             .lineLimit(1)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
                             .background(selected ? Color.selection.opacity(0.35) : Color.primary.opacity(0.08), in: Capsule())
+                            // The pane's own progress, along the chip's bottom edge, inside it.
+                            .overlay(alignment: .bottom) {
+                                if let progress {
+                                    ProgressStrip(progress: progress).padding(.horizontal, 10).padding(.bottom, 1)
+                                        .accessibilityHidden(true)
+                                }
+                            }
                             // The selected pane is underlined too, so it reads at a glance (as on the Mac).
                             .overlay(alignment: .bottom) {
                                 if selected {
@@ -168,6 +181,7 @@ struct PaneScreen: View {
                             }
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(progress.map { "\(name), \($0.spokenText)" } ?? name)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
             }

@@ -58,9 +58,14 @@ struct NeedsYouView: View {
                     ForEach(agents.prefix(family == .systemSmall ? 2 : 3)) { agent in
                         Link(destination: Self.url(agent)) {
                             // Plain text colours: a Link would otherwise take the tint.
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(Self.what(agent)).font(.caption.weight(.medium)).foregroundStyle(.primary).lineLimit(1)
-                                Text(Self.where(agent, at: entry.date)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                                // The kind's symbol; the line beside it already says the name.
+                                Image(systemName: Self.symbol(agent)).font(.caption).foregroundStyle(.secondary)
+                                    .frame(width: 16).accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(Self.what(agent)).font(.caption.weight(.medium)).foregroundStyle(.primary).lineLimit(1)
+                                    Text(Self.where(agent, at: entry.date)).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                }
                             }
                         }
                         .tint(Color.primary)
@@ -88,6 +93,10 @@ struct NeedsYouView: View {
         let state = AgentInfo.State(rawValue: agent.state) ?? .unknown
         return "\(AgentInfo.shortName(ofKind: agent.kind)) \(state.alertVerb(needsUser: agent.needsUser))"
     }
+
+    /// The kind's SF Symbol, from ClothoKit's table: a fixed name per known kind and the generic one for
+    /// every other, never a name made from the kind's text.
+    static func symbol(_ agent: AgentsSummary.Agent) -> String { AgentKind.of(agent.kind).symbolName }
 
     /// "now", "4m", "2h", "earlier" (older than 12 hours).
     static func age(_ agent: AgentsSummary.Agent, at date: Date) -> String {

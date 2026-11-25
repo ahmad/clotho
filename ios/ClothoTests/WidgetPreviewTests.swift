@@ -1,3 +1,4 @@
+import ClothoKit
 import SwiftUI
 import WidgetKit
 import XCTest
@@ -49,6 +50,57 @@ final class WidgetPreviewTests: XCTestCase {
         XCTAssertEqual(NeedsYouView.what(agent("waiting", nil)), "Claude is waiting")
         XCTAssertEqual(NeedsYouView.what(agent("done", nil)), "Claude finished")
         XCTAssertEqual(NeedsYouView.what(agent("error", nil, kind: "codex")), "Codex hit an error")
+    }
+
+    /// Any kind (clothod 0.1.33): a kind ClothoKit's table knows by its name and symbol, one it doesn't by its
+    /// own text, and "other" as "Agent", both with the generic symbol. The symbol is the table's, never a
+    /// name made from the kind.
+    func testRowsNameAndDrawAnyKind() throws {
+        XCTAssertEqual(NeedsYouView.what(agent("waiting", true, kind: "copilot")), "Copilot needs you")
+        XCTAssertEqual(NeedsYouView.symbol(agent("waiting", true, kind: "copilot")), "eyeglasses")
+        XCTAssertEqual(NeedsYouView.what(agent("done", false, kind: "gemini")), "Gemini is done")
+        XCTAssertEqual(NeedsYouView.symbol(agent("done", false, kind: "gemini")), "sparkles")
+        XCTAssertEqual(NeedsYouView.symbol(agent("waiting", true)), "sparkle")
+        XCTAssertEqual(NeedsYouView.what(agent("error", true, kind: "deploy")), "deploy needs you")
+        XCTAssertEqual(NeedsYouView.symbol(agent("error", true, kind: "deploy")), AgentKind.genericSymbol)
+        XCTAssertEqual(NeedsYouView.what(agent("done", nil, kind: "other")), "Agent finished")
+        XCTAssertEqual(NeedsYouView.symbol(agent("done", nil, kind: "other")), AgentKind.genericSymbol)
+        XCTAssertEqual(NeedsYouView.what(agent("waiting", true, kind: "")), "Agent needs you")
+        // A kind that is itself a symbol's name still draws the generic one.
+        XCTAssertEqual(NeedsYouView.symbol(agent("waiting", true, kind: "star.fill")), AgentKind.genericSymbol)
+        XCTAssertEqual(NeedsYouView.what(agent("waiting", true, kind: "star.fill")), "star.fill needs you")
+        // Every symbol a row can draw exists.
+        for kind in ["claude", "codex", "opencode", "gemini", "copilot", "aider", "amp", "cursor", "other", "deploy"] {
+            XCTAssertNotNil(UIImage(systemName: AgentKind.of(kind).symbolName), kind)
+        }
+
+        let machine = UUID(uuidString: "00000000-0000-0000-0000-00000000C10D")!
+        let kinds = NeedsYouEntry(date: now, summary: AgentsSummary(updated: now.timeIntervalSince1970, agents: [
+            .init(machine: machine, machineName: "devbox", pane: 7, workspace: "Platform", kind: "copilot", state: "waiting",
+                  since: now.timeIntervalSince1970 - 120, needsUser: true),
+            .init(machine: machine, machineName: "devbox", pane: 9, workspace: "Releases", kind: "deploy", state: "error",
+                  since: now.timeIntervalSince1970 - 900, needsUser: true),
+            .init(machine: machine, machineName: "devbox", pane: 3, workspace: "Notes", kind: "other", state: "done",
+                  since: now.timeIntervalSince1970 - 4000, needsUser: false),
+        ]))
+        for (family, size, name) in [(WidgetFamily.systemSmall, CGSize(width: 170, height: 170), "small"),
+                                     (.systemMedium, CGSize(width: 364, height: 170), "medium")] {
+            for scheme in [ColorScheme.light, .dark] {
+                let view = NeedsYouView(entry: kinds, family: family).padding(16)
+                    .frame(width: size.width, height: size.height)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                    .environment(\.colorScheme, scheme)
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 3
+                let image = try XCTUnwrap(renderer.uiImage, "\(name) didn't render")
+                XCTAssertEqual(image.size, size, name)
+                let shot = XCTAttachment(image: image)
+                shot.name = "widget kinds \(name) \(scheme == .light ? "light" : "dark")"
+                shot.lifetime = .keepAlways
+                add(shot)
+            }
+        }
     }
 
     /// A summary stored by an older app or extension has no `needsUser`: it still decodes, and reads as before.
@@ -138,6 +190,64 @@ final class WidgetPreviewTests: XCTestCase {
                 add(shot)
             }
         }
+    }
+
+    /// The Live Activity names any kind as the rest of the app does. Its `kind` is the relay's fit of the
+    /// agent's (`AgentActivityAttributes.relayKind`), only ever shown as text.
+    func testLiveActivityNamesAnyKind() throws {
+        func state(_ kind: String, _ state: String, tool: String? = nil, msg: String? = nil) -> AgentActivityAttributes.ContentState {
+            .init(state: state, kind: kind, since: 2, started: 1, tool: tool, msg: msg)
+        }
+        XCTAssertEqual(state("claude", "running").name, "Claude")
+        XCTAssertEqual(state("copilot", "running").name, "Copilot")
+        XCTAssertEqual(state("copilot", "running", tool: "Bash").headline, "Copilot is running Bash")
+        XCTAssertEqual(state("copilot", "waiting", tool: "Edit").headline, "Copilot wants to use Edit")
+        XCTAssertEqual(state("deploy", "running").name, "deploy")
+        XCTAssertEqual(state("deploy", "done").headline, "deploy finished")
+        XCTAssertEqual(state("claude-code", "error").headline, "claude-code hit an error")
+        XCTAssertEqual(state("other", "running").name, "Agent")
+        XCTAssertEqual(state("other", "waiting").headline, "Agent is waiting for you")
+        XCTAssertEqual(state("other", "running").headline, "Agent is working")
+        // A coding agent's message is Markdown; any other kind's shows as typed.
+        XCTAssertEqual(state("copilot", "done", msg: "**All** tests pass.").messageLine, "All tests pass.")
+        XCTAssertEqual(state("deploy", "done", msg: "**All**\ttests pass.").messageLine, "**All** tests pass.")
+        XCTAssertEqual(state("other", "waiting", msg: "press `enter`").messageLine, "press `enter`")
+        XCTAssertNil(state("other", "running", msg: "x").messageLine)
+
+        let attributes = AgentActivityAttributes(machine: UUID(), pane: 7, machineName: "devbox", workspace: "Releases", tab: "deploy")
+        let started = Int(Date().timeIntervalSince1970) - 90
+        let shown: [(String, AgentActivityAttributes.ContentState)] = [
+            ("copilot", .init(state: "running", kind: "copilot", since: started + 60, started: started, tool: "Bash", detail: "npm test")),
+            ("unknown kind", .init(state: "done", kind: "deploy", since: started + 90, started: started, msg: "deployed **v1.4** to `prod`")),
+            ("other", .init(state: "waiting", kind: "other", since: started + 80, started: started, msg: "Press enter to continue")),
+        ]
+        for (name, content) in shown {
+            let view = AgentActivityLockScreen(attributes: attributes, state: content)
+                .frame(width: 364)
+                .background(Color(.secondarySystemBackground))
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 3
+            let image = try XCTUnwrap(renderer.uiImage, "\(name) didn't render")
+            XCTAssertEqual(image.size.width, 364, name)
+            let shot = XCTAttachment(image: image)
+            shot.name = "live activity kind \(name)"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+    }
+
+    /// The first content's kind is the one clothod sends next (`Live::content` in clothod's push.rs).
+    func testLiveActivityKindFitsTheRelay() {
+        XCTAssertEqual(AgentActivityAttributes.relayKind("claude"), "claude")
+        XCTAssertEqual(AgentActivityAttributes.relayKind("Claude Code"), "claude-code")
+        XCTAssertEqual(AgentActivityAttributes.relayKind("9lives"), "other")
+        XCTAssertEqual(AgentActivityAttributes.relayKind(""), "other")
+        XCTAssertEqual(AgentActivityAttributes.relayKind("\u{FC}n\u{EF}"), "other")
+        XCTAssertEqual(AgentActivityAttributes.relayKind("nightly.backup"), "nightly-backup")
+        XCTAssertEqual(AgentActivityAttributes.relayKind(String(repeating: "a", count: 40)).count, 32)
+        // What it then reads as.
+        XCTAssertEqual(AgentInfo.shortName(ofKind: AgentActivityAttributes.relayKind("Claude Code")), "claude-code")
+        XCTAssertEqual(AgentInfo.shortName(ofKind: AgentActivityAttributes.relayKind("9lives")), "Agent")
     }
 
     /// The user saw the timer centred: a timer Text fills the width it's given and centres in it. Rendered in

@@ -1,3 +1,4 @@
+import ClothoKit
 import CryptoKit
 @testable import Clotho
 import UserNotifications
@@ -83,6 +84,41 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(out.userInfo["request"] as? String, "87b99bd3910be450")
         XCTAssertEqual(out.title, "clotho · Claude is waiting")
         XCTAssertEqual(out.body, "Allow Bash: date > /tmp/clotho-phone-test.txt?")
+    }
+
+    /// clothod's NU_TRUE/CT_NU_TRUE and NU_FALSE/CT_NU_FALSE (push.rs): a done record with `nu`, padded to 1024
+    /// bytes and sealed by the Rust sender. The plaintexts are clothod's, byte for byte.
+    static let nuTrue = #"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"done","msg":"Both fixes are ready. Should I push them, or do you want to read the diff first?","t":1761512345.5,"q":"fix the flaky push test on macOS","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"d":254,"nu":true,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           "}"#
+    static let ctNuTrue = "Dx3qmBHkrYzps9SKQuYVYsuIBJhO11enqxWxSjXHS2DmafmsPY9YgzURuM6WdkLYzWtz9KS0iYIJSwPfmAsarSx25k0E1GmWHU+NYxnvaQnMONLhTWQ3lnGhOOa2+uZPKHCQkDmG8qohNP1wah+piyNtzWcJ4vwlntHF2H/urb03fYn1/9ToF5QVcSGc4m7xiAKok2XT1hlFG5t7o/kfIniekFHxJlIcSPgNrYlz0Xwd83k7e4FHkdTqBL0RQFUlEaa7SgbbMxPG4Sv+Z+RKi3H1ibrzU5bmsFL/BUscYQV3d4BK2Mql5iPhTduiB4HJaWgUU3pkn+p2unczy/p/cR1Ok7PLXsvyNUUUDaSFbVSOTOOz3QZnPNxbkvO95Rkw/kg7mZqcmE0M/yaHrBWA8K7tZn/ZpRTF4qYvhrT1xqtqaf+CVo49dbKncdPc8yNsZ6r11h2c6lXp8NsH38aYDBgJYGZYigkYuq4kxB0nM2XlqhE1FF+V7TThSxIoIct0I7S3x+JjbxiKMYO9VxBqUZ3znqsQ2Z9Bz7OIeax1SBocESoDhFSpPsGdRV2VKQdvPF7DfHxLkjaGhi9EB3wV8fl+9eL+ZYuj4OqFfbrw2NfkA9abpwVq75gzQiuVuRyZiV0j1zzs+AEbtWOIBQMeiQbEwyQ0w0117DBKcQAEbYALnvF+eWGs95mazzvI+tqrWS1JUZdkzqTdG7PDaWDLgAi9tTBVI3B1J8VBl7565t12/0R5oRwNEyJjcowmtM/Vo8IDFpPhFP1wlIelgBA4K1rgwfwzZqN3ZRfdxfpmg3jfwUi0XCwxyolOV/gZYAdHLmtd9I4Bk60so8C8Z1KOEZN3/H3YWeKuJQXfNJofPjOn5LLsH0zG6pVR49cj1RmaCW92ix17KSdhLQMX7gFL0wShadtEAe+4hhwRiRmmrXy6EUGAtc0do+tpY7V4IQgAxTGH8jKsh9gweBAcZ21ZaP/yqbcXjrlZH5YW1HHPzZyrbmLTxcyDRsbwNCh4/H2hWGyr57UCDB0yQdF5DS62xwzJJjOXVg8U+EJDvvLAwY+Wm3+Y36CXqqxScWFaCvrVpT+oZv0TfM0jJXRKTSmjs5sVs9JmPzjqwXFtpypKUlLpEOxYv6I2V4PmPvQZnX6XkrDXqGCS47vw3W4kXQ6hKFAFf+kvAxmfQKakzysgQ7qVyL00SmFVovdNp7JU9BTcFLb0hCsCl2HmYQSf26AbGkBg63IpkxjfMx4Y3g7sCe7w9IxQgNZbfOOdrBmaP6hEkYlq9luI2G84Rib67hi+65Qqv4r9gFHk5m21i5bY25+UgdTXwqsz9v68ZBR/0OVPrFi5zFd5W4oXnnGl0mPvkcbEGxyUaYv8fMb9ulVbZlbbUG+lpyvT6Pytbq0BlWmBk4lTf1cVySOlKkVLnqj3Dg=="
+    static let nuFalse = #"{"v":1,"m":"00000000-0000-0000-0000-00000000C10D devbox","p":7,"k":"claude","s":"done","msg":"All 61 tests pass. I fixed the flaky timing test by measuring from the report instead of the first delivery.","t":1761512345.5,"q":"fix the flaky push test on macOS","pj":"clotho","tb":"clothod","w":"clotho","wid":3,"d":254,"nu":false,"pad":"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              "}"#
+    static let ctNuFalse = "AYfkADlh+MiCzsIrrzGqBccHN5eNWxlsaDP6y8ygEH4KIXwNUO5M8Hlof0t+fm7mQwg80GPcId9ZJeo4DB1n22tNlG8xlWepFDLaqKrwsifcK32rkKul5dl9KhXj8FwfKM023+fcum9M2+zg2wFJpAmbbP9QeXSxCWrRPmIaFPL6WpHaWGyfshSRNJjOL4gEd6oRCIWcyR739iQaB0ZIfdC11Etlu3L60uIxvkTTlzDKHEr5aXZ9PDWOamOp7eaIWF877EcaF03ZTOXbWhWUBoXQsWpb6yjtxOD1cMkCJWZfZqBhc7WzE/vMTPCA4K9x+oInMsrvqku3l2CIQSMpAkTg80OrEYcrgI696XbbyUfbXu206ENIhUY6Wxm4x0SeL2p5ynbU6dA8x4NQQpEbs2yNQ2yFjCPD89V6FZ4FVuIXRzOEGbyshIGzGedU3xduvFmwp/AznJl5p+KQX9lN3EbDqy+RhSV/ntNN3jKQ7NyRMxQU/9iDnOThisUnuRy2iUN+fCjJNxYZG1xuKpmHe/GFVq+BlV8+5pZFwtW7Q2G777vhtsZ/F4v7URhrK/Tli3g8w2bRr8o/o8mrqyRLWkgt2QqdBEkipBnDIucKabZIKOPHnBHkVJnk5inXdFAMHtWG4eahFv2Dc9TXMiOHTHpQKeXBEZuy8OEr8dKtaYJzt2PQA/zv3PA8kt9XL3CcQYUVXR9YehVvzVDJGOPy+6jpZlWs7tNv4SRlcXisP2iY5SAS0MS+Bn3Y+M+iG+EQDMarfTNdvVYX56mUByLUPixcHMBGIjGDu8UBnghMRW/oQfdwySAb8bV3I/1yD+10uEFKesFtU3NtelDlatrxRT7oLQYBPR7dG4x5UbtqtYfwqaAn8x+MEBBxVmunQ5Ft1phRsVcX8HcSoJ0aYS6TuV+KrsHV7ZQng9IcuoYJKOSeF/PgrIaBHPCX5xC27i+gXL4QmFyl/EL/+ZucCT7gY8QWiTKopkELy5i+kshNK/ARCmbBBLtQA2bdjoebmxVAEXx+cl7pah9wCsQ6QAby7v84kuZlABUckRC0Epa9vp74sVVQu7IUvpeuWGOdCusOCavvAQKgaBoW9toQr0Q4jIzpPH5GhyekixlWdEc97rCOzdFqxphRDcB2Qx91lQZnU1CtRrbbsa2j9MeECgBsq/ZfJYeTcp8je0gV+RShJRaQdHLR4+StrF3IfyHFqyGXs54YO6WcfPbD5zng8sLsvZvssOiT0Sv46LrevWcyxYUwbS8XVHLJ92Rb89RjtGNQijf8jJAud511PkKbIJMbUkUgxatB+0h6pVBAx3D3IWXt2arqG3OgZfh7H1t+g8YPSxGHKlAXVf9MI7ppnxO8QurOJ4PLtjZaL9Wdw7IsvdkV8XUx3XsDe3YajCk/w2vG2b1aLebkx0tLT3u0us9TqQ=="
+
+    /// The sealed `nu` vectors open to exactly clothod's bytes, 1024 of them, only under the right collapse id,
+    /// and decode to a done record with `nu` true and false.
+    func testOpensClothodNeedsUserVectors() throws {
+        for (name, plain, sealed, nu) in [("NU_TRUE", Self.nuTrue, Self.ctNuTrue, true), ("NU_FALSE", Self.nuFalse, Self.ctNuFalse, false)] {
+            XCTAssertEqual(Data(base64Encoded: sealed)?.count, 32 + 1024 + 16, name)
+            let opened = try PushAlert.openData(sealed, collapseID: Self.vectorCollapse, key: try vectorPrivateKey())
+            XCTAssertEqual(opened.count, 1024, name)
+            XCTAssertEqual(opened, Data(plain.utf8), name)
+            XCTAssertThrowsError(try PushAlert.openData(sealed, collapseID: "00000000000000000000000000000000",
+                                                        key: try vectorPrivateKey()), "\(name): wrong associated data")
+            XCTAssertThrowsError(try PushAlert.open(sealed, collapseID: "00000000000000000000000000000000",
+                                                    key: try vectorPrivateKey()), "\(name): wrong associated data")
+            let alert = try PushAlert.open(sealed, collapseID: Self.vectorCollapse, key: try vectorPrivateKey())
+            XCTAssertEqual(alert.s, "done", name)
+            XCTAssertEqual(alert.nu, nu, name)
+            XCTAssertEqual(alert.m, Self.vectorLabel, name)
+            XCTAssertEqual(alert.p, 7, name)
+            XCTAssertEqual(alert.tb, "clothod", name)
+
+            let content = UNMutableNotificationContent()
+            content.threadIdentifier = Self.vectorCollapse
+            content.userInfo = ["e": sealed]
+            let out = try XCTUnwrap(PushAlert.decrypt(content, key: try vectorPrivateKey()), name)
+            XCTAssertEqual(out.title, nu ? "Needs you · clotho › clothod" : "Done · clotho › clothod", name)
+            XCTAssertEqual(out.categoryIdentifier, AlertActions.replyCategory, name)
+        }
     }
 
     private func delivered(_ alert: PushAlert) throws -> UNNotificationContent {
@@ -213,12 +249,88 @@ final class PushTests: XCTestCase {
         XCTAssertEqual(out.body, "All tests pass.")
     }
 
-    /// The pure title, for states a push doesn't carry: anything but waiting, error and done keeps AgentNotice's.
-    func testTitleFunction() {
-        let notice = PushAlert(m: "x", p: 1, k: "claude", s: "running", w: "W", nu: false).notice(machine: "devbox")
-        XCTAssertEqual(AlertText.title(notice, state: "running", needsUser: false, workspace: "W", tab: "T"), notice.title)
-        XCTAssertEqual(AlertText.title(notice, state: "running", needsUser: true, workspace: "W", tab: "T"), "Needs you · W › T")
-        XCTAssertEqual(AlertText.title(notice, state: "done", needsUser: nil, workspace: "W", tab: "T"), notice.title)
+    /// The title for states a push doesn't carry, as `apply` sets it: ClothoKit's place title when there is
+    /// one, else the notice's own. Anything but waiting, error and done keeps the notice's unless the user
+    /// has to act.
+    func testApplySetsTheTitle() {
+        func applied(_ state: String, _ nu: Bool?, w: String? = "W", tb: String? = "T") -> (title: String, notice: AgentNotice) {
+            let notice = PushAlert(m: "x", p: 1, k: "claude", s: state, w: w, nu: nu).notice(machine: "devbox")
+            let content = UNMutableNotificationContent()
+            AlertText.apply(notice, state: state, needsUser: nu, workspace: w, tab: tb, to: content)
+            XCTAssertEqual(content.subtitle, notice.subtitle)
+            XCTAssertEqual(content.body, notice.body)
+            return (content.title, notice)
+        }
+        XCTAssertEqual(applied("running", false).title, applied("running", false).notice.title)
+        XCTAssertEqual(applied("running", true).title, "Needs you · W › T")
+        XCTAssertEqual(applied("done", nil).title, applied("done", nil).notice.title)
+        XCTAssertEqual(applied("done", nil).title, "W · Claude finished")
+        XCTAssertEqual(applied("done", false).title, "Done · W › T")
+        XCTAssertEqual(applied("done", false, tb: nil).title, "Done · W")
+        XCTAssertEqual(applied("error", false, tb: "").title, "Needs you · W")
+        XCTAssertEqual(applied("waiting", true, w: nil).title, applied("waiting", true, w: nil).notice.title)
+        XCTAssertEqual(applied("waiting", true, w: "").title, applied("waiting", true, w: "").notice.title)
+    }
+
+    /// Since clothod 0.1.33 `tb` is always there, the Tab's title as the apps show it (a pane title or folder
+    /// for a Tab without a name), so the title always names the Tab. An older daemon's record may have none.
+    func testTitleNamesTheTab() throws {
+        var alert = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: "waiting", msg: "Which database?", w: "W", tb: "T", nu: true)
+        XCTAssertEqual(try delivered(alert).title, "Needs you · W › T")
+        alert.tb = "api-server"
+        XCTAssertEqual(try delivered(alert).title, "Needs you · W › api-server")
+        alert.s = "done"; alert.nu = false
+        XCTAssertEqual(try delivered(alert).title, "Done · W › api-server")
+        alert.tb = nil
+        XCTAssertEqual(try delivered(alert).title, "Done · W", "an older daemon, a Tab without a name")
+    }
+
+    /// Reply only where a reply can go. The record has no source, so the kind stands in: a coding agent takes
+    /// one; a script's kind and "other" (a program's notification) don't. A permission request keeps Allow and Deny.
+    func testReplyOnlyForCodingAgents() throws {
+        func category(_ kind: String, _ state: String, rq: String? = nil) throws -> String {
+            try delivered(PushAlert(m: Self.vectorLabel, p: 7, k: kind, s: state, msg: "x", w: "W", tb: "T", rq: rq, nu: true)).categoryIdentifier
+        }
+        for kind in ["claude", "gemini", "codex", "copilot"] {
+            XCTAssertEqual(try category(kind, "done"), AlertActions.replyCategory, kind)
+            XCTAssertEqual(try category(kind, "waiting"), AlertActions.replyCategory, kind)
+            XCTAssertEqual(try category(kind, "error"), "", kind)
+        }
+        for kind in ["deploy", "other", "", "nightly.backup"] {
+            XCTAssertEqual(try category(kind, "done"), "", kind)
+            XCTAssertEqual(try category(kind, "waiting"), "", kind)
+            XCTAssertEqual(try category(kind, "error"), "", kind)
+            XCTAssertEqual(try category(kind, "waiting", rq: "87b99bd3910be450"), AlertActions.permissionCategory, kind)
+        }
+        XCTAssertEqual(try category("claude", "waiting", rq: "87b99bd3910be450"), AlertActions.permissionCategory)
+    }
+
+    /// A record whose kind isn't a coding agent carries any program's text: it shows as typed (no Markdown is
+    /// read) and `msg` goes before `sm`, which for such text is only a Markdown-stripped copy. A coding agent's
+    /// record is Markdown, as before: `sm` first, else `msg` cleaned.
+    func testOtherKindsShowTheirTextAsTyped() throws {
+        let typed = "build **failed**:\t`make` exited 2 [log](x)"
+        for kind in ["other", "deploy", ""] {
+            var alert = PushAlert(m: Self.vectorLabel, p: 7, k: kind, s: "error", msg: typed, w: "W", tb: "T",
+                                  sm: "build failed: make exited 2 log", nu: true)
+            XCTAssertEqual(try delivered(alert).body, "build **failed**: `make` exited 2 [log](x)", kind)
+            alert.msg = nil
+            XCTAssertEqual(try delivered(alert).body, "build failed: make exited 2 log", "\(kind): the summary when there is no message")
+            // Nothing reads as a permission ask.
+            alert.msg = "needs permission"; alert.s = "waiting"; alert.tool = "Bash"; alert.cmd = "ls"
+            XCTAssertEqual(try delivered(alert).body, "needs permission", kind)
+        }
+        XCTAssertEqual(try delivered(PushAlert(m: Self.vectorLabel, p: 7, k: "deploy", s: "done", msg: "ok", w: "W", tb: "T", nu: false)).subtitle, "devbox")
+        XCTAssertEqual(PushAlert(m: "x", p: 1, k: "deploy", s: "done").notice(machine: "devbox").title, "deploy finished on devbox")
+        XCTAssertEqual(PushAlert(m: "x", p: 1, k: "other", s: "done").notice(machine: "devbox").title, "Agent finished on devbox")
+
+        var claude = PushAlert(m: Self.vectorLabel, p: 7, k: "claude", s: "done", msg: typed, w: "W", tb: "T",
+                               sm: "The build failed.", nu: true)
+        XCTAssertEqual(try delivered(claude).body, "The build failed.")
+        claude.sm = nil
+        let body = try delivered(claude).body
+        for raw in ["**", "`", "]("] { XCTAssertFalse(body.contains(raw), "raw Markdown \(raw) in \(body)") }
+        XCTAssertTrue(body.contains("failed"), body)
     }
 
     /// A turn that just finished with nothing for the user to do arrives silently; everything else keeps the

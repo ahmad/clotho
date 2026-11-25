@@ -34,7 +34,7 @@ struct QuickReplySheet: View {
                         .disabled(text.isEmpty)
                 }
             }
-            .navigationTitle("Reply to \(row.info.kind.capitalized)")
+            .navigationTitle("Reply to \(row.info.shortKindName)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

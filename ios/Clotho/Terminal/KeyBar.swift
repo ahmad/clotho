@@ -92,14 +92,33 @@ final class KeyBar: UIInputView {
         }
         let button = UIButton(configuration: config, primaryAction: UIAction { [weak self] _ in self?.press(key) })
         button.isPointerInteractionEnabled = true
-        button.accessibilityLabel = switch key {
-        case .newline: "Newline"
-        case .paste: "Paste"
-        default: label
-        }
+        let (spoken, identifier) = Self.accessibility(for: key, label: label)
+        button.accessibilityLabel = spoken
+        button.accessibilityIdentifier = identifier
         button.widthAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
         return button
     }
+
+    /// What VoiceOver says for a key, and its identifier for tests ("key.left", "key.hideKeyboard"). A key drawn
+    /// as a symbol gets real words, never the symbol's name; a key drawn as text reads as that text.
+    private static func accessibility(for key: Key, label: String) -> (label: String, identifier: String) {
+        switch key {
+        case .esc: (label, "key.esc")
+        case .ctrl: (label, "key.ctrl")
+        case .tab: (label, "key.tab")
+        case .left: ("Left Arrow", "key.left")
+        case .down: ("Down Arrow", "key.down")
+        case .up: ("Up Arrow", "key.up")
+        case .right: ("Right Arrow", "key.right")
+        case .text(let text): (label, "key.\(text)")
+        case .newline: ("Newline", "key.newline")
+        case .paste: ("Paste", "key.paste")
+        case .hideKeyboard: ("Hide Keyboard", "key.hideKeyboard")
+        }
+    }
+
+    /// The keys, in order (for tests).
+    var keyButtons: [UIButton] { stack.arrangedSubviews.compactMap { $0 as? UIButton } }
 
     private func press(_ key: Key) {
         guard let terminal else { return }

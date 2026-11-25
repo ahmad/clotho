@@ -175,6 +175,19 @@ final class AgentsUITests: XCTestCase {
         // Light, then dark from Settings (and back to the system's, for later tests).
         top(app)
         attach(app, "groups light")
+
+        // The tab's badge counts Needs you only (its header's count, plus pinned rows that need the user, which
+        // show under Pinned): the finished agents under Done aren't in it.
+        XCTAssertTrue(needsYou.waitForExistence(timeout: 5), "Needs you isn't at the top of the list")
+        let badge = app.tabBars.buttons["Agents"].value as? String ?? ""
+        let badged = try XCTUnwrap(Int(badge.components(separatedBy: CharacterSet.decimalDigits.inverted).first { !$0.isEmpty } ?? ""),
+                                   "no count in the Agents tab's badge: \(badge)")
+        let counts = app.staticTexts.matching(NSPredicate(format: "label MATCHES '[0-9]+'")).allElementsBoundByIndex
+        let header = needsYou.frame
+        let needing = try XCTUnwrap(counts.first { abs($0.frame.midY - header.midY) < 8 && $0.frame.minX >= header.maxX - 1 }.flatMap { Int($0.label) },
+                                  "no count beside the Needs you header")
+        let pinnedOnTop = app.buttons.matching(NSPredicate(format: "identifier == 'needsYouAgent' AND label CONTAINS 'Pinned'")).count
+        XCTAssertEqual(badged, needing + pinnedOnTop, "the badge counts more than Needs you (Done?): \(badge)")
         app.showTab("Settings")
         choose(app, "Dark")
         app.showTab("Agents")

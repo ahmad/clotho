@@ -17,12 +17,17 @@ final class ClothoTests: XCTestCase {
         XCTAssertEqual(decoded.first?.devDirs, true)
     }
 
-    /// Reply only on a hook-reported waiting agent that still wants attention.
+    /// Reply only on a hook-reported waiting coding agent that still wants attention.
     func testReplyOnlyForHookWaitingWithAttention() {
-        func row(_ state: AgentInfo.State, _ source: String?, _ attention: Bool?) -> AgentRow {
+        func row(_ state: AgentInfo.State, _ source: String?, _ attention: Bool?, kind: String = "claude") -> AgentRow {
             AgentRow(machineID: UUID(), machineName: "m", pane: 1, tab: 1, workspace: "w", title: "t",
-                     info: AgentInfo(kind: "claude", state: state, source: source, attention: attention))
+                     info: AgentInfo(kind: kind, state: state, source: source, attention: attention))
         }
+        XCTAssertTrue(row(.waiting, "hook", true, kind: "gemini").acceptsReply, "another coding agent, through its hook")
+        XCTAssertFalse(row(.waiting, "hook", true, kind: "deploy").acceptsReply, "a script's report: nobody reads a reply")
+        XCTAssertFalse(row(.waiting, "hook", true, kind: "other").acceptsReply)
+        XCTAssertFalse(row(.waiting, "osc", true, kind: "other").acceptsReply, "a program's notification")
+        XCTAssertFalse(row(.waiting, "osc", true).acceptsReply, "osc, whatever kind it names")
         XCTAssertTrue(row(.waiting, "hook", true).acceptsReply)
         XCTAssertFalse(row(.waiting, "hook", false).acceptsReply, "already answered or acked")
         XCTAssertFalse(row(.waiting, "detected", true).acceptsReply, "detected agent (bell)")

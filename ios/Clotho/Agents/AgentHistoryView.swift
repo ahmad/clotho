@@ -79,7 +79,7 @@ struct AgentHistoryRow: View {
                     Text(entry.date, format: .dateTime.hour().minute().second())
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                if let message = entry.message.map(PlainText.fromMarkdown), !message.isEmpty {
+                if let message = Self.message(entry) {
                     Text(message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 if let detail = Self.detail(entry) {
@@ -90,8 +90,18 @@ struct AgentHistoryRow: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// The entry's message as it is drawn, nil when there's nothing to draw. An agent's reply is Markdown, made
+    /// plain; an osc entry's is a program's output, plain by contract, so it stays as typed
+    /// (`AgentNotice.plainLine`: "**bold**" keeps its stars and nothing becomes a link).
+    static func message(_ entry: AgentHistoryEntry) -> String? {
+        let text = entry.message.map { entry.source == "osc" ? AgentNotice.plainLine($0) : PlainText.fromMarkdown($0) }
+        return text.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The kind shows by its name from ClothoKit's table (`AgentKind`): "Gemini", "Copilot"; a kind the table
+    /// doesn't know as its own text, and none as "Agent".
     static func headline(_ entry: AgentHistoryEntry) -> String {
-        let kind = entry.kind.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Agent"
+        let kind = entry.kind.map(AgentInfo.shortName(ofKind:)) ?? AgentKind.genericName
         switch entry.event {
         case .state, .update:
             let state = entry.state?.rawValue.capitalized ?? "Unknown"

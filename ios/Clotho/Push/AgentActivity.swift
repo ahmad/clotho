@@ -13,7 +13,7 @@ struct AgentActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         /// running, waiting, done or error.
         var state: String
-        /// The agent kind: claude, codex, other.
+        /// The agent kind as the relay takes it (`relayKind`): claude, codex, deploy, other.
         var kind: String
         /// When the current state began (unix seconds).
         var since: Int
@@ -52,6 +52,24 @@ struct AgentActivityAttributes: ActivityAttributes {
         return flat.count <= max ? flat : String(flat.prefix(max - 1)) + "…"
     }
 
+    /// A kind as clothod sends it through the relay (`Live::content` in clothod's push.rs), which takes
+    /// `^[a-z][a-z0-9_-]{0,31}$`: ASCII letters lowercased, every character but a-z, 0-9, "_" and "-" replaced
+    /// by "-", cut at 32, and "other" when it doesn't then start with a letter. "Claude Code" is "claude-code";
+    /// "9lives" and "" are "other". The phone's first content uses it too, so the name doesn't change when
+    /// the machine's first update arrives.
+    static func relayKind(_ kind: String) -> String {
+        var out = String.UnicodeScalarView()
+        for scalar in kind.unicodeScalars.prefix(32) {
+            switch scalar {
+            case "a"..."z", "0"..."9", "_", "-": out.append(scalar)
+            case "A"..."Z": out.append(Unicode.Scalar(UInt8(scalar.value) + 32))
+            default: out.append("-")
+            }
+        }
+        guard let first = out.first, case "a"..."z" = first else { return "other" }
+        return String(out)
+    }
+
     static func content(_ state: ContentState, staleAfter seconds: TimeInterval = 900) -> ActivityContent<ContentState> {
         ActivityContent(state: state, staleDate: Date().addingTimeInterval(seconds))
     }
@@ -62,8 +80,13 @@ extension AgentActivityAttributes.ContentState {
     var sinceDate: Date { Date(timeIntervalSince1970: TimeInterval(since)) }
     var isOver: Bool { state == "done" || state == "error" }
 
-    /// "Claude", "Codex".
-    var name: String { kind.prefix(1).uppercased() + kind.dropFirst() }
+    /// "Claude", "Copilot"; a kind ClothoKit's table doesn't know by its own text ("deploy"), and "other" as
+    /// "Agent". Only ever shown as text.
+    var name: String { AgentInfo.shortName(ofKind: kind) }
+
+    /// Whether `msg` is a coding agent's (Markdown) or any other program's (plain text, shown as typed). The
+    /// content has no source, so the kind decides, as for a push record.
+    private var isPlainText: Bool { !AgentKind.of(kind).isCodingAgent }
 
     /// "is working", "is waiting for you", "finished", "hit an error".
     var verb: String {
@@ -93,8 +116,12 @@ extension AgentActivityAttributes.ContentState {
     /// The command or file, one line; only while the agent is in a tool.
     var detailLine: String? { isOver ? nil : detail.flatMap { AgentActivityAttributes.line($0, max: 200) } }
 
-    /// The last message or the question, as plain text (a machine's push may carry Markdown); not while running.
-    var messageLine: String? { state == "running" ? nil : msg.flatMap { AgentActivityAttributes.line(PlainText.oneLine($0), max: 300) } }
+    /// The last message or the question, on one line; not while running. A coding agent's is cleaned of
+    /// Markdown (a machine's push may carry it); any other kind's stays as typed.
+    var messageLine: String? {
+        guard state != "running" else { return nil }
+        return msg.flatMap { AgentActivityAttributes.line(isPlainText ? AgentNotice.plainLine($0) : PlainText.oneLine($0), max: 300) }
+    }
 
     var symbol: String {
         switch state {

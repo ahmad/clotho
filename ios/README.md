@@ -18,11 +18,16 @@ iOS 27 simulators); the laptop Mac (Xcode 26) still works.
 ./build.sh test     # unit, integration and UI tests
 ```
 
+Tests never use the deployed push relay: `./build.sh test` builds the app without its URL and says so
+("push relay: none in this test build"), then fails if the built app's Info.plist has one after all. See
+"Push alerts" for the two tests that opt in.
+
 **Private settings.** The signing team, the push relay's URL and the APNs key ID are never in the repo. They
 come from the environment: `CLOTHO_TEAM_ID`, `CLOTHO_RELAY_URL` and `CLOTHO_APNS_KEY_ID`, kept on the dev box in
 `~/.config/clotho/local.env` and passed to the build Mac by `scripts/clotho-build`. `project.yml` takes the
 team from `CLOTHO_TEAM_ID`; the app reads the relay URL (Info.plist `ClothoRelayURL`) and the Keychain group's
 team prefix (`AppIdentifierPrefix`) from its Info.plist. A build without them works, with push alerts off.
+`./build.sh test` drops `CLOTHO_RELAY_URL` on purpose.
 
 The app uses `../ClothoKit` (model, ModelStore, ClothodBackend, RemoteInstaller), SwiftTerm and
 swift-nio-ssh, and bundles `../clothod/dist` (manifest.json plus one clothod per platform) to install on
@@ -166,7 +171,9 @@ skips on the dev box.
   pane to the phone. Other clients letterbox. A pane sized larger by another client is scaled down to
   fit here.
 - The Agents list (top of the home screen) reads each pane's `agent` field. Launch with
-  `-FakeAgents YES` to give agent-less panes made-up states for UI work. Pull to refresh connects to
+  `-FakeAgents YES` to give agent-less panes made-up states for UI work. With `-FakeAgentKinds YES` as well they
+  are of every kind (the other coding agents, a script's report, a program's notification) and the running
+  ones show a progress. Pull to refresh connects to
   every machine. Agents that start needing you post a local notification while the app runs.
 - Quick replies: swipe or long-press a waiting agent for Reply (1/2/3/Enter/Esc for permission prompts, or
   text plus Enter). They go through clothod's `pane.keys`, which encodes keys for the pane's modes (a
@@ -174,8 +181,7 @@ skips on the dev box.
   hello get "Update clothod to reply" and never a raw-CR fallback. `ClothoUITests/QuickReplyUITests`
   replies to a real Claude Code in a dev pane; start it with `--setting-sources project,local` so
   user-level permission hooks (AgentHQ) don't answer the prompt first.
-- Not built yet: push notifications through an APNs relay, file
-  browsing (`fs.*`), and CloudKit sync of the machine list.
+- Not built yet: CloudKit sync of the machine list.
 
 ## Push alerts
 
@@ -191,8 +197,17 @@ Agent alerts while the app is closed; the design is docs/push.md.
 - The relay URL is built in from `CLOTHO_RELAY_URL` (Info.plist `ClothoRelayURL`,
   `PushRegistrar.deployedRelay`); a build without it has push alerts off and logs so. `-PushRelay <url>`
   overrides it, e.g. with the dev relay. Each machine has an "Agent alerts" switch, and "Send test alert" on its screen.
+- Tests have no relay unless they opt in, so a test run can't register the simulator with the deployed relay
+  or hand the test daemon a handle to push through. Two checks:
+  - In the app (`PushRegistrar.relay(override:builtIn:underTest:realRelayAllowed:)`): under test (a
+    `-UITesting` launch, or the unit tests' host app) the built-in relay isn't used. `-PushRelay <url>` still
+    wins, and `-PushRealRelay YES` allows the built-in one for that launch.
+  - In `build.sh test`: it unsets `CLOTHO_RELAY_URL` before building, prints which it did, and after the run
+    exits 1 if the test app's Info.plist still has a `ClothoRelayURL`. `/tmp/clotho-ios-push-e2e` (a file or a
+    folder) keeps the URL in the build.
 - End to end, on request (needs the network and Apple): `touch /tmp/clotho-ios-push-e2e` runs
   `PushUITests.testRealSandboxPushIsDecrypted` (the app sends itself an alert through the deployed relay).
+  Both real tests pass `-PushRealRelay YES`; every other test of that run still has no relay.
   For an alert from clothod itself: start the dev daemon with `CLOTHOD_TEST_PUSH_FAST=1`, create
   `/tmp/clotho-ios-push-e2e/agent`, run `PushUITests/testAgentAlertFromClothod`, and once it writes
   `/tmp/clotho-ios-push-e2e/ready` (the app is registered and in the background), run

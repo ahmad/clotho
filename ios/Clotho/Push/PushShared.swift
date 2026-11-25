@@ -74,9 +74,11 @@ struct PushAlert: Codable, Equatable, Sendable {
     var s: String
     var msg: String?
     var t: Double?
-    /// Workspace name and id, tab title, project.
+    /// Workspace name and id, and the project.
     var w: String?
     var wid: UInt64?
+    /// The Tab's title as the apps show it. Always there since clothod 0.1.33; before that only for a Tab the
+    /// user had named, so a record from an older daemon may have none and its title then stops at the Workspace.
     var tb: String?
     var pj: String?
     /// The first line of the prompt the user typed for this turn.
@@ -106,9 +108,14 @@ struct PushAlert: Codable, Equatable, Sendable {
     /// The alert's text (ClothoKit's AgentNotice, the same as the app's own banner and the Mac's): the summary
     /// when there is one, else the message as plain text; a permission ask always names its tool and command
     /// first. With neither, the body is the prompt, then the tab title.
+    ///
+    /// The record doesn't say where the agent's status came from, so the kind decides how its text is read:
+    /// a coding agent's is Markdown, as above; any other kind's (a script, a program that sent a notification,
+    /// "other") is plain text, shown as typed, `msg` before `sm`, and never read as a permission ask.
     func notice(machine name: String) -> AgentNotice {
         AgentNotice(kind: k, state: s, machine: name, workspace: w, project: pj, duration: d, result: msg,
-                    tool: tool, toolInput: cmd, fallback: q ?? tb, summary: sm, needsUser: nu)
+                    tool: tool, toolInput: cmd, fallback: q ?? tb, summary: sm, needsUser: nu,
+                    plainText: !AgentKind.of(k).isCodingAgent)
     }
 
     static let info = Data("clotho push v1".utf8)
@@ -118,11 +125,15 @@ struct PushAlert: Codable, Equatable, Sendable {
 
     /// Opens `base64(enc || ct)`; the collapse id is the associated data.
     static func open(_ ciphertext: String, collapseID: String, key: Curve25519.KeyAgreement.PrivateKey) throws -> PushAlert {
+        try JSONDecoder().decode(PushAlert.self, from: try openData(ciphertext, collapseID: collapseID, key: key))
+    }
+
+    /// The record's bytes as the machine sealed them (JSON, padded to 1024 bytes by clothod).
+    static func openData(_ ciphertext: String, collapseID: String, key: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         guard let data = Data(base64Encoded: ciphertext), data.count > encLength else { throw CocoaError(.coderInvalidValue) }
         var recipient = try HPKE.Recipient(privateKey: key, ciphersuite: suite, info: info,
                                            encapsulatedKey: data.prefix(encLength))
-        let plain = try recipient.open(data.dropFirst(encLength), authenticating: Data(collapseID.utf8))
-        return try JSONDecoder().decode(PushAlert.self, from: plain)
+        return try recipient.open(data.dropFirst(encLength), authenticating: Data(collapseID.utf8))
     }
 
     /// The notification as it should show: the relay's generic content with the alert's text, grouped by
@@ -144,7 +155,9 @@ struct PushAlert: Codable, Equatable, Sendable {
         info["pane"] = NSNumber(value: alert.p)
         if let rq = alert.rq, alert.s == "waiting" { info["request"] = rq }
         out.userInfo = info
-        out.categoryIdentifier = AlertActions.category(state: alert.s, request: alert.rq)
+        // The record has no source: a coding agent's kind stands in for "reports through its hooks".
+        out.categoryIdentifier = AlertActions.category(state: alert.s, request: alert.rq,
+                                                       acceptsReplies: AgentKind.of(alert.k).isCodingAgent)
         return out
     }
 
@@ -179,32 +192,19 @@ enum PushLabel {
 /// has to act, threaded by machine and workspace so one workspace's alerts stack. The same for a push
 /// (ClothoNotify) and the app's foreground notification.
 enum AlertText {
-    /// Sets the title, subtitle and body. A turn that just finished with nothing for the user to do
-    /// (`state` done, `needsUser` false) is silent; otherwise the sound is left as it is (a push keeps the
-    /// relay's, and the app sets its own banner's).
+    /// Sets the title, subtitle and body. The title is ClothoKit's `AgentNotice.placeTitle`, the same as the
+    /// Mac's: "Needs you · Platform › cargo test" when the user has to act, "Done · Platform › cargo test" for
+    /// a turn that just finished, and without a tab "Needs you · Platform". A record without `needsUser` (an
+    /// older daemon) or without a workspace keeps the notice's own title.
+    ///
+    /// A turn that just finished with nothing for the user to do (`state` done, `needsUser` false) is silent;
+    /// otherwise the sound is left as it is (a push keeps the relay's, and the app sets its own banner's).
     static func apply(_ notice: AgentNotice, state: String, needsUser: Bool?, workspace: String?, tab: String?,
                       to content: UNMutableNotificationContent) {
-        content.title = title(notice, state: state, needsUser: needsUser, workspace: workspace, tab: tab)
+        content.title = AgentNotice.placeTitle(state: state, needsUser: needsUser, workspace: workspace, tab: tab) ?? notice.title
         content.subtitle = notice.subtitle
         content.body = notice.body
         if state == "done", needsUser == false { content.sound = nil }
-    }
-
-    /// "Needs you · Platform › cargo test" when the user has to act (`needsUser`, or a waiting or failed
-    /// agent), "Done · Platform › cargo test" for a turn that just finished; without a tab, "Needs you ·
-    /// Platform". A record without `needsUser` (an older daemon) or without a workspace keeps AgentNotice's title.
-    static func title(_ notice: AgentNotice, state: String, needsUser: Bool?, workspace: String?, tab: String?) -> String {
-        guard let needsUser, let workspace, !workspace.isEmpty else { return notice.title }
-        let lead: String
-        if needsUser || state == "waiting" || state == "error" {
-            lead = "Needs you"
-        } else if state == "done" {
-            lead = "Done"
-        } else {
-            return notice.title
-        }
-        guard let tab, !tab.isEmpty else { return "\(lead) · \(workspace)" }
-        return "\(lead) · \(workspace) › \(tab)"
     }
 
     /// Machine and workspace (its id, else its name); the machine alone when the workspace isn't known.
@@ -215,7 +215,8 @@ enum AlertText {
 }
 
 /// What an agent alert lets the user do without opening the app: answer a permission request (Allow, which needs
-/// the phone unlocked, Deny, or Deny with a reason the agent is told), or reply to a waiting or finished agent.
+/// the phone unlocked, Deny, or Deny with a reason the agent is told), or reply to a waiting or finished agent
+/// that takes replies.
 /// The same for a push (the extension sets the category) and the app's own banner.
 enum AlertActions {
     static let permissionCategory = "agent.permission"
@@ -225,10 +226,12 @@ enum AlertActions {
     static let denyWithReason = "denyReason"
     static let reply = "reply"
 
-    /// A waiting agent with a request id is a permission request; other waits and finished turns take a reply.
-    static func category(state: String, request: String?) -> String {
+    /// A waiting agent with a request id is a permission request. Other waits and finished turns take a reply
+    /// only when the agent does (`AgentInfo.acceptsReplies`; for a push record, a coding agent's kind): a
+    /// script's report or a program's notification has nobody to answer, and gets no actions.
+    static func category(state: String, request: String?, acceptsReplies: Bool) -> String {
         if state == "waiting", let request, !request.isEmpty { return permissionCategory }
-        return state == "waiting" || state == "done" ? replyCategory : ""
+        return acceptsReplies && (state == "waiting" || state == "done") ? replyCategory : ""
     }
 
     static var categories: Set<UNNotificationCategory> {

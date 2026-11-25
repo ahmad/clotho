@@ -183,7 +183,8 @@ final class IPadUITests: XCTestCase {
 
     /// Puts the software keyboard away, if it is up.
     private func hideKeyboard(_ app: XCUIApplication) {
-        let hide = app.buttons["keyboard.chevron.compact.down"].firstMatch
+        // By identifier (KeyBar's "key.hideKeyboard"), so the key's wording can change.
+        let hide = app.buttons.matching(identifier: "key.hideKeyboard").firstMatch
         guard hide.exists, hide.isHittable else { return }
         hide.tap()
         _ = app.keyboards.firstMatch.waitForNonExistence(timeout: 5)
@@ -207,10 +208,6 @@ final class IPadUITests: XCTestCase {
         from.press(forDuration: 0.05, thenDragTo: to)
     }
 
-    private func attach(_ app: XCUIApplication, _ name: String) {
-        let shot = XCTAttachment(screenshot: app.screenshot())
-        shot.name = name
-        shot.lifetime = .keepAlways
-        add(shot)
-    }
+    /// The whole screen, upright in landscape too (`attachScreen`, ScreenShots.swift).
+    private func attach(_ app: XCUIApplication, _ name: String) { attachScreen(name) }
 }

@@ -101,11 +101,27 @@ test("a silent push has no sound, is passive, and still runs the extension", asy
 test("silent must be a boolean", async () => {
   const h = await register();
   const deliver = async () => assert.fail("must not deliver");
-  for (const silent of ["yes", 1, null]) {
+  for (const silent of ["yes", 1]) {
     const res = await handle(post("/v1/push", { handle: h, ciphertext: "AA==", collapse_id: COLLAPSE, silent }), ENV, { deliver });
     assert.equal(res.status, 400, JSON.stringify(silent));
     assert.deepEqual(await res.json(), { error: "bad_request" });
   }
+});
+
+test("silent: null sends the same payload as no field", async () => {
+  const h = await register();
+  const sent = [];
+  const deliver = async (_env, msg) => { sent.push(msg); return { status: 200 }; };
+  const absent = await handle(post("/v1/push", { handle: h, ciphertext: "AAEC/w==", collapse_id: COLLAPSE }), ENV, { deliver });
+  const nulled = await handle(post("/v1/push", { handle: h, ciphertext: "AAEC/w==", collapse_id: COLLAPSE, silent: null }), ENV, { deliver });
+  assert.equal(absent.status, 200);
+  assert.equal(nulled.status, 200);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1].payload, sent[0].payload);
+  assert.deepEqual(sent[1].payload, {
+    aps: { alert: { title: "Clotho", body: "An agent needs you" }, "mutable-content": 1, sound: "default", "thread-id": COLLAPSE },
+    e: "AAEC/w==",
+  });
 });
 
 test("a silent push keeps the size limit and the rate limit", async () => {

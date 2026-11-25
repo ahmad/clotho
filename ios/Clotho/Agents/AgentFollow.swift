@@ -67,22 +67,27 @@ extension MachineConnection {
         }
         let since = Int(agent.since ?? now.timeIntervalSince1970)
         let started = agent.turnStarted.map { Int($0) } ?? since
-        let kind = agent.kind.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
         let request = agent.pendingRequests.first
         let inTool = state == "running" || state == "waiting"
         let tool = inTool ? (request?.tool ?? agent.tool) : nil
         let message: String?
-        switch state {
-        // The summary when there is one; the headline and detail already name a permission ask's tool and command.
-        case "waiting": message = agent.summary ?? request?.question ?? agent.message
-        case "done", "error": message = agent.summary ?? agent.message
-        default: message = nil
+        if state == "running" {
+            message = nil
+        } else if agent.isOscSourced {
+            // Any program's text, plain by contract: as typed, the message before the daemon's summary of it.
+            let plain = { (text: String?) -> String? in text.map(AgentNotice.plainLine).flatMap { $0.isEmpty ? nil : $0 } }
+            message = plain(agent.message) ?? plain(agent.summary)
+        } else {
+            // The summary when there is one; the headline and detail already name a permission ask's tool and command.
+            let text = state == "waiting" ? agent.summary ?? request?.question ?? agent.message : agent.summary ?? agent.message
+            message = text.map(PlainText.oneLine)
         }
         return AgentActivityAttributes.ContentState(
-            state: state, kind: kind.isEmpty ? "other" : kind, since: since, started: started,
+            // The kind as clothod will send it, so the activity names the agent the same before and after.
+            state: state, kind: AgentActivityAttributes.relayKind(agent.kind), since: since, started: started,
             tool: tool.flatMap { AgentActivityAttributes.line($0, max: 64) },
             detail: tool == nil ? nil : (request.map { $0.summary } ?? agent.toolInput).flatMap { AgentActivityAttributes.line($0, max: 200) },
-            msg: message.flatMap { AgentActivityAttributes.line(PlainText.oneLine($0), max: 300) })
+            msg: message.flatMap { AgentActivityAttributes.line($0, max: 300) })
     }
 }
 #endif

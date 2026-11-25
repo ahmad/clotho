@@ -13,7 +13,8 @@ final class PushRegistrar: ObservableObject {
     /// The relay's address: the Cloudflare Worker in ios/relay, built in from the CLOTHO_RELAY_URL build setting
     /// (Info.plist `ClothoRelayURL`; scripts/clotho-build passes it from the dev box's private settings). Nil
     /// when the build had none: push alerts are then off. `-PushRelay <url>` (a launch argument or default)
-    /// overrides it, for example with the local dev relay (relay/dev.js) at http://127.0.0.1:8787.
+    /// overrides it, for example with the local dev relay (relay/dev.js) at http://127.0.0.1:8787. Under test
+    /// it isn't used at all unless the test asks (`relay(override:builtIn:underTest:realRelayAllowed:)`).
     static let deployedRelay: URL? = builtInRelay(Bundle.main.object(forInfoDictionaryKey: "ClothoRelayURL") as? String)
 
     /// The relay URL an Info.plist value names: nil when it is missing, empty, an unexpanded `$(...)`, or not an
@@ -38,8 +39,26 @@ final class PushRegistrar: ObservableObject {
     }()
 
     var relay: URL? {
-        if let override = UserDefaults.standard.string(forKey: "PushRelay") { return URL(string: override) }
-        return Self.deployedRelay
+        Self.relay(override: UserDefaults.standard.string(forKey: "PushRelay"), builtIn: Self.deployedRelay,
+                   underTest: Self.isUnderTest, realRelayAllowed: UserDefaults.standard.bool(forKey: "PushRealRelay"))
+    }
+
+    /// Which relay this launch uses. `-PushRelay` always wins (a test names its own, the dev relay). The
+    /// built-in one, the deployed relay, is never used under test: a test launch would register the simulator
+    /// there and hand its handle to the test daemon, whose alerts would then go out through production. A test
+    /// that means to (the opt-in real push tests) passes `-PushRealRelay YES`. With no relay, `start()` never
+    /// registers and no machine is given a handle.
+    nonisolated static func relay(override: String?, builtIn: URL?, underTest: Bool, realRelayAllowed: Bool) -> URL? {
+        if let override { return URL(string: override) }
+        return !underTest || realRelayAllowed ? builtIn : nil
+    }
+
+    /// A UI test's launch (`-UITesting`) or the unit tests' host app (XCTest sets `XCTestConfigurationFilePath`,
+    /// and `XCTestBundlePath` for the bundle it injects).
+    nonisolated static var isUnderTest: Bool {
+        let process = ProcessInfo.processInfo
+        return process.arguments.contains("-UITesting") || process.environment["XCTestConfigurationFilePath"] != nil
+            || process.environment["XCTestBundlePath"] != nil
     }
 
     /// Debug builds are signed for APNs's sandbox, TestFlight and App Store builds for production.
@@ -53,6 +72,9 @@ final class PushRegistrar: ObservableObject {
 
     func start() {
         guard let relay else {
+            if Self.isUnderTest, Self.deployedRelay != nil {
+                return log("push: under test, so the built-in relay is not used (no -PushRelay or -PushRealRelay YES); push alerts are off")
+            }
             return log("push: no relay URL in this build (CLOTHO_RELAY_URL unset at build time) and no -PushRelay; push alerts are off")
         }
         log("push: registering for remote notifications (relay \(relay.absoluteString))")

@@ -324,6 +324,227 @@ final class SSHIntegrationTests: XCTestCase {
 
         try await backend.closeWorkspace(created.workspace)
     }
+
+    // MARK: agent.ack and progress, clothod 0.1.33
+
+    /// Resolve on a coding agent's hook report (agent.ack): the agent stays, as before 0.1.33, without
+    /// attention, and its row moves to Working. The row is the app's own (`MachineConnection.agentRows`).
+    @MainActor
+    func testAckKeepsAHookAgent() async throws {
+        let probe = try await AckProbe(machine: machine, workspace: "ios-ack-claude")
+        defer { probe.stop() }
+        // As Claude Code's hooks report (each report a child of a process that keeps running).
+        probe.type(#"sh -c 'b=$(ls "$HOME"/.local/share/clotho-ios-dev/bin/*/clothod | head -1); "$b" report waiting --agent claude --session ios-ack-test --message ack-test; sleep 60'"#)
+        try await probe.waitUntil("the reported agent needs the user") { probe.agent?.needsAttention == true }
+        XCTAssertEqual(probe.agent?.kind, "claude")
+        XCTAssertEqual(probe.row?.group, .needsYou)
+
+        probe.resolve()
+        try await probe.waitUntil("the ack's pane event") { probe.agent?.attention != true }
+        // Long enough for the daemon's once-a-second look at pane-bound agents: this one isn't one.
+        try await Task.sleep(nanoseconds: 2_500_000_000)
+        XCTAssertNotNil(probe.agent, "the ack removed a coding agent")
+        XCTAssertEqual(probe.agent?.state, .waiting)
+        XCTAssertNotEqual(probe.agent?.attention, true)
+        XCTAssertEqual(probe.row?.group, .working, "a resolved agent's row isn't under Working")
+        probe.assertRowsFollowedTheModel()
+        XCTAssertFalse(probe.sawNoAgent, "the agent went away and came back")
+        try await probe.close()
+    }
+
+    /// Resolve on a script's report while the script still runs: the pane-bound agent stays, with attention
+    /// false, and its row is under Working with no Reply. Nothing leaves the list until an event says so.
+    @MainActor
+    func testAckKeepsAScriptsAgentWhileItRuns() async throws {
+        let probe = try await AckProbe(machine: machine, workspace: "ios-ack-script")
+        defer { probe.stop() }
+        probe.type(#"sh -c 'b=$(ls "$HOME"/.local/share/clotho-ios-dev/bin/*/clothod | head -1); "$b" report waiting --kind deploy --needs-user yes --message ack-deploy; sleep 60'"#)
+        try await probe.waitUntil("the script's agent needs the user") { probe.agent?.needsAttention == true }
+        XCTAssertEqual(probe.agent?.kind, "deploy", "a reporter's own kind is kept")
+        let before = try XCTUnwrap(probe.row, "no row for the script's agent")
+        XCTAssertEqual(before.group, .needsYou)
+        XCTAssertTrue(AgentRowView.accessibilityText(before).contains("· deploy ·"), AgentRowView.accessibilityText(before))
+        XCTAssertFalse(before.acceptsReply, "a script's report offers Reply")
+
+        probe.resolve()
+        try await probe.waitUntil("the ack's pane event") { probe.agent?.attention != true }
+        try await Task.sleep(nanoseconds: 2_500_000_000)
+        XCTAssertNotNil(probe.agent, "the ack removed an agent whose program still runs")
+        XCTAssertEqual(probe.agent?.attention, false)
+        let after = try XCTUnwrap(probe.row, "the row left the list while the script runs")
+        XCTAssertEqual(after.group, .working)
+        XCTAssertFalse(after.acceptsReply)
+        probe.assertRowsFollowedTheModel()
+        XCTAssertFalse(probe.sawNoAgent, "the agent went away and came back")
+        try await probe.close()
+    }
+
+    /// Resolve on a program's notification (OSC 9) after the program exited: the daemon removes the agent, and
+    /// the row goes with the event that says so, not before. The text is the program's, asterisks and all.
+    @MainActor
+    func testAckRemovesAnOscAgent() async throws {
+        let probe = try await AckProbe(machine: machine, workspace: "ios-ack-osc")
+        defer { probe.stop() }
+        // printf is the shell's own: by the time the notification is read, nothing that sent it runs.
+        probe.type(#"printf '\033]9;Build **finished**\007'"#)
+        try await probe.waitUntil("the osc agent") { probe.agent?.isOscSourced == true && probe.agent?.needsAttention == true }
+        XCTAssertEqual(probe.agent?.source, "osc")
+        XCTAssertEqual(probe.agent?.message, "Build **finished**")
+        let row = try XCTUnwrap(probe.row, "no row for the osc agent")
+        XCTAssertEqual(row.group, .needsYou)
+        XCTAssertEqual(row.summary, "Build **finished**", "an osc agent's text is plain: the asterisks stay")
+        XCTAssertFalse(row.acceptsReply, "a program's notification offers Reply")
+
+        probe.resolve()
+        try await probe.waitUntil("the agent removed") { probe.agent == nil }
+        XCTAssertNil(probe.row, "the row stayed after the agent went away")
+        probe.assertRowsFollowedTheModel()
+        XCTAssertTrue(probe.sawNoAgent)
+        // Removed, not brought back: nothing lists it again.
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        XCTAssertNil(probe.agent)
+        XCTAssertNil(probe.row)
+        try await probe.close()
+    }
+
+    /// A program's progress (OSC 9;4) is the pane's: `progress` 40 with no agent and no attention, and
+    /// OSC 9;4;0 clears it while the program still runs.
+    @MainActor
+    func testProgressOverTheWire() async throws {
+        let backend = ClothodBackend(configuration: .init(transport: SSHTransport(machine: machine), clientName: "clotho-ios-test"))
+        let store = ModelStore(backend: backend)
+        try await store.start()
+        defer { store.stop() }
+        func waitUntil(_ what: String, _ seconds: Double = 15, _ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(seconds)
+            while !condition() {
+                guard Date() < deadline else { return XCTFail("timed out: \(what)") }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        try await waitUntil("hello") { store.hello != nil }
+        guard store.hello?.features.contains(.paneProgress) == true else {
+            throw XCTSkip("clothod \(store.hello?.version ?? "?") has no pane.progress")
+        }
+        let created = try await backend.createWorkspace(name: "ios-progress")
+        let pane = created.pane
+        try await waitUntil("the pane in the model") { store.state.pane(pane) != nil }
+        // Every value the model showed, in order, so a short-lived one isn't missed between two looks.
+        var seen: [PaneProgress?] = [], agents = 0, attention = 0
+        store.onChange = {
+            guard let now = store.state.pane(pane) else { return }
+            if seen.last != .some(now.progress) { seen.append(now.progress) }
+            if now.agent != nil { agents += 1 }
+            if store.state.panes.contains(where: { $0.agent?.attention == true }) { attention += 1 }
+        }
+        store.onAgentChange = { _, _, _ in agents += 1 }
+
+        // One program for both, so the clear is the sequence's and not the program's exit.
+        backend.sendInput(pane, Data(#"sh -c 'printf "\033]9;4;1;40\007"; sleep 3; printf "\033]9;4;0\007"; sleep 30'"#.utf8) + Data("\r".utf8))
+        let running = PaneProgress(state: .running, percent: 40)
+        try await waitUntil("progress 40") { seen.contains(running) }
+        let started = Date()
+        try await waitUntil("progress cleared") { seen.last == .some(nil) && seen.contains(running) }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 20, "cleared by the program's exit, not by OSC 9;4;0")
+        XCTAssertEqual(seen.compactMap { $0 }, [running], "\(seen)")
+        XCTAssertNil(store.state.pane(pane)?.progress)
+        XCTAssertNil(store.state.pane(pane)?.agent, "progress made an agent")
+        XCTAssertEqual(agents, 0, "progress made an agent")
+        XCTAssertEqual(attention, 0, "progress raised attention")
+
+        store.onChange = nil
+        store.onAgentChange = nil
+        try await backend.closeWorkspace(created.workspace)
+    }
+}
+
+/// One pane on the test daemon behind a connection as the app makes one, for the three `agent.ack` outcomes of
+/// clothod 0.1.33. Rows come from `MachineConnection.agentRows` and Resolve is `MachineConnection.ackAgent`,
+/// the code the Agents list runs. The connection's store is started directly and its change handlers are
+/// replaced: no saved model, banners or push registration for a test machine.
+@MainActor
+private final class AckProbe {
+    let connection: MachineConnection
+    let pane: PaneID
+    private let workspace: WorkspaceID
+    /// At every change of the model: the pane's agent, and whether the list had a row for it.
+    private(set) var changes: [(agent: AgentInfo?, listed: Bool)] = []
+    /// The pane had an agent and then, at some change, none.
+    private(set) var sawNoAgent = false
+    private var hadAgent = false
+
+    init(machine: Machine, workspace name: String) async throws {
+        let connection = MachineConnection(machine: machine, transport: SSHTransport(machine: machine))
+        let store = connection.store
+        store.onChange = nil
+        store.onAgentChange = nil
+        try await store.start()
+        var deadline = Date().addingTimeInterval(15)
+        while store.hello == nil, Date() < deadline { try await Task.sleep(nanoseconds: 100_000_000) }
+        guard let features = store.hello?.features, features.contains(.agentKinds), features.contains(.agentOsc) else {
+            store.stop()
+            throw XCTSkip("clothod \(store.hello?.version ?? "?") has no agent.kinds and agent.osc")
+        }
+        let created = try await store.backend.createWorkspace(name: name)
+        deadline = Date().addingTimeInterval(15)
+        while store.state.pane(created.pane) == nil, Date() < deadline { try await Task.sleep(nanoseconds: 100_000_000) }
+        self.connection = connection
+        pane = created.pane
+        workspace = created.workspace
+        store.onChange = { [weak self] in self?.record() }
+    }
+
+    var agent: AgentInfo? { connection.store.state.pane(pane)?.agent }
+    var row: AgentRow? { connection.agentRows.first { $0.pane == pane } }
+
+    private func record() {
+        let agent = agent
+        if agent != nil { hadAgent = true } else if hadAgent { sawNoAgent = true }
+        changes.append((agent, row != nil))
+    }
+
+    /// Types a line into the pane's shell.
+    func type(_ line: String) {
+        connection.store.backend.sendInput(pane, Data((line + "\r").utf8))
+    }
+
+    /// Resolve, as the list's swipe does it. The row is still there when this returns: the app takes nothing
+    /// out of the list itself, the daemon's event does (or doesn't).
+    func resolve(file: StaticString = #filePath, line: UInt = #line) {
+        let agentBefore = agent
+        connection.ackAgent(pane)
+        XCTAssertNotNil(row, "Resolve took the row out before the daemon answered", file: file, line: line)
+        XCTAssertEqual(agent, agentBefore, "Resolve changed the agent before the daemon answered", file: file, line: line)
+    }
+
+    /// At every change the list had a row exactly when the model had an agent.
+    func assertRowsFollowedTheModel(file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(changes.isEmpty, "no model change was seen", file: file, line: line)
+        for (index, change) in changes.enumerated() {
+            XCTAssertEqual(change.listed, change.agent != nil,
+                           "change \(index): the row and the model disagree (\(String(describing: change.agent)))", file: file, line: line)
+        }
+    }
+
+    func waitUntil(_ what: String, _ seconds: Double = 15, _ condition: () -> Bool,
+                   file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("timed out: \(what)", file: file, line: line) }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// Closes the workspace (and with it the reporter still sleeping in the pane).
+    func close() async throws {
+        try await connection.store.backend.closeWorkspace(workspace)
+    }
+
+    /// Not `MachineConnection.disconnect`: that saves the model. The test's tearDown removes the daemon.
+    func stop() {
+        connection.store.onChange = nil
+        connection.store.stop()
+    }
 }
 
 private actor OutputCollector {

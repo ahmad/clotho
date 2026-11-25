@@ -76,9 +76,14 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
 - Plaintext, before encryption:
   `{"v":1, "m":<label>, "p":<pane>, "k":<kind>, "s":<state>, "msg":<message, at most 400 bytes>, "t":<since>}`.
   `msg` is the agent's own message (for example "Allow cargo test --release?"), never pane output.
+  `k` may be any kind name (clothod 0.1.33): a coding agent's ("claude", "codex", "gemini", "copilot", …), a
+  name a reporter gave (`clothod report --kind deploy`), or "other". The record doesn't say where the status
+  came from (hooks, a report, a program's notification, or detection), so the phone goes by the kind; see
+  "How the phone shows it".
 - Detail (clothod 0.1.13), every key optional:
   - `w`: the workspace name. `wid`: its id, stable per daemon.
-  - `tb`: the tab title.
+  - `tb`: the Tab's title as the apps show it: the name the user gave it, else its pane's title or
+    folder. Always present since clothod 0.1.33; before that only for a Tab the user had named.
   - `pj`: the project, the basename of the pane's cwd.
   - `q`: the first line of the prompt the user typed for this turn. It's absent for turns the user didn't type.
   - `tool` and `cmd`: only for a permission wait (Claude Code's `permission_prompt`). They're the tool it
@@ -106,10 +111,15 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
   notification:
   - title, when `nu` is present: "Needs you · Platform › api-server" for true and "Done · Platform ›
     api-server" for false (what it is · Workspace › Tab). Without a Tab it is "Needs you · Platform":
-    clothod sends `tb` only for a Tab the user named, while the app's own banner names the Tab as its
-    lists show it (the pane's title or folder when the Tab has no name).
+    that is a record from a clothod before 0.1.33, for a Tab the user hadn't named. The wording is
+    ClothoKit's (`AgentNotice.placeTitle`), the same on the Mac.
     Without `nu`, or without a Workspace: "Platform · Claude finished" (Workspace · agent state), as
     before.
+  - the agent's name, from `k` by ClothoKit's table (`AgentKind`): "Claude" for "claude", "Copilot" for
+    "copilot". A kind the table doesn't know shows by its own text ("deploy finished"), with control,
+    format and private-use characters dropped and at most 32 characters; "other" and "" read "Agent".
+    Where a symbol is drawn (the widget's rows) it is the table's for a known kind and a generic one for
+    every other: a kind's text never becomes a symbol or image name.
   - subtitle: "devbox · api-server · 4m" (machine · project · duration)
   - body: `sm`, else `msg` cleaned of Markdown (ClothoKit's `PlainText`); raw Markdown never shows. A
     permission wait (waiting, with `tool`, and a `msg` that is a permission message or absent) always reads
@@ -117,6 +127,19 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
     `tool` and `cmd`, not the summary. clothod sends `tool` only for permission waits, so "waiting with
     `tool`" is enough; the `msg` check is a guard. The app's own banner uses the agent's `summary` the same
     way. The subtitle and the body don't depend on `nu`.
+  - plain text: all of the above is for a coding agent's `k`, whose `msg` is Markdown. For any other `k`
+    (a reporter's own kind, "other", "") the text is some program's and is shown as typed: `msg` first,
+    else `sm`, on one line with control characters dropped, no Markdown read and nothing made a link, and
+    never as a permission ask. `msg` goes first because `sm` is then only a Markdown-stripped copy of it.
+    This is a fallback for the missing source: in the app, where the agent's `source` is known, only an
+    `osc` agent's text is plain. So a push differs from the app's own banner in three cases: an OSC
+    agent whose kind names a coding agent, and a detected coding agent holding a notification's text,
+    both read as Markdown; and a hook-reported script (kind "deploy") shows `msg` where the banner
+    shows the summary.
+  - actions: a permission wait (`rq`) has Allow, Deny and Deny with Reason, whatever the kind. Any other
+    waiting or done alert has Reply only when a reply can go somewhere: in the app, an agent that
+    reports through its hooks and is a coding agent; for a push, a coding agent's `k` (the same
+    fallback). A script's report or a program's notification has no actions.
   - sound: the default sound, except none for a done with `nu` false (a plain finished turn). The
     relay already sends such a push without a sound (`silent`, below); the app's own banner and a push
     through an older relay drop it from `nu`.
@@ -348,7 +371,12 @@ tool?, detail?, msg?}, timestamp, stale?, dismiss?}`, authorised by the same pus
 
 `POST {relay}/v1/activity` with `{handle, token, env, event, content: {state, kind, since, started, tool?, detail?, msg?}, timestamp, stale | dismiss}`:
 - `state`: `running` (also while the agent is starting), `waiting`, `done` or `error`. `kind`: the agent
-  kind, made to fit `^[a-z][a-z0-9_-]{0,31}$` ("other" if it can't). `since`: unix seconds when the
+  kind, made to fit `^[a-z][a-z0-9_-]{0,31}$`: ASCII letters lowercased, any other character but a
+  digit, "_" or "-" replaced by "-", cut at 32, and "other" if it then doesn't start with a letter
+  ("Claude Code" is "claude-code", "9lives" is "other"). The phone fits the kind the same way for the
+  content it starts the activity with, and shows it by the same table as an alert's `k` ("Copilot", an
+  unknown kind by its own text, "other" as "Agent"); a kind that isn't a coding agent's has its `msg`
+  shown as typed. `since`: unix seconds when the
   current state began. `started`: unix seconds when the turn began, else `since`. That is the elapsed timer,
   so running → waiting → running doesn't reset it.
 - `tool` (at most 64, ASCII, `^[A-Za-z0-9_.:-]{1,64}$`, else left out) and `detail` (the tool input's

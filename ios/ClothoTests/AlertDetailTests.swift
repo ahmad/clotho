@@ -148,11 +148,18 @@ final class AlertDetailTests: XCTestCase {
 /// Phase 4: what a notification lets the user do (docs/ios-redesign.md).
 final class AlertActionTests: XCTestCase {
     func testCategories() {
-        XCTAssertEqual(AlertActions.category(state: "waiting", request: "a1b2"), AlertActions.permissionCategory)
-        XCTAssertEqual(AlertActions.category(state: "waiting", request: nil), AlertActions.replyCategory, "a question takes a reply")
-        XCTAssertEqual(AlertActions.category(state: "done", request: nil), AlertActions.replyCategory)
-        XCTAssertEqual(AlertActions.category(state: "done", request: "a1b2"), AlertActions.replyCategory, "a stale id on a finished turn")
-        XCTAssertEqual(AlertActions.category(state: "error", request: nil), "")
+        XCTAssertEqual(AlertActions.category(state: "waiting", request: "a1b2", acceptsReplies: true), AlertActions.permissionCategory)
+        XCTAssertEqual(AlertActions.category(state: "waiting", request: nil, acceptsReplies: true), AlertActions.replyCategory, "a question takes a reply")
+        XCTAssertEqual(AlertActions.category(state: "done", request: nil, acceptsReplies: true), AlertActions.replyCategory)
+        XCTAssertEqual(AlertActions.category(state: "done", request: "a1b2", acceptsReplies: true), AlertActions.replyCategory, "a stale id on a finished turn")
+        XCTAssertEqual(AlertActions.category(state: "error", request: nil, acceptsReplies: true), "")
+        // An agent with nobody to answer (a script's report, a program's notification) gets no Reply; a
+        // permission request is still answered with Allow or Deny.
+        XCTAssertEqual(AlertActions.category(state: "waiting", request: nil, acceptsReplies: false), "")
+        XCTAssertEqual(AlertActions.category(state: "done", request: nil, acceptsReplies: false), "")
+        XCTAssertEqual(AlertActions.category(state: "done", request: "a1b2", acceptsReplies: false), "")
+        XCTAssertEqual(AlertActions.category(state: "error", request: nil, acceptsReplies: false), "")
+        XCTAssertEqual(AlertActions.category(state: "waiting", request: "a1b2", acceptsReplies: false), AlertActions.permissionCategory)
         let permission = AlertActions.categories.first { $0.identifier == AlertActions.permissionCategory }
         let allow = permission?.actions.first { $0.identifier == AlertActions.allow }
         XCTAssertTrue(allow?.options.contains(.authenticationRequired) == true, "Allow needs the phone unlocked")
@@ -365,6 +372,43 @@ final class AgentActivityTests: XCTestCase {
         // What a machine's push carries is cleaned on the way to the screen too.
         XCTAssertEqual(AgentActivityAttributes.ContentState(state: "done", kind: "claude", since: 1, started: 1,
                                                             msg: "## Done\n\n- **one**").messageLine, "Done • one")
+    }
+
+    /// An osc agent's text is any program's output, plain by contract: the first content shows it as typed,
+    /// the message before the daemon's summary (a Markdown-stripped copy), and never as Markdown.
+    @MainActor
+    func testFirstContentKeepsAnOscAgentsTextPlain() {
+        var osc = AgentInfo(kind: "other", state: .done, source: "osc", message: "build **done**\tin `3s`\n[log](x)", since: 300)
+        osc.summary = "build done in 3s log"
+        let state = MachineConnection.activityState(osc)
+        XCTAssertEqual(state.msg, "build **done** in `3s` [log](x)")
+        XCTAssertEqual(state.kind, "other")
+        XCTAssertEqual(state.messageLine, "build **done** in `3s` [log](x)", "and the screen doesn't read it as Markdown either")
+        // Only a summary: still plain.
+        osc.message = nil
+        XCTAssertEqual(MachineConnection.activityState(osc).msg, "build done in 3s log")
+        osc.message = " \n "
+        XCTAssertEqual(MachineConnection.activityState(osc).msg, "build done in 3s log", "an empty message gives way")
+        // Waiting too, and nothing while running.
+        let waiting = AgentInfo(kind: "other", state: .waiting, source: "osc", message: "press *enter*", since: 300)
+        XCTAssertEqual(MachineConnection.activityState(waiting).msg, "press *enter*")
+        XCTAssertNil(MachineConnection.activityState(AgentInfo(kind: "other", state: .running, source: "osc", message: "x", since: 1)).msg)
+        // The same text from a hook-reported coding agent is Markdown, as before.
+        let hook = AgentInfo(kind: "claude", state: .done, source: "hook", message: "build **done**", since: 300)
+        XCTAssertEqual(MachineConnection.activityState(hook).msg, "build done")
+    }
+
+    /// The kind in the first content is the one clothod sends next (`Live::content`, and its test
+    /// `live_activity_kinds_fit_the_relay`), so the activity doesn't rename the agent on the first update.
+    @MainActor
+    func testFirstContentKindFitsLikeClothod() {
+        for (kind, fit) in [("claude", "claude"), ("Claude Code", "claude-code"), ("9lives", "other"), ("", "other"),
+                            ("ünï", "other"), ("my.tool", "my-tool"), ("deploy_2", "deploy_2"), ("-x", "other"), ("a b/c", "a-b-c")] {
+            XCTAssertEqual(AgentActivityAttributes.relayKind(kind), fit, kind)
+            XCTAssertEqual(MachineConnection.activityState(AgentInfo(kind: kind, state: .running, since: 1)).kind, fit, kind)
+        }
+        XCTAssertEqual(AgentActivityAttributes.relayKind(String(repeating: "a", count: 40)).count, 32)
+        XCTAssertEqual(AgentActivityAttributes.relayKind("a\u{E9}" + String(repeating: "b", count: 40)), "a-" + String(repeating: "b", count: 30))
     }
 }
 #endif

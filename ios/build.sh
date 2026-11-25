@@ -10,6 +10,9 @@
 # Privacy manifests (scripts/check-privacy.py): the committed ones are linted before xcodegen runs, and every build
 # checks that the app and both extensions carry their own PrivacyInfo.xcprivacy declaring every required-reason
 # API their executables import.
+# `test` builds the app without the push relay's URL (it unsets CLOTHO_RELAY_URL), so no test run can register
+# with the deployed relay or send through it; afterwards it checks the built app's Info.plist has none and fails
+# if it does. /tmp/clotho-ios-push-e2e (a file or a folder) opts in, for the real push tests (README, "Push alerts").
 # Exits with xcodebuild's status (non-zero on a build error or a failed test), or 1 from a failed check.
 cd "$(dirname "$0")"
 # Where Homebrew has no xcodegen (the build Mac), the release zip lives in ~/Builds/tools.
@@ -41,7 +44,21 @@ PUSH=YES WIDGET=YES LIVE_ACTIVITY=YES TAILNET=$tailnet xcodegen generate --quiet
 # Pack before xcodebuild, not only in its pre-build phase: Xcode plans the resource copy before that phase
 # runs, so the first build after a new clothod release would otherwise bundle the previous one.
 python3 scripts/pack-dist.py "$CLOTHOD_DIST" build-resources/dist || exit 1
+app=build/Build/Products/Debug-iphonesimulator/Clotho.app
+# The relay URL the built app carries (Info.plist ClothoRelayURL); empty when it has none or isn't built.
+built_relay() { /usr/libexec/PlistBuddy -c 'Print :ClothoRelayURL' $app/Info.plist 2>/dev/null; }
+real_relay=NO
 if [ "$action" = test ]; then
+  if [ -e /tmp/clotho-ios-push-e2e ]; then
+    real_relay=YES
+    echo "push relay: /tmp/clotho-ios-push-e2e exists, so this test build keeps CLOTHO_RELAY_URL (real push tests)"
+  else
+    unset CLOTHO_RELAY_URL
+    echo "push relay: none in this test build (CLOTHO_RELAY_URL unset; touch /tmp/clotho-ios-push-e2e to keep it)"
+    # An earlier build's Info.plist may carry the URL, and an incremental build may not write it again: remove
+    # it, so this build has to.
+    if [ -n "$(built_relay)" ]; then rm -f $app/Info.plist; fi
+  fi
   trap 'scripts/cleanup-dev.sh' EXIT
   mkdir -p /tmp/cki-ios-bin && rm -f /tmp/cki-ios-bin/clothod && cp "$CLOTHOD_DIST/macos-aarch64/clothod" /tmp/cki-ios-bin/clothod
   # Its own config file, so settings tests never write the user's ~/.config/clothod/config.toml.
@@ -65,7 +82,6 @@ xcodebuild -project Clotho.xcodeproj -scheme Clotho -destination "platform=iOS S
 rc=${pipestatus[1]}
 # Only CLOTHO_TAILNET=1 builds may link the node, and the extensions never do. Debug builds keep the code in
 # <name>.debug.dylib next to a stub executable, so both are checked.
-app=build/Build/Products/Debug-iphonesimulator/Clotho.app
 if [ -f $app/Clotho ]; then
   bins=()
   [ $tailnet = NO ] && bins+=($app/Clotho $app/Clotho.debug.dylib)
@@ -76,5 +92,18 @@ if [ -f $app/Clotho ]; then
   # Each bundle's own manifest covers what its executable imports. The extensions are named, so a missing one fails.
   python3 -I scripts/check-privacy.py bundle $app $app/PlugIns/ClothoNotify.appex $app/PlugIns/ClothoWidget.appex \
     || exit 1
+fi
+# The second check that tests stay off the deployed relay (the first is in the app: PushRegistrar.relay).
+if [ "$action" = test ] && [ $real_relay = NO ] && [ -f $app/Clotho ]; then
+  if [ ! -f $app/Info.plist ]; then
+    echo "error: the test app has no Info.plist, so its push relay URL can't be checked. Remove ios/build and run again." >&2
+    exit 1
+  fi
+  if [ -n "$(built_relay)" ]; then
+    echo "error: the test app was built with a push relay URL (Info.plist ClothoRelayURL) though CLOTHO_RELAY_URL" \
+      "was unset: a stale Info.plist. Only the app's own check kept this run off the relay. Remove ios/build and run again." >&2
+    exit 1
+  fi
+  echo "push relay: the test app's Info.plist has none"
 fi
 exit $rc

@@ -1,35 +1,17 @@
 import ClothoKit
 import Foundation
 
-/// The Agents list's three groups, in the order they show.
-enum AgentGroup: Int, CaseIterable, Sendable {
-    /// The user has to do something: a question, a permission ask, an error, or a finished turn that ends in one.
-    case needsYou
-    /// A turn that just finished, with nothing to answer. Resolve (or the agent's next turn) moves it on.
-    case done
-    /// Everything else: running, starting, settling, idle, resolved and muted agents. Folded away by default.
-    case working
-
-    var title: String {
-        switch self {
-        case .needsYou: return "Needs you"
-        case .done: return "Done"
-        case .working: return "Working"
-        }
-    }
-
-    /// The group of an agent, from what ClothoKit says about it. Only an agent with the daemon's attention
-    /// (`needsAttention`: never a muted or a settling one) is in the first two. A finished turn is Done unless the
-    /// daemon says the user has to act (`needsUser` true); an older daemon doesn't say (nil), and its finished
-    /// turns are Done too.
-    init(_ info: AgentInfo) {
-        guard info.needsAttention else { self = .working; return }
-        self = info.state == .done && info.needsUser != true ? .done : .needsYou
-    }
-}
-
 extension AgentRow {
-    var group: AgentGroup { AgentGroup(info) }
+    /// The row's group, by ClothoKit's rule, which the Mac shares (`AgentInfo.statusGroup`). Only an agent with
+    /// the daemon's attention (never a muted or a settling one) is in Needs you or Done; a finished turn is Done
+    /// unless the daemon says the user has to act. Everything else, idle and resolved agents too, is Working.
+    var group: AgentStatusGroup { info.statusGroup }
+
+    /// The Agents tab's badge: the agents in Needs you. A turn that only finished (Done) doesn't count, as it
+    /// doesn't in the widget.
+    static func needsYouCount(_ rows: [AgentRow]) -> Int {
+        rows.filter { $0.group == .needsYou }.count
+    }
 
     /// The rows of each group, in order: Needs you with the longest wait first, Done with the newest first,
     /// Working as `sorted` ranks it (idle, running, starting, then resolved ones).
@@ -51,5 +33,12 @@ extension AgentRow {
     /// The pane's change counts for its agent's row, only from a daemon that counts them (feature `git.changes`).
     static func changes(of git: PaneGit?, features: Set<Hello.Feature>?) -> PaneGit.Changes? {
         features?.contains(.gitChanges) == true ? git?.changes : nil
+    }
+
+    /// The pane's progress for its agent's row: only from a daemon that reports it (feature `pane.progress`) and
+    /// only while the machine is connected (`live`), so a saved model or a lost connection never leaves a bar
+    /// standing.
+    static func progress(of progress: PaneProgress?, features: Set<Hello.Feature>, live: Bool) -> PaneProgress? {
+        live && features.contains(.paneProgress) ? progress : nil
     }
 }
