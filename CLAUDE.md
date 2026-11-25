@@ -101,6 +101,8 @@ anything else that gets pushed. Here the machines go by role:
   through `scripts/clotho-build <role> <command>` (role = clothod, mac, ios or main). That syncs the clone to
   the role's own mirror under `~/Builds` and passes the `CLOTHO_*` settings along. clothod's mirror holds the
   released `clothod/dist`, and the other mirrors link to it. Never sync into another role's mirror.
+  Before a heavy run, wait with `scripts/build-mac-idle` (it ends when none of our build tools is running there
+  and the load is calm). Don't write that wait by hand: a `pgrep -f` loop matches its own command line and never ends.
   Separate mirrors stop file clashes, not CPU contention: the iOS UI suite is timing-sensitive, so the main
   session runs heavy work (test suites, release builds) one at a time and never starts two role agents that
   both run one. Signing uses the build Mac's dedicated build keychain: unlock it in the same SSH session

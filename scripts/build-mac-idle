@@ -1,0 +1,61 @@
+#!/bin/bash
+# Waits until the build Mac is free for a heavy run (a test suite, a release build), so roles don't write
+# this check by hand. Hand-written loops kept using `pgrep -f <pattern>`, which matches the loop's own
+# command line and never ends; this one matches process NAMES only.
+#
+# Usage: scripts/build-mac-idle [--max-minutes N] [--max-load L] [--check]
+#   --max-minutes N   give up after N minutes (default 40); exit 1
+#   --max-load L      also wait for the 1-minute load average to be under L (default 20)
+#   --check           look once: exit 0 if free, 1 if not; never waits
+#
+# "Free" means none of OUR heavy tools is running there (cargo, rustc, xcodebuild, swift-build, swift-test,
+# swift-frontend, xctest, go) and the load is under the limit, twice in a row a few seconds apart. It never
+# looks at, or touches, anything else on that machine: the user's own work can load it too, and then this
+# just waits. Prints one line per look to stderr.
+#
+# The host comes from ~/.config/clotho/local.env (CLOTHO_BUILD_HOST; CLOTHO_MAC overrides it), as in
+# scripts/clotho-build.
+set -euo pipefail
+max_minutes=40; max_load=20; once=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --max-minutes) max_minutes=$2; shift 2 ;;
+    --max-load) max_load=$2; shift 2 ;;
+    --check) once=1; shift ;;
+    *) echo "usage: scripts/build-mac-idle [--max-minutes N] [--max-load L] [--check]" >&2; exit 64 ;;
+  esac
+done
+local_env=${CLOTHO_LOCAL_ENV:-$HOME/.config/clotho/local.env}
+# shellcheck disable=SC1090
+[ -r "$local_env" ] && . "$local_env"
+host=${CLOTHO_MAC:-${CLOTHO_BUILD_HOST:-}}
+[ -n "$host" ] || { echo "build-mac-idle: set CLOTHO_BUILD_HOST in $local_env (or CLOTHO_MAC)" >&2; exit 2; }
+
+# One look: prints "<load> <names of our heavy tools running, comma-separated or ->". `ps -Ao comm` gives the
+# executable path only, never arguments, so nothing here can match this script or the ssh that runs it.
+look() {
+  ssh -o ConnectTimeout=15 -o BatchMode=yes "$host" '
+    load=$(sysctl -n vm.loadavg | awk "{print \$2}")
+    busy=$(ps -Ao comm= | sed "s#.*/##" | grep -xE "cargo|rustc|xcodebuild|swift-build|swift-test|swift-frontend|xctest|go" | sort -u | paste -sd, -)
+    echo "$load ${busy:--}"'
+}
+free() { # $1 = look's output
+  local load=${1%% *} busy=${1#* }
+  [ "$busy" = "-" ] && awk -v l="$load" -v m="$max_load" 'BEGIN { exit !(l < m) }'
+}
+
+deadline=$(( $(date +%s) + max_minutes * 60 ))
+clear=0
+while :; do
+  if out=$(look); then
+    echo "build-mac-idle: load ${out%% *}, running: ${out#* }" >&2
+    if free "$out"; then clear=$((clear + 1)); else clear=0; fi
+  else
+    echo "build-mac-idle: can't reach the build Mac" >&2
+    clear=0
+  fi
+  [ "$clear" -ge 2 ] && exit 0
+  [ "$once" = 1 ] && { [ "$clear" -ge 1 ] && exit 0 || exit 1; }
+  [ "$(date +%s)" -ge "$deadline" ] && { echo "build-mac-idle: still busy after $max_minutes minutes" >&2; exit 1; }
+  if [ "$clear" -ge 1 ]; then sleep 8; else sleep 60; fi
+done
