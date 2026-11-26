@@ -20,6 +20,33 @@ final class PaneTerminalView: TerminalView {
     /// doesn't come up. Scrolling and selecting still work.
     nonisolated(unsafe) var readOnly = false
 
+    /// The class of SwiftTerm's own OSC 9;4 bar, which it lays over the top of every terminal view. It is
+    /// internal and the view's reference to it is private (1.99.1), so it is found among the subviews by name.
+    static let builtInProgressBarClass = "TerminalProgressBarView"
+
+    /// SwiftTerm's own progress bar, while it is still in the view.
+    var builtInProgressBar: UIView? {
+        subviews.first { String(describing: type(of: $0)) == Self.builtInProgressBarClass }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        dropBuiltInProgressBar()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        dropBuiltInProgressBar()
+    }
+
+    /// Progress is drawn once, by Clotho, from the daemon's model (`ProgressStrip`: the Tab's strip and the
+    /// pane chips). SwiftTerm's bar would repeat it a few points lower, for the selected pane only and with
+    /// its own 15 s timeout, so it is taken out of the view: SwiftTerm keeps updating a bar nobody sees.
+    private func dropBuiltInProgressBar() {
+        builtInProgressBar?.removeFromSuperview()
+        progressReportTimeout = nil
+    }
+
     nonisolated override func send(source: Terminal, data: ArraySlice<UInt8>) {
         if isFeeding || readOnly { return }
         super.send(source: source, data: data)

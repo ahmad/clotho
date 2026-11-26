@@ -182,9 +182,9 @@ and when your agents stop. Encrypting is little extra work because CryptoKit (iO
   ```
   The alert still shows on the lock screen and in Notification Center, and the extension still runs
   and rewrites it. It makes no sound, doesn't light the screen and never breaks through a Focus.
-  clothod asks only for `silent`; the passive level is the relay's part. A missing `silent` or
-  `"silent": false` gets the payload above, with the sound. A `silent` that isn't a boolean is
-  answered 400 (`bad_request`). A relay deployed before this ignores the unknown field and plays the
+  clothod asks only for `silent`; the passive level is the relay's part. A missing `silent`,
+  `"silent": null` or `"silent": false` gets the payload above, with the sound. Any other `silent` that
+  isn't a boolean (a string, a number) is answered 400 (`bad_request`). A relay deployed before this ignores the unknown field and plays the
   sound as before, and the phone still drops it from `nu`.
 - `collapse_id` = the first 32 hex digits of SHA-256(`label` + "/" + `pane`). It is stable per pane, so a
   second alert for the same pane replaces the first. The app gives its own foreground notifications

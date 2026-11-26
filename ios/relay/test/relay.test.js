@@ -98,7 +98,7 @@ test("a silent push has no sound, is passive, and still runs the extension", asy
   });
 });
 
-test("silent must be a boolean", async () => {
+test("silent must be a boolean, null or absent", async () => {
   const h = await register();
   const deliver = async () => assert.fail("must not deliver");
   for (const silent of ["yes", 1]) {
